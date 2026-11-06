@@ -12,6 +12,11 @@ types instead of exact strings.
 
 from __future__ import annotations
 
+import config.v2_config
+import core.scheduled_tasks
+import core.vibe_agents
+
+
 import json
 import sys
 from pathlib import Path
@@ -62,9 +67,9 @@ def test_agent_run_default_async_envelope_schema(tmp_path: Path, capsys) -> None
     """
 
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = core.vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hi"])
 
     with (
@@ -103,9 +108,9 @@ def test_agent_run_close_after_is_persisted_for_new_session(
     capsys,
 ) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = core.vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(
         ["--agent", "worker", "--close-after", "--no-callback", "--message", "hi"]
     )
@@ -152,11 +157,11 @@ def test_agent_run_releases_reserved_session_when_guarded_enqueue_loses(
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         agent_store.create(name="fallback", backend="codex")
         agent_store.set_default_agent_name("fallback")
-        request_store = cli.TaskExecutionStore()
+        request_store = core.scheduled_tasks.TaskExecutionStore()
         original_enqueue = request_store.enqueue_agent_run
         args = _parse_agent_run(
             ["--agent", "worker", "--no-callback", "--message", "hi"]
@@ -206,9 +211,9 @@ def test_agent_run_releases_reserved_session_when_guarded_enqueue_loses(
 
 def test_agent_run_explicit_async_flag_remains_compatible(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = core.vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hi"])
 
     with (
@@ -268,9 +273,9 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
                 agent_backend="codex",
                 agent_name="worker",
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--agent",
@@ -307,9 +312,9 @@ def test_agent_run_outside_an_agent_shell_needs_no_callback_policy(tmp_path: Pat
     db_path = tmp_path / "state" / "vibe.sqlite"
     with patch.dict("os.environ", {"AVIBE_HOME": str(tmp_path)}):
         ensure_sqlite_state()
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--message", "hi"])
 
         with (
@@ -371,9 +376,9 @@ def test_agent_run_callback_returns_to_the_caller_from_env(tmp_path: Path, capsy
                 agent_backend="codex",
                 agent_name="caller",
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--callback", "--message", "hi"])
 
         with (
@@ -455,9 +460,9 @@ def test_agent_run_existing_session_defaults_to_p1_steer(
                 agent_backend="codex",
                 agent_name="worker",
             )["id"]
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--session-id",
@@ -530,9 +535,9 @@ def test_agent_run_queue_persists_explicit_p3_intent(
                 agent_backend="codex",
                 agent_name="worker",
             )["id"]
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--session-id",
@@ -605,9 +610,9 @@ def test_agent_run_steers_an_im_backed_session_by_default(
                 agent_backend="codex",
                 agent_name="worker",
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--agent",
@@ -681,9 +686,9 @@ def test_agent_run_async_self_target_callback_is_not_duplicated(
                 agent_backend="codex",
                 agent_name="caller",
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="caller", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--session-id", caller_session["id"], "--callback", "--message", "hi"])
 
         with (
@@ -758,9 +763,9 @@ def test_agent_run_sync_self_target_detach_callback_is_not_duplicated(
                 agent_backend="codex",
                 agent_name="caller",
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="caller", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--session-id", caller_session["id"], "--callback", "--sync", "--message", "hi"])
 
         with (
@@ -843,9 +848,9 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
                 agent_backend="codex",
                 agent_name="worker",
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--sync", "--callback-session-id", callback_session["id"], "--message", "hi"])
 
         with (
@@ -871,9 +876,9 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
 
 def test_agent_run_sync_waits_for_run_result(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = core.vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(["--agent", "worker", "--sync", "--no-callback", "--message", "hi"])
 
     wait_calls: list[tuple[str, float | None]] = []
@@ -900,9 +905,9 @@ def test_agent_run_sync_waits_for_run_result(tmp_path: Path, capsys) -> None:
 
 def test_agent_run_sync_wait_timeout_is_passed_to_waiter(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = core.vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(
         ["--agent", "worker", "--sync", "--wait-timeout", "2.5", "--no-callback", "--message", "hi"]
     )
@@ -937,7 +942,7 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         with create_sqlite_engine(db_path).begin() as conn:
             scope_id = upsert_scope(
@@ -998,7 +1003,7 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
             ).mappings().one()
         assert row["callback_session_id"] == callback_session["id"]
         assert row["callback_status"] is None
-        assert cli.TaskExecutionStore().list_pending_callbacks() == []
+        assert core.scheduled_tasks.TaskExecutionStore().list_pending_callbacks() == []
 
 
 def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) -> None:
@@ -1013,7 +1018,7 @@ def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) ->
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         with create_sqlite_engine(db_path).begin() as conn:
             scope_id = upsert_scope(
@@ -1092,7 +1097,7 @@ def test_agent_run_callback_conflict_does_not_reserve_session(tmp_path: Path, ca
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         args = _parse_agent_run(
             [
@@ -1201,9 +1206,9 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         source_session_id = _seed_bound_session(db_path, tmp_path)
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="reviewer", backend="codex", model="gpt-5.1", reasoning_effort="high")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--fork-session",
@@ -1267,9 +1272,9 @@ def test_agent_run_fork_self_uses_caller_session_and_inherits_scope(tmp_path: Pa
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         source_session_id = _seed_bound_session(db_path, tmp_path)
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="reviewer", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--fork-self",
@@ -1319,9 +1324,9 @@ def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, cap
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         caller_session_id = _seed_bound_session(db_path, tmp_path)
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--same-scope", "--no-callback", "--message", "hi"])
         monkeypatch.chdir(invoke_dir)
 
@@ -1365,9 +1370,9 @@ def test_agent_run_same_scope_rejects_standalone_caller(tmp_path: Path, capsys) 
                 agent_backend="codex",
                 agent_name="worker",
             )["id"]
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             ["--agent", "worker", "--same-scope", "--no-callback", "--message", "hi"]
         )
@@ -1456,9 +1461,9 @@ def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsy
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         _seed_bound_session(db_path, tmp_path)
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--agent",
@@ -1502,9 +1507,9 @@ def test_agent_run_create_scope_id_requires_existing_scope(tmp_path: Path, capsy
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--agent",
@@ -1565,9 +1570,9 @@ def test_agent_run_create_scope_id_rejects_archived_project(tmp_path: Path, caps
                     updated_at="2026-06-16T00:00:00Z",
                 )
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--agent",
@@ -1600,9 +1605,9 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         source_session_id = _seed_bound_session(db_path, tmp_path)
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="claude-worker", backend="claude")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 "--fork-session",
@@ -1644,9 +1649,9 @@ def test_only_fork_self_is_the_agents_own_fork(tmp_path: Path, capsys, flags, se
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         source_session_id = _seed_bound_session(db_path, tmp_path)
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             [
                 *[source_session_id if flag == "SOURCE" else flag for flag in flags],
@@ -1687,7 +1692,7 @@ def test_agent_run_fork_reports_unavailable_source_agent_in_english_under_a_zh_u
         code=SESSION_AGENT_UNAVAILABLE_CODE,
         details={"source_session_id": "ses-source"},
     )
-    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(config.v2_config.V2Config, "load", lambda: SimpleNamespace(language="zh"))
     monkeypatch.setattr(
         "core.services.session_fork.reserve_forked_session",
         lambda **_kwargs: (_ for _ in ()).throw(error),
@@ -1720,9 +1725,9 @@ def test_agent_run_callerless_session_workdir_uses_show_workspace(tmp_path: Path
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hi"])
         monkeypatch.chdir(invoke_dir)
 
@@ -1752,9 +1757,9 @@ def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> Non
     with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = core.vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = core.scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
             ["--agent", "worker", "--cwd", str(picked_dir), "--no-callback", "--message", "hi"]
         )

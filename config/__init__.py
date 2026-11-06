@@ -15,9 +15,29 @@ from .paths import (
     ensure_data_dirs,
     migrate_default_home,
 )
-from .v2_config import V2Config
-from .v2_settings import SettingsStore
-from .v2_sessions import SessionsStore
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .v2_config import V2Config
+    from .v2_settings import SettingsStore
+    from .v2_sessions import SessionsStore
+
+
+def __getattr__(name: str):
+    # Importing config.paths must not also load every configuration consumer.
+    if name == "V2Config":
+        from .v2_config import V2Config
+
+        return V2Config
+    if name == "SettingsStore":
+        from .v2_settings import SettingsStore
+
+        return SettingsStore
+    if name == "SessionsStore":
+        from .v2_sessions import SessionsStore
+
+        return SessionsStore
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "V2Config",

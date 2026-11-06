@@ -55,6 +55,7 @@ from storage.models import (
     scopes,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from core.watch_protocol import NO_EVENT_EXIT_CODE
 from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import (
     DEFINITION_AGENT_BINDING_REVISION_KEY,
@@ -505,15 +506,14 @@ def scheduled_definition_reclaimable_by_session_expression(session_id: str) -> A
 # that ran out of time from one that failed.
 _TIMEOUT_EXIT_CODE = 124
 # The exit code a waiter carries when it ran to completion and found nothing worth
-# an Agent turn. Written by ``core/watches.py`` (which imports it from here so the
-# two layers cannot drift), read here because it is a CLEAN ending: the projections
+# an Agent turn. Shared with ``core/watches.py`` through ``core.watch_protocol``,
+# read here because it is a CLEAN ending: the projections
 # below classify every finished non-zero code as a failure, which reported an
 # intentionally quiet cycle -- green CI, filtered review chatter -- as an error.
 # 64 is also BSD ``sysexits`` EX_USAGE, so the supervisor only records it bare like
 # this for a waiter that also printed the no-event marker; a generic command that
 # rejects its own arguments is recorded with its error text and stays a failure
 # here, because every branch above requires ``no_error``.
-NO_EVENT_EXIT_CODE = 64
 # The runs a definition's own executions are recorded as. A watch's supervisor
 # heartbeat is *also* an ``agent_runs`` row and is ``running`` for as long as the
 # waiter lives, so counting it as an execution would make every healthy waiter

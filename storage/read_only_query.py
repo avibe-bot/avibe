@@ -14,6 +14,7 @@ from config import paths
 from storage.cache_metrics import CACHE_VIEWS, cache_observation
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import MESSAGE_TURN_ID_SQL
+from storage.query_policy import SCHEMA_PRAGMAS
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 
 DEFAULT_QUERY_STEP_LIMIT = 250_000
@@ -23,12 +24,6 @@ DEFAULT_QUERY_STEP_LIMIT = 250_000
 # of a query result carry it); names/policy live behind the proper Vaults API/CLI.
 # Sibling vault tables (requests/links/grants/audit) stay queryable for inspection.
 _DENIED_TABLES = frozenset({"vault_secrets"})
-
-# The PRAGMAs a query may run: each only describes the schema and has no setter.
-# Every other PRAGMA stays denied: some change connection state, such as ``query_only``.
-SCHEMA_PRAGMAS = frozenset(
-    {"table_list", "table_info", "table_xinfo", "index_list", "index_info", "foreign_key_list"}
-)
 
 # Harness concepts whose table name shares nothing a fuzzy match could find.
 _CONCEPT_TABLES = {

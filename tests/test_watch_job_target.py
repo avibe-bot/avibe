@@ -7,6 +7,9 @@ Stores default to SQLite under the per-test ``AVIBE_HOME`` (``tests/conftest.py`
 
 from __future__ import annotations
 
+import vibe.runtime
+
+
 import asyncio
 import fcntl
 import json
@@ -857,8 +860,8 @@ def test_vibe_stop_ends_owned_jobs_and_the_watch_reports_after_the_next_start(tm
 
     host, job_id, watch_id = asyncio.run(hand_over())
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
-    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
 
@@ -889,8 +892,8 @@ def test_vibe_stop_ends_a_foreground_job_that_no_watch_owns(tmp_path: Path, monk
     job_id = asyncio.run(_start_job(host, tmp_path, "sleep 60 & wait"))
     assert host.meta(job_id)["watch_id"] is None  # still in the foreground, never handed over
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
-    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
 
@@ -919,8 +922,8 @@ def test_vibe_stop_ends_foreground_jobs_even_when_the_watch_store_cannot_be_read
     job_id = asyncio.run(_start_job(host, tmp_path, "sleep 60"))
     break_store()
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
-    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
 
@@ -940,11 +943,11 @@ def test_vibe_stop_leaves_the_jobs_of_a_service_that_holds_the_lock(tmp_path: Pa
 
     host, job_id = asyncio.run(hand_over())
     monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
-    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(vibe.runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
     monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
-    lock_path = cli.runtime.get_service_lock_path()
+    lock_path = vibe.runtime.get_service_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # A service that started after this stop's own stop of the service owns the jobs now.
     with lock_path.open("a+") as held:

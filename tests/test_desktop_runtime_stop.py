@@ -13,6 +13,9 @@ never substituted: the stop finds them by scanning.
 
 from __future__ import annotations
 
+import vibe.restart_supervisor
+
+
 import contextlib
 import errno
 import json
@@ -802,7 +805,7 @@ def test_a_stop_from_a_runtime_s_own_tree_reaps_its_abandoned_installers(spawn, 
 def test_a_plain_restart_from_another_desktop_runtime_schedules_nothing(
     running_runtime, caller, stop_env, capsys, monkeypatch
 ):
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: pytest.fail("no restart may be scheduled"))
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: pytest.fail("no restart may be scheduled"))
     caller(None, OTHER_ID)
 
     assert cli.cmd_restart() == 3

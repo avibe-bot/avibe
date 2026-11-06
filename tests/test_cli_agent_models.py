@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import vibe.api
+
+
 import io
 import json
 import sys
@@ -39,7 +42,7 @@ def test_parser_registers_agent_models():
 
 def test_cmd_agent_models_by_backend(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -64,7 +67,7 @@ def test_cmd_agent_models_by_backend(monkeypatch):
 
 def test_cmd_agent_models_uses_shared_pagination(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -93,7 +96,7 @@ def test_cmd_agent_models_uses_shared_pagination(monkeypatch):
 
 def test_cmd_agent_models_paginates_providers_and_models_together(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -168,7 +171,7 @@ def test_cmd_agent_models_by_name_echoes_current(monkeypatch):
         lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
     )
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -206,7 +209,7 @@ def test_cmd_agent_models_current_flags_invalid_effort(monkeypatch):
         lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
     )
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -239,7 +242,7 @@ def test_cmd_agent_models_model_filter_keeps_current_honest(monkeypatch):
         lambda: SimpleNamespace(require=lambda name: agent, require_accessible=lambda name: agent),
     )
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -285,7 +288,7 @@ def test_agent_models_current_normalizes_opencode_bare_model():
 
 def test_agent_value_warning_effort_only_unknown(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,
@@ -301,7 +304,7 @@ def test_agent_value_warning_effort_only_unknown(monkeypatch):
 
 def test_agent_value_warning_effort_only_valid(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "agent_model_options",
         lambda *a, **k: {
             "ok": True,

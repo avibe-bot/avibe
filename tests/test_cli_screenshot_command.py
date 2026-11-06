@@ -1,3 +1,6 @@
+
+import vibe.screenshot
+
 import json
 import sys
 from pathlib import Path
@@ -26,7 +29,7 @@ def test_cmd_screenshot_prints_path(capsys, monkeypatch) -> None:
         captured.append(output)
         return ScreenshotResult(path=Path("/tmp/vibe-screen.png"), backend="fake")
 
-    monkeypatch.setattr(cli, "capture_screenshot", fake_capture)
+    monkeypatch.setattr(vibe.screenshot, "capture_screenshot", fake_capture)
     parser = cli.build_parser()
     args = parser.parse_args(["screenshot", "--output", "custom.png"])
 
@@ -37,7 +40,7 @@ def test_cmd_screenshot_prints_path(capsys, monkeypatch) -> None:
 
 def test_cmd_screenshot_prints_json(capsys, monkeypatch) -> None:
     monkeypatch.setattr(
-        cli,
+        vibe.screenshot,
         "capture_screenshot",
         lambda output=None: ScreenshotResult(path=Path("/tmp/vibe-screen.png"), backend="fake"),
     )
@@ -59,7 +62,7 @@ def test_cmd_screenshot_reports_errors(capsys, monkeypatch) -> None:
     def fake_capture(output=None):
         raise ScreenshotError("display is unavailable")
 
-    monkeypatch.setattr(cli, "capture_screenshot", fake_capture)
+    monkeypatch.setattr(vibe.screenshot, "capture_screenshot", fake_capture)
     parser = cli.build_parser()
     args = parser.parse_args(["screenshot", "--json"])
 

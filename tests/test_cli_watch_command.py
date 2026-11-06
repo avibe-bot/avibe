@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import core.scheduled_tasks as scheduled_tasks
+import core.vibe_agents as vibe_agents
+import core.watches as watches
+import storage.db
+
+
 import io
 import json
 import os
@@ -95,7 +101,7 @@ def test_watch_help_examples_use_the_caller_session_default(capsys) -> None:
 
 def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     try:
         agent = agent_store.create(name="pm", backend="codex")
         agent_store.create(name="zz-fallback", backend="codex")
@@ -128,7 +134,7 @@ def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys)
             patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
             patch(
                 "vibe.cli._agent_store",
-                side_effect=lambda: cli.VibeAgentStore(db_path),
+                side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
             ),
         ):
             assert cli.cmd_watch_update(args) == 0
@@ -143,7 +149,7 @@ def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys)
             patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
             patch(
                 "vibe.cli._agent_store",
-                side_effect=lambda: cli.VibeAgentStore(db_path),
+                side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
             ),
         ):
             result, payload = _capture_stderr_json(cli.cmd_watch_update, explicit)
@@ -254,7 +260,7 @@ def test_watch_add_rejects_missing_cwd(tmp_path: Path) -> None:
 
 def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
@@ -263,7 +269,7 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -484,14 +490,14 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
 
 def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="project-agent", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-29T00:00:00+00:00"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-scope-watch", now=now)
         conn.execute(
@@ -550,7 +556,7 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
 
 def test_watch_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -587,14 +593,14 @@ def test_watch_add_create_per_run_without_scope_records_standalone_definition(tm
 
 def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="project-agent", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-29T00:00:00+00:00"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-watch-once", now=now)
         conn.execute(
@@ -643,7 +649,7 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    target = cli.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
+    target = scheduled_tasks.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
@@ -653,14 +659,14 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
 
 def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="codex", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import agent_sessions
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-28T00:00:00+00:00"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-watch-defaults", now=now)
         conn.execute(
@@ -945,7 +951,7 @@ def test_default_watch_startup_timeout_exceeds_reconcile_and_stable_windows() ->
         stable_running_seconds=cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS
     )
 
-    assert timeout_seconds > cli.WATCH_RECONCILE_INTERVAL_SECONDS + cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS
+    assert timeout_seconds > watches.WATCH_RECONCILE_INTERVAL_SECONDS + cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS
 
 
 def test_default_watch_startup_timeout_accounts_for_recovery_entries(tmp_path: Path) -> None:
@@ -970,7 +976,7 @@ def test_default_watch_startup_timeout_accounts_for_recovery_entries(tmp_path: P
     )
 
     assert recovery_entry_count == 2
-    assert timeout_seconds == base_timeout + (2 * cli.WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS)
+    assert timeout_seconds == base_timeout + (2 * watches.WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS)
 
 
 def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tmp_path: Path) -> None:
@@ -1464,7 +1470,7 @@ def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path:
             "session_workdir": str(tmp_path),
         },
     )
-    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent_store = vibe_agents.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     agent_store.create(name="worker", backend="codex")
     args = _parse_watch_update([watch.id, "--reset-delivery"])
 
@@ -1583,9 +1589,9 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
 
     db_path = tmp_path / "state" / "vibe.sqlite"
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-16T00:00:00Z"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-existing", now=now)
         conn.execute(
@@ -1684,7 +1690,7 @@ def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) ->
 
     db_path = tmp_path / "state" / "vibe.sqlite"
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     try:
         # The Agent the definition's Session runs as, and a DIFFERENT current
         # default. The gap between them is what makes the re-pin observable at all.
@@ -1710,7 +1716,7 @@ def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) ->
         post_to=None,
         deliver_key="slack::channel::C123",
         agent_name=None,
-        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+        metadata={scheduled_tasks.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
     )
 
     def _update(*argv: str) -> tuple[int, str]:
@@ -1721,7 +1727,7 @@ def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) ->
         into a ``JSONDecodeError`` and hide which field was corrupted.
         """
         args = _parse_watch_update([watch.id, *argv])
-        cli_agent_store = cli.VibeAgentStore(db_path)
+        cli_agent_store = vibe_agents.VibeAgentStore(db_path)
         stderr = io.StringIO()
         try:
             with (
@@ -1749,7 +1755,7 @@ def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) ->
         "passed nor the cleared state that was asked for; every future watch hook now "
         "runs as the wrong Agent"
     )
-    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+    assert stored.metadata.get(scheduled_tasks.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
         "the contradictory pair dropped the follow-the-session state, so the bound "
         "Session no longer governs the definition's Agent"
     )
@@ -1939,11 +1945,11 @@ def _reserved_session_cli_db(tmp_path: Path):
     from storage.sessions_service import SQLiteSessionsService
 
     db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
 
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
             "ses-workspace-notices"
         )
@@ -1965,7 +1971,7 @@ def _reserved_session_cli_db(tmp_path: Path):
 def _message_rows(db_path: Path, session_id: str) -> list[tuple]:
     from sqlalchemy import text as sa_text
 
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         return [
             tuple(row)
             for row in conn.execute(

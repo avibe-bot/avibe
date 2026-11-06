@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
 import contextlib
@@ -24,108 +26,23 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Callable, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from apscheduler.triggers.cron import CronTrigger
-from tzlocal import get_localzone_name
-from sqlalchemy import select
-
 from config import paths
-from config.atomic_io import write_atomic
-from config.v2_config import V2Config
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
-from core.scheduled_tasks import (
-    AGENT_RUN_CALLBACK_FAILURE_ONLY,
-    AGENT_RUN_CALLBACK_MODE_METADATA_KEY,
-    AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
-    AGENT_RUN_DELIVERY_QUEUE,
-    AGENT_RUN_DELIVERY_STEER,
-    BINDING_FOLLOWS_SESSION_METADATA_KEY,
-    ScheduledTaskStore,
-    TaskExecutionStore,
-    UnresolvableSessionTarget,
-    parse_scope_id,
-    parse_session_key,
-    resolve_session_id_target,
-    session_anchor_for_target,
-)
 from core.caller_context import (
     caller_context_from_env,
     caller_resource_user_context,
     caller_resource_user_context_from_env,
 )
-from core.command_runner import command_line_preview
-from core.cron_weekday import ambiguous_weekday_field, weekday_readings
-from core.install_integrity import verify_python_environment, verify_site_packages
-from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentBotLockedError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
-from core.watches import (
-    DEFAULT_RETRY_EXIT_CODE,
-    NO_EVENT_EXIT_CODE,
-    NO_EVENT_MARKER,
-    WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
-    WATCH_RECONCILE_INTERVAL_SECONDS,
-    JobWatchUpdateRefused,
-    ManagedWatchStore,
-    WatchRuntimeStateStore,
-)
-from vibe import __version__, api, runtime
+from core.watch_protocol import DEFAULT_RETRY_EXIT_CODE, NO_EVENT_EXIT_CODE, NO_EVENT_MARKER
+from vibe import __version__
 from vibe.i18n import t as i18n_t
-from vibe.restart_supervisor import schedule_restart
-from vibe.screenshot import ScreenshotError, capture_screenshot
-from vibe.upgrade import (
-    CURRENT_VIBE_EXECUTABLE_ENV,
-    LEGACY_PACKAGE_NAME,
-    PACKAGE_NAME,
-    AtomicActivation,
-    DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
-    RestartState,
-    activate_installer_candidate,
-    activate_upgrade_candidate,
-    activation_block_reason,
-    atomic_uv_install_root,
-    atomic_upgrade_lock,
-    build_upgrade_plan,
-    cache_running_vibe_path,
-    current_generation,
-    execute_upgrade_plan,
-    defer_upgrade_activation,
-    format_deferred_activation_log,
-    generation_downgrade,
-    get_latest_version_info,
-    get_safe_cwd,
-    format_activation_failures,
-    get_deferred_activation_log_path,
-    is_desktop_managed_runtime,
-    _launcher_generation,
-    _candidate_python,
-    launcher_is_current_process,
-    move_managed_launcher_locked,
-    newest_launcher_selection,
-    process_generation,
-    restart_is_pending,
-    restart_record_is_pending,
-    discard_atomic_uv_install_generation,
-    should_skip_show_runtime_prepare,
-    stable_launcher_selections,
-    top_ranked_selections,
-    UPGRADE_INSTALL_TIMEOUT_SECONDS,
-    verify_upgrade_candidate,
-)
-from storage.db import create_sqlite_engine
-from storage.lock import MigrationLockTimeout
-from storage.background import (
-    DefinitionWriteConflict,
-    HEALTH_HEALTHY,
-    SQLiteBackgroundTaskStore,
-    JobWatchResumeRefused,
-    TaskResumeBlocked,
-    TaskScheduleRetired,
-    compute_next_run_at,
-    normalize_run_status,
-)
-from storage.models import agents, scope_settings, scopes
+from vibe.restart_state import RestartState
+from vibe.launcher_path import CURRENT_VIBE_EXECUTABLE_ENV, cache_running_vibe_path
+from vibe.package_shape import CORE_PACKAGE_NAME as PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME as LEGACY_PACKAGE_NAME
 from storage.pagination import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
@@ -134,8 +51,18 @@ from storage.pagination import (
     page_sequence,
     pagination_payload,
 )
-from storage.read_only_query import SCHEMA_PRAGMAS, ReadOnlyQueryError, run_read_only_query
-from storage.settings_service import make_scope_id
+from storage.query_policy import SCHEMA_PRAGMAS
+
+if TYPE_CHECKING:
+    from config.v2_config import V2Config
+    from core.scheduled_tasks import ScheduledTaskStore, TaskExecutionStore, UnresolvableSessionTarget
+    from core.vibe_agents import (
+        AgentAlwaysEnabledError, AgentArchivedEditError, AgentBotLockedError, AgentReferenceRewriteError,
+        VibeAgent, VibeAgentStore,
+    )
+    from core.watches import ManagedWatchStore, WatchRuntimeStateStore
+    from storage.background import DefinitionWriteConflict, SQLiteBackgroundTaskStore
+    from vibe import runtime
 
 logger = logging.getLogger(__name__)
 UV_TOOL_PACKAGE_NAMES = (PACKAGE_NAME, LEGACY_PACKAGE_NAME)
@@ -512,6 +439,8 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # a prose string to branch on. Fixing it at the printer means a command added later
     # inherits the code instead of having to remember it, and adds no third copy of the
     # payload builder below.
+    from core.scheduled_tasks import UnresolvableSessionTarget
+
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
     if _is_stale_login_session(exc):
@@ -617,14 +546,13 @@ def _print_cli_payload(kind: str, **fields) -> None:
 
 def _configured_trace_retention_days() -> int:
     """Read the persisted window for help text without loading/migrating config."""
-    from storage import agent_events_retention as _retention
+    from vibe.trace_retention_policy import DEFAULT_RETENTION_DAYS, validate_retention_days
 
     try:
         config_path = paths.get_config_path()
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         runtime = payload.get("runtime") if isinstance(payload, dict) else None
         value = runtime.get("agent_events_trace_retention_days") if isinstance(runtime, dict) else None
-        from vibe.trace_retention_policy import validate_retention_days
 
         try:
             return validate_retention_days(value)
@@ -632,7 +560,7 @@ def _configured_trace_retention_days() -> int:
             pass
     except Exception:
         pass
-    return _retention.DEFAULT_RETENTION_DAYS
+    return DEFAULT_RETENTION_DAYS
 
 
 def _redirect_broken_diagnostic_stream(stream: Any) -> None:
@@ -684,6 +612,7 @@ def _emit_upgrade_advisory(message: str | None, *, stream: Any = None) -> bool:
 
 def _emit_activation_notice(outcome: Any) -> None:
     """Format and emit a peer activation notice without affecting the result."""
+    from vibe.upgrade import format_activation_failures
 
     try:
         notice = format_activation_failures(outcome)
@@ -694,6 +623,7 @@ def _emit_activation_notice(outcome: Any) -> None:
 
 def _emit_deferred_activation_notice(log_path: Path | None) -> None:
     """Format and emit the deferred helper log location best-effort."""
+    from vibe.upgrade import format_deferred_activation_log
 
     try:
         notice = format_deferred_activation_log(log_path)
@@ -1543,6 +1473,8 @@ def _launcher_command(launcher: Path | str, *args: str) -> str:
 
 def _service_generation_items(*, language: str = "en") -> list[dict]:
     """Warn when the running service is older than the last activated install."""
+    from vibe import runtime
+    from vibe.upgrade import generation_downgrade, process_generation
 
     items: list[dict] = []
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -1572,6 +1504,8 @@ def _service_generation_items(*, language: str = "en") -> list[dict]:
 
 
 def _service_install_family_items(*, language: str = "en", detect_extra_processes: bool = True) -> list[dict]:
+    from vibe import runtime
+
     items: list[dict] = []
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -1618,6 +1552,8 @@ def _service_install_family_items(*, language: str = "en", detect_extra_processe
 
 
 def _restart_status_is_stale(payload: dict, path: Path) -> bool:
+    from vibe.upgrade import restart_record_is_pending
+
     try:
         state = RestartState(payload.get("state"))
     except (TypeError, ValueError):
@@ -1661,6 +1597,8 @@ def _restart_failure_summary(payload: dict, language: str) -> str:
 
 
 def _restart_state_items(*, language: str = "en") -> list[dict]:
+    from vibe import runtime
+
     items: list[dict] = []
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
@@ -1777,6 +1715,8 @@ def _restart_state_items(*, language: str = "en") -> list[dict]:
 
 
 def _service_lifecycle_items(*, language: str = "en", detect_extra_processes: bool = True) -> list[dict]:
+    from vibe import runtime
+
     items: list[dict] = []
     missing_value = i18n_t("doctor.value.missing", language)
     pid_path = paths.get_runtime_pid_path()
@@ -1898,6 +1838,8 @@ def _service_lifecycle_items(*, language: str = "en", detect_extra_processes: bo
 
 
 def _show_git_checkpoint_items(*, language: str = "en") -> list[dict]:
+    from vibe import runtime
+
     try:
         if runtime.resolve_service_owner_pid(include_starting=False):
             from core.show_git import show_git_checkpointing_active
@@ -1922,6 +1864,7 @@ def _show_git_checkpoint_items(*, language: str = "en") -> list[dict]:
 
 def _scheduled_task_weekday_items(*, language: str = "en") -> list[dict]:
     """Warn about stored cron tasks whose numeric weekday may fire a day off intent."""
+    from core.cron_weekday import ambiguous_weekday_field
 
     if not paths.get_sqlite_state_path().exists():
         return []
@@ -2149,6 +2092,8 @@ def _read_json(path):
 
 
 def _pid_alive(pid):
+    from vibe import runtime
+
     return runtime.pid_alive(pid)
 
 
@@ -2220,18 +2165,26 @@ def _spawn_background(
     stdout_name: str = "service_stdout.log",
     stderr_name: str = "service_stderr.log",
 ):
+    from vibe import runtime
+
     return runtime.spawn_background(args, pid_path, stdout_name, stderr_name)
 
 
 def _stop_process(pid_path):
+    from vibe import runtime
+
     return runtime.stop_process(pid_path)
 
 
 def _render_status():
+    from vibe import runtime
+
     return runtime.render_status()
 
 
 def _default_timezone_name() -> str:
+    from tzlocal import get_localzone_name
+
     try:
         return get_localzone_name()
     except Exception:
@@ -2431,11 +2384,15 @@ def _task_on_failure(task) -> str:
 
 
 def _task_command_preview(task) -> str:
+    from core.command_runner import command_line_preview
+
     shell_command, command, _metadata = _task_command_fields(task)
     return command_line_preview(shell_command, command)
 
 
 def _task_next_run_at(task) -> Optional[str]:
+    from storage.background import compute_next_run_at
+
     return compute_next_run_at(
         enabled=task.enabled,
         schedule_type=task.schedule_type,
@@ -2547,6 +2504,7 @@ _DEFINITION_HEALTH_FIELDS = frozenset(
 
 def _definition_health_fields(row: Mapping[str, object]) -> dict:
     """Health on the CLI: a verdict only when it is not ``healthy``, counters only when set."""
+    from storage.background import HEALTH_HEALTHY
 
     fields: dict[str, object] = {}
     for verdict, counters in _DEFINITION_HEALTH_VERDICTS:
@@ -2655,12 +2613,15 @@ def _task_fallback_projection(task) -> dict:
 
 
 def _task_store() -> ScheduledTaskStore:
+    from core.scheduled_tasks import ScheduledTaskStore
+
     return ScheduledTaskStore()
 
 
 @contextlib.contextmanager
 def _definition_read_store():
     """Own the canonical read projection store used by CLI read commands."""
+    from storage.background import SQLiteBackgroundTaskStore
 
     store = SQLiteBackgroundTaskStore(include_private_metadata=False)
     try:
@@ -2741,10 +2702,14 @@ def _task_mutation_payload(task) -> dict:
 
 
 def _task_request_store() -> TaskExecutionStore:
+    from core.scheduled_tasks import TaskExecutionStore
+
     return TaskExecutionStore()
 
 
 def _agent_store() -> VibeAgentStore:
+    from core.vibe_agents import VibeAgentStore
+
     return VibeAgentStore()
 
 
@@ -2768,10 +2733,14 @@ def _primary_platform() -> str:
 
 
 def _watch_store() -> ManagedWatchStore:
+    from core.watches import ManagedWatchStore
+
     return ManagedWatchStore()
 
 
 def _watch_runtime_store() -> WatchRuntimeStateStore:
+    from core.watches import WatchRuntimeStateStore
+
     return WatchRuntimeStateStore()
 
 
@@ -2796,6 +2765,8 @@ def _parse_validated_session_key(
     *,
     help_command: str,
 ) -> object:
+    from core.scheduled_tasks import parse_session_key
+
     try:
         parsed = parse_session_key(session_key)
     except ValueError as exc:
@@ -2843,6 +2814,8 @@ def _validate_session_id_target(
     *,
     help_command: str,
 ) -> object:
+    from core.scheduled_tasks import resolve_session_id_target
+
     try:
         resolved = resolve_session_id_target(session_id)
     except ValueError as exc:
@@ -2924,6 +2897,7 @@ def _resolve_command_target(session_id: Optional[str], session_key: str) -> _Com
     been opened yet: that target is where future work lands, so it is returned as
     a placement rather than silently admitted.
     """
+    from core.scheduled_tasks import parse_session_key, resolve_session_id_target, session_anchor_for_target
 
     if session_id:
         try:
@@ -2984,6 +2958,7 @@ def _require_cli_turn_authority(
     which Agent was selected is not known until the caller resolves it. Callers
     that can name such a target finish with ``_require_cli_target_placement``.
     """
+    from storage.db import create_sqlite_engine
 
     target = _resolve_command_target(session_id, session_key)
     target_session_id = target.session_id
@@ -3164,6 +3139,8 @@ def _resolve_caller_run_id(args, *, purpose: str, help_command: str) -> tuple[st
 
 
 def _parse_validated_scope_id(scope_id: str, *, help_command: str):
+    from core.scheduled_tasks import parse_scope_id
+
     try:
         target = parse_scope_id(scope_id)
     except ValueError as exc:
@@ -3195,6 +3172,10 @@ def _parse_validated_scope_id(scope_id: str, *, help_command: str):
 
 
 def _validate_existing_scope_id(scope_id: str, *, help_command: str):
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.models import scope_settings, scopes
+
     target = _parse_validated_scope_id(scope_id, help_command=help_command)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
@@ -3228,6 +3209,8 @@ def _validate_existing_scope_id(scope_id: str, *, help_command: str):
 
 
 def _scope_id_from_session_id(session_id: str, *, help_command: str) -> Optional[str]:
+    from core.scheduled_tasks import resolve_session_id_target
+
     resolved = resolve_session_id_target(session_id)
     return resolved.scope_id
 
@@ -3246,6 +3229,8 @@ def _require_scope_id_from_session_id(session_id: str, *, help_command: str) -> 
 
 
 def _legacy_scope_key_from_target(value: Optional[str]) -> str:
+    from core.scheduled_tasks import parse_scope_id, parse_session_key
+
     if not value:
         return ""
     try:
@@ -3326,6 +3311,8 @@ def _definition_metadata_with_scope(
 
 
 def _scope_id_payload_from_session(session_id: Optional[str]) -> Optional[str]:
+    from core.scheduled_tasks import resolve_session_id_target
+
     if not session_id:
         return None
     try:
@@ -3335,6 +3322,8 @@ def _scope_id_payload_from_session(session_id: Optional[str]) -> Optional[str]:
 
 
 def _validate_callback_session_id(session_id: str, *, help_command: str) -> None:
+    from core.scheduled_tasks import resolve_session_id_target
+
     try:
         resolve_session_id_target(session_id)
     except ValueError as exc:
@@ -3575,6 +3564,12 @@ def _agent_write_guard_ids(
 
 
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
+    from core.scheduled_tasks import parse_scope_id, parse_session_key
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.models import agents, scope_settings
+    from storage.settings_service import make_scope_id
+
     if not session_key:
         return _ScopeRoutingTarget(None, None)
     try:
@@ -3618,6 +3613,8 @@ def _resolve_agent_target(
     help_command: str,
     existing_agent_reference: bool = False,
 ) -> _AgentTargetResolution:
+    from core.scheduled_tasks import resolve_session_id_target
+
     store = _agent_store()
     try:
         requested = None
@@ -3895,6 +3892,7 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
     """One Run for the CLI: the ``vibe runs list`` row when ``brief``, else full detail."""
+    from storage.background import normalize_run_status
 
     from storage.message_deliveries import public_message_metadata
 
@@ -4087,6 +4085,8 @@ def _default_watch_startup_timeout_seconds(
     stable_running_seconds: float = WATCH_STARTUP_STABLE_RUNNING_SECONDS,
     recovery_entry_count: int = 0,
 ) -> float:
+    from core.watches import WATCH_RECONCILE_INTERVAL_SECONDS, WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS
+
     recovery_budget = max(0, recovery_entry_count) * WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS
     return (
         WATCH_RECONCILE_INTERVAL_SECONDS
@@ -4576,6 +4576,8 @@ def cmd_task_show(task_id: str, *, brief: bool = False):
 
 
 def cmd_task_set_enabled(task_id: str, enabled: bool):
+    from storage.background import DefinitionWriteConflict, TaskResumeBlocked, TaskScheduleRetired
+
     store = _task_store()
     task = store.get_task(task_id)
     if task is None:
@@ -4668,6 +4670,8 @@ def _resolve_definition_name_update(args, task, *, help_command: str) -> Optiona
 
 def _validate_task_cron(cron: str, timezone: ZoneInfo, *, help_command: str) -> None:
     """Refuse a cron the scheduler cannot parse or whose weekday digits are ambiguous."""
+    from apscheduler.triggers.cron import CronTrigger
+    from core.cron_weekday import ambiguous_weekday_field, weekday_readings
 
     try:
         CronTrigger.from_crontab(cron, timezone=timezone)
@@ -4861,6 +4865,9 @@ def _cmd_task_update_pure_command(args, store, task) -> int:
 
 
 def cmd_task_update(args):
+    from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
+    from storage.background import DefinitionWriteConflict
+
     reserved_session_id: Optional[str] = None
     try:
         store = _task_store()
@@ -5429,6 +5436,8 @@ def cmd_agent_show(args):
     # Reading one Agent is selection-shaped — the row names its backend, model and
     # instructions — so it answers under use access to that exact resource, the
     # same ACL ``vibe agent list`` already filters by.
+    from core.vibe_agents import VibeAgentAccessError
+
     try:
         agent = _agent_store().require_accessible(args.name)
     except VibeAgentAccessError as exc:
@@ -5448,6 +5457,8 @@ def cmd_agent_show(args):
 
 
 def cmd_agent_default(args):
+    from core.vibe_agents import AgentBotLockedError, validate_agent_backend
+
     try:
         store = _agent_store()
         if store.get(args.name) is None:
@@ -5497,6 +5508,9 @@ def _agent_models_current(agent, options: dict) -> dict:
 
 
 def cmd_agent_models(args):
+    from core.vibe_agents import VibeAgentAccessError, validate_agent_backend
+    from vibe import api
+
     try:
         name = getattr(args, "name", None)
         backend_arg = getattr(args, "backend", None)
@@ -5596,6 +5610,8 @@ def _catalog_mismatches(
     may lag behind a new release, so a mismatch is advisory. OpenCode's is live (it needs the OpenCode server), so it
     is not checked here, keeping the commands fast; ``vibe agent models`` is the place for the full OpenCode check.
     """
+    from vibe import api
+
     if backend == "opencode" or (not model and not reasoning_effort):
         return [], False
     authoritative = not is_native_cli_backend(backend)
@@ -5672,6 +5688,8 @@ def _session_model_override_fields(
 
 
 def cmd_agent_create(args):
+    from core.vibe_agents import AgentNameValidationError, validate_agent_backend
+
     try:
         system_prompt = args.system_prompt
         if args.system_prompt_file:
@@ -5705,6 +5723,8 @@ def cmd_agent_create(args):
 
 
 def cmd_agent_update(args):
+    from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentBotLockedError
+
     try:
         kwargs: dict[str, object] = {}
         if args.description is not None:
@@ -5749,6 +5769,8 @@ def cmd_agent_update(args):
 
 
 def cmd_agent_set_enabled(args, *, enabled: bool):
+    from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentBotLockedError
+
     try:
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
@@ -5783,6 +5805,8 @@ def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskC
 
 
 def cmd_agent_remove(args):
+    from core.vibe_agents import AgentArchiveError, AgentReferenceRewriteError
+
     try:
         store = _agent_store()
         try:
@@ -5818,6 +5842,8 @@ def cmd_agent_remove(args):
 
 
 def cmd_agent_import(args):
+    from core.vibe_agents import iter_global_agent_files, parse_agent_file
+
     try:
         candidates = []
         skipped = []
@@ -6117,6 +6143,7 @@ def _follows_session_agent_after_update(
     handed no Agent to ask about. It is cleared here, before that Agent is resolved
     and admitted, rather than after the row is saved.
     """
+    from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
 
     if not metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY):
         return False
@@ -6466,6 +6493,7 @@ def _resolve_callback_route(
     ``failure``. A run on the caller's own Session gets neither, because its result already lands there.
     ``--no-callback`` is accepted and changes nothing.
     """
+    from core.scheduled_tasks import AGENT_RUN_CALLBACK_FAILURE_ONLY
 
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
     if explicit_callback:
@@ -6553,10 +6581,14 @@ def _reserve_cli_session(
 
 
 def _session_anchor_with_suffix(target, *, suffix: str) -> str:
+    from core.scheduled_tasks import session_anchor_for_target
+
     return f"{session_anchor_for_target(target)}:{suffix}_{uuid4().hex[:12]}"
 
 
 def _sync_run_detached(run_payload: dict) -> bool:
+    from storage.background import normalize_run_status
+
     return (
         run_payload.get("wait_state") == "detached"
         or run_payload.get("handoff_reason") == "wait_limit_reached"
@@ -6906,6 +6938,15 @@ def _resolve_bot_run_target(args) -> None:
 
 
 def cmd_agent_run(args):
+    from core.scheduled_tasks import (
+        AGENT_RUN_CALLBACK_FAILURE_ONLY,
+        AGENT_RUN_CALLBACK_MODE_METADATA_KEY,
+        AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
+        AGENT_RUN_DELIVERY_QUEUE,
+        AGENT_RUN_DELIVERY_STEER,
+        resolve_session_id_target,
+    )
+
     reserved_session_id: Optional[str] = None
     try:
         bot_target = bool((getattr(args, "bot", None) or "").strip())
@@ -7142,6 +7183,8 @@ def cmd_agent_run(args):
 
 
 def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout: Optional[float]) -> dict:
+    from storage.background import normalize_run_status
+
     started = time.monotonic()
     max_wait = wait_timeout if wait_timeout is not None else 1800.0
     while True:
@@ -7344,6 +7387,7 @@ def cmd_runs_show(args):
 
 def _live_session_runtime_for_run(run: dict) -> dict | None:
     """Attach authoritative controller ownership to an active Session Run."""
+    from storage.background import normalize_run_status
 
     if normalize_run_status(run.get("status")) not in {"queued", "running"}:
         return None
@@ -7380,6 +7424,8 @@ def _run_session_id(run: dict | None) -> str:
 
 
 def _should_attempt_live_run_cancel(run: dict | None) -> bool:
+    from storage.background import normalize_run_status
+
     if not isinstance(run, dict):
         return False
     return (
@@ -7414,6 +7460,8 @@ def _record_live_cancel_fallback(
 
 
 def _initial_cancel_result(run: dict | None) -> dict:
+    from storage.background import normalize_run_status
+
     if not isinstance(run, dict):
         return _recorded_only_cancel_result(reason_code="run_not_found")
     status = normalize_run_status(run.get("status"))
@@ -7472,6 +7520,8 @@ async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
 
 
 def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
+    from storage.background import normalize_run_status
+
     session_id = _run_session_id(run)
     run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
@@ -7591,6 +7641,7 @@ def _format_byte_size(size: int) -> str:
 
 
 def cmd_data_retention(args):
+    from config.v2_config import V2Config
     from storage import agent_events_retention
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -7824,6 +7875,8 @@ def _query_records_text(result, page_fields: dict, *, rows: list[dict], cut_note
 
 
 def cmd_data_query(args):
+    from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
+
     try:
         sql = getattr(args, "sql", None)
         sql_file = getattr(args, "sql_file", None)
@@ -7881,6 +7934,8 @@ def cmd_data_query(args):
 
 def cmd_data_cache(args):
     """Summarize Vibey cache behavior from read-only diagnostic views."""
+    from storage.read_only_query import ReadOnlyQueryError
+
     help_command = "vibe data cache --help"
     try:
         now = datetime.now(timezone.utc)
@@ -7962,6 +8017,8 @@ def _validate_session_type(platform: str) -> None:
 def _open_session_engine():
     # Bootstrap/migrate the SQLite state first so a fresh Avibe home returns a clean
     # empty list / not-found instead of a raw "no such table" error (Codex P2).
+    from storage.db import create_sqlite_engine
+
     _ensure_cli_sqlite_state()
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
@@ -8137,6 +8194,7 @@ def _session_queue_row(row: dict, *, position: int) -> dict:
 
 
 def cmd_session_queue_list(args):
+    from core.scheduled_tasks import resolve_session_id_target
     from core.services import sessions as sessions_service
     from storage import message_deliveries
 
@@ -8201,6 +8259,7 @@ def cmd_session_queue_list(args):
 
 
 def cmd_session_queue_remove(args):
+    from core.scheduled_tasks import resolve_session_id_target
     from core.services import sessions as sessions_service
     from storage import message_deliveries
     from storage.background import run_update_event_transaction
@@ -8357,6 +8416,8 @@ def cmd_session_update(args):
 
 
 def _open_vault_engine():
+    from storage.db import create_sqlite_engine
+
     _ensure_cli_sqlite_state()
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
@@ -8422,6 +8483,8 @@ def _vault_cli_delivery(args, **fields) -> dict:
 
 
 def _vault_cli_signing_context(args, *, digest: str, help_command: str) -> dict | None:
+    from vibe import api
+
     raw = getattr(args, "signing_context_json", None)
     if raw is None:
         return None
@@ -8872,6 +8935,7 @@ def cmd_vault_tags(args):
 
 
 def cmd_vault_remove(args):
+    from sqlalchemy import select
     from storage import vault_service
     from storage.models import agent_sessions
 
@@ -10285,6 +10349,7 @@ def _wait_for_vault_request(
     poll_interval: float = 2.0,
     require_delivery_ready: bool = False,
 ) -> dict | None:
+    from vibe import api
     from storage import vault_service
 
     deadline = time.monotonic() + timeout
@@ -10593,6 +10658,7 @@ def cmd_vault_request(args):
 
 
 def cmd_vault_sign(args):
+    from vibe import api
     from storage import vault_crypto, vault_service
 
     help_command = "vibe vault sign --help"
@@ -10682,6 +10748,7 @@ def cmd_vault_sign(args):
 
 
 def cmd_vault_await(args):
+    from vibe import api
     from storage import vault_service
 
     help_command = "vibe vault await --help"
@@ -11374,7 +11441,7 @@ _AVAULT_AUTHORIZE_FAILURES = {
     "avault_missing": ("avault_missing", "avault is not installed", "Run: vibe doctor repair avault --yes"),
     "avault_upgrade_required": (
         "avault_upgrade_required",
-        f"authorizing avault requires avault >= {api.AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION}",
+        "authorizing avault requires avault >= {minimum_version}",
         "Run: vibe doctor repair avault --yes",
     ),
 }
@@ -11382,6 +11449,8 @@ _AVAULT_AUTHORIZE_FAILURES = {
 
 def cmd_vault_key_authorize(args):
     """Run avault's one Keychain dialog for the person at this Mac."""
+    from vibe import api
+
     help_command = "vibe vault key authorize --help"
     if caller_context_from_env() is not None:
         # Only an explicit user action may raise the dialog; an Agent hands the step back.
@@ -11411,6 +11480,7 @@ def cmd_vault_key_authorize(args):
     code, message, hint = _AVAULT_AUTHORIZE_FAILURES.get(
         str(result.get("reason")), _AVAULT_AUTHORIZE_FAILURES["not_completed"]
     )
+    message = message.format(minimum_version=api.AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION)
     details = {"avault_error": result["detail"]} if result.get("detail") else None
     _print_task_error(TaskCliError(message, code=code, hint=hint, help_command=help_command, details=details))
     return 1
@@ -11425,6 +11495,7 @@ def _read_passphrase_stdin(help_command: str) -> str:
 
 
 def cmd_vault_key_export(args):
+    from config.atomic_io import write_atomic
     from storage import vault_service
     from vibe import api
 
@@ -11684,6 +11755,8 @@ def cmd_watch_show(watch_id: str, *, brief: bool = False):
 
 
 def cmd_watch_set_enabled(watch_id: str, enabled: bool):
+    from storage.background import DefinitionWriteConflict, JobWatchResumeRefused
+
     store = _watch_store()
     watch = store.get_watch(watch_id)
     if watch is None:
@@ -11719,6 +11792,10 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
 
 
 def cmd_watch_update(args):
+    from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
+    from core.watches import JobWatchUpdateRefused
+    from storage.background import DefinitionWriteConflict
+
     reserved_session_id: Optional[str] = None
     try:
         store = _watch_store()
@@ -12229,6 +12306,7 @@ def _add_dependency_download_failure(
 
 
 def _managed_dependencies_doctor_items(*, language: str = "en", deep: bool = False) -> list[dict]:
+    from vibe import api
     from core.dependency_network import probe_url
 
     labels = {
@@ -12779,6 +12857,8 @@ def _show_runtime_doctor_items(*, language: str = "en", deep: bool = False) -> l
 
 
 def _macos_login_session_doctor_items(*, language: str = "en") -> list[dict]:
+    from vibe import api, runtime
+
     if platform.system() != "Darwin":
         return []
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -12830,6 +12910,9 @@ def _doctor(*, deep: bool = False, language: str = "en"):
             "ok": bool
         }
     """
+    from config.v2_config import V2Config
+    from vibe import api
+
     groups = []
     summary = {"pass": 0, "warn": 0, "fail": 0}
 
@@ -13286,6 +13369,8 @@ def _path_entries_for_executable(name: str) -> list[Path]:
 
 
 def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
+    from vibe.upgrade import _launcher_generation, atomic_uv_install_root
+
     tool_roots: list[Path] = []
     seen_roots: set[str] = set()
 
@@ -13433,6 +13518,7 @@ def _describe_launcher_selections(selections: list, language: str = "en") -> str
 
 def _stable_launcher_items(*, language: str = "en") -> list[dict]:
     """Fail when two discoverable stable launchers select different installs."""
+    from vibe.upgrade import newest_launcher_selection, stable_launcher_selections, top_ranked_selections
 
     items: list[dict] = []
     selections = stable_launcher_selections()
@@ -13490,6 +13576,8 @@ def _stable_launcher_items(*, language: str = "en") -> list[dict]:
 
 
 def _local_cli_installation_items(*, language: str = "en") -> list[dict]:
+    from core.install_integrity import verify_site_packages
+
     items: list[dict] = []
 
     vibe_paths = _path_entries_for_executable("vibe")
@@ -13704,6 +13792,8 @@ def _write_refreshed_runtime_status() -> None:
     # would be the second place deciding one fact -- and the one that persists
     # it, so a lock holder still migrating would be recorded as `running` and
     # every later reader would inherit that answer instead of measuring.
+    from vibe import runtime
+
     status = runtime.read_status()
     resolved = runtime.resolve_service_state()
     runtime.write_status(resolved.state, resolved.detail, resolved.service_pid, status.get("ui_pid"))
@@ -13716,6 +13806,8 @@ def _start_service_after_repair(
     *,
     stopped_pids: list[int],
 ) -> dict:
+    from vibe import runtime
+
     try:
         new_pid = runtime.start_service()
     except Exception as exc:
@@ -13815,6 +13907,8 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
 
 
 def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
+    from vibe import runtime
+
     target = "stale-restart-state"
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
@@ -13830,6 +13924,8 @@ def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
 
 
 def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
+    from vibe import runtime
+
     target = "duplicate-service-processes"
     if runtime.service_instance_lock_attached_to_process():
         return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly"))
@@ -13886,6 +13982,15 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
 
 def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
     """Point every managed stable launcher at the newest installed generation."""
+    from storage.lock import MigrationLockTimeout
+    from vibe.upgrade import (
+        atomic_upgrade_lock,
+        launcher_is_current_process,
+        move_managed_launcher_locked,
+        newest_launcher_selection,
+        stable_launcher_selections,
+        top_ranked_selections,
+    )
 
     target_name = "stable-launchers"
 
@@ -14009,6 +14114,8 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
 
 
 def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
+    from vibe import runtime
+
     target = "stale-install-runtime"
     if runtime.service_instance_lock_attached_to_process():
         return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly"))
@@ -14134,14 +14241,20 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
 
 
 def _repair_askill(*, dry_run: bool = False) -> dict:
+    from vibe import api
+
     return _repair_managed_dependency("askill", api.ensure_askill_installed, dry_run=dry_run)
 
 
 def _repair_avault(*, dry_run: bool = False) -> dict:
+    from vibe import api
+
     return _repair_managed_dependency("avault", api.ensure_avault_installed, dry_run=dry_run)
 
 
 def _repair_model_hub_engine(*, dry_run: bool = False) -> dict:
+    from vibe import api
+
     return _repair_managed_dependency(
         "model-hub-engine",
         api.ensure_model_hub_engine_installed,
@@ -14340,6 +14453,7 @@ def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
     Returns 0 to go on starting, 3 when this start does not take the home over,
     and 2 when the superseded Runtime may be left partly running.
     """
+    from vibe import runtime
 
     from vibe import internal_client
     from vibe.desktop_runtime import desktop_runtime_id
@@ -14380,6 +14494,8 @@ def cmd_start(
     desktop_receipt: bool = False,
     desktop_ready_timeout: float | None = None,
 ):
+    from vibe import runtime
+
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
@@ -14630,6 +14746,7 @@ def cmd_start(
 
 def cmd_desktop_endpoint() -> int:
     """Print the desktop shell's loopback endpoint descriptor."""
+    from vibe import runtime
 
     from vibe.desktop_runtime import desktop_endpoint_payload
 
@@ -14677,6 +14794,8 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:
+    from vibe import runtime
+
     if pid_path == paths.get_runtime_pid_path():
         return runtime.resolve_service_owner_pid(include_starting=True) is not None or bool(
             runtime.extra_service_process_pids()
@@ -14690,6 +14809,8 @@ def _pid_file_points_to_live_process(pid_path: Path) -> bool:
 
 
 def _runtime_process_was_running() -> bool:
+    from vibe import runtime
+
     return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
@@ -14716,6 +14837,8 @@ def _write_status_unless_a_service_holds_the_lock(*status: str) -> None:
     # The service holding the lock owns the shared status, even another
     # Runtime's. The write holds the free lock, so no service can start, and
     # publish its own status, before it lands.
+    from vibe import runtime
+
     runtime.desktop_service_lock_presence(while_absent=lambda: _write_status(*status))
 
 
@@ -14730,12 +14853,16 @@ def _print_stop_json(payload: dict) -> None:
 def _print_left_running(result: runtime.DesktopRuntimeStopResult) -> None:
     # A tunnel connector started by a desktop UI inherits its Runtime id, so
     # the scan may list it; what is reported is what still runs on return.
+    from vibe import runtime
+
     left_running = [item for item in result.left_running if runtime.pid_alive(item.pid)]
     if left_running:
         _print_stop_json({"left_running": [{"pid": item.pid, "name": item.name} for item in left_running]})
 
 
 def _stop_expected_desktop_runtime(runtime_id: str) -> int:
+    from vibe import runtime
+
     result = runtime.stop_desktop_runtime(runtime_id)
     if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
         _print_stop_json({"reason": result.refusal})
@@ -14762,6 +14889,8 @@ def _stop_the_home_s_connector() -> int:
     # The tunnel connector serves this home's Web UI, whichever Runtime
     # started it. It stops only while this stop holds the free service lock,
     # so no service can run, and no UI of this home is left to serve it.
+    from vibe import runtime
+
     outcome: list[int] = []
 
     def settle_the_connector() -> None:
@@ -14802,6 +14931,7 @@ def _desktop_provenance_refused(
     runtime_ids: frozenset[str] | None = None,
 ) -> bool:
     """Print why a desktop caller may not act on the Avibe running here, if it may not."""
+    from vibe import runtime
 
     refusal = runtime.desktop_provenance_refusal(include_ui=include_ui, runtime_ids=runtime_ids)
     if refusal is None:
@@ -14851,6 +14981,7 @@ def _stop_what_the_service_left() -> None:
 
 
 def cmd_stop(*, expect_runtime_id: str | None = None):
+    from vibe import runtime
     from vibe.desktop_runtime import desktop_caller_provenance
 
     if expect_runtime_id is not None:
@@ -15568,6 +15699,8 @@ def _ui_show_events_host(config: V2Config) -> str:
 
 
 def _local_show_events_targets(session_id: str) -> list[_LocalShowEventsTarget]:
+    from config.v2_config import V2Config
+    from vibe import runtime
     from urllib.parse import quote
 
     try:
@@ -15596,6 +15729,8 @@ def _local_show_events_targets(session_id: str) -> list[_LocalShowEventsTarget]:
 
 
 def _local_show_events_url(session_id: str) -> str | None:
+    from config.v2_config import V2Config
+    from vibe import runtime
     from urllib.parse import quote
 
     try:
@@ -15813,6 +15948,8 @@ def _post_session_queue_updated_to_live_ui(session_id: str) -> None:
 
 
 def _post_session_cli_event_to_live_ui(session_id: str, payload: dict) -> None:
+    from config.v2_config import V2Config
+    from vibe import runtime
     from urllib.parse import quote
 
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
@@ -16400,6 +16537,8 @@ def cmd_doctor(args=None):
 
 
 def cmd_screenshot(args):
+    from vibe.screenshot import ScreenshotError, capture_screenshot
+
     try:
         result = capture_screenshot(getattr(args, "output", None))
     except ScreenshotError as exc:
@@ -16431,11 +16570,15 @@ def get_latest_version() -> dict:
     Returns:
         {"current": str, "latest": str, "has_update": bool, "error": str|None}
     """
+    from vibe.upgrade import get_latest_version_info
+
     return get_latest_version_info(__version__)
 
 
 def cmd_check_update(args=None):
     """Check for available updates."""
+    from vibe.upgrade import is_desktop_managed_runtime
+
     if getattr(args, "json", False):
         if is_desktop_managed_runtime():
             _print_cli_payload("update_check", current=__version__, desktop_managed=True)
@@ -16475,6 +16618,27 @@ def cmd_check_update(args=None):
 
 def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
+    from core.install_integrity import verify_python_environment
+    from vibe.restart_supervisor import schedule_restart
+    from vibe.upgrade import (
+        UPGRADE_INSTALL_TIMEOUT_SECONDS,
+        _candidate_python,
+        activate_upgrade_candidate,
+        activation_block_reason,
+        atomic_upgrade_lock,
+        build_upgrade_plan,
+        defer_upgrade_activation,
+        discard_atomic_uv_install_generation,
+        execute_upgrade_plan,
+        get_deferred_activation_log_path,
+        get_safe_cwd,
+        is_desktop_managed_runtime,
+        launcher_is_current_process,
+        restart_is_pending,
+        should_skip_show_runtime_prepare,
+        verify_upgrade_candidate,
+    )
+
     print(f"Current version: {__version__}")
     if is_desktop_managed_runtime():
         print("This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.")
@@ -16929,6 +17093,8 @@ def cmd_runtime(args) -> int:
 
 
 def _prepare_show_runtime_after_install(vibe_path: str | None) -> None:
+    from vibe.upgrade import get_safe_cwd, should_skip_show_runtime_prepare
+
     if should_skip_show_runtime_prepare():
         print("\033[33mSkipping Show Runtime preparation because VIBE_INSTALL_SKIP_SHOW_RUNTIME is set.\033[0m")
         return
@@ -16978,6 +17144,8 @@ def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) ->
     the default; repair stays available on request, exactly as it is for the
     Show Runtime, tmux, and git phases.
     """
+    from vibe import api
+
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
@@ -17047,6 +17215,7 @@ def _ensure_ripgrep_during_prepare(offline: bool | None = None, force: bool = Fa
 
 def _ensure_cloudflared_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
     """Prepare the pinned cloudflared while remote access is enabled; never fails prepare."""
+    from config.v2_config import V2Config
 
     try:
         config = V2Config.load()
@@ -17268,6 +17437,8 @@ def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) ->
     prepare's ``--force`` repair request and still reinstalls the managed
     release, since a corrupted binary can report the pinned version.
     """
+    from vibe import api
+
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
@@ -17285,6 +17456,7 @@ def _ensure_model_hub_engine_during_prepare(
     force: bool = False,
 ) -> dict:
     """Converge CPA to the Avibe pin without making upgrade success depend on it."""
+    from vibe import api
 
     try:
         return api.ensure_model_hub_engine_installed(
@@ -17315,6 +17487,8 @@ def _format_restart_delay(delay_seconds: float) -> str:
 
 
 def _schedule_delayed_restart(delay_seconds: float) -> int:
+    from vibe.restart_supervisor import schedule_restart
+
     current_vibe_path = cache_running_vibe_path()
     result = schedule_restart(delay_seconds=delay_seconds, vibe_path=current_vibe_path, trigger="cli")
     print(f"Restart scheduled in {_format_restart_delay(delay_seconds)}.")
@@ -17330,6 +17504,7 @@ def _generation_downgrade_blocks(command: str | None, *, allow_downgrade: bool =
     A supervisor-owned launch (``command`` is None, or the desktop shell) is
     only warned: blocking it would leave the service down instead of old.
     """
+    from vibe.upgrade import current_generation, generation_downgrade, is_desktop_managed_runtime
 
     downgrade = generation_downgrade(current_generation())
     if downgrade is None:
@@ -17359,6 +17534,8 @@ def _generation_downgrade_blocks(command: str | None, *, allow_downgrade: bool =
 
 def _cmd_restart_with_delay(delay_seconds: float) -> int:
     # Checked again by the restart job, which acts on whatever runs by then.
+    from vibe.restart_supervisor import schedule_restart
+
     if _desktop_provenance_refused("restart"):
         return 3
     if delay_seconds > 0:
@@ -19380,6 +19557,16 @@ def _dispatch_restart_supervisor(argv: list[str]) -> int:
 
 def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     """Activate a Windows CLI upgrade after the parent launcher exits."""
+    from vibe import runtime
+    from vibe.restart_supervisor import schedule_restart
+    from vibe.upgrade import (
+        AtomicActivation,
+        DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
+        activate_upgrade_candidate,
+        activation_block_reason,
+        atomic_upgrade_lock,
+        discard_atomic_uv_install_generation,
+    )
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--parent-pid", type=int, required=True)
@@ -19488,6 +19675,13 @@ class _InstallerRetentionFormatter(logging.Formatter):
 
 def _dispatch_installer_activation(argv: list[str]) -> int:
     """Activate a staged one-command install through the shared Python owner."""
+    from vibe.upgrade import (
+        AtomicActivation,
+        _launcher_generation,
+        activate_installer_candidate,
+        atomic_uv_install_root,
+        discard_atomic_uv_install_generation,
+    )
 
     if argv == ["--protocol-version"]:
         print("2")
@@ -19733,15 +19927,16 @@ def _cli_invocation_authority(env: Optional[Mapping[str, str]] = None):
     stale — that would turn a rejected remote caller into the machine's owner.
     """
 
+    snapshot = caller_resource_user_context_from_env(env)
+    if snapshot is None:
+        return None
+
     from storage.resource_access_service import (
         RESOURCE_USER_CONTEXT_METADATA_KEY,
         resource_user_context_from_metadata,
     )
     from vibe.authorization import AuthorizationContext
 
-    snapshot = caller_resource_user_context_from_env(env)
-    if snapshot is None:
-        return None
     context = resource_user_context_from_metadata({RESOURCE_USER_CONTEXT_METADATA_KEY: snapshot})
     return AuthorizationContext(is_remote=True) if context is None else context
 
@@ -19803,19 +19998,26 @@ def _require_internal_activation_admission(command: str) -> None:
 
 
 def main():
-    """Public CLI entry: resolve the invocation's authority once, then dispatch.
+    """Parse static public arguments before loading the executing command's authority.
 
-    The whole dispatch runs inside the invocation, including argument parsing and
-    the internal activation entry points, so nothing this process does on the
-    caller's behalf can be mistaken for local administration. Entering it with
-    ``None`` for a local invocation is deliberate: skipping activation would leave
-    a surrounding authority in place for a nested local call.
+    Raw MCP and internal activations retain admission-before-parsing: their own
+    parsers and identity/error precedence are existing contracts. Every executing
+    command enters invocation_authority, including None for a local invocation,
+    so nested local calls never inherit an outer remote authority.
     """
-
-    from vibe.authorization import invocation_authority
 
     cache_running_vibe_path()
     argv = sys.argv[1:]
+    if not (argv and argv[0] in (*_INTERNAL_ACTIVATION_COMMANDS, "mcp", "mcp-add", "mcp-discover")):
+        parser = build_parser()
+        args = parser.parse_args()
+        if args.command == "version":
+            sys.exit(cmd_version(args))
+        if args.command == "show" and args.show_command is None:
+            sys.exit(cmd_show(args))
+
+    from vibe.authorization import invocation_authority
+
     with invocation_authority(_cli_invocation_authority()):
         if argv and argv[0] in _INTERNAL_ACTIVATION_COMMANDS:
             _require_internal_activation_admission(argv[0])
@@ -19837,8 +20039,6 @@ def main():
             from vibe import mcp_cli
 
             sys.exit(mcp_cli.discover_main(argv[1:]))
-        parser = build_parser()
-        args = parser.parse_args()
         _require_command_admission(parser, args)
         _dispatch_parsed_command(parser, args)
 

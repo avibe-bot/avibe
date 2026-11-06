@@ -6,6 +6,9 @@ closed loop through the Web action is AUTH-SETUP-134.
 
 from __future__ import annotations
 
+import vibe.runtime
+
+
 import threading
 import time
 
@@ -247,7 +250,7 @@ def test_status_readers_and_failed_calls_never_authorize(mac_avault, monkeypatch
 
 def test_doctor_reports_stale_login_session_with_restart_action(monkeypatch):
     monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 4242)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 4242)
     calls = []
 
     def probe(**kwargs):

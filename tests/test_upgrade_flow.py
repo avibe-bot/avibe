@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import config.v2_config as v2_config
+import core.install_integrity as install_integrity
+import vibe.restart_supervisor
+import vibe.runtime
+import vibe.upgrade
+
+
 from contextlib import nullcontext
 import io
 import os
@@ -460,7 +467,7 @@ def test_installer_activation_snapshot_comes_from_shared_launcher_identity(monke
     target.write_text("active\n", encoding="utf-8")
     launcher.symlink_to(target)
     monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
-    monkeypatch.setattr(cli, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(vibe.upgrade, "atomic_uv_install_root", lambda: root)
 
     assert cli._dispatch_installer_activation(["--snapshot", "--launcher", str(launcher)]) == 0
     assert capsys.readouterr().out == f"{generation.resolve()}\n"
@@ -726,15 +733,15 @@ def test_deferred_activation_dispatch_activates_then_schedules_restart(monkeypat
     launcher = tmp_path / "bin" / "vibe.exe"
     candidate = tmp_path / "generation" / "bin" / "vibe.exe"
     calls: list[str] = []
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
-    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(vibe.upgrade, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "activate_upgrade_candidate",
         lambda _activation: calls.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
     )
-    monkeypatch.setattr(cli, "schedule_restart", lambda **_kwargs: calls.append("restart"))
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **_kwargs: calls.append("restart"))
 
     result = cli._dispatch_deferred_upgrade_activation(
         [
@@ -764,15 +771,15 @@ def test_deferred_activation_seeds_restart_before_releasing_install_lock(monkeyp
         def __exit__(self, *_args):
             events.append("lock-exit")
 
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", Lock)
-    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", Lock)
+    monkeypatch.setattr(vibe.upgrade, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "activate_upgrade_candidate",
         lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(tmp_path / "vibe.exe"),
     )
-    monkeypatch.setattr(cli, "schedule_restart", lambda **_kwargs: events.append("restart"))
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **_kwargs: events.append("restart"))
 
     result = cli._dispatch_deferred_upgrade_activation(
         [
@@ -796,17 +803,17 @@ def test_deferred_activation_notice_failure_does_not_skip_restart(monkeypatch, t
     events: list[str] = []
     launcher = tmp_path / "vibe.exe"
 
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
-    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(vibe.upgrade, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "activate_upgrade_candidate",
         lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
     )
-    monkeypatch.setattr(cli, "schedule_restart", lambda **_kwargs: events.append("restart"))
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **_kwargs: events.append("restart"))
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "format_activation_failures",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
     )
@@ -842,11 +849,11 @@ def test_deferred_offline_activation_prepares_show_runtime_after_releasing_lock(
         def __exit__(self, *_args):
             events.append("lock-exit")
 
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", Lock)
-    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", Lock)
+    monkeypatch.setattr(vibe.upgrade, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "activate_upgrade_candidate",
         lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
     )
@@ -856,7 +863,7 @@ def test_deferred_offline_activation_prepares_show_runtime_after_releasing_lock(
         lambda path: events.append(f"prepare:{path}"),
     )
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "format_activation_failures",
         lambda *_args, **_kwargs: events.append("notice") or None,
     )
@@ -884,11 +891,11 @@ def test_deferred_offline_activation_prepare_failure_is_truthful(
 
     events: list[str] = []
     launcher = tmp_path / "vibe.exe"
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
-    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(vibe.upgrade, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "activate_upgrade_candidate",
         lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
     )
@@ -967,11 +974,11 @@ def test_deferred_activation_rejects_missing_source_when_launcher_changed(monkey
     from vibe import cli
 
     calls: list[str] = []
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
-    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: "superseded")
-    monkeypatch.setattr(cli, "discard_atomic_uv_install_generation", lambda _path: calls.append("discard"))
-    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: calls.append("activate"))
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(vibe.upgrade, "activation_block_reason", lambda _activation: "superseded")
+    monkeypatch.setattr(vibe.upgrade, "discard_atomic_uv_install_generation", lambda _path: calls.append("discard"))
+    monkeypatch.setattr(vibe.upgrade, "activate_upgrade_candidate", lambda _activation: calls.append("activate"))
 
     result = cli._dispatch_deferred_upgrade_activation(
         ["--parent-pid", "123", "--launcher", str(tmp_path / "vibe.exe"), "--candidate", str(tmp_path / "candidate")]
@@ -1126,7 +1133,7 @@ def test_doctor_resolves_hardlinked_atomic_generation(monkeypatch, tmp_path, too
     launcher_source.write_text("launcher\n", encoding="utf-8")
     os.link(launcher_source, launcher)
     monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
-    monkeypatch.setattr(cli, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(vibe.upgrade, "atomic_uv_install_root", lambda: root)
 
     assert site_packages in cli._uv_tool_site_packages_for_vibe(launcher)
 
@@ -1183,11 +1190,11 @@ def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, cap
         "error": None, "has_update": True, "latest": "2.2.0",
     })
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
-    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: outcome)
+    monkeypatch.setattr(vibe.upgrade, "activate_upgrade_candidate", lambda _activation: outcome)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "execute_upgrade_plan",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr=""),
     )
@@ -1221,17 +1228,17 @@ def test_cmd_upgrade_prepares_show_runtime_before_activation_notice(monkeypatch,
         "error": None, "has_update": True, "latest": "2.2.0",
     })
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
-    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: events.append("activate") or outcome)
+    monkeypatch.setattr(vibe.upgrade, "activate_upgrade_candidate", lambda _activation: events.append("activate") or outcome)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "execute_upgrade_plan",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr=""),
     )
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda _path: events.append("prepare"))
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "format_activation_failures",
         lambda *_args, **_kwargs: events.append("notice") or None,
     )
@@ -1721,7 +1728,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "build_upgrade_plan",
         lambda **kwargs: calls.setdefault("plan_kwargs", kwargs) and plan,
     )
@@ -1731,7 +1738,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         calls["restart_kwargs"] = kwargs
         return {"job_id": "restart"}
 
-    monkeypatch.setattr(cli, "schedule_restart", fake_schedule_restart)
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", fake_schedule_restart)
 
     def fake_run(cmd, **kwargs):
         if cmd == plan.command:
@@ -1763,7 +1770,7 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
 
 def test_cmd_upgrade_rejects_desktop_managed_runtime(monkeypatch, capsys):
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "yes")
-    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="en"))
+    monkeypatch.setattr(v2_config.V2Config, "load", lambda: SimpleNamespace(language="en"))
     monkeypatch.setattr(
         cli,
         "get_latest_version",
@@ -1776,7 +1783,7 @@ def test_cmd_upgrade_rejects_desktop_managed_runtime(monkeypatch, capsys):
 
 def test_cmd_check_update_reports_desktop_managed_runtime(monkeypatch, capsys):
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "on")
-    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="en"))
+    monkeypatch.setattr(v2_config.V2Config, "load", lambda: SimpleNamespace(language="en"))
     monkeypatch.setattr(
         cli,
         "get_latest_version",
@@ -1789,7 +1796,7 @@ def test_cmd_check_update_reports_desktop_managed_runtime(monkeypatch, capsys):
 
 def test_desktop_managed_runtime_messages_are_english_in_the_cli_and_localized_on_the_web(monkeypatch, capsys):
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
-    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(v2_config.V2Config, "load", lambda: SimpleNamespace(language="zh"))
     monkeypatch.setattr(api.V2Config, "load", lambda: SimpleNamespace(language="zh"))
 
     assert cli.cmd_check_update() == 0
@@ -1808,14 +1815,14 @@ def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkey
     monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "true")
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
 
     def fake_schedule_restart(**kwargs):
         calls["restart_kwargs"] = kwargs
         return {"job_id": "restart"}
 
-    monkeypatch.setattr(cli, "schedule_restart", fake_schedule_restart)
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", fake_schedule_restart)
     monkeypatch.setattr(
         cli.subprocess,
         "run",
@@ -1835,13 +1842,13 @@ def test_cmd_upgrade_reports_restart_scheduling_failure_as_partial_success(monke
 
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
 
     def fail_restart(**kwargs):
         raise RuntimeError("bad launcher")
 
-    monkeypatch.setattr(cli, "schedule_restart", fail_restart)
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", fail_restart)
     prepared: list[str] = []
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda path: prepared.append(path))
     monkeypatch.setattr(
@@ -1871,15 +1878,15 @@ def test_cmd_upgrade_preserves_restart_failure_when_advisory_output_fails(
 
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "execute_upgrade_plan",
         lambda _plan, **kwargs: subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr=""),
     )
     monkeypatch.setattr(
-        cli,
+        vibe.restart_supervisor,
         "schedule_restart",
         lambda **kwargs: (_ for _ in ()).throw(
             PermissionError("权限不足") if sink == "cp1252" else RuntimeError("closed pipe")
@@ -1932,13 +1939,13 @@ def test_cmd_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):
 
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
 
     def fail_restart(**kwargs):
         raise AssertionError("schedule_restart should not run when Avibe was not running")
 
-    monkeypatch.setattr(cli, "schedule_restart", fail_restart)
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", fail_restart)
 
     def fake_run(cmd, **kwargs):
         if cmd == plan.command:
@@ -1969,15 +1976,15 @@ def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, caps
     )
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: {"job_id": "restart"})
-    monkeypatch.setattr(cli, "verify_python_environment", lambda _python: SimpleNamespace(ok=True))
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: {"job_id": "restart"})
+    monkeypatch.setattr(install_integrity, "verify_python_environment", lambda _python: SimpleNamespace(ok=True))
     monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
 
     def execute(plan, **kwargs):
         calls["plan"] = plan
         return subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr="")
 
-    monkeypatch.setattr(cli, "execute_upgrade_plan", execute)
+    monkeypatch.setattr(vibe.upgrade, "execute_upgrade_plan", execute)
 
     assert cli.cmd_upgrade() == 0
     assert "Attempting upgrade anyway..." in capsys.readouterr().out
@@ -2489,8 +2496,8 @@ def test_api_runtime_process_was_running_checks_service_and_ui_pid_files(monkeyp
 def test_cli_runtime_process_was_running_uses_service_process_state(monkeypatch):
     service_running = False
 
-    monkeypatch.setattr(cli.runtime, "service_process_running", lambda: service_running)
-    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "service_process_running", lambda: service_running)
+    monkeypatch.setattr(vibe.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
 
     assert cli._runtime_process_was_running() is False
     service_running = True
