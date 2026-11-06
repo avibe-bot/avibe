@@ -1,12 +1,11 @@
 # CLI runtime path and state architecture
 
-**Status:** decision plan; docs-only lane, 2026-11-06. No runtime or schema implementation is included here. The owner decides which implementation PRs proceed.
+**Status:** direction approved for personal-agent performance work, 2026-11-06; docs only. Implementation starts in a separate lane after this plan merges.
 
-## Decisions the owner must make
+## Open decisions
 
-1. **Approve the shape:** a minimal/lazy CLI front end, a read-only current-state fast path, and warm-service delivery for hot mutations. The service is the normal path; it is not a reason to add a second proxy or to make the controller a workspace proxy.
-2. **Approve the security boundaries:** explicit caller provenance on control-IPC requests; fail closed when the service is unavailable for service-owned mutations; Vault's durable pre-use intent and post-use uncertainty semantics; any additive audit-operation migration.
-3. **Do not use the following as the solution:** increasing SQLite timeouts, a broad global writer, disabling Agent Relay refresh, or relying on #3280/#3281 as a throughput fix. #3280 and #3281 are valuable foundations, but the cold-start/bootstrap path remains.
+1. **Service down:** approve returning "not executed" for service-owned mutations when no handoff occurred, without direct-SQLite fallback or automatic service start.
+2. **Phase 2 readiness:** determine whether existing schema/data markers suffice; a new readiness stamp would require a separately approved migration.
 
 **AI Relay automatic refresh stays part of normal behavior.** The temporary panel-refresh pause used during the incident is an operational mitigation only; it must not become the architecture or acceptance benchmark.
 
@@ -14,7 +13,7 @@
 
 Split the current `ensure_sqlite_state()` contract into two explicit operations:
 
-- `probe_current_sqlite_state()`: one bounded read-only check of the exact Alembic revision, required data-migration completion markers, and a migration-ready stamp. It takes no migration file lock, opens no writable engine, does no backup bookkeeping, and does no report counts. An unknown, missing, malformed, old, or in-progress state falls back to the existing conservative repair path.
+- `probe_current_sqlite_state()`: a bounded read-only check of the exact Alembic revision and required data-migration completion markers. It takes no migration file lock, opens no writable engine, does no backup bookkeeping, and does no report counts. Unknown, missing, malformed, old, or in-progress state falls back to the existing conservative repair path. Whether an additional readiness stamp is needed remains open.
 - `repair_sqlite_state()`: the existing lock/migration/import/backup path, used only when the probe says the state is not ready or when an explicit maintenance operation requests it.
 
 Then:
@@ -302,156 +301,109 @@ All normal Vault metadata branches currently use V E. Key custody and cryptograp
 
 ### 3.1 Invariants
 
-1. **No old-schema operation:** a command either proves the exact schema/data readiness contract or completes the conservative repair path before using state. Unknown/corrupt/missing markers fail closed; they never count as current.
-2. **No routine writer from a read:** `version`, help, `data query`, `harness status`, list/show reads, and Agent discovery do not take a migration writer or repair model rows merely to answer a read.
-3. **No controller-loop blocking:** SQLite transactions, migration locks, subprocess waits, and file/network waits stay off the controller loop. Preserve #2725/#2706 ordering and activation-boundary rules when moving a write.
-4. **Authority is explicit:** a private socket authenticates the local installation, not arbitrary caller claims. Every service request carries validated provenance; Session ID, PID, or `source=cli` is never authorization.
-5. **No hidden fallback:** service-owned mutations return a precise not-executed `service_unavailable`/`service_busy` result when the service is down. They do not silently take the old direct path or start a service, because that would reintroduce contention and split authority semantics.
-6. **No external replay:** SQLite retry can repeat a whole idempotent database transaction before an external effect. After Vault/HTTP/child-process handoff may have occurred, an uncertain audit completion is marked unknown/degraded and is reconciled by operation ID; the external effect is never automatically replayed.
-7. **One source of truth:** the controller/service owns live scheduling, Session steering, Vault preparation and runtime projections. CLI output is a client view, not a second scheduler or workspace proxy.
+1. **No old-schema operation:** prove exact schema/data readiness or complete the conservative repair path before using state; uncertainty never counts as current.
+2. **No routine writer from a read:** version/help and ordinary reads do not acquire a migration writer, repair indexes, or prefill Agent models.
+3. **No controller-loop blocking:** keep SQLite work, migration locks, subprocess waits and file/network waits off the loop; preserve #2725/#2706 ordering and activation rules.
+4. **Behavior parity:** carry the CLI's existing invocation context to the service and apply the same checks. Preserve existing behavior and tests; do not add an identity model.
+5. **No hidden fallback:** subject to the service-down decision, return not-executed before handoff rather than silently restoring direct writes or starting a service. A timeout after handoff is not proof of non-execution.
+6. **No external replay:** retain today's audit semantics and never automatically replay Vault egress, HTTP requests, or child commands after a possible handoff. Retry only short DB-only transactions where already safe.
 
-### 3.2 Option evaluation
+### 3.2 Lazy entry and schema readiness
 
-| Option | Cost | Risk | Benefit | Migration path |
-| --- | --- | --- | --- | --- |
-| **A. Version/readiness stamp fast path** | Medium: exact marker contract, race tests, split importer API | Incomplete marker set or migration TOCTOU could authorize code against an unusable state | Removes file lock, migration pipeline and bootstrap writer from every current-state process; directly attacks the 22.465 s p50 bootstrap stage | Use existing `alembic_version` + required data markers first. Add a new `state_meta`/sidecar stamp only in a separately reviewed migration if the existing markers cannot express readiness |
-| **B. Lazy imports and bootstrap** | Medium/high refactor of the monolithic `vibe.cli` module and parser dispatch | Import cycles, changed help/errors, authority regression | cProfile shows ~0.36–0.43 s in `vibe.cli` import before a handler; makes version/help and static errors close to interpreter cost | Add a small raw entry/parser and lazy-load one command module at a time; retain parser-backed leaf/admission tests |
-| **C. Warm control-IPC clients** | High: request contracts, server handlers, identity, backpressure, service-down UX | Authority confusion, stale ACL, IPC overload, accidental controller proxy | Removes per-process DB/bootstrap and gives one warm engine/writer admission for the highest-frequency writes; Vault fetch can avoid 50 cold processes | Start with Agent enqueue + Session send/update/queue + Task/Watch mutations. Keep compatibility adapters and an explicit diagnostic/offline mode only if separately approved |
-| **D. Read-only direct paths** | Low/medium: RO engines and no-prefill stores | Stale data or bypassed ACL if a read handler is not narrowed correctly | No writer, no WAL mode mutation, no bootstrap write; preserves useful standalone diagnostics | Introduce `ReadOnlyState`/`read_only=True` constructors; `data query` and list/show handlers use `mode=ro`; pin query plans for growing tables |
-| **E. Remaining whole-transaction retries** | Low/medium; classify every residual writer | Retrying a non-idempotent or post-effect operation can duplicate work | Suppresses transient lock failures while preserving correctness; #3281 now covers canonical transcript/activity/outcome paths | Reuse #3281 retry helper; apply only to short DB-only transactions, bounded attempts/backoff, and add contention tests per owner |
-| **F. Broad global ordered writer** | High and cross-cutting | Queue starvation/latency and false belief that all cross-process writers are solved | Helps controller-loop ordering and fsync stalls | Keep #2726/#2725 ordered-writer design for controller-owned durable emits; do not adopt it as the first CLI fix or as a substitute for RO/service paths |
+**Entry:** use a small stdlib/parser/version entry, parse before expensive state lookup where today's admission permits it, and lazy-load only the selected command implementation. Preserve existing command checks and their regression tests, including internal activation and dynamic MCP dispatch; this is a startup optimization, not an authorization redesign.
 
-### 3.3 CLI entry and schema readiness
+**Readiness:**
 
-**Entry path:**
+- Open existing state read-only (`mode=ro`); never create directories or set WAL mode on this path.
+- Read the exact Alembic head and required import/data markers in a bounded query set. Missing tables, malformed markers, unexpected revisions or open failures mean not-ready.
+- Prefer existing markers. Phase 2 must demonstrate safe concurrent migration/replacement behavior before enabling the fast path; if those markers cannot express readiness, propose a new stamp with a separately approved migration, rather than assume one exists.
+- Keep a consistent read snapshot for direct reads; service-owned work uses the service's readiness lifecycle. Unknown or changing state takes the conservative repair path, never an optimistic continuation.
+- Leave backup lifecycle work, history COUNTs, imports and repairs in migration/maintenance. Keep current/old/new/missing/corrupt/replacement/concurrent-upgrade and held-lock tests.
 
-1. A tiny entry module handles raw `--help`, `version`, parse errors, internal activation admission, and command-name classification. It imports only stdlib/parser/version code.
-2. Parse the command before resolving expensive authority. Public facts (`version`, help, parse errors) do not need a database lookup. A declared remote caller is still never treated as local Owner: commands with a role floor resolve and validate the caller before dispatch; unknown/internal commands fail closed.
-3. Lazily import the selected command implementation. `mcp` loads only `mcp_cli`; Vault loads only Vault modules; Show/Computer/upgrade modules are not imported for version/help.
-4. Resolve caller provenance once per stateful invocation and attach it to the request context. Keep the current fail-closed behavior for missing/malformed/stale remote snapshots and pairing mismatch.
+### 3.3 Read-only command layer
 
-**Readiness probe:**
+- Add explicit RO engine/store variants: no writable bootstrap, index creation or Agent-model prefill during reads.
+- `data query` retains its SQL authorizer and limits, but opens ready state directly with `mode=ro`/`query_only`.
+- Agent, background, Session and Show list/show handlers use RO state; initialization/repair belongs to the service or explicit maintenance.
+- `harness status` merges a bounded persisted snapshot with live IPC and reports controller unavailability without repairing SQLite.
+- Retain existing filtering and command checks. Pin bounded query plans for growing tables; RO is not a reason to change which data a command returns.
 
-- Open the existing database read-only (`mode=ro`; never set WAL mode on this path).
-- Read the exact Alembic head and every required data-migration/import marker in one bounded statement or bounded fixed set. Treat missing table, missing marker, malformed JSON, old/new unexpected marker, or database-open failure as **not ready**.
-- Read an atomic migration-ready stamp. The migration path clears/advances the stamp before any schema/data change and publishes ready only after the final commit and backup transition. Recheck the stamp inside the read transaction; if it changes, discard the connection and enter the conservative repair path.
-- The normal command keeps that read snapshot for the operation or obtains a fresh one through the service. This prevents a command from using a partially upgraded database. Migration tests must cover current, old, new, missing, corrupt, replacement, held-writer, held-migration-lock and concurrent-upgrade cases.
-- Do not run backup lifecycle validation, history COUNTs, JSON import, or data repair from the ready path. Those belong to migration/maintenance, not a per-command precondition.
-- A current-state probe is not permission to operate on an old schema. The implementation must fail closed on any uncertainty; the probe is an optimization, not a new migration policy.
+### 3.4 Warm service/control IPC
 
-### 3.4 Read-only command layer
+Reuse the existing private control channel and warm state engine. Requests carry the operation, arguments and the same invocation context the CLI already receives through injected `AVIBE_*` caller variables. The service applies the same checks the CLI applies today, with no behavior change.
 
-Introduce explicit read-only variants rather than relying on convention:
+**This caller context is not a security boundary.** Agent shells run as the owner's OS user: they can drop the caller environment and fall back to local Owner, or read `~/.avibe` directly. This performance work neither fixes nor strengthens that model. Keep the existing behavior tests; add no provenance-hardening or role matrix.
 
-- `create_sqlite_engine(read_only=True)` / raw SQLite `mode=ro` for direct reads; no parent creation, WAL pragma, migration, index creation, or model prefill.
-- `VibeAgentStore(read_only=True)` that never calls `prefill_missing_models()`. If the catalog is absent, return an explicit not-initialized result or ask the service; never repair it during `agent list/show/models`.
-- `SQLiteBackgroundTaskStore(read_only=True)` for list/show/status reads; no index/table readiness repair in the read path.
-- `data query` validates and authorizes SQL, then directly opens RO state. Its safe SQL authorizer remains; the change is to remove the preceding E write-capable bootstrap from the ordinary current-state path.
-- `harness status` may continue to merge a bounded RO persisted snapshot with live controller IPC. If IPC is unavailable, report `controller_unavailable` without trying to repair SQLite.
-- Preserve resource ACL filtering and instance-role floors. RO does not mean unauthenticated or unrestricted.
+Move hot mutations by measured benefit, not by a desire to make every command use IPC:
 
-### 3.5 Warm service/control IPC layer
-
-Extend the existing private control channel with versioned request/response contracts. The service owns one warm state engine/pool and a bounded writer queue; this is not a browser/cloud proxy for the workspace.
-
-Each request carries:
-
-- protocol version and request ID;
-- operation and arguments, with no arbitrary SQL or plaintext Vault material;
-- local/remote provenance from the invocation context, including Session/Run identity when applicable;
-- the current resource/user context or a server-verifiable reference, never an untrusted role string;
-- deadline/cancellation and an explicit idempotency/operation key where an external effect exists.
-
-The server revalidates current Session membership, Project/instance ACL, role, purpose and grant scope. It may cache non-security metadata, but not revocation-sensitive authorization. IPC authentication proves the request came from this installation; it does not make arbitrary same-user JSON claims trusted.
-
-| Command group | Target path | Service-down behavior |
+| Command group | Target path | Service unavailable before handoff (proposed) |
 | --- | --- | --- |
-| `agent run` (new/session/fork/Bot enqueue) | Service reserves Session/Run and performs the short durable enqueue; service owns the warm engine and admission | Return not-executed; no direct SQLite fallback |
-| `session update`, `session send-now`, queue remove, and eventually list/get | Service owns Session authority and steering; read-only list/get may initially use RO direct path if that reduces migration risk | Mutations fail closed; reads may use explicitly authorized RO fallback only if the contract says so |
-| `task add/update/pause/resume/run/remove`, `watch add/update/pause/resume/remove` | Service owns definitions, reservations, runtime projections and scheduler coordination | Return not-executed; do not create a second scheduler in the CLI |
-| `runs list/show/cancel`, `harness status` | Start with RO direct lists plus bounded live IPC; move to service read endpoints only if profiling shows it is worthwhile | Read status reports controller unavailable; cancel fails closed if live control is unavailable |
-| `vault list/find/tags/edit/access/request/await` | Service owns metadata/policy/request transactions; avault remains the custody boundary | No direct fallback for protected/security-sensitive paths |
-| `vault fetch` | DB-free thin client to Vault service; server-side adapter resolves policy/grant/audit and invokes avault | Precise not-executed error; no direct SQLite fallback, no automatic service start |
-| `vault run` | Shared authorization/audit service, with a separate process/stdio transport preserving caller cwd, environment boundaries, cancellation, signals, exit code and backpressure | Not-executed before handoff; after handoff, return actual/unknown result without replay |
-| `skill load/list` | Keep local skill-file reads; send observation through the service's bounded observation path if it is a write | Do not disable observation silently; report/defer telemetry according to its existing contract |
-| `mcp` | Already a control-IPC client; only make import/argument bootstrap lazy | Existing service-unavailable behavior, no local hidden server |
+| `agent run` (new/session/fork/Bot), Session mutations, Task/Watch mutations, Run cancellation | Service performs the existing durable enqueue/update and live coordination with a warm engine | Not-executed; no direct write fallback |
+| `data query`, list/show reads, `harness status` | RO direct reads; retain live enrichment where needed | Standalone reads remain available; report missing live state |
+| Vault delivery and its metadata/preparation | Thin client to the existing Vault logic in a warm service; avault retains custody | Not-executed; no automatic service start |
+| `skill load/list`, `mcp` | Keep file reads and existing observation/control IPC; optimize import cost | Existing behavior unchanged; do not disable observation |
 
-### 3.6 Vault chapter: adopted from the hot-path design
+Keep transactions short and blocking work off the controller loop. Reuse existing scheduling/admission; add queue machinery only if measurements show it is needed. A warm pool removes repeated setup, not SQLite's single-writer limit.
 
-The authoritative proposal is `_tmp/sqlite-bookkeeping/vault-hot-path-design.md`; it is folded here without weakening its security conclusions.
+### 3.5 Vault: performance only
 
-1. **Delivery:** one shared warm Vault service over the existing private local control IPC. `vibe vault fetch` becomes DB-free. Show Runtime uses a server-only adapter, not one Python subprocess per HTTP call. The service owns a warm engine and invokes avault; it never receives plaintext keys.
-2. **Audit ordering:** validate caller, policy, selected fields, grant and host/method constraints; commit a value-free `prepared` credential-use intent before giving avault permission to act; hand off outside SQLite; complete the ledger by operation ID afterward.
-3. **Failure semantics:** if the pre-handoff intent cannot commit, do not hand off. If the external effect may already have happened and completion fails, do not replay the request; return the actual response when known plus explicit audit-degraded/unknown state and reconcile later.
-4. **One-shot grants:** reserve atomically with its audit intent, keep the grant unavailable after an uncertain handoff, and retry only idempotent ledger transitions. Do not retry egress.
-5. **Identity:** a local socket authenticates the installation, not arbitrary caller claims. Agent calls bind to durable Run/Session authority; Show Runtime preserves the authenticated originating page/request identity or an explicitly owner-authorized background identity. No broad ambient Controller Owner token and no browser-accessible credential proxy.
-6. **`run`:** do not accidentally run child commands under the controller's cwd/environment or return decrypted environment values to the CLI. Preserve process ownership, stdio, cancellation, signals and exit code in a separate reviewed transport.
-7. **Queueing:** bounded, fair service admission may protect Vault's own writes, but SQLite still has one physical writer and unrelated direct writers still contend. Do not claim a pool removes serialization.
-8. **Migration:** the durable operation ledger/uniqueness state is an additive schema/security migration if current tables cannot express it. It needs owner approval, upgrade/downgrade evidence, crash/uncertain-outcome tests and no history deletion.
-
-### 3.7 Residual direct writers and controller loop
-
-- Keep #3280 and #3281 as landed foundations; do not duplicate their changes.
-- Use #3281's whole-transaction bounded retry shape for remaining short DB-only writers. Retry the complete transaction, not an individual statement, and classify exhaustion visibly.
-- Never retry model calls, Vault egress, HTTP POSTs, child commands, or any operation that may already have affected the outside world.
-- Move synchronous SQLite commits off the controller loop through the ordered writer/runtime-work path described by #2725/#2706, preserving per-emit message IDs, transcript order, runtime activation boundaries and cancellation points.
-- Do not resurrect the parked broad global-writer design merely because it is conceptually simple. Measure after the CLI/service changes.
+- Make `vault fetch` a DB-free thin client to the warm service; use a server-only Show adapter instead of spawning Python for every HTTP call. Reuse today's Vault checks, grant handling and audit semantics unchanged; avault continues to own custody and cryptography.
+- Preserve the existing no-replay behavior when an external effect may have occurred, including transport timeout or audit failure. Do not add a new audit protocol or schema.
+- Move `vault run` only with transport that preserves caller cwd/environment, stdio, cancellation, signals and exit code without returning decrypted environment values to the client. Reuse existing delivery logic for other Vault commands when profiling justifies moving them.
+- Keep #3280/#3281's short transaction/retry foundations. Do not use longer timeouts, a broad global writer or disabled Relay refresh as substitutes for eliminating cold setup.
 
 ---
 
 ## 4. Phased delivery
 
-Each phase is independently shippable and reversible. The current document is the decision gate, not an implementation PR.
+Each phase is independently shippable and reversible. #3280/#3281 are landed foundations, not proof that CLI throughput is fixed.
 
-| Phase | Deliverable | Boundary / approval | Rollback and validation |
+| Phase | Deliverable | Measured reason | Validation / decision |
 | --- | --- | --- | --- |
-| 0 | **Already landed:** #3280 no-op bootstrap-writer removal; #3281 whole-transaction retries | No new schema; #3281 changed writer correctness but not throughput | Revert independently if regression; retain their focused contention tests and archived benchmark |
-| 1 | Split raw CLI entry/parser from the monolithic import; lazy-load command handlers and backend modules | Admission/authority regression surface; no credential boundary, but must preserve fail-closed floors | Revert to old dispatcher; parser leaf coverage, `version/help/invalid` profile, local/remote authority tests |
-| 2 | Current-state readiness probe and conservative repair fallback | If existing markers suffice, no schema migration; if a new readiness stamp is needed, separate additive migration and owner approval | Feature flag/kill switch to always use repair path; current/old/missing/corrupt/concurrent migration tests |
-| 3 | Explicit RO engines/stores; remove Agent prefill and background index repair from read commands; make `data query` no-bootstrap | Resource ACL and data-exposure boundary; no Vault | Revert individual read handlers to service/old path; RO authorizer, query-plan and writer-contention tests |
-| 4 | Control-IPC contracts for `agent run`, Session mutations, Task/Watch mutations, and live Run cancellation | **Security/authority boundary; owner approval required.** Service-down behavior becomes externally visible | Keep direct path behind an explicit diagnostic-only switch during rollout; identity matrix, crash/cancel, ordering and 200-call benchmark |
-| 5 | Vault metadata/preparation service and DB-free `vault fetch`; Show server adapter | **Vault/security boundary; owner approval required.** No plaintext/key custody change without avault review | Keep old fetch only as an owner-approved emergency mode, never automatic; protected/standard, pre-use failure, post-use uncertainty and no-replay tests |
-| 6 | Separate Vault `run`/`inject`/`sign` process and custody transports; durable operation ledger if required | **Vault + possible schema migration; owner approval required** | Per-operation compatibility and explicit protocol version; crash/stdio/cancellation/audit migration tests |
-| 7 | Remaining direct writer cleanup, controller-loop ordered persistence, fair service queues and benchmark hardening | May touch runtime activation/loop invariants; coordinate with #2725/#2706 owners | Roll back command family independently; no global writer until measured need is demonstrated |
+| 1 | Lazy entry/parser and command imports | `vibe.cli` import costs ~0.36–0.43 s in cold profiles | Parser leaf coverage, existing behavior tests, version/help/invalid profiles; revert dispatcher independently |
+| 2 | Current-state RO readiness probe; conservative repair fallback | ~0.05 s uncontended bootstrap; 22.465 s p50 in the instrumented 50-process baseline | Current/old/missing/corrupt/concurrent migration and lock cases; approve a migration only if a new stamp is necessary; retain repair fallback |
+| 3 | Explicit RO engines/stores; no read-time prefill/index repair; no-bootstrap `data query` | 184 data queries, 123 Harness status calls, 92 Watch lists and 41 Run lists in 27 hours | SQL authorizer, existing filtering tests, bounded query plans and zero read-writer occupancy; revert by handler |
+| 4 | Warm-service Agent enqueue, then Watch/Session/Task mutations and associated live cancellation | 363 Agent runs, 100 Watch adds, 35 Session updates and 17 Task adds; repeated admission/bootstrap cost | Approve service-down behavior; test enqueue/order/cancel parity and the 200-call workload; roll back by command family, not automatic fallback |
+| 5 | Warm Vault service, DB-free fetch and Show server adapter | Fetch orchestration reached 29.389 s p50 / 48.001 s p95 in the instrumented baseline | Compare cold versus warm fetch/Show adapter latency and process count; retain existing checks/audits and no-replay behavior |
+| 6 | Vault `run` transport, then other Vault paths only where profiles justify them | 23 Vault runs in 27 hours; cold `run` profile pays import/admission/bootstrap even before delivery | Process/stdio/cwd/cancel/exit-code parity, audit parity and no replay; benchmark each additional command before expanding scope |
 
-Every implementation PR must name: command families changed, caller identity contract, service-down result, write transaction boundaries, migration/recovery behavior, and the exact benchmark slice it improves. None should silently change Relay refresh policy.
+After Phase 3, remeasure before starting the service moves; use remaining call frequency and latency to refine their order. Any further writer/queue work needs measured residual contention, not a speculative phase. Implementation PRs identify changed commands, performance evidence, rollback and any schema or user-visible behavior change requiring approval. Existing identity checks and Vault audit semantics are compatibility constraints, not new design work.
 
 ---
 
 ## 5. Acceptance benchmark
 
-Run on a hermetic synthetic home with no owner DB, credentials, Keychain, service restart or external network except explicitly owned loopback stubs. Compare: current RC12, #3280/#3281 combined baseline, each phase, and the final warm-service path.
+Use a hermetic synthetic home, test-owned service and loopback stubs: no owner DB, credentials, Keychain, live-service restart or external network. Compare RC12 (including #3280/#3281), each phase and the final warm path.
 
 ### Workload
 
-- 200 mixed Agent-style CLI calls, 20-way concurrency, weighted by the reconstructed table: `agent run`, `data query`, `harness status`, `watch add/list`, `skill load`, `runs list`, `session update`, `session queue list`, `vault run/fetch`, plus a smaller set of list/show reads.
-- A simulated turn continuously appends transcript/result/activity records at a fixed offered rate; preserve the real `SQLiteTranscriptStore` path and record every offered, attempted, committed, retried and skipped operation.
-- Include service warm and service cold-start phases. Restore the normal AI Relay refresh behavior for the final workload; a temporarily paused panel is a separate mitigation sample, not the acceptance run.
-- For Vault, use standard and protected fixtures separately. The protected fixture must exercise approval/grant state without exposing key material; HTTP/child-command stubs must count external handoffs and reject duplicate operation IDs.
+- 200 mixed CLI calls, 20-way concurrency, weighted by the measured command frequencies: Agent enqueue, reads, Watch/Session mutations, skill loads and Vault delivery.
+- A simulated turn uses the real `SQLiteTranscriptStore` path at a fixed offered rate; record offered, attempted, committed, retried and skipped writes.
+- Measure warm and cold-start service cases with normal AI Relay refresh. A paused panel is a separate mitigation sample, never the acceptance run.
+- Use standard Vault fixtures and loopback HTTP/child stubs that count actual handoffs to detect replay. Keep existing behavior tests; add no protected-approval fixture or authority matrix to this performance benchmark.
 
 ### Required measurements and gates
 
 | Dimension | Acceptance condition |
 | --- | --- |
-| Correctness | Zero surfaced SQLite lock/timeout errors in the mixed workload; zero lost/duplicate transcript rows; all retry exhaustion visible; no swallowed audit deficit |
-| Latency | Report p50/p95/max for whole process, import, authority/admission, readiness/bootstrap, IPC, handler, SQLite wait/commit, and external egress separately. Do not subtract percentiles. |
-| Turn safety | Transcript commit p50/p95/max and controller-loop stall time remain bounded; no synchronous migration/SQLite wait on the loop |
-| Version safety | Current, old, new, missing, corrupt, replacement and concurrent migration states prove no command operates on an old/unknown schema |
-| Service failure | Service-owned mutations return not-executed with no direct-SQLite fallback or automatic service start; RO commands follow their documented standalone behavior |
-| Authority | Local Owner, remote Viewer/Editor/Owner, stale/malformed provenance, revoked Session/Run, mismatched pairing, and Show page identity cases are covered |
-| Vault | Pre-use intent failure causes no handoff; post-use completion failure never replays; one-shot grant cannot be reused; operation-ID reconnect is idempotent and value-free |
-| Resource | Report child count/RSS, writer occupancy, queue depth, retry count and host load; distinguish instrumentation from production latency |
+| Correctness | Zero surfaced SQLite lock/timeout errors, lost/duplicate transcript rows or hidden retry exhaustion in the mixed workload; preserve existing command and audit behavior |
+| Latency | Report p50/p95/max for whole process, import, existing admission, readiness/bootstrap, IPC, handler, SQLite wait/commit and external egress separately; do not subtract percentiles |
+| Turn safety | Bounded transcript commit latency and controller-loop stalls; no synchronous migration/SQLite wait on the loop |
+| Version safety | Current, old, new, missing, corrupt, replacement and concurrent migration states prove no operation uses old/unknown schema |
+| Service failure | If approved, unavailable service returns not-executed before handoff, with no direct write fallback or automatic start; post-handoff uncertainty never triggers replay |
+| Vault compatibility | Existing grants, checks and audit semantics unchanged; stubs observe no duplicate external requests; `run` preserves process behavior |
+| Resource | Report child count/RSS, writer occupancy, existing queue depth, retries and host load; distinguish instrumented from production latency |
 
-Proposed initial targets are relative, not promises: `version/help` should approach interpreter-plus-parser cost with no database access; current-state read commands should have no writer occupancy; warm service enqueue/control p95 should be bounded independently of database history size; and transcript p95 should not regress from the #3280 RC12 result under the same offered workload. The owner should set absolute thresholds after the first post-phase measurement rather than treating the 29.389 s instrumented cold baseline as a service-level target.
+Initial targets remain relative: version/help approach interpreter-plus-parser cost without DB access; current-state reads have zero writer occupancy; warm enqueue/control p95 is bounded independently of history size; transcript p95 does not regress from RC12 under the same offered workload. Set absolute thresholds after the first post-phase measurement, not from the 29.389 s instrumented cold baseline.
 
 ---
 
 ## 6. Non-goals and known limits
 
-- This plan does not implement a service, change a schema, alter authority, restart Avibe, change Relay refresh, or touch Vault credentials.
-- It does not claim that a warm pool makes SQLite writers parallel. SQLite still has one physical writer; the goal is to remove unnecessary writers and bound the necessary ones.
-- It does not make arbitrary `vibe data query` SQL a controller endpoint. Its guarded RO connection remains the simpler boundary initially.
-- It does not turn `avibe.bot` into a workspace/runtime proxy. Browser traffic and service clients still reach the user's local runtime or managed instance through the intended tunnel/control boundary.
-- The benchmark does not cover real avault cryptography, Keychain latency, protected approval UX, arbitrary external HTTP semantics, or the owner's multi-gigabyte database. Those require separately approved, hermetic fixtures.
+- Personal-agent performance only: no enterprise, Organization, member or role-model design, and no identity hardening; preserve existing behavior.
+- Intent-first audit is possible future hardening, not part of this work.
+- No runtime implementation, deployment, credential change, service restart or Relay refresh change in this PR.
+- No arbitrary-SQL controller endpoint, workspace proxy, parallel-writer claim or speculative global queue.
+- Measurements do not cover real avault cryptography, Keychain latency, protected approval UX, arbitrary external HTTP semantics or the owner's multi-gigabyte DB.
 
-**Decision point:** approve or reject the target split (lazy entry + readiness probe + RO reads + warm service + Vault contract). Once approved, implementation should start at Phase 1/2 and remain independently reversible; no phase should be inferred as owner approval for the Vault or authority-boundary phases.
+**Next:** merge this plan, then open a separate implementation lane for Phases 1–3. Only the service-down result and a possible readiness-stamp migration remain open decisions.
