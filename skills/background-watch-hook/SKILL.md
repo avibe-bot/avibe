@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Run durable `vibe watch` waits for PR reviews, CI, files or external signals, then resume the Agent in the right Session.
-version: 0.19.1
+version: 0.20.0
 ---
 
 # Background Watch Hook
@@ -48,6 +48,12 @@ immediately seed/arm. Keep the same Watch and cursor across all later rounds.
 
 - `wait_pr.py --workflow <actual-name>` combines PR activity with exact-head CI;
   repeat `--workflow` for every required workflow. Omit `--sha` to follow pushes.
+- Authenticated PR watches also report paginated merge-queue timeline events:
+  enqueue, removal (with GitHub's reason), and `MERGED` (with merge commit/ref).
+  These survive filters, success coalescing, and restart/delivery acknowledgement.
+  Keep this same Watch through queue validation; PR-head CI is not merge-group CI.
+  On removal, inspect the reason and associated queue run, then follow
+  `pr-delivery-loop` recovery. Only `MERGED` readback permits close-out.
 - `--coalesce-success`: keep half-success quiet; report one same-head CI/review
   success candidate. Findings, errors and unfamiliar results remain reportable.
 - `--actionable-only` drops review triggers and empty envelopes; `--settle 20`

@@ -31,7 +31,11 @@ def _load_module():
                 "reviewThreads": {
                     "nodes": [],
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
-                }
+                },
+                "timelineItems": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
             }
         }
     }
@@ -2085,7 +2089,7 @@ def test_fetch_state_includes_combined_actions_and_request_count() -> None:
         cache=fetch_actions.call_args.kwargs["cache"],
     )
     assert state["actions"][0]["id"] == 7
-    assert request_count == 2 + 5 + 2
+    assert request_count == 2 + 6 + 2
     assert fetch_pr.call_count == 2
 
 
@@ -2242,6 +2246,7 @@ def test_fetch_state_paginates_review_threads_as_part_of_the_pr_snapshot() -> No
         patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
         patch.object(module, "list_paginated_with_count", return_value=([], 1)),
         patch.object(module, "github_graphql", side_effect=lambda *_args, **_kwargs: next(graphql_pages)),
+        patch.object(module, "_fetch_merge_queue_events", return_value=([], 1)),
     ):
         state, request_count = module._fetch_state("avibe-bot/avibe", 153, "token")
 
@@ -2249,7 +2254,7 @@ def test_fetch_state_paginates_review_threads_as_part_of_the_pr_snapshot() -> No
         {"id": "thread-1", "isResolved": False},
         {"id": "thread-2", "isResolved": True},
     ]
-    assert request_count == 7
+    assert request_count == 8
 
 
 def test_fresh_pr_watch_baselines_existing_review_threads() -> None:
@@ -4341,6 +4346,123 @@ def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0
                 "--settle", str(settle), *extra_args,
             ),
         )
+
+
+def _queue_event(kind="AddedToMergeQueueEvent", event_id="queue-1", **fields):
+    return {"__typename": kind, "id": event_id, "createdAt": "2026-11-06T15:00:00Z", **fields}
+
+
+def _queue_page(nodes, *, more=False, cursor=None):
+    return {"repository": {"pullRequest": {"timelineItems": {
+        "nodes": nodes, "pageInfo": {"hasNextPage": more, "endCursor": cursor},
+    }}}}
+
+
+def test_fetch_state_paginates_merge_queue_timeline_and_preserves_evidence():
+    module = _load_module()
+    added = _queue_event()
+    removed = _queue_event("RemovedFromMergeQueueEvent", "queue-2", reason="CI_FAILURE")
+    merged = _queue_event("MergedEvent", "merge-3", mergeRefName="master", commit={"oid": "b" * 40})
+    with (
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(module, "github_graphql", side_effect=[
+            _queue_page([added, removed], more=True, cursor="page-2"),
+            _queue_page([merged]),
+        ]) as graphql,
+    ):
+        state, count = module._fetch_state("avibe-bot/avibe", 153, "token")
+    assert count == 8
+    assert state["merge_queue_events"] == [added, removed, merged]
+    assert [call.args[1]["endCursor"] for call in graphql.call_args_list] == [None, "page-2"]
+    query = graphql.call_args.args[0]
+    for event_type in ("ADDED_TO_MERGE_QUEUE_EVENT", "REMOVED_FROM_MERGE_QUEUE_EVENT", "MERGED_EVENT"):
+        assert event_type in query
+
+
+@pytest.mark.parametrize("page", [
+    {}, _queue_page([None]),
+    {"repository": {"pullRequest": {"timelineItems": {"nodes": []}}}},
+    _queue_page([], more=True),
+    _queue_page([], more=True, cursor="same-page"),
+])
+def test_merge_queue_timeline_rejects_incomplete_or_looping_pages(page):
+    module = _load_module()
+    with patch.object(module, "github_graphql", return_value=page), pytest.raises(RuntimeError):
+        module._fetch_merge_queue_events("avibe-bot/avibe", 153, "token")
+
+
+@pytest.mark.parametrize("coalesce", [False, True])
+def test_queue_lifecycle_survives_filters_event_limit_restart_and_ack(tmp_path, coalesce):
+    module = _load_module()
+    path = tmp_path / "queue.json"
+    pending = _ci_run(status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending)
+    state = _ci_state(pending)
+    state["merge_queue_events"] = [
+        _queue_event(),
+        _queue_event("RemovedFromMergeQueueEvent", "queue-2", reason="CI_FAILURE"),
+    ]
+    options = ("--actionable-only", "--event-limit", "1")
+    if coalesce:
+        options += ("--coalesce-success",)
+    rc, output, payload = _ci_cycle(module, path, [state], extra_args=options)
+    assert rc == 0
+    assert "ENQUEUED" in output and "DEQUEUED" in output and "CI_FAILURE" in output
+    assert payload["snapshot"]["merge_queue_events"] == {}
+    assert set(payload["pending"]["cursors"]["snapshot"]["merge_queue_events"]) == {"queue-1", "queue-2"}
+
+    # A restart before delivery must replay the actual report without GitHub.
+    def unavailable(*args, **kwargs):
+        raise AssertionError("must replay persisted queue event before remote preflight")
+
+    rc, replay, _ = _run_managed(module, path, unavailable, delivery="1", extra_args=(
+        "--branch", "feature", "--workflow", "CI", *options,
+    ))
+    assert rc == 0 and replay == output
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2", extra_args=options)
+    assert rc == 124 and output == ""
+
+    # A later merge carries the landing commit, not the reviewed PR head.
+    state["merge_queue_events"].append(_queue_event(
+        "MergedEvent", "merge-3", mergeRefName="master", commit={"oid": "b" * 40},
+    ))
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2", extra_args=options)
+    assert rc == 0
+    assert "MERGED into master" in output and "b" * 40 in output
+    assert "ENQUEUED" not in output and "DEQUEUED" not in output
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="3", extra_args=options)
+    assert rc == 124 and output == ""
+
+
+def test_fresh_seed_adopts_queue_history_and_missing_token_retains_it(tmp_path):
+    module = _load_module()
+    path = tmp_path / "queue.json"
+    state = _ci_state()
+    state["merge_queue_events"] = [_queue_event()]
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(state, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.dict("os.environ", {module.WATCH_ID_ENV: ""}),
+        patch("sys.argv", [
+            "wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153",
+            "--state-file", str(path), "--seed-state",
+        ]),
+        redirect_stdout(stdout),
+    ):
+        assert module.main() == 0
+    assert stdout.getvalue() == ""
+    payload = json.loads(path.read_text())
+    assert "queue-1" in payload["snapshot"]["merge_queue_events"]
+    with patch.object(module, "github_graphql", side_effect=AssertionError("no auth")):
+        assert module._fetch_merge_queue_events("avibe-bot/avibe", 153, None) == (None, 0)
+    unavailable = {**state, "merge_queue_events": None}
+    assert module._normalized_pr_snapshot(
+        unavailable, committed_snapshot=payload["snapshot"],
+    )["merge_queue_events"] == payload["snapshot"]["merge_queue_events"]
 
 
 COALESCED_HEAD = "a" * 40

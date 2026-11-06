@@ -176,6 +176,27 @@ query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
 """
 
 
+MERGE_QUEUE_EVENTS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      timelineItems(first: 100, after: $endCursor, itemTypes: [
+        ADDED_TO_MERGE_QUEUE_EVENT, REMOVED_FROM_MERGE_QUEUE_EVENT, MERGED_EVENT
+      ]) {
+        nodes {
+          __typename
+          ... on AddedToMergeQueueEvent { id createdAt }
+          ... on RemovedFromMergeQueueEvent { id createdAt reason }
+          ... on MergedEvent { id createdAt mergeRefName commit { oid } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
 class StateFileError(RuntimeError):
     """The requested ``--state-file`` cannot do the job it was asked to do.
 
@@ -896,6 +917,16 @@ def _normalized_pr_snapshot(
         "issue_comments": _normalized_item_map(issue_comments, fields=("body",)),
         "reactions": normalized_reactions,
         "review_threads": review_threads,
+        # Retain the last authenticated observation when GraphQL is unavailable
+        # without a token. An API failure with a token raises instead of erasing it.
+        "merge_queue_events": (
+            _normalized_item_map(
+                state["merge_queue_events"],
+                fields=("__typename", "createdAt", "reason", "mergeRefName", "commit"),
+            )
+            if isinstance(state.get("merge_queue_events"), list)
+            else (committed_snapshot or {}).get("merge_queue_events", {})
+        ),
     }
 
 
@@ -1080,6 +1111,64 @@ def _fetch_review_threads(
     return threads, request_count
 
 
+def _fetch_merge_queue_events(
+    repo: str, pr_number: int, token: str | None,
+) -> tuple[list[dict[str, Any]] | None, int]:
+    """Read the full lifecycle timeline, including enqueue/dequeue between polls."""
+
+    if token is None:
+        return None, 0
+    owner, repo_name = repo.split("/", 1)
+    events: list[dict[str, Any]] = []
+    end_cursor: str | None = None
+    seen_cursors: set[str] = set()
+    request_count = 0
+    while True:
+        data = github_graphql(
+            MERGE_QUEUE_EVENTS_QUERY,
+            {"owner": owner, "repo": repo_name, "number": pr_number, "endCursor": end_cursor},
+            token,
+        )
+        request_count += 1
+        repository = data.get("repository")
+        pr = repository.get("pullRequest") if isinstance(repository, dict) else None
+        connection = pr.get("timelineItems") if isinstance(pr, dict) else None
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            raise RuntimeError("GitHub GraphQL response has no timelineItems nodes list")
+        for node in connection["nodes"]:
+            if (
+                not isinstance(node, dict) or not isinstance(node.get("id"), str)
+                or node.get("__typename") not in {
+                    "AddedToMergeQueueEvent", "RemovedFromMergeQueueEvent", "MergedEvent",
+                }
+            ):
+                raise RuntimeError("GitHub GraphQL returned an invalid merge queue event")
+            events.append(node)
+        page = connection.get("pageInfo")
+        if not isinstance(page, dict) or not isinstance(page.get("hasNextPage"), bool):
+            raise RuntimeError("GitHub GraphQL timelineItems response has no pageInfo")
+        if not page["hasNextPage"]:
+            return events, request_count
+        end_cursor = page.get("endCursor")
+        if not isinstance(end_cursor, str) or not end_cursor or end_cursor in seen_cursors:
+            raise RuntimeError("GitHub GraphQL timelineItems page has no advancing endCursor")
+        seen_cursors.add(end_cursor)
+
+
+def _format_merge_queue_event(event: dict[str, Any]) -> str:
+    kind = event["__typename"]
+    when = event.get("createdAt") or "unknown time"
+    if kind == "AddedToMergeQueueEvent":
+        detail = "ENQUEUED; waiting for merge-group CI, not yet merged."
+    elif kind == "RemovedFromMergeQueueEvent":
+        reason = event.get("reason") or "not supplied by GitHub"
+        detail = f"DEQUEUED; reason: {reason}. Recheck live PR/queue state and failed merge-group runs."
+    else:
+        commit = (event.get("commit") or {}).get("oid") or "unavailable"
+        detail = f"MERGED into {event.get('mergeRefName') or 'unknown ref'}; merge commit: {commit}."
+    return f"- merge_queue {event['id']} at {when}\n  {detail}"
+
+
 def _fetch_state(
     repo: str,
     pr_number: int,
@@ -1127,6 +1216,7 @@ def _fetch_state(
         cache=cache,
     )
     review_threads, review_thread_requests = _fetch_review_threads(repo, pr_number, token)
+    merge_queue_events, merge_queue_requests = _fetch_merge_queue_events(repo, pr_number, token)
     actions: list[dict[str, Any]] = []
     action_requests = 0
     selected_ci_sha = ci_sha or (_current_pr_head_sha(pull_request) if ci_workflows else None)
@@ -1166,6 +1256,7 @@ def _fetch_state(
             "issue_comments": issue_comments,
             "reactions": reactions,
             "review_threads": review_threads,
+            "merge_queue_events": merge_queue_events,
             "actions": actions,
         },
         (
@@ -1175,6 +1266,7 @@ def _fetch_state(
             + issue_comment_requests
             + reaction_requests
             + review_thread_requests
+            + merge_queue_requests
             + action_requests
             + requests_after_actions
         ),
@@ -1300,6 +1392,14 @@ def _render_activity(
         current_snapshot = _quiet_success_snapshot(current_snapshot, defer_reactions=defer_reactions)
         if snapshot is not None:
             snapshot = _quiet_success_snapshot(snapshot, defer_reactions=defer_reactions)
+    previous_queue_events = (snapshot or {}).get("merge_queue_events", {})
+    # The normalized item map keeps IDs as keys; render the immutable timeline
+    # entries in their API order rather than guessing transitions from membership.
+    queue_events = [
+        {**event, "id": event_id}
+        for event_id, event in current_snapshot["merge_queue_events"].items()
+        if previous_queue_events.get(event_id) != event
+    ]
     snapshot_changed = snapshot is not None and current_snapshot != snapshot
     if snapshot is not None and not snapshot_changed:
         return (
@@ -1318,6 +1418,7 @@ def _render_activity(
         or has_pr_status_event
         or has_head_event
         or thread_changes
+        or queue_events
     ):
         return None, review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
 
@@ -1325,7 +1426,7 @@ def _render_activity(
         not actionable_only or current_pr_status in ACTIONABLE_PR_STATUSES
     )
 
-    required_events: list[str] = []
+    required_events: list[str] = [_format_merge_queue_event(event) for event in queue_events]
     if has_head_event and isinstance(state.get("pull_request"), dict):
         required_events.append(_format_pr_head_event(state["pull_request"], previous_head_sha, current_head_sha))
     if render_pr_status_event and isinstance(state.get("pull_request"), dict):
@@ -2851,9 +2952,12 @@ def main() -> int:
             ignore_self_comments=not args.include_self_comments,
             actionable_only=args.actionable_only, ignored_authors=ignored_authors,
             ignore_patterns=ignore_patterns,
-            committed_snapshot={"review_threads": dict(
-                latest_review_thread_states if args.coalesce_success else review_thread_states
-            )},
+            committed_snapshot={
+                "review_threads": dict(
+                    latest_review_thread_states if args.coalesce_success else review_thread_states
+                ),
+                "merge_queue_events": (snapshot or {}).get("merge_queue_events", {}),
+            },
             review_threads_available=token is not None,
         )
 

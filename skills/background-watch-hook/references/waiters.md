@@ -20,6 +20,30 @@ Good trigger scenarios:
 
 Prefer `vibe watch` when the wait should be inspectable, pausable, resumable, or removable later.
 
+## Merge queue lifecycle
+
+For authenticated single-PR watches, `wait_pr.py` reads all pages of the GraphQL
+`ADDED_TO_MERGE_QUEUE_EVENT`, `REMOVED_FROM_MERGE_QUEUE_EVENT`, and `MERGED_EVENT`
+timeline. Enqueue is reported as `ENQUEUED`, removal as `DEQUEUED` with GitHub's
+reason when supplied, and merge as `MERGED` with the merge commit OID and target
+ref. These are mandatory lifecycle events, not self-authored comment noise or
+coalesced review success. An enqueue and dequeue between two polls are both
+reported even though current queue membership ends unchanged.
+
+Timeline entries live in the existing PR snapshot and pending-delivery transaction:
+a fresh seed adopts history, normal resumes report only new/changed entries, and
+an unacknowledged report is replayed rather than silently consumed. Pagination or
+API failures do not replace the saved timeline with an empty one. Without a token,
+queue timeline observation is unavailable; the waiter retains an existing saved
+observation and still monitors REST PR state, but cannot promise enqueue/dequeue
+notifications.
+
+The `--workflow` inventory remains bound to the PR head. It does not certify a
+synthetic merge-group head. After enqueue, keep the Watch alive, inspect queue runs
+when recovering a removal, and only clean up after live `MERGED` plus merge-commit
+readback. A success exit from `gh pr merge`, an auto-merge request, and absence from
+the queue are not completion signals.
+
 ## Main Tools
 
 - `vibe watch add`
