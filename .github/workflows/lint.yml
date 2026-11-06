@@ -4,15 +4,14 @@ on:
   pull_request:
     # Labeling re-runs the hosted wire gate, which reads the labels it runs with.
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  push:
-    branches:
-      - master
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Only test runs share these groups; superseded master checks must not
-  # occupy runners needed by the latest commit. Release workflows are separate.
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # PR runs supersede older runs for the same PR. Queue groups are immutable
+  # landing trees and must never cancel one another or a PR run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -21,9 +20,10 @@ jobs:
   changes:
     # Always report a workflow result; workflow-level paths-ignore would leave
     # required contexts pending. Only proven narrative-only diffs skip work,
-    # and on a pull request two job families skip when no changed path can
-    # reach their inputs (docs/plans/ci-affected-routing.md). Each routed job
-    # reports through a required gate that checks it against its route.
+    # and on a pull request or merge-group entry two job families skip when no
+    # changed path can reach their inputs (docs/plans/ci-affected-routing.md).
+    # Each routed job reports through a required gate that checks it against its
+    # route.
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -897,7 +897,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
     if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip'
-    # Pull requests allocate only Windows latest; master pushes run the full
+    # Pull requests allocate only Windows latest; merge groups run the full
     # Windows latest plus Windows on Arm matrix.
     strategy:
       fail-fast: false
@@ -1120,8 +1120,8 @@ jobs:
   windows-model-hub:
     name: windows-model-hub (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    needs: build-linux-artifacts
-    if: github.event_name != 'pull_request'
+    needs: [changes, build-linux-artifacts]
+    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1303,7 +1303,7 @@ jobs:
     name: windows-agent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false' && github.event_name != 'pull_request'
+    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'
     timeout-minutes: 20
     strategy:
       fail-fast: false
