@@ -244,7 +244,7 @@ jobs:
               npm run test:inbox-return
           - lane: 2
             suites: |
-              npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts
+              npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts project-expansion-return.spec.ts
               # Against the built app: StrictMode's dev double-mount drops the picker's first open.
               npm run test:workbench-general-build -- composer-mention-picker.spec.ts
               npm run test:project-order

@@ -36,6 +36,7 @@ import {
   type ProjectSessionsSnapshot,
 } from '../lib/projectSessionSnapshots';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
+import { readExpandedProjects, rememberExpandedProjects } from '../lib/projectExpansionSnapshot';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -46,11 +47,14 @@ import { sessionActivityInboxAction } from '../lib/inboxActivity';
 // size has to be one shared value (it can't differ per surface).
 const SESSIONS_PAGE_SIZE = 8;
 const RECONNECT_SESSIONS_PAGE_SIZE = 200;
+// How long the first list waits for the projects the reader left open.
+const EXPANSION_READ_LIMIT_MS = 400;
 
 // The project list as the last live bootstrap returned it, so opening the
 // sidebar or the Projects page paints it before the bootstrap answers
-// (docs/plans/web-ui-local-cache.md). Only the list: the bootstrap a cold start
-// takes asks for no project's sessions, and no project starts expanded.
+// (docs/plans/web-ui-local-cache.md). Only the list: the projects the reader left
+// open are a record of their own (``projectExpansionSnapshot``), and each one's
+// first page is another (``projectSessionSnapshots``).
 const PROJECTS_SNAPSHOT_KEY = 'projects:bootstrap';
 const PROJECTS_SNAPSHOT_SCHEMA = 1;
 
@@ -288,6 +292,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const contradictedProjectRouteRef = useRef(new Set<string>());
   const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
   const projectTreeRunnerRef = useRef<() => void>(() => {});
+  const fetchSessionsRunnerRef = useRef<(projectId: string) => void>(() => {});
   // Local snapshot state. ``paintedSnapshotRef`` names the rows painted from the
   // snapshot that no live bootstrap has replaced yet; the state mirror is what
   // keeps ``projectsLoaded`` false while they are on screen. ``snapshotRetiredRef``
@@ -312,6 +317,111 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const setPaintedSnapshot = useCallback((next: PaintedProjectsSnapshot | null) => {
     paintedSnapshotRef.current = next;
     setSnapshotOnScreen(next !== null);
+  }, []);
+
+  // Expanding a project draws its last stored first page in the same render,
+  // while the live read that replaces it is in flight. Only onto a window
+  // nothing has loaded, and never an empty page: the empty state is the live
+  // answer's to show.
+  const paintCachedWindow = useCallback((projectId: string) => {
+    const principal = getLocalSnapshotPrincipal();
+    const cached = cachedProjectSessions(projectId);
+    if (!principal || !cached || cached.sessions.length === 0) return false;
+    paintedWindowsRef.current.set(projectId, principal);
+    setSessions((prev) => {
+      if (prev[projectId]?.sessions != null) return prev;
+      return {
+        ...prev,
+        [projectId]: { sessions: cached.sessions, cursor: cached.next_before_id, loading: false, loadingMore: false, error: false },
+      };
+    });
+    return true;
+  }, []);
+
+  // ── The projects the reader left open come back with the list ──────────────
+  // The stored set is read once per reader and applied to the first list this
+  // tree commits, IN that commit: the painted snapshot or the first live answer,
+  // whichever lands first. Both bootstrap reads wait for it before they ask (one
+  // local read, well inside the request it precedes), so no live list can commit
+  // first and draw a restored project closed for a frame. Until it is applied the
+  // open set is not stored either, so the empty set a document starts with cannot
+  // overwrite the one the reader left.
+  //
+  // Only a live list says a project is gone. The painted one can be older than
+  // the stored set (a project created just before a reload whose bootstrap
+  // failed), so it opens what it holds and leaves the rest ``pending``, still
+  // stored, for the live list to open or drop.
+  const expansionRef = useRef<{
+    principal: string;
+    ids: string[] | null;
+    read: Promise<string[]>;
+    /** Some list has been restored onto; from then on every change is stored. */
+    applied: boolean;
+    /** Stored ids no list has opened yet; null once a live list has settled them. */
+    pending: Set<string> | null;
+  } | null>(null);
+  // Restored projects with nothing to show yet: they draw their skeleton rows,
+  // and whichever bootstrap applied the restore reads what its answer left out.
+  const restoredUnloadedRef = useRef(new Set<string>());
+
+  /** The stored set while it is still to be applied for the reader named now. */
+  const pendingExpansion = useCallback((): Promise<string[]> | null => {
+    const principal = getLocalSnapshotPrincipal();
+    if (!principal) return null;
+    let entry = expansionRef.current;
+    if (!entry || entry.principal !== principal) {
+      // The first list waits for this read, so a store that never answers (WebKit
+      // has had IndexedDB opens that hang) costs at most this, and restores nothing.
+      const read = Promise.race([
+        readExpandedProjects(),
+        new Promise<string[]>((resolve) => { window.setTimeout(() => resolve([]), EXPANSION_READ_LIMIT_MS); }),
+      ]);
+      const created: NonNullable<typeof entry> = { principal, ids: null, read, applied: false, pending: null };
+      void read.then((ids) => { created.ids = ids; });
+      entry = created;
+      expansionRef.current = entry;
+    }
+    return entry.applied && entry.pending === null ? null : entry.read;
+  }, []);
+
+  /** Open the stored projects ``listed`` holds, with the rows they had: called in
+   *  the same render as the list it is checked against. ``live`` says the list is
+   *  the server's, which settles the stored ids it does not hold: they are gone. */
+  const restoreExpansion = useCallback((listed: ReadonlySet<string>, { live }: { live: boolean }) => {
+    const entry = expansionRef.current;
+    if (!entry || entry.ids === null || entry.principal !== getLocalSnapshotPrincipal()) return;
+    if (entry.applied && entry.pending === null) return;
+    const candidates = entry.pending ?? new Set(entry.ids);
+    entry.applied = true;
+    const restored = [...candidates].filter((projectId) => listed.has(projectId) && !expandedRef.current.has(projectId));
+    const unmatched = [...candidates].filter((projectId) => !listed.has(projectId));
+    entry.pending = live ? null : new Set(unmatched);
+    // What a live list no longer has is dropped from the record too, even with
+    // nothing to open.
+    if (live && unmatched.length > 0) void rememberExpandedProjects([...expandedRef.current, ...restored]);
+    if (restored.length === 0) return;
+    expandedRef.current = new Set([...expandedRef.current, ...restored]);
+    setExpanded((prev) => new Set([...prev, ...restored]));
+    const unloaded = restored.filter((projectId) => !sessionsRef.current[projectId]?.sessions && !paintCachedWindow(projectId));
+    if (unloaded.length === 0) return;
+    for (const projectId of unloaded) restoredUnloadedRef.current.add(projectId);
+    setSessions((prev) => {
+      const next = { ...prev };
+      for (const projectId of unloaded) {
+        if (next[projectId]?.sessions == null) next[projectId] = { ...EMPTY_SESSIONS, ...next[projectId], loading: true };
+      }
+      return next;
+    });
+  }, [paintCachedWindow]);
+
+  /** Read the window of each restored project the bootstrap that opened it did
+   *  not bring, or could not: a failed read shows its retry, not a skeleton. */
+  const loadRestoredWindows = useCallback(() => {
+    const owed = [...restoredUnloadedRef.current];
+    restoredUnloadedRef.current.clear();
+    for (const projectId of owed) {
+      if (expandedRef.current.has(projectId)) fetchSessionsRunnerRef.current(projectId);
+    }
   }, []);
 
   // The list and its mirror move together. The mirror used to be written on render,
@@ -534,12 +644,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         Object.entries(prev).filter(([projectId]) => accessibleIds.has(projectId)),
       ),
     );
-    setExpanded((prev) => new Set([...prev].filter((projectId) => accessibleIds.has(projectId))));
+    // The same set when nothing left the list: a new one would store it again.
+    expandedRef.current = new Set([...expandedRef.current].filter((projectId) => accessibleIds.has(projectId)));
+    setExpanded((prev) => {
+      const kept = [...prev].filter((projectId) => accessibleIds.has(projectId));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+    restoreExpansion(accessibleIds, { live: true });
     setCreating((prev) => new Set([...prev].filter((projectId) => accessibleIds.has(projectId))));
     for (const projectId of [...pendingReconcileRef.current.keys()]) {
       if (!accessibleIds.has(projectId)) pendingReconcileRef.current.delete(projectId);
     }
-  }, [commitProjects, forgetSessionsOfUnlistedProjects, setPaintedSnapshot]);
+  }, [commitProjects, forgetSessionsOfUnlistedProjects, restoreExpansion, setPaintedSnapshot]);
 
   // A reconnect and an authorization change are not the same kind of signal. A
   // reconnect says "you may have missed events", so deferring it while nothing
@@ -577,6 +693,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     liveProjectIdsRef.current = null;
     sessionsRef.current = {};
     expandedRef.current = new Set();
+    restoredUnloadedRef.current.clear();
+    // Nothing stored before the change is restored after it, nor stored again,
+    // whether a list had opened it yet or not: the stored set is settled as
+    // empty, and what the reader opens from here on is stored as usual.
+    const expansion = expansionRef.current;
+    if (expansion) Object.assign(expansion, { applied: true, pending: null, ids: [] });
     sessionProjectRef.current.clear();
     pendingReconcileRef.current.clear();
     pendingCachedRowRefreshRef.current.clear();
@@ -653,6 +775,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       if (!page) continue;
       acceptProjectRows(read, projectId, page.sessions);
       paintedWindowsRef.current.delete(projectId);
+      restoredUnloadedRef.current.delete(projectId);
       rememberProjectSessions(projectId, firstPageOf(page.sessions, page.next_before_id));
     }
     setSessions((prev) => {
@@ -679,14 +802,24 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       return;
     }
     bootstrapReadInFlightRef.current = true;
+    // The list this read commits opens what the reader left open, so it waits for
+    // that set (see ``restoreExpansion``).
+    const restoring = pendingExpansion();
+    const stored = restoring ? await restoring : [];
     const read = readOwnershipRef.current.beginRead(['projects', 'projects-bootstrap']);
     const retryAfterMutation = () => {
       if (readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) return;
       // Upgrade any already-pending cached fetch to the authoritative retry.
       queueFetchProjectsIntent({ cache: false });
     };
+    // The first live list brings the first page of every open project with it, in
+    // the same round trip: one restored, or one opened on the painted snapshot. A
+    // later list leaves the windows alone, since a bootstrap page REPLACES one.
+    const open = liveProjectIdsRef.current === null ? [...new Set([...expandedRef.current, ...stored])] : [];
     try {
-      const result = await api.getWorkbenchProjectsBootstrap({ cache: options?.cache });
+      const result = await api.getWorkbenchProjectsBootstrap(open.length > 0
+        ? { cache: options?.cache, projectIds: open, status: 'active', limit: SESSIONS_PAGE_SIZE }
+        : { cache: options?.cache });
       const projectsCurrent = readOwnershipRef.current.isCurrent(read, 'projects');
       if (projectsCurrent) applyProjectsSnapshot(result.projects);
       if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
@@ -714,9 +847,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       }
     } finally {
       bootstrapReadInFlightRef.current = false;
+      loadRestoredWindows();
       flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, queueFetchProjectsIntent]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot, flushBootstrapReadIntent, loadRestoredWindows, pendingExpansion, queueFetchProjectsIntent]);
 
   // (Re)connect reconcile: rebuild a project's ALREADY-paged-in window (not just
   // page 1) so a transient SSE reconnect / controller restart doesn't truncate an
@@ -824,6 +958,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       return;
     }
     bootstrapReadInFlightRef.current = true;
+    const restoring = pendingExpansion();
+    if (restoring) await restoring;
     const retryAfterInvalidation = (read: WorkbenchSessionReadStamp) => {
       if (readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) return;
       queueProjectTreeIntent();
@@ -921,9 +1057,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       }
     } finally {
       bootstrapReadInFlightRef.current = false;
+      loadRestoredWindows();
       flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions, applyProjectsSnapshot, canIssueRead, flushBootstrapReadIntent, queueProjectTreeIntent, queueReconcile, reconcileSessions, settlePendingReconcile, windowTarget]);
+  }, [api, applyBootstrapSessions, applyProjectsSnapshot, canIssueRead, flushBootstrapReadIntent, loadRestoredWindows, pendingExpansion, queueProjectTreeIntent, queueReconcile, reconcileSessions, settlePendingReconcile, windowTarget]);
 
   fetchProjectsRunnerRef.current = (options) => void fetchProjects(options);
   projectTreeRunnerRef.current = () => void reconcileProjectTree();
@@ -1000,21 +1137,55 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     const seed = async (principal: string | null) => {
       // The session snapshots load into memory now, so expanding a project can
       // draw its cached rows in the same render.
-      if (principal && isActive()) void hydrateProjectSessionSnapshots().then(forgetSessionsOfUnlistedProjects);
-      if (!principal || !isActive() || snapshotRetiredRef.current) return;
-      const snapshot = await readLocalSnapshot(PROJECTS_SNAPSHOT_KEY, PROJECTS_SNAPSHOT_SCHEMA, parseProjectsSnapshot);
-      if (cancelled || !snapshot || snapshotRetiredRef.current) return;
-      if (getLocalSnapshotPrincipal() !== principal || projectsRef.current !== null) return;
+      const hydrated = principal && isActive()
+        ? hydrateProjectSessionSnapshots().then(forgetSessionsOfUnlistedProjects)
+        : null;
+      if (!principal || !isActive()) return;
+      const restoring = pendingExpansion();
+      if (snapshotRetiredRef.current && !restoring) return;
+      const [snapshot, stored] = await Promise.all([
+        snapshotRetiredRef.current
+          ? null
+          : readLocalSnapshot(PROJECTS_SNAPSHOT_KEY, PROJECTS_SNAPSHOT_SCHEMA, parseProjectsSnapshot),
+        restoring ?? [],
+      ]);
+      // A restored project draws its stored rows in the same render as the list.
+      if (stored.length > 0 && hydrated) await hydrated;
+      if (cancelled || getLocalSnapshotPrincipal() !== principal) return;
+      if (projectsRef.current !== null) {
+        // A live list is on screen already, because the reader was named after it
+        // landed: what they left open opens on it.
+        if (restoring && liveProjectIdsRef.current) {
+          restoreExpansion(liveProjectIdsRef.current, { live: true });
+          loadRestoredWindows();
+        }
+        return;
+      }
+      if (!snapshot || snapshotRetiredRef.current) return;
       // An empty list stays unpainted: the empty state is the live answer's to show.
       if (snapshot.projects.length === 0) return;
-      setPaintedSnapshot({ principal, ids: new Set(snapshot.projects.map((project) => project.id)) });
+      const listed = new Set(snapshot.projects.map((project) => project.id));
+      setPaintedSnapshot({ principal, ids: listed });
       commitProjects(snapshot.projects);
+      restoreExpansion(listed, { live: false });
+      // A bootstrap in flight asked for these windows and reads what it left out
+      // when it settles; one that settled already (a failure can beat the paint)
+      // left that to this.
+      if (!bootstrapReadInFlightRef.current) loadRestoredWindows();
     };
     seedSnapshotRef.current = (principal) => void seed(principal);
     const unsubscribe = subscribeLocalSnapshotPrincipal((principal) => {
       const painted = paintedSnapshotRef.current;
       if (principal && painted && principal !== painted.principal) dropPainted();
       if (principal) dropPaintedWindows(principal);
+      // The projects another reader left open are not this reader's to see open.
+      const expansion = expansionRef.current;
+      if (principal && expansion && expansion.principal !== principal) {
+        expansionRef.current = null;
+        restoredUnloadedRef.current.clear();
+        expandedRef.current = new Set();
+        setExpanded(new Set());
+      }
       void seed(principal);
     });
     return () => {
@@ -1022,7 +1193,17 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       seedSnapshotRef.current = () => {};
       unsubscribe();
     };
-  }, [commitProjects, forgetSessionsOfUnlistedProjects, isActive, setPaintedSnapshot]);
+  }, [commitProjects, forgetSessionsOfUnlistedProjects, isActive, loadRestoredWindows, pendingExpansion, restoreExpansion, setPaintedSnapshot]);
+
+  // Every change to what is open is stored at once, so a reload cannot lose a
+  // toggle: an expand, a collapse, a project a new Session opened, or one that
+  // left the list. Never before the stored set is applied (``restoreExpansion``),
+  // and with the stored ids no live list has settled yet.
+  useEffect(() => {
+    const expansion = expansionRef.current;
+    if (!expansion?.applied || expansion.principal !== getLocalSnapshotPrincipal()) return;
+    void rememberExpandedProjects(new Set([...expanded, ...(expansion.pending ?? [])]));
+  }, [expanded]);
 
   useEffect(() => {
     if (active) seedSnapshotRef.current(getLocalSnapshotPrincipal());
@@ -1179,6 +1360,9 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     },
     [acceptProjectRows, api, canIssueRead, projectIsInTree, reconcileSessions],
   );
+  useEffect(() => {
+    fetchSessionsRunnerRef.current = (projectId) => void fetchSessions(projectId);
+  }, [fetchSessions]);
 
   // Keep the tree live: patch a row's status dot / title from SSE, and refetch
   // projects + every loaded project's window when the stream (re)opens (the
@@ -1301,24 +1485,6 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     reconcileSessions,
     refreshCachedSessionRow,
   ]);
-
-  // Expanding a project draws its last stored first page in the same render,
-  // while the live read that replaces it is in flight. Only onto a window
-  // nothing has loaded, and never an empty page: the empty state is the live
-  // answer's to show.
-  const paintCachedWindow = useCallback((projectId: string) => {
-    const principal = getLocalSnapshotPrincipal();
-    const cached = cachedProjectSessions(projectId);
-    if (!principal || !cached || cached.sessions.length === 0) return;
-    paintedWindowsRef.current.set(projectId, principal);
-    setSessions((prev) => {
-      if (prev[projectId]?.sessions != null) return prev;
-      return {
-        ...prev,
-        [projectId]: { sessions: cached.sessions, cursor: cached.next_before_id, loading: false, loadingMore: false, error: false },
-      };
-    });
-  }, []);
 
   const toggleExpanded = useCallback(
     (projectId: string) => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -26,7 +26,9 @@ import { formatRelativeTime } from '../../lib/relativeTime';
 import {
   appShellScrollElement,
   clearProjectVisibleCount,
+  consumeInheritedProjectsListScroll,
   holdMobileProjectsListForChatReturn,
+  inheritedProjectsListScroll,
   markMobileProjectsListRestored,
   readAppShellScrollTop,
   readMobileProjectsListSnapshot,
@@ -460,20 +462,55 @@ export const ProjectsPage: React.FC = () => {
   const [visibleSessionCounts, setVisibleSessionCounts] = useState<MobileProjectsVisibleCounts>(
     () => readMobileProjectsListSnapshot().visibleCounts,
   );
+  // Decided once, on the first render: the restore below can consume the
+  // inherited place before the effect that reads this runs.
+  const [inheritedOnMount] = useState(() => inheritedProjectsListScroll() !== null);
   useEffect(() => {
+    // A list this document showed before (a conversation and back) is drawn at
+    // once from the provider, so its place is put back now. One a previous
+    // document left waits for its rows instead (below).
+    const inherited = inheritedOnMount;
     const top = readMobileProjectsListSnapshot().scrollTop;
     const restore = () => writeAppShellScrollTop(appShellScrollElement(), top);
-    restore();
-    const frame = requestAnimationFrame(restore);
+    if (!inherited) restore();
+    const frame = inherited ? 0 : requestAnimationFrame(restore);
     markMobileProjectsListRestored();
     const scrollEl = appShellScrollElement();
     const onScroll = () => rememberMobileProjectsListScroll(readAppShellScrollTop(scrollEl));
     scrollEl?.addEventListener?.('scroll', onScroll, { passive: true });
+    // The reader's own scrolling outranks a place still waiting to be restored.
+    const giveUpRestore = () => consumeInheritedProjectsListScroll();
+    const inputs = ['wheel', 'touchmove', 'keydown'] as const;
+    if (inherited) for (const type of inputs) window.addEventListener(type, giveUpRestore, { capture: true, passive: true });
     return () => {
       cancelAnimationFrame(frame);
       scrollEl?.removeEventListener?.('scroll', onScroll);
+      for (const type of inputs) window.removeEventListener(type, giveUpRestore, { capture: true });
     };
-  }, []);
+  }, [inheritedOnMount]);
+
+  // The place a previous document left the list at, written once, before the
+  // first frame that can hold it. The projects it left open are open from the
+  // first render that has the list, but one whose rows were not stored draws a
+  // shorter skeleton until they come, so a place near the end waits for them.
+  // Once the list has settled (live, and no open project still waiting), the
+  // place is written even if the list is shorter now: the nearest it has.
+  const listShown = projects !== null;
+  const listSettled = listShown && projectsLoaded && !(projects ?? []).some((project) => {
+    if (!isExpanded(project.id)) return false;
+    const state = sessionsOf(project.id);
+    return state.loading && !state.sessions?.length;
+  });
+  useLayoutEffect(() => {
+    if (!listShown) return;
+    const top = inheritedProjectsListScroll();
+    if (top === null) return;
+    const scroller = appShellScrollElement();
+    const room = (scroller?.scrollHeight ?? 0) - (scroller?.clientHeight ?? 0);
+    if (room < top && !listSettled) return;
+    consumeInheritedProjectsListScroll();
+    writeAppShellScrollTop(scroller, top);
+  });
 
   useEffect(() => {
     rememberMobileProjectsListCounts(visibleSessionCounts);
