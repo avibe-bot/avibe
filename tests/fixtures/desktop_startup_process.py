@@ -100,6 +100,8 @@ runtime.service_instance_started = lambda _pid: controller_ready.is_set()
 
 def start_service(*, start_info, **kwargs):
     global service_pid
+    # cmd_start creates its readiness deadline immediately before this call.
+    trace["service_start_ms"] = (time.monotonic() - started) * 1000
     trace["service_starts"] += 1
     if case == "eof":
         child = runtime.spawn_service_background_process(
