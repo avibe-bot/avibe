@@ -5023,6 +5023,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const motion = useTranscriptMotion({ scrollRef, columnRef: contentRef, pinnedRef, sessionId: session.id });
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
+  // Read by the glide to the latest message as it lands: rows that came in
+  // while it ran can have detached the live tail from the window.
+  const needsLatestReloadRef = useRef(needsLatestReload);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -5031,6 +5034,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     reloadLatestRef.current = onReloadLatest;
   }, [onReloadLatest]);
+  useLayoutEffect(() => {
+    needsLatestReloadRef.current = needsLatestReload;
+  }, [needsLatestReload]);
 
   // Whenever the loaded window stops reaching the live tail — a search deep-link
   // window OR the retained-window cap detaching the tail while the reader is
@@ -5355,7 +5361,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     }
     const glide = { frame: 0 };
     glideRef.current = glide;
-    const run = () => {
+    const run = (): void => {
       const el = scrollRef.current;
       if (!el || glideRef.current !== glide) return;
       const screen = el.clientHeight;
@@ -5386,6 +5392,17 @@ export const Transcript: React.FC<TranscriptProps> = ({
         lastScrollTopRef.current = Math.max(0, current.scrollTop);
         if (progress < 1) {
           glide.frame = requestAnimationFrame(step);
+          return;
+        }
+        // At the retained-window cap, a row that arrived while the glide ran
+        // (following was off) detached the live tail: the bottom reached is
+        // not the latest. Install the latest window and glide on into it,
+        // unless the reader took over meanwhile.
+        if (needsLatestReloadRef.current) {
+          void reloadLatestRef.current().then((installed) => {
+            if (installed && glideRef.current === glide) glide.frame = requestAnimationFrame(run);
+            else if (glideRef.current === glide) glideRef.current = null;
+          });
           return;
         }
         glideRef.current = null;

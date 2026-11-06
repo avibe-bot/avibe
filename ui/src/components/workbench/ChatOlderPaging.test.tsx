@@ -594,6 +594,49 @@ describe('transcript older-page loading', () => {
     }
   });
 
+  // At the retained-window cap, a row arriving while the glide runs (following
+  // is off) detaches the live tail: the glide lands on the latest window, not on
+  // the bottom of the detached one.
+  it('installs the latest window when the tail detached during the glide, and lands on it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const reload = pendingPage();
+      const onReloadLatest = vi.fn().mockReturnValue(reload.promise);
+      const { scroller, rerender, props, getByRole, scrollTo } = renderTranscript({ hasOlder: false, onReloadLatest });
+      await act(async () => scrollTo(1000));
+      await act(async () => { vi.advanceTimersByTime(1600); });
+      fireEvent.click(getByRole('button', { name: 'chat.scrollToBottom' }));
+      await act(async () => {
+        vi.advanceTimersByTime(16);
+        flushFrames();
+      });
+      // A row came in: ChatPage detached the tail.
+      await act(async () => rerender({ needsLatestReload: true }));
+      for (let frame = 0; frame < 30; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(onReloadLatest).toHaveBeenCalledTimes(1);
+      expect(props.followingTailRef.current).toBe(false);
+      await act(async () => {
+        rerender({ needsLatestReload: false, messages: messages(1001, 50) });
+        reload.land(true);
+      });
+      for (let frame = 0; frame < 40; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(scroller.scrollTop).toBe(scroller.scrollHeight - scroller.clientHeight);
+      expect(props.followingTailRef.current).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // Whatever else moves the transcript (here a jump to a search result) takes
   // over from the glide, which must not write over it.
   it('stops the glide to the latest message when a jump takes over', async () => {
