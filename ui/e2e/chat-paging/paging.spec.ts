@@ -4,6 +4,15 @@ import { copy } from '../support/copy';
 const fixture = (page: Page) => page.getByTestId('chat-paging-fixture');
 const scroller = (page: Page) => page.getByTestId('chat-transcript');
 const loads = async (page: Page) => Number(await fixture(page).getAttribute('data-loads'));
+// The reader drags the scroll thumb to the top: a pointer goes down on the
+// transcript, then it moves. A move with no input behind it, soon after the
+// transcript wrote a position to hold the reader's place, is what iOS does when
+// it takes that write back, and the transcript makes the write again (#3293).
+const dragToTop = (page: Page) => scroller(page).evaluate((el) => {
+  el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+  el.scrollTop = 0;
+  el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+});
 const open = async (page: Page, query = '') => {
   // No API request from this fixture may reach a running Avibe service.
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
@@ -19,7 +28,7 @@ test('each upward visit loads one page and preserves the reader through the reta
   for (let index = 0; index < 8; index += 1) {
     const anchorId = await page.locator('[data-message-id]').first().getAttribute('data-message-id');
     const anchor = page.locator(`[data-message-id="${anchorId}"]`);
-    await scroller(page).evaluate((el) => { el.scrollTop = 0; });
+    await dragToTop(page);
     const top = await anchor.evaluate((el) => el.getBoundingClientRect().top);
     await expect(fixture(page)).toHaveAttribute('data-loads', String(index + 1));
     await expect(page.getByRole('status', { name: copy('chat.loadingOlder') })).toHaveCount(0);
@@ -38,7 +47,7 @@ test('restores a capped window even when the page lands before the next resize o
   await open(page, '?count=300&delay=0');
   const height = await scroller(page).evaluate((el) => el.scrollHeight);
   for (let index = 0; index < 3; index += 1) {
-    await scroller(page).evaluate((el) => { el.scrollTop = 0; });
+    await dragToTop(page);
     await expect(fixture(page)).toHaveAttribute('data-loads', String(index + 1));
     await expect.poll(() => scroller(page).evaluate((el) => el.scrollTop)).toBeGreaterThan(120);
     expect(await scroller(page).evaluate((el) => el.scrollHeight)).toBe(height);
@@ -49,7 +58,7 @@ test('restores a capped window even when the page lands before the next resize o
 
 test('waits after an empty page and accepts another upward gesture at the hard top', async ({ page, isMobile }) => {
   await open(page, '?empty=1');
-  await scroller(page).evaluate((el) => { el.scrollTop = 0; });
+  await dragToTop(page);
   await expect(fixture(page)).toHaveAttribute('data-loads', '1');
   await expect(page.getByRole('status', { name: copy('chat.loadingOlder') })).toHaveCount(0);
   await page.waitForTimeout(200);
@@ -71,7 +80,7 @@ test('waits after an empty page and accepts another upward gesture at the hard t
 
 test('offers an explicit retry for a failed page and then restores the reader', async ({ page }) => {
   await open(page, '?fail=1');
-  await scroller(page).evaluate((el) => { el.scrollTop = 0; });
+  await dragToTop(page);
   const retry = page.getByRole('button', { name: copy('chat.olderLoadFailed') });
   await expect(retry).toBeVisible();
   await page.waitForTimeout(200);

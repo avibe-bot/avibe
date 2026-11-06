@@ -15,6 +15,34 @@ tools, including the existing optional shard selector; there is no new nightly
 job. The rationale and accepted loss of whole-catalog render-smoke coverage are
 in [Design frames](design-frames.md#ci-boundary).
 
+### Every e2e suite type-checks (2026-11-06)
+
+A browser lane type-checks only the suites it runs (`scripts/e2e-suite.mjs`).
+Suites outside the lanes were type-checked by nothing, and one broke unnoticed
+when a shared component gained a required prop. `ui-checks (static)` now runs
+`npm run typecheck:e2e`, which type-checks every suite under `ui/e2e/`. It
+fails when a directory with specs has no `tsconfig.json`, so a new suite cannot
+be missed. In its first CI run (`42190302240`) the 21 checks took 2:30, four at
+a time (20–40 s each; 30 s in all locally). That brought the static part from
+2:18–2:34 to 5:10, still under the tests part (8:40) and every browser lane
+(9:31–11:44) of the same run.
+
+`test:chat-paging` joined lane 2, the emptiest (its suites summed 377 s and
+459 s in master runs `42165094179` and `42167111540`). It took 52 s on CI.
+Suites whose browser cases no lane runs:
+
+| Suite | Local wall time | Where its cases run |
+| --- | --- | --- |
+| model-catalog | 409 s (622 s on CI) | nightly `model-hub-ui-regression` |
+| model-provider | 28 s (49 s on CI) | nightly `model-hub-ui-regression` |
+| citations | 24 s | nowhere |
+| queue-attachments | 69 s | nowhere |
+| session-dot | 20 s | nowhere |
+| web-fetch | 3 s, no npm script | nowhere (manual screenshots) |
+
+Local times are whole npm commands on an Apple Silicon Mac. On the three lane
+suites measured both ways, CI took 1.3–2.0 times as long.
+
 The sections below record the original PR #3232 contract and measurements, not
 a requirement to restore its screenshot gate. Removing parallel captures reduces
 runner work; it does not promise to subtract their duration from the browser
@@ -49,7 +77,7 @@ Four browser lanes, balanced by the first run's observed command wall times:
 | Lane | Commands | Estimated execution |
 | --- | --- | --- |
 | 1 | pet-mini, chat-interactions, inbox-return | 8:13 |
-| 2 | five workbench-general specs, built composer-mention-picker, project-order | 8:08 |
+| 2 | five workbench-general specs, built composer-mention-picker, project-order, chat-paging (added later, about 1 minute) | 8:08 |
 | 3 | three onboarding-fidelity specs, home-media, pdf-preview, motion (added later, about 1 minute) | 8:10 |
 | 4 | vault-integrity, workbench geometry, badge-triggers, chat-selection, voice-shortcut, chat-scroll (added later, about 1 minute) | 7:52 |
 

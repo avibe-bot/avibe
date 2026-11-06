@@ -451,10 +451,13 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
     for command in (
         "npm run validate:theme", "npm run lint", "npm run typecheck:tests",
-        "npm run typecheck:design", "npm test",
+        "npm run typecheck:design", "npm run typecheck:e2e", "npm test",
     ):
         assert check_commands.count(command) == 1
         assert command not in build_commands
+    # Suites no browser lane runs are type-checked only through this script.
+    ui_scripts = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))["scripts"]
+    assert ui_scripts["typecheck:e2e"] == "node scripts/typecheck-e2e.mjs"
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
     for job in (checks, build):
@@ -655,6 +658,7 @@ _BROWSER_COMMANDS = (
     "run test:pdf-preview",
     "run test:motion",
     "run test:chat-scroll",
+    "run test:chat-paging",
 )
 
 
