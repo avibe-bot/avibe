@@ -536,6 +536,26 @@ describe('transcript older-page loading', () => {
     }
   });
 
+  // Following the tail, opening something (a disclosure control) leaves it and
+  // holds the row that was tapped; a plain tap keeps following.
+  it('leaves the tail for a tap on a disclosure control, and only for that', async () => {
+    const { scroller, props } = renderTranscript({ hasOlder: false });
+    scroller.scrollTop = scroller.scrollHeight;
+    fireEvent.scroll(scroller);
+    expect(props.followingTailRef.current).toBe(true);
+    const rows = scroller.querySelectorAll<HTMLElement>('[data-message-id]');
+    const tapped = rows[rows.length - 2];
+
+    fireEvent.click(tapped);
+    expect(props.followingTailRef.current).toBe(true);
+
+    const control = document.createElement('button');
+    control.setAttribute('aria-expanded', 'false');
+    tapped.append(control);
+    fireEvent.click(control);
+    expect(props.followingTailRef.current).toBe(false);
+  });
+
   // A second finger elsewhere (the composer) can outlast the one on the
   // transcript and end where the transcript never hears of it.
   it('counts a touch that ends outside the transcript as ended', async () => {
