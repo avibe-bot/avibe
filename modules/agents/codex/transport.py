@@ -468,7 +468,15 @@ class CodexTransport:
                 for name in servers:
                     if isinstance(name, str):
                         discovered = servers[name]
-                        base = discovered if isinstance(discovered, dict) else {}
+                        base = (
+                            {
+                                key: discovered[key]
+                                for key in ("command", "args", "url", "transport")
+                                if key in discovered
+                            }
+                            if isinstance(discovered, dict)
+                            else {}
+                        )
                         existing = overrides.get(name, {})
                         overrides[name] = {
                             **base,

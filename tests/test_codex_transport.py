@@ -435,7 +435,15 @@ class NativeMcpSuppressionTests(unittest.IsolatedAsyncioTestCase):
 
             for effective, layers, expected_names in (
                 ({}, [{"config": {"mcp_servers": {"disabled-only": {}}}}], {"disabled-only"}),
-                ({"mcp_servers": {"effective-only": {}}}, [], {"effective-only"}),
+                (
+                    {"mcp_servers": {"effective-only": {
+                        "command": "run",
+                        "env": {"TOKEN": "secret"},
+                        "headers": {"Authorization": "Bearer secret"},
+                    }}},
+                    [],
+                    {"effective-only"},
+                ),
                 ({"mcp_servers": {"both": {}}}, [{"config": {"mcp_servers": {"both": {}, "layer-only": {}}}}], {"both", "layer-only"}),
             ):
                 with self.subTest(effective=effective, layers=layers):
@@ -450,9 +458,12 @@ class NativeMcpSuppressionTests(unittest.IsolatedAsyncioTestCase):
 
                     transport._write_message = write
                     await transport.send_request("thread/start", {"cwd": "/project", "config": {}})
-                    self.assertEqual(
-                        set(writes[1]["params"]["config"]["mcp_servers"]), expected_names
-                    )
+                    actual = writes[1]["params"]["config"]["mcp_servers"]
+                    self.assertEqual(set(actual), expected_names)
+                    if "effective-only" in expected_names:
+                        self.assertEqual(actual["effective-only"], {"command": "run", "enabled": False})
+                    self.assertNotIn("env", str(actual))
+                    self.assertNotIn("headers", str(actual))
 
     async def test_real_cli_does_not_start_project_mcp_before_or_after_trust(self):
         import json
