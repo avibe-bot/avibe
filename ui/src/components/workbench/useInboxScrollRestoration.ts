@@ -14,6 +14,10 @@ type Snapshot = {
 // Keep only geometry and IDs; the Inbox provider already owns the loaded pages.
 let saved: Snapshot | null = null;
 
+/** The cards on the page: not the copies the list's motion draws of a card while it leaves or moves
+ *  (`FlipList`), which are pictures of a whole row, its card included. */
+const CARDS = '[data-inbox-session-id]:not([data-flip-ghost] *)';
+
 function scrollOwner(root: HTMLElement): HTMLElement | null {
   const shell = root.closest<HTMLElement>(`#${APP_SHELL_SCROLL_ID}`);
   return shell && getComputedStyle(shell).overflowY !== 'visible'
@@ -47,7 +51,7 @@ export function useInboxScrollRestoration(
 
     const restore = () => {
       if (pending.current !== snapshot) return;
-      const rows = new Map(Array.from(root.querySelectorAll<HTMLElement>('[data-inbox-session-id]'))
+      const rows = new Map(Array.from(root.querySelectorAll<HTMLElement>(CARDS))
         .map((row) => [row.dataset.inboxSessionId, row]));
       // A returning route may paint before its cached/reconciled rows arrive.
       // Do not consume the position while the content is still empty.
@@ -89,7 +93,7 @@ export function useInboxScrollRestoration(
     if (!root || !owner) return;
     const top = viewportTop(owner);
     const height = owner.clientHeight;
-    const candidates = Array.from(root.querySelectorAll<HTMLElement>('[data-inbox-session-id]')).map((row) => {
+    const candidates = Array.from(root.querySelectorAll<HTMLElement>(CARDS)).map((row) => {
       const rect = row.getBoundingClientRect();
       const offset = rect.top - top;
       const bottom = rect.bottom - top;

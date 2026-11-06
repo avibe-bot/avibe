@@ -3743,6 +3743,7 @@
       "headerCount": "{{unread}} 条未读 · {{total}} 条全部",
       "markAllRead": "全部已读",
       "markRead": "标记已读",
+      "swipeRead": "已读",
       "viewAll": "查看完整收件箱",
       "refresh": "刷新",
       "filterUnread": "未读",

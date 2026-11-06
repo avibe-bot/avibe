@@ -50,6 +50,14 @@ that a touch during a push finishes it at once; that a desktop navigation runs n
 transition; and that a pressed control sinks and steps its colour, keeping only
 the colour under reduced motion. Frame rate on an iPhone is a device check.
 
+`swipe-read.spec.ts` checks marking a card read: 「Mark read」 sits at the card's
+bottom right on desktop and phone, and on a phone (Chromium's touch emulation) a
+swipe either way past 30% of the card marks it read without opening it, a short
+swipe springs back, and a touch that goes down still scrolls the list with the
+card left in place. The gesture's thresholds, flicks, the left-edge rule and
+pointer types are covered by `InboxCard.swipe.test.tsx`; how the swipe feels on
+an iPhone is a device check.
+
 `load-more.spec.ts` loads `load-more.html`, which mounts the production
 `WorkbenchInboxProvider` and `InboxPage` over a routed `GET /api/inbox` that pages
 the way the server does (newest first, keyset cursor, a cursor only when another

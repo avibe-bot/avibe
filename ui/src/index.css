@@ -151,6 +151,8 @@
   --motion-press-delay: 60ms;
   /* An icon trading places with another (Send and Stop, a badge leaving). */
   --motion-scale-morph: 0.6;
+  /* What a swipe uncovers grows its icon to this once letting go would commit it. */
+  --motion-scale-arm: 1.15;
 }
 @supports (transition-timing-function: linear(0, 1)) {
   :root {
@@ -1656,5 +1658,27 @@ pre,
   --press-scale: var(--motion-scale-press);
   @media (pointer: coarse) {
     --press-delay: var(--motion-press-delay);
+  }
+}
+
+/* A swipe action (docs/plans/web-ui-motion.md M7; ui/design: motion/inbox/phone-swipe-*): what a card
+   uncovers as a finger moves it sideways. `swipe-action` is the row-sized holder; each `swipe-action-face`
+   is soft mint until letting go would commit it (`--swipe-armed: 1`, which the gesture writes), then
+   filled, with its icon grown to `--motion-scale-arm`. Colours follow on `fast`, the icon on
+   `spring-snappy`; reduced motion keeps the fill and drops the growth. */
+@utility swipe-action {
+  --swipe-armed: 0;
+}
+@utility swipe-action-face {
+  background-color: color-mix(in oklab, var(--color-mint) calc(var(--swipe-armed) * 100%), var(--color-mint-soft));
+  color: color-mix(in oklab, var(--color-primary-foreground) calc(var(--swipe-armed) * 100%), var(--color-mint-ink));
+  transition:
+    background-color var(--motion-duration-fast) var(--motion-ease-move),
+    color var(--motion-duration-fast) var(--motion-ease-move);
+  & svg {
+    transition: scale var(--motion-spring-snappy-duration) var(--motion-spring-snappy);
+    @media (prefers-reduced-motion: no-preference) {
+      scale: calc(1 + var(--swipe-armed) * (var(--motion-scale-arm) - 1));
+    }
   }
 }

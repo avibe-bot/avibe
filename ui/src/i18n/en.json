@@ -3743,6 +3743,7 @@
       "headerCount": "{{unread}} unread · {{total}} total",
       "markAllRead": "Mark all read",
       "markRead": "Mark read",
+      "swipeRead": "Read",
       "viewAll": "Open full inbox",
       "refresh": "Refresh",
       "filterUnread": "Unread",
