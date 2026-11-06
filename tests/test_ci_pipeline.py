@@ -564,6 +564,31 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     assert len(app_builds) == 2
     assert all(verify_index < index for index in app_builds)
 
+    test_step, = [
+        step for step in steps
+        if step.get("name") == "Run XCTest on iPhone Simulator"
+    ]
+    assert "-parallel-testing-enabled NO" in test_step["run"]
+    assert '-resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult"' in test_step["run"]
+
+    artifact = steps[-1]
+    assert artifact["name"] == "Upload XCTest failure result bundle"
+    assert artifact["if"] == "${{ failure() }}"
+    assert artifact["uses"] == (
+        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+    )
+    assert artifact["with"] == {
+        "name": "ios-shell-xcresult",
+        "path": "${{ runner.temp }}/AvibeTests.xcresult",
+        "if-no-files-found": "ignore",
+        "retention-days": 7,
+    }
+
+    scheme = (
+        ROOT / "ios/Avibe.xcodeproj/xcshareddata/xcschemes/Avibe.xcscheme"
+    ).read_text(encoding="utf-8")
+    assert 'parallelizable = "NO"' in scheme
+
 
 def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path: Path) -> None:
     script = ROOT / "ios/scripts/verify_mobile_bundle.sh"

@@ -170,6 +170,11 @@ Timeout, abort, malformed response, and script failures map to `network`.
 Only a Supabase verify-stage rejection maps to `invalid_or_expired`; provider
 throttling preserves `Retry-After`, and OTP request rejections preserve the
 provider error code.
+The bundled page consumes that classification through one mapping shared by
+every catch path. Only an explicit signed-out bootstrap/refresh result or a
+completed logout enters Welcome. A failed cold-start or `#account` bootstrap
+shows the existing retry presentation and retries only bootstrap; unknown,
+busy, stale, inactive, and unavailable failures remain network recovery.
 
 WebKit owns every persistent cookie. The account transport and runtime share one
 named store, but the account transport is invalidated before an instance opens.
@@ -205,7 +210,14 @@ availability is informational and the instance OIDC/consent flow remains the
 entry authority. The app depends on backend PR #308, merged as
 `1cea1dffdc3e68c6a2cc8594064bf94367485b5c` and successfully deployed to
 Production by Vercel on 2026-11-05 at 18:44:16 UTC. Public no-cookie and health
-probes return the expected 401 and 200; no real account session was used.
+probes return the expected 401 and 200. The owner separately verified production
+email OTP on the iOS 27.2 simulator on 2026-11-06; this implementation lane used
+no real account in automation.
+
+The hermetic WebKit transport tests run serially, wait for fixture events with
+budgets separate from the app's deadlines, and use numeric loopback origins for
+cross-origin redirect checks. When `ios-shell` XCTest fails, CI uploads
+`AvibeTests.xcresult` as `ios-shell-xcresult`.
 
 ## WebKit API inventory
 
@@ -276,7 +288,7 @@ pinned to Xcode 26.6.
 | `javaScriptCanOpenWindowsAutomatically` | WebKit default. WebKit decides whether a script may request a new context; accepted requests use the child-WebView rule. | New-window policy tests and simulator build. |
 | `allowsBackForwardNavigationGestures`, `allowsLinkPreview`, `dataDetectorTypes` | WebKit defaults. The shell adds no gesture, preview, or data-detector policy. | API ledger; interactions are manual checks. |
 | `isElementFullscreenEnabled` | WebKit default. Fullscreen product work remains deferred. | API ledger; the deferral is recorded below. |
-| `isInspectable` | WebKit default in both Debug and Release. Temporary simulator fixtures do not ship an inspectability override. | Debug and Release simulator builds. |
+| `isInspectable` | Enabled for managed runtime WebViews only in Debug so device investigations can use Safari Web Inspector. Release keeps the WebKit default. | Factory XCTest plus Debug and Release simulator builds. |
 | `upgradeKnownHostsToHTTPS`, `limitsNavigationsToAppBoundDomains` | WebKit defaults. Configured instance input independently requires HTTPS; the shell does not opt into App-Bound Domains. | Simulator build and origin policy tests. |
 | `defaultWebpagePreferences.preferredContentMode` | WebKit `.recommended`, which selects the iPhone-appropriate content mode. | API ledger and simulator build. |
 | `defaultWebpagePreferences.allowsContentJavaScript` | WebKit `true`; the Workbench requires JavaScript. | The simulator capability probe executes JavaScript. |

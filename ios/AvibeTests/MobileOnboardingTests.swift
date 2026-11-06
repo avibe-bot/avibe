@@ -86,6 +86,239 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    func testManyInstancesScrollsTheLastCardFullyIntoViewAndSelectsIt() async throws {
+        let instances = (1...8).map { index in
+            MobileInstance(
+                id: "instance-\(index)",
+                name: "Instance \(index)",
+                host: "instance-\(index).avibe.bot",
+                url: URL(string: "https://instance-\(index).avibe.bot")!,
+                relationship: index.isMultiple(of: 2) ? "shared" : "owner",
+                ownerEmail: index.isMultiple(of: 2)
+                    ? "owner-\(index)@example.com"
+                    : nil,
+                available: true
+            )
+        }
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(
+            accountID: "account-1",
+            instances: instances
+        )
+        let selected = expectation(description: "last instance selected")
+        var selectedInstance: MobileInstance?
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport],
+                onOpen: {
+                    selectedInstance = $0.instance
+                    selected.fulfill()
+                }
+            )
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 620)
+        )
+        defer {
+            window.isHidden = true
+        }
+
+        let rendered = try await waitForJavaScriptValue(in: webView) {
+            """
+            Array.from(document.querySelectorAll("button")).some(
+              (button) => button.textContent?.includes("Instance 8")
+            )
+            """
+        }
+        XCTAssertTrue(rendered)
+
+        let overflows = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const viewport = document.querySelector("main");
+              return Boolean(viewport && viewport.scrollHeight > viewport.clientHeight);
+            })()
+            """
+        ) as? Bool
+        XCTAssertEqual(overflows, true)
+
+        _ = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const target = Array.from(document.querySelectorAll("button")).find(
+                (button) => button.textContent?.includes("Instance 8")
+              );
+              target?.scrollIntoView({block: "end"});
+              return Boolean(target);
+            })()
+            """
+        )
+        let fullyVisible = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const viewport = document.querySelector("main");
+              const target = Array.from(document.querySelectorAll("button")).find(
+                (button) => button.textContent?.includes("Instance 8")
+              );
+              if (!viewport || !target || viewport.scrollTop <= 0) return false;
+              const viewportRect = viewport.getBoundingClientRect();
+              const targetRect = target.getBoundingClientRect();
+              return targetRect.top >= viewportRect.top - 1
+                && targetRect.bottom <= viewportRect.bottom + 1;
+            })()
+            """
+        }
+        XCTAssertTrue(fullyVisible)
+
+        _ = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const target = Array.from(document.querySelectorAll("button")).find(
+                (button) => button.textContent?.includes("Instance 8")
+              );
+              target?.click();
+              return Boolean(target);
+            })()
+            """
+        )
+        await fulfillment(of: [selected], timeout: 30)
+        XCTAssertEqual(selectedInstance, instances.last)
+    }
+
+    func testOTPActionRemainsReachableInAReducedHeightWebView() async throws {
+        let signedOutTransport = FakeMobileAuthTransport()
+        let loginTransport = FakeMobileAuthTransport()
+        loginTransport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedOutTransport, loginTransport]
+            )
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 320, height: 360)
+        )
+        defer {
+            window.isHidden = true
+        }
+
+        let welcome = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.querySelector("main button") !== null
+            """
+        }
+        XCTAssertTrue(welcome)
+        _ = try await webView.evaluateJavaScript(
+            """
+            document.querySelector("main button")?.click();
+            true;
+            """
+        )
+
+        let emailReady = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.querySelector("#mobile-login-email") !== null
+            """
+        }
+        XCTAssertTrue(emailReady)
+        _ = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const input = document.querySelector("#mobile-login-email");
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                "value"
+              )?.set;
+              setter?.call(input, "alex@example.com");
+              input?.dispatchEvent(new Event("input", {bubbles: true}));
+              document.querySelector("form button[type=submit]")?.click();
+              return true;
+            })()
+            """
+        )
+
+        let codeReady = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.querySelector("#mobile-login-code") !== null
+            """
+        }
+        XCTAssertTrue(codeReady)
+        _ = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const input = document.querySelector("#mobile-login-code");
+              input?.focus();
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                "value"
+              )?.set;
+              setter?.call(input, "123456");
+              input?.dispatchEvent(new Event("input", {bubbles: true}));
+              return true;
+            })()
+            """
+        )
+
+        window.frame = CGRect(x: 0, y: 0, width: 320, height: 280)
+        controller.view.frame = window.bounds
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+
+        let focusedWithoutOuterRing = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const input = document.querySelector("#mobile-login-code");
+              const wrapper = input?.parentElement;
+              return document.activeElement === input
+                && !wrapper?.className.includes("focus-within:ring");
+            })()
+            """
+        }
+        XCTAssertTrue(focusedWithoutOuterRing)
+
+        let overflows = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const viewport = document.querySelector("main");
+              return Boolean(viewport && viewport.scrollHeight > viewport.clientHeight);
+            })()
+            """
+        ) as? Bool
+        XCTAssertEqual(overflows, true)
+
+        let verifyVisible = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const viewport = document.querySelector("main");
+              const target = document.querySelector("button.shadow-mint-card-sm");
+              if (!viewport || !target || target.disabled) return false;
+              const viewportRect = viewport.getBoundingClientRect();
+              const targetRect = target.getBoundingClientRect();
+              return viewport.scrollTop > 0
+                && targetRect.top >= viewportRect.top - 1
+                && targetRect.bottom <= viewportRect.bottom + 1;
+            })()
+            """
+        }
+        XCTAssertTrue(verifyVisible)
+
+        _ = try await webView.evaluateJavaScript(
+            """
+            document.querySelector("button.shadow-mint-card-sm")?.click();
+            true;
+            """
+        )
+        let signedIn = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.body.textContent.includes("Personal Avibe")
+            """
+        }
+        XCTAssertTrue(signedIn)
+    }
+
     func testBundledPageInstallsTheMobileBridgeAtItsTrustedOrigin() async throws {
         let transport = FakeMobileAuthTransport()
         transport.session = snapshot(accountID: "account-1")
@@ -556,13 +789,16 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
-    private func snapshot(accountID: String) -> MobileSessionSnapshot {
+    private func snapshot(
+        accountID: String,
+        instances: [MobileInstance]? = nil
+    ) -> MobileSessionSnapshot {
         MobileSessionSnapshot(
             account: MobileAccount(
                 id: accountID,
                 email: "\(accountID)@example.com"
             ),
-            instances: [instance]
+            instances: instances ?? [instance]
         )
     }
 
@@ -600,6 +836,25 @@ final class MobileOnboardingTests: XCTestCase {
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition
         )
+    }
+
+    private func present(
+        _ controller: UIViewController,
+        size: CGSize
+    ) throws -> (UIWindow, WKWebView) {
+        let window = UIWindow(
+            frame: CGRect(origin: .zero, size: size)
+        )
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.beginAppearanceTransition(true, animated: false)
+        controller.endAppearanceTransition()
+        controller.view.frame = window.bounds
+        controller.view.layoutIfNeeded()
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        return (window, webView)
     }
 
     private func waitForJavaScriptValue(

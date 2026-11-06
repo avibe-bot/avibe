@@ -50,6 +50,7 @@ import {
 
 type Screen =
   | 'boot'
+  | 'bootError'
   | 'welcome'
   | 'email'
   | 'code'
@@ -60,6 +61,7 @@ type Screen =
 
 type BusyAction = 'boot' | 'send' | 'verify' | 'resend' | 'refresh' | 'select' | 'logout';
 type CooldownSource = 'client' | 'provider' | null;
+type MobileOperation = 'bootstrap' | 'request' | 'verify' | 'refresh' | 'select' | 'logout';
 type MobileErrorKey =
   | 'mobileApp.email.invalid'
   | 'mobileApp.code.invalid'
@@ -126,23 +128,23 @@ const screenForSession = (session: MobileSessionState): Screen => {
   return session.instances.length === 0 ? 'empty' : 'instances';
 };
 
-const providerErrorKey = (
+const pageErrorKey = (
   error: MobileBridgeError,
-  fallback: 'network' | 'code',
+  operation: MobileOperation,
 ): MobileErrorKey => {
-  switch (error.code) {
-  case 'invalid_email':
+  if (
+    (error.code === 'invalid_email' || error.code === 'email_address_invalid')
+    && operation === 'request'
+  ) {
     return 'mobileApp.email.invalid';
-  case 'invalid_or_expired':
-    return 'mobileApp.code.invalid';
-  case 'rate_limited':
-    return 'mobileApp.code.rateLimited';
-  case 'network':
-  case 'unavailable':
-    return 'mobileApp.errors.network';
-  default:
-    return fallback === 'code' ? 'mobileApp.code.invalid' : 'mobileApp.errors.network';
   }
+  if (error.code === 'invalid_or_expired' && operation === 'verify') {
+    return 'mobileApp.code.invalid';
+  }
+  if (error.code === 'rate_limited') {
+    return 'mobileApp.code.rateLimited';
+  }
+  return 'mobileApp.errors.network';
 };
 
 function CloudScreen({
@@ -256,6 +258,37 @@ function PageTitle({
 }
 
 const raised = 'rounded-3xl border border-border bg-surface/80 p-5 shadow-mint-card-sm';
+
+function RecoveryCard({
+  errorKey,
+  locked,
+  onRetry,
+}: {
+  errorKey: MobileErrorKey;
+  locked: boolean;
+  onRetry: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className={cn(raised, 'py-8 text-center')}>
+      <AlertTriangle className="mx-auto mb-4 size-7 text-gold-ink" />
+      <p className="text-base font-semibold">{t('mobileApp.instances.unavailable')}</p>
+      <p role="alert" className="mt-3 text-sm leading-6 text-muted">
+        {t(errorKey as TranslationKey)}
+      </p>
+      <Button
+        type="button"
+        variant="outline"
+        disabled={locked}
+        className="mt-5 rounded-full"
+        onClick={onRetry}
+      >
+        <RotateCw className="size-4" />
+        {t('common.retry')}
+      </Button>
+    </div>
+  );
+}
 
 function Welcome({
   locked,
@@ -401,16 +434,18 @@ function OtpCells({
   invalid,
   busy,
   onChange,
+  onFocus,
 }: {
   code: string;
   invalid: boolean;
   busy: boolean;
   onChange: (value: string) => void;
+  onFocus: () => void;
 }) {
   const { t } = useTranslation();
   const input = useRef<HTMLInputElement>(null);
   return (
-    <div className="relative rounded-2xl focus-within:ring-2 focus-within:ring-mint/40">
+    <div className="relative">
       <Label htmlFor="mobile-login-code" className="sr-only">
         {t('mobileApp.code.label')}
       </Label>
@@ -427,6 +462,7 @@ function OtpCells({
         disabled={busy}
         aria-invalid={invalid || undefined}
         aria-describedby="mobile-login-code-hint mobile-login-code-feedback"
+        onFocus={onFocus}
         onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
       />
       <div aria-hidden="true" className="grid grid-cols-6 gap-2">
@@ -475,6 +511,28 @@ function CodeEntry({
   onResend: () => void;
 }) {
   const { t } = useTranslation();
+  const codeActionRegion = useRef<HTMLDivElement>(null);
+  const revealCodeActions = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const region = codeActionRegion.current;
+      if (typeof region?.scrollIntoView === 'function') {
+        region.scrollIntoView({ block: 'end' });
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const revealWhenFocused = () => {
+      if (document.activeElement?.id === 'mobile-login-code') revealCodeActions();
+    };
+    window.addEventListener('resize', revealWhenFocused);
+    window.visualViewport?.addEventListener('resize', revealWhenFocused);
+    return () => {
+      window.removeEventListener('resize', revealWhenFocused);
+      window.visualViewport?.removeEventListener('resize', revealWhenFocused);
+    };
+  }, [revealCodeActions]);
+
   return (
     <CloudScreen>
       <Brand back disabled={locked} onBack={onBack} />
@@ -498,29 +556,37 @@ function CodeEntry({
           {t('mobileApp.code.changeEmail')}
         </Button>
       </div>
-      <OtpCells
-        code={code}
-        invalid={errorKey === 'mobileApp.code.invalid'}
-        busy={locked}
-        onChange={onCodeChange}
-      />
-      <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
-        {t('mobileApp.code.hint')}
-      </p>
-      <div id="mobile-login-code-feedback" className="mt-3 min-h-6 text-center text-xs leading-6">
-        {errorKey ? (
-          <p role="alert" className="text-destructive-ink">{t(errorKey as TranslationKey)}</p>
-        ) : resent ? (
-          <p role="status" className="text-mint-ink">{t('mobileApp.code.resent')}</p>
-        ) : null}
-      </div>
-      <div className="mt-5" aria-busy={busy === 'verify'}>
-        <Primary
-          disabled={locked || code.length !== 6}
-          onClick={onVerify}
+      <div ref={codeActionRegion} data-mobile-code-actions className="scroll-mb-4">
+        <OtpCells
+          code={code}
+          invalid={errorKey === 'mobileApp.code.invalid'}
+          busy={locked}
+          onChange={onCodeChange}
+          onFocus={revealCodeActions}
+        />
+        <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
+          {t('mobileApp.code.hint')}
+        </p>
+        <div
+          id="mobile-login-code-feedback"
+          className="mt-3 min-h-6 text-center text-xs leading-6"
         >
-          {busy === 'verify' ? t('mobileApp.code.verifying') : t('mobileApp.code.verify')}
-        </Primary>
+          {errorKey ? (
+            <p role="alert" className="text-destructive-ink">
+              {t(errorKey as TranslationKey)}
+            </p>
+          ) : resent ? (
+            <p role="status" className="text-mint-ink">{t('mobileApp.code.resent')}</p>
+          ) : null}
+        </div>
+        <div className="mt-5" aria-busy={busy === 'verify'}>
+          <Primary
+            disabled={locked || code.length !== 6}
+            onClick={onVerify}
+          >
+            {busy === 'verify' ? t('mobileApp.code.verifying') : t('mobileApp.code.verify')}
+          </Primary>
+        </div>
       </div>
       <div className="mt-6 text-center text-sm leading-7">
         <p className="text-muted">{t('mobileApp.code.resendPrompt')}</p>
@@ -673,21 +739,7 @@ function Instances({
         </p>
       ) : null}
       {errorKey ? (
-        <div className={cn(raised, 'py-8 text-center')}>
-          <AlertTriangle className="mx-auto mb-4 size-7 text-gold-ink" />
-          <p className="text-base font-semibold">{t('mobileApp.instances.unavailable')}</p>
-          <p className="mt-3 text-sm leading-6 text-muted">{t(errorKey as TranslationKey)}</p>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={locked}
-            className="mt-5 rounded-full"
-            onClick={onRefresh}
-          >
-            <RotateCw className="size-4" />
-            {t('common.retry')}
-          </Button>
-        </div>
+        <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRefresh} />
       ) : (
         <div className="flex flex-col gap-4" aria-busy={refreshing || busy === 'select'}>
           {session.instances.map((instance) => (
@@ -732,6 +784,7 @@ function EmptyInstances({
   cli,
   busy,
   locked,
+  errorKey,
   onBack,
   onAccount,
   onRefresh,
@@ -741,6 +794,7 @@ function EmptyInstances({
   cli: boolean;
   busy: boolean;
   locked: boolean;
+  errorKey: MobileErrorKey | null;
   onBack: () => void;
   onAccount: () => void;
   onRefresh: () => void;
@@ -766,6 +820,11 @@ function EmptyInstances({
         title={t(cli ? 'mobileApp.empty.cliTitle' : 'mobileApp.empty.title')}
         subtitle={t(cli ? 'mobileApp.empty.cliSubtitle' : 'mobileApp.empty.subtitle')}
       />
+      {errorKey ? (
+        <div className="mb-6">
+          <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRefresh} />
+        </div>
+      ) : null}
       {cli ? (
         <div className={cn(raised, 'flex flex-col gap-4')}>
           <p className="text-sm leading-6 text-muted">{t('mobileApp.empty.cliBody')}</p>
@@ -853,6 +912,7 @@ function Account({
   session,
   busy,
   locked,
+  errorKey,
   onBack,
   onSwitch,
   onLogout,
@@ -860,6 +920,7 @@ function Account({
   session: Extract<MobileSessionState, { status: 'signedIn' }>;
   busy: boolean;
   locked: boolean;
+  errorKey: MobileErrorKey | null;
   onBack: () => void;
   onSwitch: () => void;
   onLogout: () => void;
@@ -883,6 +944,11 @@ function Account({
           {busy ? t('mobileApp.account.signingOut') : t('mobileApp.account.signOut')}
         </Button>
       </section>
+      {errorKey ? (
+        <div className="mt-6">
+          <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onLogout} />
+        </div>
+      ) : null}
       <section className="mt-8">
         <h2 className="mb-4 text-sm font-semibold">{t('mobileApp.account.current')}</h2>
         {current ? (
@@ -930,6 +996,28 @@ function Boot() {
   );
 }
 
+function BootRecovery({
+  errorKey,
+  locked,
+  onRetry,
+}: {
+  errorKey: MobileErrorKey;
+  locked: boolean;
+  onRetry: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <CloudScreen>
+      <Brand account disabled />
+      <PageTitle
+        title={t('mobileApp.instances.title')}
+        subtitle={t('mobileApp.instances.subtitle')}
+      />
+      <RecoveryCard errorKey={errorKey} locked={locked} onRetry={onRetry} />
+    </CloudScreen>
+  );
+}
+
 export function MobileOnboarding() {
   const { i18n } = useTranslation();
   const startsOnAccount = useRef(window.location.hash === '#account');
@@ -957,35 +1045,36 @@ export function MobileOnboarding() {
     [signedIn],
   );
 
-  useEffect(() => {
-    let active = true;
+  const bootstrap = useCallback(async () => {
     const token = beginOperation('boot');
-    if (token === null) return () => {
-      active = false;
-    };
-    void bootstrapMobileSession()
-      .then((next) => {
-        if (!active || !ownsOperation(token)) return;
-        setSession(next);
-        setScreen(
-          startsOnAccount.current && next.status === 'signedIn'
-            ? 'account'
-            : screenForSession(next),
-        );
-        startsOnAccount.current = false;
-      })
-      .catch(() => {
-        if (!active || !ownsOperation(token)) return;
-        setErrorKey('mobileApp.errors.network');
-        setScreen('welcome');
-      })
-      .finally(() => {
-        if (active) finishOperation(token);
-      });
-    return () => {
-      active = false;
-    };
+    if (token === null) return;
+    setErrorKey(null);
+    setScreen('boot');
+    try {
+      const next = await bootstrapMobileSession();
+      if (!ownsOperation(token)) return;
+      setSession(next);
+      setScreen(
+        startsOnAccount.current && next.status === 'signedIn'
+          ? 'account'
+          : screenForSession(next),
+      );
+      startsOnAccount.current = false;
+    } catch (rawError) {
+      if (!ownsOperation(token)) return;
+      setErrorKey(pageErrorKey(normalizeMobileBridgeError(rawError), 'bootstrap'));
+      setScreen('bootError');
+    } finally {
+      finishOperation(token);
+    }
   }, [beginOperation, finishOperation, ownsOperation]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void bootstrap();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [bootstrap]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -993,11 +1082,17 @@ export function MobileOnboarding() {
     return () => window.clearTimeout(timer);
   }, [cooldown]);
 
-  const applySignedInSession = (
+  const applySession = (
     token: OperationToken,
     next: MobileSessionState,
+    allowSignedOut: boolean,
   ) => {
     if (!ownsOperation(token)) return;
+    if (next.status === 'signedOut' && !allowSignedOut) {
+      setCode('');
+      setErrorKey('mobileApp.errors.network');
+      return;
+    }
     setSession(next);
     setScreen(screenForSession(next));
     setErrorKey(null);
@@ -1034,8 +1129,7 @@ export function MobileOnboarding() {
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      if (error.code === 'busy') return;
-      setErrorKey(providerErrorKey(error, 'network'));
+      setErrorKey(pageErrorKey(error, 'request'));
       if (error.retry_after_seconds) {
         setCooldown(error.retry_after_seconds);
         setCooldownSource('provider');
@@ -1055,13 +1149,13 @@ export function MobileOnboarding() {
     setErrorKey(null);
     try {
       const next = await verifyMobileOtp(email, code);
-      applySignedInSession(token, next);
+      applySession(token, next, false);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      if (error.code === 'busy') return;
-      setErrorKey(providerErrorKey(error, 'code'));
-      if (error.code === 'network' || error.code === 'unavailable') setCode('');
+      const nextErrorKey = pageErrorKey(error, 'verify');
+      setErrorKey(nextErrorKey);
+      if (nextErrorKey === 'mobileApp.errors.network') setCode('');
       if (error.retry_after_seconds) setCooldown(error.retry_after_seconds);
     } finally {
       finishOperation(token);
@@ -1074,12 +1168,11 @@ export function MobileOnboarding() {
     setErrorKey(null);
     try {
       const next = await refreshMobileSession();
-      applySignedInSession(token, next);
+      applySession(token, next, true);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      if (error.code === 'busy') return;
-      setErrorKey('mobileApp.errors.network');
+      setErrorKey(pageErrorKey(error, 'refresh'));
     } finally {
       finishOperation(token);
     }
@@ -1100,8 +1193,7 @@ export function MobileOnboarding() {
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      if (error.code === 'busy') return;
-      setErrorKey('mobileApp.errors.network');
+      setErrorKey(pageErrorKey(error, 'select'));
     } finally {
       finishOperation(token);
     }
@@ -1114,6 +1206,10 @@ export function MobileOnboarding() {
     try {
       const next = await logoutMobileSession();
       if (!ownsOperation(token)) return;
+      if (next.status !== 'signedOut') {
+        setErrorKey('mobileApp.errors.network');
+        return;
+      }
       setSession(next);
       setEmail('');
       setCode('');
@@ -1123,8 +1219,7 @@ export function MobileOnboarding() {
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      if (error.code === 'busy') return;
-      setErrorKey('mobileApp.errors.network');
+      setErrorKey(pageErrorKey(error, 'logout'));
     } finally {
       finishOperation(token);
     }
@@ -1148,6 +1243,15 @@ export function MobileOnboarding() {
   };
 
   if (screen === 'boot') return <Boot />;
+  if (screen === 'bootError') {
+    return (
+      <BootRecovery
+        errorKey={errorKey ?? 'mobileApp.errors.network'}
+        locked={locked}
+        onRetry={() => void bootstrap()}
+      />
+    );
+  }
   if (screen === 'welcome') return <Welcome locked={locked} onContinue={showEmail} />;
   if (screen === 'email') {
     return (
@@ -1158,7 +1262,10 @@ export function MobileOnboarding() {
         cooldown={cooldown}
         errorKey={errorKey}
         onBack={() => {
-          if (!isOperationLocked()) setScreen('welcome');
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('welcome');
+          }
         }}
         onEmailChange={(value) => {
           if (isOperationLocked()) return;
@@ -1199,11 +1306,16 @@ export function MobileOnboarding() {
         session={signedIn}
         busy={busy === 'logout'}
         locked={locked}
+        errorKey={errorKey}
         onBack={() => {
-          if (!isOperationLocked()) setScreen(accountReturnScreen);
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen(accountReturnScreen);
+          }
         }}
         onSwitch={() => {
           if (!isOperationLocked()) {
+            setErrorKey(null);
             setScreen(signedIn.instances.length ? 'instances' : 'empty');
           }
         }}
@@ -1217,15 +1329,25 @@ export function MobileOnboarding() {
         cli={screen === 'cli'}
         busy={busy === 'refresh'}
         locked={locked}
+        errorKey={errorKey}
         onBack={() => {
-          if (!isOperationLocked()) setScreen('empty');
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('empty');
+          }
         }}
         onAccount={() => {
-          if (!isOperationLocked()) setScreen('account');
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('account');
+          }
         }}
         onRefresh={() => void refresh()}
         onShowCli={() => {
-          if (!isOperationLocked()) setScreen('cli');
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('cli');
+          }
         }}
         onOpenGuide={openGuide}
       />
@@ -1241,10 +1363,16 @@ export function MobileOnboarding() {
       onRefresh={() => void refresh()}
       onSelect={(instance) => void select(instance)}
       onAccount={() => {
-        if (!isOperationLocked()) setScreen('account');
+        if (!isOperationLocked()) {
+          setErrorKey(null);
+          setScreen('account');
+        }
       }}
       onAdd={() => {
-        if (!isOperationLocked()) setScreen('empty');
+        if (!isOperationLocked()) {
+          setErrorKey(null);
+          setScreen('empty');
+        }
       }}
     />
   );

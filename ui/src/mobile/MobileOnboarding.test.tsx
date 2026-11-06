@@ -123,6 +123,56 @@ const expectScreenLocked = () => {
   ))).toEqual([]);
 };
 
+type FailureOperation =
+  | 'bootstrap'
+  | 'accountEntry'
+  | 'request'
+  | 'resend'
+  | 'verify'
+  | 'refresh'
+  | 'select'
+  | 'logout';
+
+const bridgeErrorCodes = [
+  'network',
+  'rate_limited',
+  'invalid_email',
+  'email_address_invalid',
+  'invalid_or_expired',
+  'busy',
+  'stale_session',
+  'inactive',
+  'unavailable',
+  'forbidden',
+  'invalid_request',
+  'signed_out',
+  'unauthorized_instance',
+  'instance_offline',
+  'invalid_instance',
+  'invalid_argument',
+  'failed',
+  'unexpected_provider_code',
+] as const;
+
+const expectedErrorKey = (
+  operation: FailureOperation,
+  code: typeof bridgeErrorCodes[number],
+): string => {
+  if (
+    (operation === 'request' || operation === 'resend')
+    && (code === 'invalid_email' || code === 'email_address_invalid')
+  ) {
+    return 'mobileApp.email.invalid';
+  }
+  if (operation === 'verify' && code === 'invalid_or_expired') {
+    return 'mobileApp.code.invalid';
+  }
+  if (code === 'rate_limited') {
+    return 'mobileApp.code.rateLimited';
+  }
+  return 'mobileApp.errors.network';
+};
+
 beforeEach(() => {
   window.history.replaceState({}, '', '/');
   resetMobileMocks();
@@ -134,6 +184,252 @@ afterEach(() => {
 });
 
 describe('mobile onboarding', () => {
+  it('AUTH-SETUP-148 completes email OTP discovery and authorized instance selection', async () => {
+    render(<MobileOnboarding />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+      target: { value: 'alex@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+
+    const code = await screen.findByLabelText('mobileApp.code.label');
+    fireEvent.change(code, { target: { value: '123456' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+
+    const instance = await screen.findByRole('button', { name: /Personal Avibe/ });
+    fireEvent.click(instance);
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+
+    expect(mobile.requestOtp).toHaveBeenCalledWith('alex@example.com');
+    expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '123456');
+  });
+
+  it('AUTH-SETUP-149 keeps every bridge failure on its owning screen without reauthentication', async () => {
+    const operations: FailureOperation[] = [
+      'bootstrap',
+      'accountEntry',
+      'request',
+      'resend',
+      'verify',
+      'refresh',
+      'select',
+      'logout',
+    ];
+
+    for (const operation of operations) {
+      for (const code of bridgeErrorCodes) {
+        cleanup();
+        resetMobileMocks();
+        window.history.replaceState({}, '', operation === 'accountEntry' ? '/#account' : '/');
+        const error = {
+          code,
+          message: code,
+          ...(code === 'rate_limited' ? { retry_after_seconds: 9 } : {}),
+        };
+
+        switch (operation) {
+        case 'bootstrap':
+        case 'accountEntry':
+          mobile.bootstrap.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          break;
+        case 'request':
+          mobile.requestOtp.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.welcome.action',
+          }));
+          fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+            target: { value: 'alex@example.com' },
+          });
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+          break;
+        case 'resend':
+          mobile.requestOtp
+            .mockResolvedValueOnce({ cooldown_seconds: 0 })
+            .mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.welcome.action',
+          }));
+          fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+            target: { value: 'alex@example.com' },
+          });
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+          fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.code.resend' }));
+          break;
+        case 'verify':
+          mobile.verifyOtp.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.welcome.action',
+          }));
+          fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+            target: { value: 'alex@example.com' },
+          });
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+          fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
+            target: { value: '123456' },
+          });
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+          break;
+        case 'refresh':
+          mobile.bootstrap.mockResolvedValueOnce(signedIn());
+          mobile.refresh.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.instances.refresh',
+          }));
+          break;
+        case 'select':
+          mobile.bootstrap.mockResolvedValueOnce(signedIn());
+          mobile.selectInstance.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
+          break;
+        case 'logout':
+          window.history.replaceState({}, '', '/#account');
+          mobile.bootstrap.mockResolvedValueOnce({
+            ...signedIn(),
+            selected_instance_id: 'owned',
+          });
+          mobile.logout.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.account.signOut',
+          }));
+          break;
+        }
+
+        const alert = await screen.findByRole('alert');
+        expect(alert.textContent, `${operation} ${code}`).toContain(
+          expectedErrorKey(operation, code),
+        );
+        expect(
+          screen.queryByRole('button', { name: 'mobileApp.welcome.action' }),
+          `${operation} ${code}`,
+        ).toBeNull();
+
+        switch (operation) {
+        case 'bootstrap':
+        case 'accountEntry':
+          expect(screen.getByRole('button', { name: 'common.retry' })).toBeTruthy();
+          break;
+        case 'request':
+          expect(screen.getByLabelText('mobileApp.email.label')).toBeTruthy();
+          break;
+        case 'resend':
+        case 'verify':
+          expect(screen.getByLabelText('mobileApp.code.label')).toBeTruthy();
+          break;
+        case 'refresh':
+        case 'select':
+          expect(screen.getByRole('heading', {
+            name: 'mobileApp.instances.title',
+          })).toBeTruthy();
+          break;
+        case 'logout':
+          expect(screen.getByRole('heading', {
+            name: 'mobileApp.account.title',
+          })).toBeTruthy();
+          break;
+        }
+
+        const expectedRequestCalls = operation === 'request'
+          ? 1
+          : operation === 'resend'
+            ? 2
+            : operation === 'verify'
+              ? 1
+              : 0;
+        expect(mobile.requestOtp, `${operation} ${code}`).toHaveBeenCalledTimes(
+          expectedRequestCalls,
+        );
+        expect(mobile.logout, `${operation} ${code}`).toHaveBeenCalledTimes(
+          operation === 'logout' ? 1 : 0,
+        );
+        await Promise.resolve();
+        expect(mobile.requestOtp, `${operation} ${code} late`).toHaveBeenCalledTimes(
+          expectedRequestCalls,
+        );
+        expect(mobile.logout, `${operation} ${code} late`).toHaveBeenCalledTimes(
+          operation === 'logout' ? 1 : 0,
+        );
+      }
+    }
+  }, 30_000);
+
+  it('retries bootstrap in place and never starts OTP after a discovery failure', async () => {
+    mobile.bootstrap
+      .mockRejectedValueOnce({ code: 'network', message: 'offline' })
+      .mockResolvedValueOnce(signedIn());
+
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'common.retry' }));
+
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.bootstrap).toHaveBeenCalledTimes(2);
+    expect(mobile.requestOtp).not.toHaveBeenCalled();
+    expect(mobile.logout).not.toHaveBeenCalled();
+  });
+
+  it('enters Welcome only from an explicit signed-out result', async () => {
+    render(<MobileOnboarding />);
+    expect(await screen.findByRole('button', {
+      name: 'mobileApp.welcome.action',
+    })).toBeTruthy();
+    cleanup();
+
+    resetMobileMocks();
+    mobile.bootstrap.mockResolvedValueOnce(signedIn());
+    mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'mobileApp.instances.refresh',
+    }));
+    expect(await screen.findByRole('button', {
+      name: 'mobileApp.welcome.action',
+    })).toBeTruthy();
+    cleanup();
+
+    resetMobileMocks();
+    window.history.replaceState({}, '', '/#account');
+    mobile.bootstrap.mockResolvedValueOnce(signedIn());
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'mobileApp.account.signOut',
+    }));
+    expect(await screen.findByRole('button', {
+      name: 'mobileApp.welcome.action',
+    })).toBeTruthy();
+    cleanup();
+
+    resetMobileMocks();
+    window.history.replaceState({}, '', '/');
+    mobile.verifyOtp.mockResolvedValueOnce({ status: 'signedOut' });
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'mobileApp.welcome.action',
+    }));
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+      target: { value: 'alex@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+    fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
+      target: { value: '123456' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'mobileApp.errors.network',
+    );
+    expect(screen.getByLabelText('mobileApp.code.label')).toBeTruthy();
+    expect(screen.queryByRole('button', {
+      name: 'mobileApp.welcome.action',
+    })).toBeNull();
+  });
+
   it('owns one fixed viewport that scrolls every bundled screen inside the document lock', async () => {
     render(<MobileOnboarding />);
 
@@ -171,10 +467,15 @@ describe('mobile onboarding', () => {
 
     finishSend?.({ cooldown_seconds: 0 });
     const code = await screen.findByLabelText('mobileApp.code.label');
+    fireEvent.focus(code);
+    expect(code.parentElement?.className).not.toContain('focus-within:ring');
     fireEvent.change(code, { target: { value: '12 3a456' } });
 
     expect((code as HTMLInputElement).value).toBe('123456');
     expect(screen.getAllByText(/^[1-6]$/)).toHaveLength(6);
+    expect(
+      code.parentElement?.querySelectorAll('.ring-2.ring-mint\\/30'),
+    ).toHaveLength(0);
     expect(
       (screen.getByRole('button', { name: 'mobileApp.code.verify' }) as HTMLButtonElement)
         .disabled,

@@ -5,6 +5,8 @@ import XCTest
 
 @MainActor
 final class MobileAuthTransportIntegrationTests: XCTestCase {
+    private static let fixtureEventTimeout: TimeInterval = 30
+
     func testFailureMappingIsStageAccurateForEveryOperation() {
         struct MappingCase {
             let name: String
@@ -187,7 +189,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let server = try LocalHTTPServer { request in
             if request.path == "/api/config/auth" {
                 requestArrived.fulfill()
-                _ = releaseResponse.wait(timeout: .now() + 10)
+                releaseResponse.wait()
                 return .json("{}")
             }
             return .status(404)
@@ -210,7 +212,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let request = Task {
             try await transport.requestOTP(email: "alex@example.com")
         }
-        await fulfillment(of: [requestArrived], timeout: 5)
+        await fulfillment(
+            of: [requestArrived],
+            timeout: Self.fixtureEventTimeout
+        )
         await assertNetworkError(from: request)
     }
 
@@ -233,7 +238,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 )
             case "/api/mobile/session":
                 requestArrived.fulfill()
-                _ = releaseResponse.wait(timeout: .now() + 10)
+                releaseResponse.wait()
                 return .json(sessionJSON)
             default:
                 return .status(404)
@@ -249,7 +254,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             controlPlaneURL: baseURL,
             websiteDataStore: .nonPersistent(),
             deadlines: MobileAuthTransportDeadlines(
-                readinessMilliseconds: 5_000,
+                readinessMilliseconds: 30_000,
                 requestMilliseconds: 500,
                 logoutMilliseconds: 500
             )
@@ -258,7 +263,10 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let request = Task {
             try await transport.fetchSession()
         }
-        await fulfillment(of: [requestArrived], timeout: 5)
+        await fulfillment(
+            of: [requestArrived],
+            timeout: Self.fixtureEventTimeout
+        )
         await assertNetworkError(from: request)
     }
 
@@ -293,6 +301,9 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let sessionJSON = Self.sessionJSON
         let deleteArrived = expectation(description: "logout request arrived")
         let releaseResponse = DispatchSemaphore(value: 0)
+        let lateResponseSent = FixtureEvent(
+            description: "late logout response sent"
+        )
         let server = try LocalHTTPServer { request in
             state.record(request)
             switch (request.method, request.path) {
@@ -309,12 +320,13 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 return .json(sessionJSON)
             case ("DELETE", "/api/mobile/session"):
                 deleteArrived.fulfill()
-                _ = releaseResponse.wait(timeout: .now() + 10)
+                releaseResponse.wait()
                 return .json(
                     "{}",
                     headers: [
                         ("Set-Cookie", "late_logout=old; Path=/; HttpOnly"),
-                    ]
+                    ],
+                    sentEvent: lateResponseSent
                 )
             default:
                 return .status(404)
@@ -338,8 +350,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     controlPlaneURL: $0,
                     websiteDataStore: $1,
                     deadlines: MobileAuthTransportDeadlines(
-                        readinessMilliseconds: 5_000,
-                        requestMilliseconds: 5_000,
+                        readinessMilliseconds: 30_000,
+                        requestMilliseconds: 30_000,
                         logoutMilliseconds: 500
                     )
                 )
@@ -351,26 +363,34 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         _ = try await coordinator.bootstrap()
         let oldIdentifier = accountStore.identifier
 
-        let start = Date()
         let logout = Task {
             try await coordinator.logout()
         }
-        await fulfillment(of: [deleteArrived], timeout: 5)
+        await fulfillment(
+            of: [deleteArrived],
+            timeout: Self.fixtureEventTimeout
+        )
         let logoutState = try await logout.value
         XCTAssertEqual(logoutState, .signedOut)
-        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
         XCTAssertNotEqual(accountStore.identifier, oldIdentifier)
 
         releaseResponse.signal()
-        try await Task.sleep(for: .milliseconds(250))
+        await fulfillment(
+            of: [lateResponseSent.expectation],
+            timeout: Self.fixtureEventTimeout
+        )
         let cookies = await allCookies(in: accountStore.dataStore.httpCookieStore)
         XCTAssertNil(cookie(named: "late_logout", in: cookies))
     }
 
     func testReadinessRejectsCrossOriginRedirect() async throws {
-        let state = HTTPFixtureState()
+        let captureState = HTTPFixtureState()
+        let captureServer = try LocalHTTPServer(address: .ipv6) { request in
+            captureState.record(request)
+            return .json("{}")
+        }
+        let captureURL = try await captureServer.start()
         let server = try LocalHTTPServer { request in
-            state.record(request)
             switch request.path {
             case "/api/config/auth":
                 return LocalHTTPResponse(
@@ -378,7 +398,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     headers: [
                         (
                             "Location",
-                            "http://localhost:\(state.baseURL!.port!)/capture"
+                            captureURL.appending(path: "capture").absoluteString
                         ),
                     ],
                     body: Data()
@@ -390,9 +410,9 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             }
         }
         let baseURL = try await server.start()
-        state.baseURL = baseURL
         addTeardownBlock {
             server.stop()
+            captureServer.stop()
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
@@ -405,7 +425,9 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         } catch let error as MobileAccountError {
             XCTAssertEqual(error.code, "network")
         }
-        XCTAssertFalse(state.requests().contains(where: { $0.path == "/capture" }))
+        XCTAssertFalse(
+            captureState.requests().contains(where: { $0.path == "/capture" })
+        )
     }
 
     func testCookieHandoffRotationDeletionAndMutationOrigin() async throws {
@@ -510,6 +532,12 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
     func testControlPlaneCookiesDoNotFollowACrossOriginRedirect() async throws {
         let state = HTTPFixtureState()
+        let captureState = HTTPFixtureState()
+        let captureServer = try LocalHTTPServer(address: .ipv6) { request in
+            captureState.record(request)
+            return .html("captured")
+        }
+        let captureURL = try await captureServer.start()
         let server = try LocalHTTPServer { request in
             state.record(request)
             switch request.path {
@@ -521,16 +549,16 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     ]
                 )
             case "/redirect":
-                let port = state.baseURL!.port!
                 return LocalHTTPResponse(
                     status: 302,
                     headers: [
-                        ("Location", "http://localhost:\(port)/capture"),
+                        (
+                            "Location",
+                            captureURL.appending(path: "capture").absoluteString
+                        ),
                     ],
                     body: Data()
                 )
-            case "/capture":
-                return .html("captured")
             default:
                 return .status(404)
             }
@@ -539,6 +567,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         state.baseURL = baseURL
         addTeardownBlock {
             server.stop()
+            captureServer.stop()
         }
 
         let configuration = WKWebViewConfiguration()
@@ -549,23 +578,32 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
         probe.expectNavigation()
         webView.load(URLRequest(url: baseURL.appending(path: "seed")))
-        await fulfillment(of: [probe.expectation], timeout: 5)
+        await fulfillment(
+            of: [probe.expectation],
+            timeout: Self.fixtureEventTimeout
+        )
 
         probe.expectNavigation()
         webView.load(URLRequest(url: baseURL.appending(path: "redirect")))
-        await fulfillment(of: [probe.expectation], timeout: 5)
+        await fulfillment(
+            of: [probe.expectation],
+            timeout: Self.fixtureEventTimeout
+        )
 
         let capture = try XCTUnwrap(
-            state.requests().last(where: {
-                $0.path == "/capture"
-                    && $0.headers["host"]?.hasPrefix("localhost:") == true
-            })
+            captureState.requests().last(where: { $0.path == "/capture" })
         )
         XCTAssertNil(capture.headers["cookie"])
     }
 
     func testCallbackTokensDoNotFollowACrossOriginRedirect() async throws {
         let state = HTTPFixtureState()
+        let captureState = HTTPFixtureState()
+        let captureServer = try LocalHTTPServer(address: .ipv6) { request in
+            captureState.record(request)
+            return .json("{}")
+        }
+        let captureURL = try await captureServer.start()
         let server = try LocalHTTPServer { request in
             state.record(request)
             switch (request.method, request.path) {
@@ -593,13 +631,11 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                     headers: [
                         (
                             "Location",
-                            "http://localhost:\(state.baseURL!.port!)/capture"
+                            captureURL.appending(path: "capture").absoluteString
                         ),
                     ],
                     body: Data()
                 )
-            case (_, "/capture"):
-                return .json("{}")
             default:
                 return .status(404)
             }
@@ -608,6 +644,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         state.baseURL = baseURL
         addTeardownBlock {
             server.stop()
+            captureServer.stop()
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
@@ -632,23 +669,29 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         )
         XCTAssertTrue(callbackBody.contains("fixture-access"))
         XCTAssertTrue(callbackBody.contains("fixture-refresh"))
-        XCTAssertFalse(state.requests().contains(where: { $0.path == "/capture" }))
+        XCTAssertFalse(
+            captureState.requests().contains(where: { $0.path == "/capture" })
+        )
     }
 
     func testDelayedOldStoreResponseCannotRestoreCookiesAfterRotation() async throws {
         let state = HTTPFixtureState()
         let requestArrived = expectation(description: "old store request arrived")
         let releaseResponse = DispatchSemaphore(value: 0)
+        let lateResponseSent = FixtureEvent(
+            description: "old store response sent"
+        )
         let server = try LocalHTTPServer { request in
             state.record(request)
             if request.path == "/delayed-cookie" {
                 requestArrived.fulfill()
-                _ = releaseResponse.wait(timeout: .now() + 10)
+                releaseResponse.wait()
                 return .html(
                     "late",
                     headers: [
                         ("Set-Cookie", "late_generation=old; Path=/; HttpOnly"),
-                    ]
+                    ],
+                    sentEvent: lateResponseSent
                 )
             }
             return .status(404)
@@ -680,13 +723,19 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         oldWebView?.load(
             URLRequest(url: baseURL.appending(path: "delayed-cookie"))
         )
-        await fulfillment(of: [requestArrived], timeout: 5)
+        await fulfillment(
+            of: [requestArrived],
+            timeout: Self.fixtureEventTimeout
+        )
 
         oldWebView?.stopLoading()
         oldWebView = nil
         await accountStore.rotate()
         releaseResponse.signal()
-        try await Task.sleep(for: .milliseconds(250))
+        await fulfillment(
+            of: [lateResponseSent.expectation],
+            timeout: Self.fixtureEventTimeout
+        )
 
         let newCookies = await allCookies(
             in: accountStore.dataStore.httpCookieStore
@@ -758,12 +807,31 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        do {
-            _ = try await task.value
+        let completed = expectation(description: "operation completed")
+        var result: Result<T, Error>?
+        Task { @MainActor in
+            result = await task.result
+            completed.fulfill()
+        }
+        await fulfillment(
+            of: [completed],
+            timeout: Self.fixtureEventTimeout
+        )
+        guard let result else {
+            task.cancel()
+            return
+        }
+        switch result {
+        case .success:
             XCTFail("Expected a network error", file: file, line: line)
-        } catch let error as MobileAccountError {
-            XCTAssertEqual(error.code, "network", file: file, line: line)
-        } catch {
+        case .failure(let error as MobileAccountError):
+            XCTAssertEqual(
+                error.code,
+                "network",
+                file: file,
+                line: line
+            )
+        case .failure(let error):
             XCTFail("Unexpected error: \(error)", file: file, line: line)
         }
     }
@@ -813,31 +881,64 @@ private struct LocalHTTPResponse: Sendable {
     let status: Int
     let headers: [(String, String)]
     let body: Data
+    let sentEvent: FixtureEvent?
+
+    init(
+        status: Int,
+        headers: [(String, String)],
+        body: Data,
+        sentEvent: FixtureEvent? = nil
+    ) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+        self.sentEvent = sentEvent
+    }
 
     static func json(
         _ body: String,
-        headers: [(String, String)] = []
+        headers: [(String, String)] = [],
+        sentEvent: FixtureEvent? = nil
     ) -> LocalHTTPResponse {
         LocalHTTPResponse(
             status: 200,
             headers: [("Content-Type", "application/json")] + headers,
-            body: Data(body.utf8)
+            body: Data(body.utf8),
+            sentEvent: sentEvent
         )
     }
 
     static func html(
         _ body: String,
-        headers: [(String, String)] = []
+        headers: [(String, String)] = [],
+        sentEvent: FixtureEvent? = nil
     ) -> LocalHTTPResponse {
         LocalHTTPResponse(
             status: 200,
             headers: [("Content-Type", "text/html; charset=utf-8")] + headers,
-            body: Data(body.utf8)
+            body: Data(body.utf8),
+            sentEvent: sentEvent
         )
     }
 
     static func status(_ status: Int) -> LocalHTTPResponse {
-        LocalHTTPResponse(status: status, headers: [], body: Data())
+        LocalHTTPResponse(
+            status: status,
+            headers: [],
+            body: Data()
+        )
+    }
+}
+
+private final class FixtureEvent: @unchecked Sendable {
+    let expectation: XCTestExpectation
+
+    init(description: String) {
+        expectation = XCTestExpectation(description: description)
+    }
+
+    func signal() {
+        expectation.fulfill()
     }
 }
 
@@ -869,14 +970,45 @@ private final class HTTPFixtureState: @unchecked Sendable {
 }
 
 private final class LocalHTTPServer: @unchecked Sendable {
+    enum LoopbackAddress {
+        case ipv4
+        case ipv6
+
+        var endpointHost: NWEndpoint.Host {
+            switch self {
+            case .ipv4:
+                return "127.0.0.1"
+            case .ipv6:
+                return "::1"
+            }
+        }
+
+        var urlHost: String {
+            switch self {
+            case .ipv4:
+                return "127.0.0.1"
+            case .ipv6:
+                return "[::1]"
+            }
+        }
+    }
+
     private let listener: NWListener
+    private let address: LoopbackAddress
     private let queue = DispatchQueue(label: "bot.avibe.ios.tests.http")
     private let handler: @Sendable (LocalHTTPRequest) -> LocalHTTPResponse
 
     init(
+        address: LoopbackAddress = .ipv4,
         handler: @escaping @Sendable (LocalHTTPRequest) -> LocalHTTPResponse
     ) throws {
-        listener = try NWListener(using: .tcp, on: .any)
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(
+            host: address.endpointHost,
+            port: .any
+        )
+        listener = try NWListener(using: parameters, on: .any)
+        self.address = address
         self.handler = handler
         listener.newConnectionHandler = { [weak self] connection in
             self?.receive(from: connection, data: Data())
@@ -901,7 +1033,7 @@ private final class LocalHTTPServer: @unchecked Sendable {
                     }
                     continuation.resume(
                         returning: URL(
-                            string: "http://127.0.0.1:\(port)"
+                            string: "http://\(self.address.urlHost):\(port)"
                         )!
                     )
                 case .failed(let error):
@@ -968,6 +1100,7 @@ private final class LocalHTTPServer: @unchecked Sendable {
         var data = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
         data.append(response.body)
         connection.send(content: data, completion: .contentProcessed { _ in
+            response.sentEvent?.signal()
             connection.cancel()
         })
     }

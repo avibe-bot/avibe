@@ -400,6 +400,13 @@ final class NavigationPolicyTests: XCTestCase {
             primary.configuration.userContentController
                 === child.configuration.userContentController
         )
+        #if DEBUG
+        XCTAssertTrue(primary.isInspectable)
+        XCTAssertTrue(child.isInspectable)
+        #else
+        XCTAssertFalse(primary.isInspectable)
+        XCTAssertFalse(child.isInspectable)
+        #endif
     }
 
     @MainActor

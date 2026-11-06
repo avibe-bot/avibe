@@ -127,6 +127,9 @@ final class WebViewFactory {
         webView.navigationDelegate = delegate
         webView.uiDelegate = delegate
         webView.translatesAutoresizingMaskIntoConstraints = false
+        #if DEBUG
+        webView.isInspectable = true
+        #endif
         outerScrollLockControllers[ObjectIdentifier(webView)] =
             OuterScrollLockController(webView: webView)
         return webView
