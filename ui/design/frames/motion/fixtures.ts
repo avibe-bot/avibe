@@ -1,8 +1,7 @@
 // What the motion frames share (docs/plans/web-ui-motion.md): one real conversation and one real Inbox in
-// the states a moment moves between, and what the kit's moments (`kit/motion/`) are told about them.
+// the states a moment moves between.
 import type { InboxSession } from '@/context/ApiContext';
 
-import type { ChatCast, ChatShift } from '../../kit/motion/cast';
 import { inboxRow, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentSays, chatFixtures, idleTurn, runningTurn, userSays } from '../chat/fixtures';
 import { workbenchFixtures } from '../workbench/fixtures';
@@ -33,13 +32,6 @@ export const sent = userSays(SENT_TEXT, 0);
 /** The reply that ends the turn the message started. */
 export const reply = agentSays('好，按「标准」档实现。第一步是发送、停止和工作中这三个过渡，我先把动效令牌接进输入框和消息列表。', 0);
 
-/** How far the conversation moves when rows go in below it: the row heights the shipped page draws for
- *  this data, at 390 px and at 1280 px (FLIP measures them at run time; a frame has to state them). */
-export const SHIFT: Record<'phone' | 'desktop', ChatShift> = {
-  phone: { send: 147, arrival: 76 },
-  desktop: { send: 66, arrival: 31 },
-};
-
 /** The Session ids each state reads (ids as the server mints them). */
 export const CHAT = {
   before: 'sesmo7b4f0re1',
@@ -60,8 +52,6 @@ export const chatStates: Record<ChatState, WorkbenchFixtures> = {
   replied: chatFixtures({ session: { ...title, id: CHAT.replied }, messages: [...history, sent, reply], turnState: idleTurn }),
 };
 
-/** The conversation as the kit's chat moments read it. */
-export const CHAT_CAST: ChatCast = { before: CHAT.before, after: CHAT.after, replied: CHAT.replied, sentId: sent.id, replyId: reply.id };
 
 /** The fixtures for a frame that stacks these states. */
 export const chatStatesFixtures = (...states: ChatState[]) => mergeFixtures(...states.map((state) => chatStates[state]));

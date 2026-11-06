@@ -990,7 +990,7 @@ describe('ChatPage opened with no cached copy', () => {
     expect(screen.getByText('Inbox title')).toBeTruthy();
     expect(rowsOf('the latest reply')).toHaveLength(1);
     expect(skeleton()).not.toBeNull();
-    expect(screen.getByTestId('chat-transcript').firstElementChild?.className).toContain('justify-end');
+    expect(screen.getByTestId('chat-transcript').firstElementChild?.firstElementChild?.className).toContain('justify-end');
     // The card does not say which Agent the chat runs on: its picker is a block.
     expect(document.querySelector('[data-route-picker-skeleton]')).not.toBeNull();
     expect(screen.queryByTestId('route-picker')).toBeNull();

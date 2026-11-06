@@ -1499,6 +1499,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // ``turn_state.foreground``, not the row's ``agent_status``, so an archived chat
   // opened inside that window loads read-only AND busy.
   const busyControls = busy && !disabled;
+  // Send and Stop trade places with a morph (docs/plans/web-ui-motion.md M2): the
+  // control that arrives grows in where the other was. Once they have traded,
+  // not as the composer first draws. Each control has its own key, so the one
+  // that arrives is a new element: React would otherwise turn Stop's element
+  // into Send, which keeps its finished animation and only shifts colours.
+  const [controlsTraded, setControlsTraded] = useState(false);
+  const [lastBusyControls, setLastBusyControls] = useState(busyControls);
+  if (lastBusyControls !== busyControls) {
+    setLastBusyControls(busyControls);
+    setControlsTraded(true);
+  }
+  const tradedControl = controlsTraded ? 'motion-morph-in' : undefined;
   const voiceProcessing = transcribing || recordingStarting || restoringRecording;
   const voiceControlMode = voiceProcessing
     ? 'loading'
@@ -2255,13 +2267,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 reads as "send, but later / into the queue". */}
             {!voiceCaptureActive && canSubmitNow && (
               <Button
+                key="queue-send"
                 type="button"
                 variant="accent"
                 size="icon"
                 onClick={submit}
                 aria-label={t(busySendsNow ? 'chat.compose.send' : 'chat.compose.queueSend')}
                 title={t(busySendsNow ? 'chat.compose.send' : 'chat.compose.queueSend')}
-                className="size-9 shrink-0"
+                // It comes with text to send, beside Stop, the way Stop came.
+                className="motion-morph-in size-9 shrink-0"
               >
                 <span className="relative inline-flex">
                   <Send className="size-4" />
@@ -2275,26 +2289,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </Button>
             )}
             <Button
+              key="stop"
               type="button"
               variant="destructive-soft"
               size="icon"
               onClick={onStop}
               disabled={!stopArmed}
               aria-label={t('chat.compose.stop')}
-              className="size-9 shrink-0"
+              className={clsx('size-9 shrink-0', tradedControl)}
             >
               <Square className="size-4" />
             </Button>
           </>
         ) : !voiceCaptureActive ? (
           <Button
+            key="send"
             type="button"
             variant="default"
             size="icon"
             onClick={submit}
             disabled={!canSubmitNow}
             aria-label={t('chat.compose.send')}
-            className="size-9 shrink-0"
+            className={clsx('size-9 shrink-0', tradedControl)}
           >
             <Send className="size-4" />
           </Button>

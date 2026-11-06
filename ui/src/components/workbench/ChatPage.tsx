@@ -92,6 +92,7 @@ import {
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
 import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
+import { HEAD_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { MentionSearchResult } from './MentionEditor';
 import {
@@ -3487,7 +3488,7 @@ export const ChatPage: React.FC = () => {
           of being discarded on unmount. */}
       <div className={clsx('flex min-h-0 flex-1 flex-col', showPageActive && 'hidden')}>
         {error && (
-          <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
+          <div className="motion-appear mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}
@@ -3659,6 +3660,10 @@ export const QueueRow: React.FC<{
 }> = ({ item, onRemove, onRecall, inBotConversation = false, pending = false }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  // Sent from here: it rises into the queue as a sent message rises into the
+  // conversation (docs/plans/web-ui-motion.md M1), and keeps that entrance when
+  // the server's row takes its place.
+  const [sentHere] = useState(pending);
   // The row's own focusable anchor. An attachment control that stops existing —
   // the disclosure once there is nothing left to disclose, or the third inline
   // preview once the window is too narrow for it — hands focus here rather than
@@ -3733,6 +3738,7 @@ export const QueueRow: React.FC<{
       aria-busy={fenced || pending}
       className={clsx(
         pending && 'opacity-60',
+        sentHere && 'motion-rise-in',
         'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         hasExpandedContent ? 'items-start' : 'items-center',
         // Wrapping is enabled only while the remainder is disclosed. A collapsed
@@ -4090,7 +4096,7 @@ export const QueueStrip: React.FC<{
       ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: queue.length })
       : t('chat.queue.title', { count: queue.length });
   return (
-    <div className="shrink-0 px-4 md:px-8">
+    <div className="motion-appear shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
         <div className="flex items-center justify-between px-1 pb-1.5">
           <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-cyan-ink">
@@ -4947,6 +4953,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
     },
     [pinnedRef],
   );
+  // The conversation's motion (docs/plans/web-ui-motion.md M1–M4): it reads
+  // where the transcript was ahead of the restore below, and moves what a
+  // commit brought in or took away after it, without touching either.
+  const motion = useTranscriptMotion({ scrollRef, columnRef: contentRef, pinnedRef, lastScrollTopRef, sessionId: session.id });
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
 
@@ -5079,6 +5089,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           onHarnessOpenChange={setHarnessRowOpen}
           pending={pendingIds.has(message.id)}
           enterClassName={rowHandover}
+          onDepart={motion.depart}
         />
         {after?.map((group) => renderActivityChip(group))}
       </>
@@ -5422,6 +5433,18 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // row. This also covers the loading slot being inserted or removed.
   useLayoutEffect(restoreScrollPosition);
 
+  // A sent message, a reply, the working bubble: in from the composer's edge,
+  // the conversation gliding up to meet them. Not while a deep link jumps or a
+  // skeleton hands over, which bring their own.
+  const ownMessageIds = useMemo(
+    () => new Set(messages.filter((message) => message.author === 'user' && message.type === 'user').map((message) => message.id)),
+    [messages],
+  );
+  const { afterCommit } = motion;
+  useLayoutEffect(() => {
+    afterCommit((id) => ownMessageIds.has(id), Boolean(jumpTarget) || skeleton || rowHandover !== undefined);
+  });
+
   // One upward gesture asks for one page, but a page that landed above the
   // reader is reading progress: the same gesture (a long fling) may ask for the
   // next one once it has carried the reader back into the prefetch band. A page
@@ -5554,15 +5577,20 @@ export const Transcript: React.FC<TranscriptProps> = ({
             maybeLoadOlder();
           }
         }}
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8"
+        className="min-h-0 flex-1 overflow-y-auto px-4 [overflow-anchor:none] md:px-8"
       >
+        {/* The conversation glides inside a box that clips it, so a glide's offset
+            never adds to what the transcript can scroll: the anchor and
+            follow-tail see the layout they would without any motion, and rows
+            rise into view from the composer's edge. */}
+        <div className="flex min-h-full flex-col overflow-y-clip py-5">
         <div
           ref={contentRef}
           className={clsx(
-            'mx-auto flex w-full max-w-[1080px] flex-col gap-3',
+            'relative mx-auto flex w-full max-w-[1080px] flex-col gap-3',
             // Above a known newest message, the skeleton and that message sit at
             // the bottom, where the loaded conversation will be read from.
-            skeleton && transcriptItems.length > 0 && 'min-h-full justify-end',
+            skeleton && transcriptItems.length > 0 && 'flex-1 justify-end',
           )}
         >
           {organizationNotice}
@@ -5659,9 +5687,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
               agentBackend={agentBackend}
               onShowActivity={!activity?.enabled ? activity?.onEnable : undefined}
               statusLabel={recovery.label}
+              onDepart={motion.depart}
             />
           ) : null}
           {footer}
+        </div>
         </div>
       </div>
       {/* Jump-to-latest: appears after scrolling up a clear distance, returns to
@@ -5673,7 +5703,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           size="icon"
           onClick={jumpToLatest}
           aria-label={t('chat.scrollToBottom')}
-          className="absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full border-border-strong shadow-lg"
+          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full border-border-strong shadow-lg"
         >
           <ChevronDown className="size-4" />
         </Button>
@@ -5718,8 +5748,16 @@ export const ThinkingBubble: React.FC<{
   agentBackend?: string | null;
   onShowActivity?: () => void;
   statusLabel?: string | null;
-}> = ({ session, agentDisplayName, agentBackend = null, onShowActivity, statusLabel }) => {
+  /** Told as the bubble goes, while it is still on screen, so it can fade where a reply grows. */
+  onDepart?: (node: HTMLElement, kind: DepartureKind) => void;
+}> = ({ session, agentDisplayName, agentBackend = null, onShowActivity, statusLabel, onDepart }) => {
   const { t } = useTranslation();
+  const rootRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = rootRef.current;
+    if (!node || !onDepart) return undefined;
+    return () => onDepart(node, 'working');
+  }, [onDepart]);
   const { botForSession, displayName: botDisplayName } = useBots();
   const replyBot = botForSession(session.id);
   const dots = (
@@ -5730,9 +5768,9 @@ export const ThinkingBubble: React.FC<{
     </div>
   );
   return (
-    <div className="flex w-full justify-start">
+    <div ref={rootRef} {...{ [WORKING_ATTRIBUTE]: '' }} className="flex w-full justify-start">
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
-        <div className="flex items-center gap-2 px-0.5">
+        <div {...{ [HEAD_ATTRIBUTE]: '' }} className="flex items-center gap-2 px-0.5">
           {replyBot ? (
             <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
           ) : (
@@ -5793,6 +5831,9 @@ type MessageRowProps = {
   pending?: boolean;
   // How the row enters: the handover fade when it replaces a skeleton.
   enterClassName?: string;
+  // Told as a sending row goes without the server's row taking its place (the
+  // send failed), while it is still on screen, so it can sink back the way it came.
+  onDepart?: (node: HTMLElement, kind: DepartureKind) => void;
 };
 
 // Memoized so a transcript re-render that doesn't touch THIS row — the scroll
@@ -5823,9 +5864,18 @@ export const MessageRow = memo(function MessageRow({
   onHarnessOpenChange,
   pending = false,
   enterClassName,
+  onDepart,
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // A sending row that goes is a send withdrawn: it leaves the way it came. Told
+  // whenever it stops sending; the transcript keeps only a row that left the page.
+  const sendingRowRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = sendingRowRef.current;
+    if (!pending || !node || !onDepart) return undefined;
+    return () => onDepart(node, 'withdrawn');
+  }, [pending, onDepart]);
   // Read here rather than threaded down as a prop: context reaches through the
   // row's memo, so a personal↔organization change repaints the transcript
   // without the page having to re-create every row's props.
@@ -6068,7 +6118,7 @@ export const MessageRow = memo(function MessageRow({
         />
       ) : null;
     return (
-      <div data-message-id={message.id} className={rowClass('justify-end')} aria-busy={pending || undefined}>
+      <div ref={sendingRowRef} data-message-id={message.id} className={rowClass('justify-end')} aria-busy={pending || undefined}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-end gap-1">
           {senderHead}
           <div
@@ -6170,7 +6220,8 @@ export const MessageRow = memo(function MessageRow({
   return (
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
-        <div className="flex items-center gap-2 px-0.5">
+        {/* The working bubble draws the same head: a reply that takes its place keeps it still. */}
+        <div {...{ [HEAD_ATTRIBUTE]: '' }} className="flex items-center gap-2 px-0.5">
           {agentIdentity && replyBot ? (
             <BotAvatar avatar={replyBot.avatar} name={botDisplayName(replyBot)} size={24} />
           ) : (

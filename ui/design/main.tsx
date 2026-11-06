@@ -49,6 +49,7 @@ async function boot() {
   designNetwork.setResponses(apiResponses(shown?.fixtures));
   for (const [key, text] of Object.entries(shown?.fixtures?.copy ?? {})) i18n.addResource(lang, 'translation', key, text[lang]);
   designNetwork.setSockets(shown?.fixtures?.sockets);
+  designNetwork.setStream(shown?.fixtures?.stream);
   designStorage.seed(shown?.fixtures?.storage);
   // Named before the page renders, as the app's authorization boundary names it before a chat opens.
   if (shown?.fixtures?.localSnapshotReader) setLocalSnapshotPrincipal(shown.fixtures.localSnapshotReader);

@@ -9,7 +9,6 @@ import { ChatPage } from '@/components/workbench/ChatPage';
 import { InboxPage } from '@/components/workbench/InboxPage';
 
 import { InboxStateProvider } from '../../shell/DesignShell';
-import { DesktopScreen } from '../../shell/DesktopScreen';
 import { PhoneScreen } from '../../shell/PhoneScreen';
 import { DockProvider } from '@/context/DockProvider';
 import { ShowPageDragProvider } from '@/context/ShowPageDragProvider';
@@ -65,14 +64,5 @@ export function InboxAt({ state }: { state: string }) {
         <InboxPage onOpenSearch={() => {}} />
       </PhoneScreen>
     </InboxStateProvider>
-  );
-}
-
-/** The desktop Workbench (the sidebar and the content column) with stacked states in the column. Each
- *  layer covers the whole column and pads itself as the column does, since the chat page reaches out
- *  over that padding. */
-export function DesktopStage({ children }: { children: ReactNode }) {
-  return withChatProviders(
-    <DesktopScreen page={<div className="absolute inset-0 [&>[data-motion-layer]]:px-10 [&>[data-motion-layer]]:py-8">{children}</div>} />,
   );
 }

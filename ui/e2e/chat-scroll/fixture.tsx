@@ -7,7 +7,9 @@
 // activity=1 (execution-process chips), images=0 (no images), boot (bootstrap
 // latency in ms, 0), reader=local (keep the local chat snapshot, so a reload
 // paints the cached window first), inbox=1 (the Inbox lists the chat with its
-// newest reply, so an uncached open draws the skeleton and that reply first).
+// newest reply, so an uncached open draws the skeleton and that reply first),
+// sendDelay (ms the server takes to answer a sent message, 150), send=fail (it
+// refuses every send).
 import '../../design/shell/storage';
 
 import { createRoot } from 'react-dom/client';
@@ -32,6 +34,8 @@ const images = params.get('images') !== '0';
 const boot = Number(params.get('boot') ?? 0);
 const reader = params.get('reader');
 const inbox = params.get('inbox') === '1';
+const sendDelay = Number(params.get('sendDelay') ?? 150);
+const sendFails = params.get('send') === 'fail';
 
 const history = conversation(count).map((message) =>
   images ? message : { ...message, text: message.text.replace(/!\[[^\]]*\]\([^)]*\)/g, '(chart)') },
@@ -84,6 +88,15 @@ const designFetch = window.fetch;
 window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.href);
   if (url.pathname === `${base}/bootstrap` && boot > 0) await new Promise((resolve) => setTimeout(resolve, boot));
+  if (url.pathname === `${base}/messages` && (init?.method ?? 'GET').toUpperCase() === 'POST') {
+    // A sent message: the server's row for it, or a refusal.
+    await new Promise((resolve) => setTimeout(resolve, sendDelay));
+    if (sendFails) return new Response(JSON.stringify({ error: 'The agent is not available.' }), { status: 503, headers: { 'content-type': 'application/json' } });
+    const sent = JSON.parse(String(init?.body ?? '{}')) as { text?: string; metadata?: Record<string, unknown> };
+    const row = { ...messageAt(history.length), author: 'user', type: 'user', source: 'user', author_id: 'local', id: `msg_sent_${history.length}`, text: sent.text ?? '', metadata: sent.metadata ?? {} } as WorkbenchMessage;
+    history.push(row);
+    return json(row);
+  }
   if (url.pathname !== `${base}/messages`) return designFetch(input, init);
   const before = url.searchParams.get('before_id');
   const limit = Number(url.searchParams.get('limit') ?? PAGE);
@@ -124,7 +137,10 @@ window.EventSource = LabEventSource as unknown as typeof EventSource;
 declare global {
   interface Window {
     __scrollLab: ScrollLab & {
-      push(text?: string): WorkbenchMessage;
+      /** A row over the event stream: the next one of the conversation, or one by `author`. */
+      push(text?: string, author?: 'user' | 'agent'): WorkbenchMessage;
+      /** A turn starting or ending over the event stream. */
+      turn(phase: 'start' | 'end'): void;
       history: WorkbenchMessage[];
     };
   }
@@ -134,14 +150,22 @@ if (reader) setLocalSnapshotPrincipal(reader);
 const recorder = installScrollRecorder();
 window.__scrollLab = Object.assign(recorder, {
   history,
-  push(text?: string) {
+  push(text?: string, author?: 'user' | 'agent') {
     const next = messageAt(history.length);
-    const row = text ? { ...next, text } : next;
+    const by = author === 'user'
+      ? { author: 'user', type: 'user', source: 'user', author_id: 'local' }
+      : author === 'agent' ? { author: 'agent', type: 'result', source: 'agent', author_id: null } : {};
+    const row = { ...next, ...by, ...(text ? { text } : {}) } as WorkbenchMessage;
     history.push(row);
     for (const source of LabEventSource.live) {
       source.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data: row }) }));
     }
     return row;
+  },
+  turn(phase: 'start' | 'end') {
+    for (const source of LabEventSource.live) {
+      source.dispatchEvent(new MessageEvent(`turn.${phase}`, { data: JSON.stringify({ type: `turn.${phase}`, data: { session_id: LAB_SESSION_ID } }) }));
+    }
   },
 });
 
