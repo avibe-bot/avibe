@@ -261,6 +261,10 @@ const SETTLE_SCROLLEND_LOST_MS = 1500;
 // long (iOS finishing a scroll animation of its own: measured 80 ms after the
 // write), is made once more.
 const TAKEBACK_WINDOW_MS = 250;
+// iOS also sends ``scrollend`` for a write of ours, 10-30 ms after it, while
+// its own momentum goes on (measured on iOS 27). One this soon after our last
+// write does not end the platform's scrolling.
+const SCROLLEND_AFTER_WRITE_MS = 100;
 /** Whether a request failed without the server refusing it: no answer at all
  *  (offline, a timeout), or the server, or the tunnel to it, failing. A refusal
  *  (any 4xx) is the server's say about the chat, and the saved copy defers to it. */
@@ -4985,6 +4989,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // back, and the reader's last input (touch, wheel, key, pointer) since which
   // a move is theirs.
   const takebackRef = useRef<{ from: number; to: number; at: number } | null>(null);
+  const lastWriteAtRef = useRef(Number.NEGATIVE_INFINITY);
   const lastInputAtRef = useRef(Number.NEGATIVE_INFINITY);
   const pinWhenSettledRef = useRef(false);
   const pagingGestureRef = useRef<{
@@ -5228,12 +5233,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
               bottomBounceRef.current = false;
               const now = scrollRef.current;
               if (!now || !pinnedRef.current || suppressAnchorRef.current) return;
-              if (now.scrollHeight - now.clientHeight - now.scrollTop > 0.5) now.scrollTop = now.scrollHeight;
+              if (now.scrollHeight - now.clientHeight - now.scrollTop > 0.5) {
+                now.scrollTop = now.scrollHeight;
+                lastWriteAtRef.current = performance.now();
+              }
               lastScrollTopRef.current = Math.max(0, now.scrollTop);
             });
           }
         } else {
           el.scrollTop = el.scrollHeight;
+          lastWriteAtRef.current = performance.now();
         }
       }
     } else {
@@ -5252,6 +5261,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       el.scrollTop += delta;
       const applied = el.scrollTop - before;
       takebackRef.current = { from: before, to: el.scrollTop, at: performance.now() };
+      lastWriteAtRef.current = takebackRef.current.at;
       // Held from here: the shift is compensated and must not be again. What
       // the scroll position could not take (a fraction of a device pixel) stays
       // owed, so fractions do not add up over a run of shifts; anything larger
@@ -5401,6 +5411,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       if (touchesRef.current === 0 && lastInputAtRef.current < takeback.at && now - takeback.at < TAKEBACK_WINDOW_MS
         && Math.abs(takeback.to - takeback.from) >= 2 && Math.abs(el.scrollTop - takeback.from) < 2) {
         el.scrollTop = takeback.to;
+        lastWriteAtRef.current = now;
         lastScrollTopRef.current = Math.max(0, el.scrollTop);
         return;
       }
@@ -5682,6 +5693,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         tabIndex={0}
         onScroll={handleScroll}
         onScrollEnd={() => {
+          if (performance.now() - lastWriteAtRef.current < SCROLLEND_AFTER_WRITE_MS) return;
           scrollingRef.current = false;
           bottomBounceRef.current = false;
         }}

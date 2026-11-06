@@ -412,6 +412,53 @@ describe('transcript older-page loading', () => {
     }
   });
 
+  // iOS sends ``scrollend`` for a write of ours too, while its momentum goes on:
+  // that one does not say the platform's scrolling is over.
+  it('does not take the scrollend of its own write for the end of momentum', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      let landed = false;
+      const onLoadOlder = vi.fn(async (whenSettled: () => Promise<void>) => {
+        await whenSettled();
+        landed = true;
+        return true;
+      });
+      const { scroller, geometry } = renderTranscript({ onLoadOlder });
+      fireEvent.touchStart(scroller, { touches: [{ clientY: 100 }] });
+      await act(async () => fireEvent.touchMove(scroller, { touches: [{ clientY: 140 }] }));
+      fireEvent.touchEnd(scroller, { touches: [] });
+      for (let frame = 0; frame < 3; frame += 1) {
+        await act(async () => {
+          scroller.scrollTop -= 20;
+          fireEvent.scroll(scroller);
+          vi.advanceTimersByTime(30);
+        });
+      }
+      // An image above the reader lands mid-momentum: compensated, and that write's
+      // own scroll and scrollend arrive.
+      geometry.extraAbove = 180;
+      act(TestResizeObserver.resize);
+      fireEvent.scroll(scroller);
+      await act(async () => {
+        vi.advanceTimersByTime(15);
+        fireEvent(scroller, new Event('scrollend'));
+      });
+      // Momentum goes quiet before its last pixel: not rest yet.
+      await act(async () => { vi.advanceTimersByTime(400); });
+      expect(landed).toBe(false);
+      await act(async () => {
+        scroller.scrollTop -= 1;
+        fireEvent.scroll(scroller);
+        vi.advanceTimersByTime(15);
+        fireEvent(scroller, new Event('scrollend'));
+        vi.advanceTimersByTime(200);
+      });
+      expect(landed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // iOS finishing a scroll of its own (the last pixel of momentum) can put back
   // the position from before the write that held the reader's place.
   it('makes a write the platform put back once more, unless a finger is down', async () => {
