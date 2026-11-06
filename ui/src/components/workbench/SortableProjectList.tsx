@@ -12,6 +12,7 @@ import { Folder } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { orderProjects } from '../../lib/projectOrder';
+import { useSortableItems } from '../../lib/sortableItems';
 import { cn } from '../../lib/utils';
 
 export type ProjectDragHandle = ComponentPropsWithRef<'button'>;
@@ -62,7 +63,7 @@ export function SortableProjectList({ projects, disabled, mobile = false, onReor
     }),
   );
   const list = baseline ? orderProjects(projects, baseline) : projects;
-  const ids = list.map((project) => project.id);
+  const ids = useSortableItems(list.map((project) => project.id));
   const name = (id: string | number) => projects.find((project) => project.id === id)?.display_name ?? '';
   const finish = () => { setActiveProject(null); setBaseline(null); };
 

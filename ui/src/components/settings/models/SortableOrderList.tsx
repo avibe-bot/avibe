@@ -11,6 +11,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { useReducedMotion } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 
+import { useSortableItems } from '@/lib/sortableItems';
 import { cn } from '@/lib/utils';
 
 /** What the row's drag handle (its ordinal) spreads onto itself; null for a row that does not move. */
@@ -85,7 +86,9 @@ export function SortableOrderList<Row>({
     else if (pending && !dropped.sent) setDropped({ ...dropped, sent: true });
     else if (!pending && dropped.sent) setDropped(null);
   }
-  const ids = dropped !== null && dropped.order.length === served.length && dropped.order.every((id) => served.includes(id)) ? dropped.order : served;
+  const ids = useSortableItems(
+    dropped !== null && dropped.order.length === served.length && dropped.order.every((id) => served.includes(id)) ? dropped.order : served,
+  );
   const byId = new Map(on.map((row) => [idOf(row), row] as const));
   const name = (id: string | number) => {
     const row = byId.get(String(id));
