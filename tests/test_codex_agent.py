@@ -3411,7 +3411,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(thread_id, "thread-fork")
-                self.assertEqual(transport.send_request.await_count, 2)
+                self.assertEqual(transport.send_request.await_count, 3)
                 agent.sessions.bind_agent_session.assert_called_once()
                 agent._inject_forked_session_correction.assert_awaited_once_with(
                     transport, request, "thread-fork"

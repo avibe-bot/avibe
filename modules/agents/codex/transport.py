@@ -437,6 +437,23 @@ class CodexTransport:
         """Send a JSON-RPC request and return the result (blocking)."""
         if not self.is_alive:
             raise ConnectionError("Codex app-server transport is not available")
+        if method in {"thread/start", "thread/resume", "thread/fork"}:
+            read_params = {"includeLayers": False}
+            if params.get("cwd"):
+                read_params["cwd"] = params["cwd"]
+            self._reading_mcp_config = True
+            try:
+                response = await self.send_request("config/read", read_params)
+            finally:
+                self._reading_mcp_config = False
+            config = response.get("config") if isinstance(response, dict) else None
+            servers = config.get("mcp_servers") if isinstance(config, dict) else None
+            if not isinstance(servers, dict):
+                raise RuntimeError("Codex config/read did not return effective mcp_servers")
+            params = dict(params)
+            config = dict(params.get("config") or {})
+            config.update({f'mcp_servers."{name}".enabled': False for name in servers})
+            params["config"] = config
 
         self._request_id += 1
         req_id = self._request_id
