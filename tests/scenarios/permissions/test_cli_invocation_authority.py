@@ -552,21 +552,49 @@ def test_permissions_026_a_below_floor_command_is_refused_while_a_remote_owner_i
     assert dispatched == ["restart"]
 
 
-def test_permissions_026_internal_activation_entry_points_stay_owner_work(monkeypatch, invoke, capsys):
-    """PERMISSIONS-026: the supervisor and installer argv are not an alternate door."""
+@pytest.mark.parametrize(
+    ("command", "tail", "handler"),
+    [
+        ("__restart-supervisor", [], "_dispatch_restart_supervisor"),
+        ("__restart-supervisor", ["--help"], "_dispatch_restart_supervisor"),
+        ("__activate-upgrade", ["--help"], "_dispatch_deferred_upgrade_activation"),
+        ("__activate-install", ["--protocol-version"], "_dispatch_installer_activation"),
+    ],
+)
+def test_permissions_026_internal_activation_entry_points_stay_owner_work(
+    monkeypatch, invoke, capsys, command, tail, handler,
+):
+    """PERMISSIONS-026: a static-looking raw tail must not bypass existing admission."""
     activated: list[str] = []
-    monkeypatch.setattr(
-        cli,
-        "_dispatch_restart_supervisor",
-        lambda argv: activated.append("restart-supervisor") or 0,
-    )
+    monkeypatch.setattr(cli, handler, lambda argv: activated.append(command) or 0)
 
-    assert invoke(["__restart-supervisor"], caller=_caller_env("member")) == 1
+    assert invoke([command, *tail], caller=_caller_env("member")) == 1
     assert activated == []
-    assert "__restart-supervisor: Instance role 'owner' is required" in capsys.readouterr().err
+    assert f"{command}: Instance role 'owner' is required" in capsys.readouterr().err
 
-    assert invoke(["__restart-supervisor"], caller=None) == 0
-    assert activated == ["restart-supervisor"]
+    assert invoke([command, *tail], caller=None) == 0
+    assert activated == [command]
+
+
+@pytest.mark.parametrize(
+    ("role", "argv", "floor"),
+    [
+        ("viewer", ["mcp", "--help"], "editor"),
+        ("viewer", ["mcp", "--unknown-option"], "editor"),
+        ("editor", ["mcp", "server", "--remove", "extra"], "owner"),
+    ],
+)
+def test_permissions_026_raw_mcp_admission_precedes_help_and_usage(invoke, capsys, role, argv, floor):
+    """PERMISSIONS-026: parse-first public entry must not change raw MCP's refusal precedence.
+
+    Ordinary parser and role-floor tests cannot reach this separate raw dispatcher.
+    These tails have no external effect; real admission must refuse before help or
+    the tool's usage failure can replace its authorization failure.
+    """
+    assert invoke(argv, caller=_caller_env(role)) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == f"error: Instance role '{floor}' is required\n"
 
 
 def test_permissions_026_guided_remote_setup_refuses_before_a_pairing_key_is_solicited(

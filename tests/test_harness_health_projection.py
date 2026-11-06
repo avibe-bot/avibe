@@ -17,6 +17,9 @@ same projected row the following ``show`` prints (HFR-098).
 
 from __future__ import annotations
 
+import core.scheduled_tasks as scheduled_tasks
+
+
 import inspect
 import json
 import sys
@@ -101,7 +104,7 @@ def _projected(payload: dict) -> dict:
     return {field: payload.get(field) for field in PROJECTED_FIELDS}
 
 
-class _FailureSeedingTaskStore(cli.ScheduledTaskStore):
+class _FailureSeedingTaskStore(scheduled_tasks.ScheduledTaskStore):
     """A task store whose new row already has failure history when it returns.
 
     Not a contrivance: an ``--at`` task whose time has already passed can be
@@ -154,7 +157,7 @@ def test_the_cli_is_a_projection_consumer_not_a_second_health_read_model(
     # Snapshot before any patching: ``monkeypatch.setattr(..., raising=False)``
     # CREATES a missing attribute, so a later absence assertion would pass for
     # the wrong reason.
-    assert not hasattr(cli.ScheduledTaskStore, "definition_health_batch"), (
+    assert not hasattr(scheduled_tasks.ScheduledTaskStore, "definition_health_batch"), (
         "the ScheduledTaskStore delegator existed only to feed the CLI-side query"
     )
 
@@ -175,7 +178,7 @@ def test_the_cli_is_a_projection_consumer_not_a_second_health_read_model(
 
     monkeypatch.setattr(SQLiteBackgroundTaskStore, "definition_health_batch", guarded)
 
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     add_args = _parse(
         [
             "task",

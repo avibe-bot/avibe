@@ -13,6 +13,14 @@ Chromium and WebKit browsers. CI runs this suite in `lint / ui-checks`.
 - A Harness row's preview chip, and a Harness group collapsed or expanded on
   its rail, stay inside the row's bubble column at phone widths: a long preview
   truncates instead of sizing the chip past the screen edge.
+- On a phone (touch, soft keyboard open), Send and Send to queue close the
+  keyboard: the composer's editor gives up focus as the message leaves, and the
+  editor's own update after the send does not focus it again. A refused send
+  gives the text back without focusing the editor. A desktop send keeps the
+  editor focused with its caret, so the next message is typed straight away.
+- On a phone, an edit (a long paste, a new line, a key Lexical inserts itself)
+  never scrolls the page; a long paste scrolls the editor's own box to the
+  caret, down and back up.
 - Desktop, keyboard, assistive clicks, incomplete gestures, and the bounded
   missing-terminal-event recovery retain their existing behavior.
 
@@ -32,6 +40,12 @@ No live Avibe state, credentials, or user browser profile is used.
 - Native browser taps in Chromium and WebKit additionally verify React's real
   listener is non-passive, and that the toolbar and full range survive past
   the selection debounce. Desktop uses real mouse input.
+
+- The composer cases stand in for the soft keyboard with the visual viewport
+  it shrinks (set before the app loads); focus and selection are the browser's
+  own. Without the fix the editor focuses itself again after a send in both
+  engines (Lexical writes its selection back to the DOM), which jsdom cannot
+  show.
 
 Headless WebKit is not a physical iOS PWA and does not reproduce its OS selection
 menu/gesture recognizer. A physical-device check is still needed: long-press a

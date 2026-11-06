@@ -150,11 +150,14 @@ async def test_mutation_excludes_new_admissions_before_writing_secrets(owned, mo
 
 
 @pytest.mark.asyncio
-async def test_rejected_native_deletion_preserves_publication_and_oauth(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source", ["claude", "opencode"])
+async def test_rejected_native_deletion_preserves_publication_and_oauth(tmp_path, monkeypatch, source):
     save_config(tmp_path)
-    path = native.claude_path()
+    path = native.claude_path() if source == 'claude' else native.opencode_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'mcpServers': {'native': {'url': 'https://example.invalid/mcp'}}}))
+    entry = {'native': {'type': 'remote', 'url': 'https://example.invalid/mcp'}}
+    data = {'mcpServers': {'native': {'url': 'https://example.invalid/mcp'}}} if source == 'claude' else {'mcp': {'servers': entry}}
+    path.write_text(json.dumps(data))
     runtime = McpRuntime()
     key = scope.ScopedName(scope.Scope(), 'native')
     definition = repository.read_definition(key)

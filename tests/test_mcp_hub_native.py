@@ -311,7 +311,6 @@ def test_spawns_disable_every_native_server(native_files):
     from claude_agent_sdk import ClaudeAgentOptions
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-    from modules.agents.codex.transport import _native_mcp_disabled_args
     from vibe.claude_config import CLAUDE_NATIVE_MCP_DISABLED
     from vibe.opencode_config import managed_opencode_runtime_config_content
 
@@ -323,15 +322,12 @@ def test_spawns_disable_every_native_server(native_files):
     client = ClaudeClient(ClaudeCompatConfig(enabled=True, permission_mode="default", cwd="/tmp"))
     assert client.options.strict_mcp_config and client.options.mcp_servers == {}
 
-    assert _native_mcp_disabled_args() == [
-        "-c", "mcp_servers.local.enabled=false", "-c", "mcp_servers.shared.enabled=false"]
-
-    overlay = json.loads(managed_opencode_runtime_config_content(None, native.opencode_disabled_mcp()))
+    overlay = json.loads(managed_opencode_runtime_config_content(None, native.opencode_disabled_mcp(), opencode_version="1.2.15"))
     assert overlay["mcp"] == {"oc": {**OPENCODE["mcp"]["oc"], "enabled": False}}
 
     only_in_overlay = json.loads(managed_opencode_runtime_config_content(
         json.dumps({"mcp": {"extra": {"type": "local", "command": ["node"], "enabled": True}}}),
-        native.opencode_disabled_mcp(),
+        native.opencode_disabled_mcp(), opencode_version="1.2.15",
     ))
     assert only_in_overlay["mcp"]["extra"]["enabled"] is False
     assert only_in_overlay["mcp"]["oc"]["enabled"] is False
@@ -360,3 +356,47 @@ def test_refused_native_remove_keeps_oauth_login(native_files, runtime):
     assert result["ok"] is False and result["error"]["type"] == "invalid_native_config"
     assert oauth_file.exists()
     assert "inline" in codex.read_text()
+
+
+@pytest.mark.parametrize("v2", [False, True])
+def test_opencode_cli_shapes_and_disabled_entries(native_files, v2):
+    """V2 CLI containers must not become a server named 'servers'; V1 keeps that name."""
+    from pathlib import Path
+
+    path = native_files[2]
+    data = json.loads((Path(__file__).parent / "fixtures/mcp_native/opencode-v2.json").read_text())
+    entries = data['mcp']['servers']
+    entries['off'] = {'type': 'local', 'command': ['unused'], 'disabled' if v2 else 'enabled': v2}
+    if not v2:
+        entries['servers'] = {'type': 'remote', 'url': 'https://example.invalid/mcp'}
+        data['mcp'] = entries
+    path.write_text(json.dumps(data))
+    found = native.read_all()
+    assert found['same'].definition['transport']['command'] == '/usr/bin/false'
+    assert found['same'].definition['transport']['args'] == ['GLOBAL']
+    assert 'off' not in found
+    assert 'off' in native.disabled_names()
+    assert native.disabled_source('off') == 'opencode'
+    assert ('servers' in found) is not v2
+    if not v2:
+        assert found['servers'].definition['transport']['url'] == 'https://example.invalid/mcp'
+
+
+def test_opencode_v2_delete_preserves_nested_config(native_files):
+    path = native_files[2]
+    original = '''{ // keep outer
+  "mcp": {
+    "servers": {
+      "drop": {"type": "local", "command": ["false"]},
+      "keep": {"type": "remote", "url": "https://example.invalid/mcp"}
+    },
+    "other": {"keep": true}
+  },
+  "theme": "system"
+}
+'''
+    path.write_text(original)
+    assert native.remove_entry('opencode', 'drop')
+    assert path.read_text() == original.replace('      "drop": {"type": "local", "command": ["false"]},\n', '')
+    assert native.remove_entry('opencode', 'keep')
+    assert json.loads(path.read_text().replace('// keep outer', ''))['mcp'] == {'servers': {}, 'other': {'keep': True}}

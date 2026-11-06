@@ -16,6 +16,7 @@ import { OnChangePlugin } from '@lexical/react/LexicalOnChangePlugin';
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import {
+  $addUpdateTag,
   $createParagraphNode,
   $createRangeSelection,
   $createTextNode,
@@ -32,6 +33,9 @@ import {
   HISTORY_PUSH_TAG,
   KEY_ENTER_COMMAND,
   PASTE_COMMAND,
+  ParagraphNode,
+  SKIP_SCROLL_INTO_VIEW_TAG,
+  TextNode,
   type EditorState,
   type LexicalNode,
   type PointType,
@@ -86,7 +90,10 @@ export type SessionSearchResult = { session_id: string; title?: string | null };
 
 export interface MentionEditorHandle {
   focus: () => void;
-  clear: () => void;
+  /** Empty the editor. ``blur``: the editor is giving up focus (the soft
+   *  keyboard closes after a send), so no selection is put back: writing one to
+   *  the DOM would focus the editor again. */
+  clear: (options?: { blur?: boolean }) => void;
   /** Append free text at the end (voice transcript) without disturbing chips. */
   append: (text: string) => void;
   /** Capture the serialized draft and logical selection before a toolbar click
@@ -108,8 +115,10 @@ export interface MentionEditorHandle {
   /** Restore the rich editor state captured before the first voice preview.
    *  Refuses to restore if the user has changed the draft since that preview. */
   restoreVoicePreview: () => boolean;
-  /** Replace the whole editor with plain text (restore on a failed send). */
-  setText: (text: string) => void;
+  /** Replace the whole editor with plain text (restore on a failed send).
+   *  ``focus: false``: leave it unfocused, with no selection, so a closed soft
+   *  keyboard stays closed until the user taps the field. */
+  setText: (text: string, options?: { focus?: boolean }) => void;
   /** Replace the whole editor with a saved draft read again after mount. It is
    *  reported like the mount-time seed (``isDraftSeed``), not as a user edit. */
   seedText: (text: string) => void;
@@ -573,12 +582,17 @@ function BootstrapPlugin({
           root?.focus({ preventScroll: true });
           editor.focus();
         },
-        clear: () => {
+        clear: (options) => {
           voicePreviewRef.current = null;
+          const blur = options?.blur === true;
           editor.update(() => {
             const root = $getRoot();
             root.clear();
             root.append($createParagraphNode());
+            // A range selection would be written back to the DOM, which focuses
+            // the editor again (Lexical's $updateDOMSelection) and keeps the
+            // soft keyboard up.
+            if (blur) $setSelection(null);
           });
         },
         append: (text: string) =>
@@ -654,14 +668,21 @@ function BootstrapPlugin({
           editor.setEditorState(active.originalState, { tag: HISTORIC_TAG });
           return true;
         },
-        setText: (text: string) => {
+        setText: (text: string, options) => {
           voicePreviewRef.current = null;
+          const focus = options?.focus !== false;
           editor.update(() => {
             const root = $getRoot();
             root.clear();
             const paragraph = $createParagraphNode();
             root.append(paragraph);
-            if (text) paragraph.selectStart().insertText(text);
+            if (!text) return;
+            if (focus) paragraph.selectStart().insertText(text);
+            else {
+              // No selection: one would be written to the DOM and focus the editor.
+              paragraph.append($createTextNode(text));
+              $setSelection(null);
+            }
           });
         },
         seedText: (text: string) => {
@@ -749,6 +770,70 @@ function MentionCaretFixPlugin() {
     [editor],
   );
   return null;
+}
+
+// While a soft keyboard is open, the editor does not scroll the page to its
+// caret: the page is pinned and the keyboard inset (useIosKeyboardInset) keeps
+// the composer above the keyboard. On iOS, Lexical's scroll-into-view counts the
+// keyboard's pan twice — it takes the visible band as
+// [visualViewport.offsetTop, + height] while the caret's rect already has that
+// pan applied — so the first keystroke after the keyboard opened scrolled the
+// page up by most of the pan (73.5 px on the owner's iPhone) and the composer
+// dropped under the keyboard until the inset caught up. A desktop, or a touch
+// screen on a hardware keyboard, keeps Lexical's scrolling to the caret.
+//
+// The tag rides on the update that edits the text (typing, an IME's
+// composition, a paste, a new line, a deletion): a transform adds it inside that
+// very update, on the text that changed or on the paragraph whose content did
+// (a node removed or inserted, a line break).
+//
+// The tag also skips the editor's own scroll (its box is max-h-40 and scrolls),
+// so after a pinned update the caret is brought into sight inside that box, and
+// never past it.
+function KeyboardPinnedPagePlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => {
+    let pinned = false;
+    const pin = () => {
+      if (!isSoftKeyboardOpen()) return;
+      pinned = true;
+      $addUpdateTag(SKIP_SCROLL_INTO_VIEW_TAG);
+    };
+    const unregisterText = editor.registerNodeTransform(TextNode, pin);
+    const unregisterParagraph = editor.registerNodeTransform(ParagraphNode, pin);
+    const unregisterUpdate = editor.registerUpdateListener(({ tags }) => {
+      if (!pinned || !tags.has(SKIP_SCROLL_INTO_VIEW_TAG)) return;
+      pinned = false;
+      const root = editor.getRootElement();
+      if (root) revealCaretInside(root);
+    });
+    return () => {
+      unregisterText();
+      unregisterParagraph();
+      unregisterUpdate();
+    };
+  }, [editor]);
+  return null;
+}
+
+/** Scroll ``root`` (and nothing else) so the caret is inside its box. */
+function revealCaretInside(root: HTMLElement) {
+  const selection = root.ownerDocument.getSelection();
+  const node = selection?.focusNode ?? null;
+  if (!selection || !node || !root.contains(node)) return;
+  const range = root.ownerDocument.createRange();
+  range.setStart(node, selection.focusOffset);
+  let caret = range.getBoundingClientRect();
+  if (caret.top === 0 && caret.bottom === 0) {
+    // A caret between elements (after a line break) has no box of its own: use
+    // its neighbour's.
+    const near = node.childNodes[selection.focusOffset - 1] ?? node.childNodes[selection.focusOffset] ?? node;
+    range.selectNode(near === root ? root.lastChild ?? root : near);
+    caret = range.getBoundingClientRect();
+  }
+  const box = root.getBoundingClientRect();
+  if (caret.bottom > box.bottom) root.scrollTop += caret.bottom - box.bottom;
+  else if (caret.top < box.top) root.scrollTop -= box.top - caret.top;
 }
 
 // Voice/dictation IMEs (e.g. Typeless) "replace" a selection by deleting it and
@@ -1079,6 +1164,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         <EditablePlugin disabled={disabled} />
         <PasteFilesPlugin onPasteFiles={onPasteFiles} />
         <MultilineInsertFixPlugin />
+        <KeyboardPinnedPagePlugin />
         <BootstrapPlugin autoFocus={autoFocus} initialText={initialText} bridgeRef={ref} />
         <MentionCaretFixPlugin />
       </LexicalComposer>

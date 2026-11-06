@@ -1794,6 +1794,32 @@ def test_list_inbox_sessions_pagination(isolated_state):
     assert [r["session_id"] for r in page2["sessions"]] == ["ses_0"]
 
 
+@pytest.mark.parametrize("limit", [2, 3])
+def test_list_inbox_sessions_full_page_has_cursor_only_when_more_exist(isolated_state, limit):
+    """A page the feed fills exactly ends it: no cursor, so the Inbox offers no
+    "Load more" whose click would find nothing."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        for i in range(3):
+            sid = f"ses_{i}"
+            _seed_titled_session(conn, scope_id, sid, f"S{i}")
+            _insert_msg(conn, scope_id, sid, "agent", f"reply {i}", f"2026-05-30T1{i}:00:00Z")
+
+    with engine.connect() as conn:
+        page = messages_service.list_inbox_sessions(conn, platform="avibe", limit=limit)
+        assert len(page["sessions"]) == min(limit, 3)
+        if limit < 3:
+            assert page["next_cursor"] == f"{page['sessions'][-1]['last_activity_at']}|ses_1"
+            rest = messages_service.list_inbox_sessions(
+                conn, platform="avibe", limit=limit, before=page["next_cursor"]
+            )
+            assert [r["session_id"] for r in rest["sessions"]] == ["ses_0"]
+            assert rest["next_cursor"] is None
+        else:
+            assert page["next_cursor"] is None
+
+
 # --- Send-while-busy queue + per-session draft ------------------------------
 
 

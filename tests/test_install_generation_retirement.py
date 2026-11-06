@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import vibe.upgrade
+
+
 import json
 import os
 from pathlib import Path
@@ -383,12 +386,14 @@ def test_failed_candidate_is_discarded_but_selected_install_is_unchanged(
 
 @pytest.mark.parametrize("surface", ["manual", "automatic"])
 def test_repeated_real_upgrade_callers_retire_history(installation, monkeypatch, surface):
-    from vibe import api, cli
+    from vibe import api, cli, restart_supervisor
 
     root, launcher = installation
     caller = cli if surface == "manual" else api
+    plan_owner = upgrade if surface == "manual" else api
+    restart_owner = restart_supervisor if surface == "manual" else api
     monkeypatch.setattr(caller, "_runtime_process_was_running", lambda: surface == "automatic")
-    monkeypatch.setattr(caller, "schedule_restart", lambda **kwargs: {"job_id": "test"})
+    monkeypatch.setattr(restart_owner, "schedule_restart", lambda **kwargs: {"job_id": "test"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     version = {"error": None, "has_update": True, "latest": "99"}
@@ -399,7 +404,7 @@ def test_repeated_real_upgrade_callers_retire_history(installation, monkeypatch,
         exported = candidate(root, f"{index:032x}")
         activation = upgrade.AtomicActivation(launcher, exported, upgrade._launcher_generation(launcher, root))
         plan = upgrade.UpgradePlan(command=["test-uv"], env={}, method="uv", activation=activation)
-        monkeypatch.setattr(caller, "build_upgrade_plan", lambda **kwargs: plan)
+        monkeypatch.setattr(plan_owner, "build_upgrade_plan", lambda **kwargs: plan)
         monkeypatch.setattr(caller.subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, "", ""))
         result = cli.cmd_upgrade() if surface == "manual" else api.do_upgrade(auto_restart=True)
         assert result == 0 if surface == "manual" else result["ok"]
@@ -983,7 +988,7 @@ def test_installer_postcommit_notice_failure_keeps_committed_generation(
     root, launcher = installation
     exported = candidate(root, "selected")
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "format_activation_failures",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokenPipeError("closed pipe")),
     )
@@ -1005,13 +1010,13 @@ def test_installer_postcommit_owner_failure_keeps_committed_generation(
 
     root, launcher = installation
     exported = candidate(root, "selected")
-    activate = cli.activate_installer_candidate
+    activate = vibe.upgrade.activate_installer_candidate
 
     def activate_then_fail(activation):
         activate(activation)
         raise RuntimeError("retention reporting failed")
 
-    monkeypatch.setattr(cli, "activate_installer_candidate", activate_then_fail)
+    monkeypatch.setattr(vibe.upgrade, "activate_installer_candidate", activate_then_fail)
 
     result = cli._dispatch_installer_activation([
         "--launcher", str(launcher), "--candidate", str(exported),
@@ -1042,16 +1047,16 @@ def test_cli_postcommit_notice_failure_keeps_committed_generation(
         lambda: {"error": None, "has_update": True, "latest": "99"},
     )
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "execute_upgrade_plan",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
     )
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_args: None)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "format_activation_failures",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
     )
@@ -1084,21 +1089,21 @@ def test_cli_postcommit_owner_failure_keeps_committed_generation(
         lambda: {"error": None, "has_update": True, "latest": "99"},
     )
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
-    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(vibe.upgrade, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
     monkeypatch.setattr(
-        cli,
+        vibe.upgrade,
         "execute_upgrade_plan",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
     )
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_args: None)
-    activate = cli.activate_upgrade_candidate
+    activate = vibe.upgrade.activate_upgrade_candidate
 
     def activate_then_fail(activation):
         activate(activation)
         raise RuntimeError("retention reporting failed")
 
-    monkeypatch.setattr(cli, "activate_upgrade_candidate", activate_then_fail)
+    monkeypatch.setattr(vibe.upgrade, "activate_upgrade_candidate", activate_then_fail)
 
     result = cli.cmd_upgrade()
 

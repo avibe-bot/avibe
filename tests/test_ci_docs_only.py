@@ -200,16 +200,15 @@ def writes(*paths: str):
 
 
 def test_pr_compares_actual_merge_tree_with_verified_parents_at_depth_two(repo: Path, tmp_path: Path) -> None:
-    event, sha = synthetic_pr(repo, writes("core/feature.py", "docs/plans/feature.md"))
+    event, merge = synthetic_pr(repo, writes("core/feature.py", "docs/plans/feature.md"))
     shallow = tmp_path / "shallow"
     subprocess.run(["git", "clone", "-q", "--depth=2", repo.as_uri(), str(shallow)], check=True)
     assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
     # The base's own core.py change is not the PR's: only its backend paths count.
-    assert routes(classify("pull_request", event, sha, shallow)) == ("skip", "run")
+    assert routes(classify("pull_request", event, merge, shallow)) == ("skip", "run")
     wrong = json.loads(json.dumps(event))
     wrong["pull_request"]["head"]["sha"] = event["pull_request"]["base"]["sha"]
-    assert classify("pull_request", wrong, sha, shallow) == classify("workflow_dispatch", {}, sha, shallow)
-    assert routes(classify("pull_request", event, event["pull_request"]["head"]["sha"], shallow)) == FULL
+    assert classify("pull_request", wrong, merge, shallow) == classify("workflow_dispatch", {}, merge, shallow)
 
 
 UI_SOURCES = (
@@ -437,6 +436,15 @@ def run_cli(repo: Path, tmp_path: Path, event_name: str, payload, sha: str, *, e
     result = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     return result.stdout, output.read_text(), summary.read_text()
+
+
+def test_cli_pr_uses_checked_out_merge_head_when_github_sha_is_source_head(repo: Path, tmp_path: Path) -> None:
+    payload, merge = synthetic_pr(repo)
+    source_head = payload["pull_request"]["head"]["sha"]
+    assert source_head != merge
+    _, output, summary = run_cli(repo, tmp_path, "pull_request", payload, source_head)
+    assert output == "docs_only=true\nwindows_control_ipc=false\nbrowser=skip\nplatform=skip\n"
+    assert "## CI scope: documentation only" in summary
 
 
 @pytest.mark.parametrize("event_name,expected", [

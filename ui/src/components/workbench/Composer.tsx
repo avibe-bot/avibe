@@ -17,7 +17,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isComposingKey } from '../../lib/imeComposition';
 import { nativeHapticImpact } from '../../lib/native';
-import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
+import { dismissSoftKeyboard, isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
   actionShortcutMatches,
@@ -1949,7 +1949,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setAttachments([]);
     attachmentFilesRef.current.clear();
     referencesRef.current = [];
-    if (useMentions) mentionRef.current?.clear();
+    // On a phone, sending ends the typing: the soft keyboard closes as the
+    // message leaves, not when the server answers. A desktop, or a tablet on a
+    // hardware keyboard, keeps the field focused for the next message.
+    const closeKeyboard = isSoftKeyboardOpen();
+    if (useMentions) mentionRef.current?.clear({ blur: closeKeyboard });
+    if (closeKeyboard) dismissSoftKeyboard();
     try {
       // If the caller reports the send couldn't start (home no-project nudge),
       // restore the prompt + attachments for retry — unless the user typed anew.
@@ -1976,9 +1981,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             setValue(submitted);
             setHasText(Boolean(submitted));
             if (useMentions) {
-              // Chips re-resolve when re-picked; the content is never lost.
+              // Chips re-resolve when re-picked; the content is never lost. The
+              // keyboard closed with the send stays closed: the text comes back
+              // without focus, and a tap on the field opens the keyboard again.
               referencesRef.current = sentRefs;
-              mentionRef.current?.setText(submitted);
+              mentionRef.current?.setText(submitted, { focus: !closeKeyboard });
             }
           }
           onDraftChange?.(submitted);

@@ -1,3 +1,6 @@
+
+import vibe.runtime
+
 import json
 import os
 from dataclasses import dataclass
@@ -2627,7 +2630,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
         captured["timeout"] = timeout
         return _Response()
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
 
     args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123", "--json"])
@@ -2658,7 +2661,7 @@ def test_show_path_cli_prints_the_json_envelope_without_json_flag(monkeypatch, t
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {})
 
     args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123"])
     assert cli.cmd_show_path(args) == 0
@@ -2677,7 +2680,7 @@ def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, caps
     def _urlopen(_request, timeout):
         raise OSError("runtime unavailable")
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
 
     args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123", "--json"])
@@ -2693,7 +2696,7 @@ def test_show_path_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
     paths.ensure_data_dirs()
     _save_config()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {})
 
     args = cli.build_parser().parse_args(["show", "path", "--json"])
     assert cli.cmd_show_path(args) == 0
@@ -2746,7 +2749,7 @@ def test_show_path_cli_prewarm_uses_verified_loopback_for_non_loopback_host(monk
             return _Response({"ui_pid": 123})
         return _Response()
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
 
     args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123", "--json"])
@@ -2792,7 +2795,7 @@ def test_show_path_cli_prewarm_falls_back_to_configured_ui_host_after_loopback_m
             raise AssertionError("unverified loopback target received the prewarm token")
         return _Response()
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
 
     args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123", "--json"])
@@ -2995,7 +2998,7 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
         prewarmed.append((request.full_url, json.loads(request.data.decode("utf-8"))))
         return _Response()
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     monkeypatch.setattr(cli.urllib.request, "urlopen", _urlopen)
 
     parser = cli.build_parser()
@@ -3031,7 +3034,7 @@ def test_show_status_and_update_default_to_caller_session(monkeypatch, tmp_path,
     monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
     paths.ensure_data_dirs()
     _save_config()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {})
 
     parser = cli.build_parser()
     assert cli.cmd_show_path(parser.parse_args(["show", "path", "--json"])) == 0
@@ -3079,7 +3082,7 @@ def test_show_status_exposes_history_without_modifying_either_repository(monkeyp
         (workspace / ".git" / "HEAD").write_text("ref: refs/heads/user-branch\n")
     before = {str(path.relative_to(workspace)): path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
     monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: active)
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {})
     parser = cli.build_parser()
 
     assert cli.cmd_show_status(parser.parse_args(["show", "status", "--json"])) == 0
@@ -3322,7 +3325,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
 
     captured = {}
 
@@ -3701,7 +3704,7 @@ def test_show_annotate_cli_posts_single_enable_event_to_live_ui(monkeypatch, tmp
                 last_active_at=now,
             )
         )
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     captured = {}
 
     class _Response:
@@ -3767,7 +3770,7 @@ def test_show_annotate_cli_defaults_session_and_records_offline_control(monkeypa
     paths.ensure_data_dirs()
     _save_config()
     ensure_sqlite_state()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": None})
 
     engine = create_sqlite_engine()
     now = messages_service._utc_now_iso()
@@ -3843,7 +3846,7 @@ def test_show_annotate_cli_does_not_create_page_for_unwritable_session(
     paths.ensure_data_dirs()
     _save_config()
     ensure_sqlite_state()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": None})
 
     engine = create_sqlite_engine()
     if status is not None:
@@ -3938,7 +3941,7 @@ def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tm
     # A dispatching event reserves its turn under the caller's own
     # authority before anything is posted, so the session has to exist.
     _seed_show_cli_session()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
 
     captured = {}
 
@@ -4001,7 +4004,7 @@ def test_show_event_cli_dispatch_preserves_top_level_payload(monkeypatch, tmp_pa
     # A dispatching event reserves its turn under the caller's own
     # authority before anything is posted, so the session has to exist.
     _seed_show_cli_session()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
 
     captured = {}
 
@@ -4077,7 +4080,7 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
             )
         )
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": None})
     dispatched = []
 
     async def _fake_run_dispatch(event):
@@ -4119,7 +4122,7 @@ def test_show_event_cli_embedded_dispatch_fallback_uses_synchronous_bridge(monke
     # A dispatching event reserves its turn under the caller's own
     # authority before anything is posted, so the session has to exist.
     _seed_show_cli_session()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": None})
     captured = {}
 
     def fake_record(session_id, payload):
@@ -4216,7 +4219,7 @@ def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
     # A dispatching event reserves its turn under the caller's own
     # authority before anything is posted, so the session has to exist.
     _seed_show_cli_session()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     posted = {}
 
     def timeout_after_receiving(request, **_kwargs):
@@ -4421,7 +4424,7 @@ def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch
     # A dispatching event reserves its turn under the caller's own
     # authority before anything is posted, so the session has to exist.
     _seed_show_cli_session()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
     posted = {}
 
     def bad_gateway_after_receiving(request, **_kwargs):
@@ -4505,7 +4508,7 @@ def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_
             )
         )
 
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
 
     def _urlopen(request, timeout):
         raise cli.urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, None)
@@ -4545,7 +4548,7 @@ def test_show_mark_cli_posts_to_configured_ui_host_when_running(monkeypatch, tmp
     config.ui.setup_host = "100.97.103.112"
     config.ui.setup_port = 15130
     config.save()
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 123})
 
     captured = {}
 

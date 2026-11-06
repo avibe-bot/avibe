@@ -44,13 +44,20 @@
 // a message can change element without leaving the transcript: a Harness row
 // that an older page turns into a group member is re-mounted inside the group,
 // or folded into its collapsed head. ``resolveScrollAnchor`` follows it there.
-export type ScrollAnchor = { el: HTMLElement; top: number; rowId?: string; rowTop?: number };
+export type ScrollAnchor = { el: HTMLElement; top: number; rowId?: string; rowTop?: number; key?: string };
 
 /** The visible band of the scroll container, in viewport coordinates. */
 export type ScrollViewport = { top: number; bottom: number };
 
 const isTranscriptRow = (el: HTMLElement): boolean =>
   el.dataset.messageId !== undefined || el.dataset.transcriptRow !== undefined;
+
+// A row with an animation of its own running (a reply growing in at the tail,
+// ui: transcriptMotion) is drawn away from where its layout puts it until it
+// ends. Its box would read the animation as the content moving, so it is never
+// the anchor; the rows around it are where they are.
+const isAnimating = (el: HTMLElement): boolean =>
+  typeof el.getAnimations === 'function' && el.getAnimations().some((animation) => animation.playState === 'running');
 
 /**
  * The anchor among the content's children. ``viewport`` decides which element
@@ -71,7 +78,7 @@ export const pickScrollAnchor = (
     const el = children[i];
     const rect = el.getBoundingClientRect();
     // Entirely above the viewport top — scrolled past, not what the reader sees.
-    if (rect.bottom <= viewport.top) continue;
+    if (rect.bottom <= viewport.top || isAnimating(el)) continue;
     if (rect.top < viewport.top) {
       straddling ??= { el, rect };
       continue;
@@ -103,6 +110,10 @@ export const anchorForTouched = (
 
 function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number): ScrollAnchor {
   const anchor: ScrollAnchor = { el, top: rect.top - contentTop };
+  // A transcript item that is not a message (an activity card or chip, a
+  // Harness group's members, its collapse bar) names itself, so it can be found
+  // again when it re-mounts.
+  if (el.dataset.transcriptKey) anchor.key = el.dataset.transcriptKey;
   const row = el.dataset.messageId !== undefined ? el : el.querySelector<HTMLElement>('[data-message-id]');
   if (row?.dataset.messageId) {
     anchor.rowId = row.dataset.messageId;
@@ -120,19 +131,25 @@ const byAttribute = (content: ParentNode, selector: string) => content.querySele
 
 /**
  * The element to restore against, and where its top belongs inside the content.
- * The anchored element while it is still mounted; otherwise the same message's
- * row wherever it now renders; otherwise the collapsed group that folded it in
+ * The anchored element while it is still mounted; otherwise the item of the same
+ * ``data-transcript-key`` where it was; otherwise the same message's row wherever
+ * it now renders; otherwise the collapsed group that folded it in
  * (``data-harness-members`` lists a group's message ids), placed where the row
- * was. ``null`` when the message left the transcript.
+ * was. ``null`` when nothing of it is left in the transcript.
  */
 export const resolveScrollAnchor = (
   anchor: ScrollAnchor,
   content: ParentNode,
 ): { el: HTMLElement; top: number } | null => {
   if (anchor.el.isConnected) return { el: anchor.el, top: anchor.top };
-  if (anchor.rowId === undefined || anchor.rowTop === undefined) return null;
   // Quoted attribute values need only quotes and backslashes escaped.
-  const id = anchor.rowId.replace(/["\\]/g, '\\$&');
+  const quoted = (value: string) => value.replace(/["\\]/g, '\\$&');
+  if (anchor.key !== undefined) {
+    const item = byAttribute(content, `[data-transcript-key="${quoted(anchor.key)}"]`);
+    if (item) return { el: item, top: anchor.top };
+  }
+  if (anchor.rowId === undefined || anchor.rowTop === undefined) return null;
+  const id = quoted(anchor.rowId);
   const row =
     byAttribute(content, `[data-message-id="${id}"]`) ??
     byAttribute(content, `[data-harness-members~="${id}"]`);

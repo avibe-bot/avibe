@@ -62,8 +62,9 @@ function mount(
       </Routes>
     </MemoryRouter>,
   );
+  // Each row's link is the conversation's title (the row itself opens it).
   return screen
-    .getAllByRole('button')
+    .getAllByRole('link')
     .map((node) => node.textContent ?? '')
     .filter((text) => text.includes('Session '))
     .map((text) => text.match(/Session \d+/)?.[0] ?? '');
@@ -181,7 +182,7 @@ describe('with Bots', () => {
     );
   }
   const rowNames = () => screen
-    .getAllByRole('button')
+    .queryAllByRole('link')
     .map((node) => node.textContent ?? '')
     .map((text) => text.match(/Session \d+|Vibey|CSO/)?.[0])
     .filter(Boolean);

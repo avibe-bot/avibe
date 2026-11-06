@@ -22,8 +22,6 @@ async function open(page: Page, query: string, { imageDelay = 50, imagesHeldUnti
   });
   await page.goto(`/e2e/chat-scroll/fixture.html?${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
-  // A web font arriving reflows the rows on screen, which no anchor can hold.
-  await page.evaluate(() => document.fonts.ready);
   await expect.poll(() => transcript(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(1);
   await page.waitForTimeout(300);
 }
@@ -86,6 +84,48 @@ test('an upward fling gets the older page before it reaches the top, and startin
   expect(restores.filter((write) => write.to - write.from > 5000)).toHaveLength(1);
   expect(restores.filter((write) => write.to - write.from < 100 && write.to > write.from + 40)).toHaveLength(0);
   expect(restores[0].from).toBeGreaterThan(200);
+});
+
+test('an older page goes in only once the reader comes to rest, and holds their place', async ({ page }) => {
+  // iOS takes back a scroll write made during momentum or the top bounce
+  // (measured on iOS 27), which would drop the reader on the top of the page that
+  // just landed. So the page waits for rest, however early it arrived.
+  await open(page, 'delay=50&images=0');
+  // Just outside the prefetch band (eight screens), so the request comes mid-fling.
+  await transcript(page).evaluate((el) => { el.scrollTop = el.clientHeight * 8 + 300; });
+  await page.waitForTimeout(300);
+  expect(await loads(page)).toBe(0);
+  const first = () => transcript(page).locator('[data-message-id]').first().getAttribute('data-message-id');
+  const head = await first();
+  // Keep the transcript moving, a few pixels a frame, as a long fling does.
+  await transcript(page).evaluate((el) => {
+    const fling = { stop: false };
+    (window as unknown as { fling: typeof fling }).fling = fling;
+    const step = () => {
+      if (fling.stop) return;
+      el.scrollTop -= 6;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+  await expect.poll(() => loads(page)).toBe(1);
+  // The page is in hand, but nothing goes in while the transcript moves.
+  await page.waitForTimeout(600);
+  expect(await first()).toBe(head);
+  await page.evaluate(() => window.__scrollLab.pinRef(0));
+  await page.evaluate(() => { (window as unknown as { fling: { stop: boolean } }).fling.stop = true; });
+  await nextFrames(page);
+  const reference = await page.evaluate(() => window.__scrollLab.refTop());
+  await expect.poll(first).not.toBe(head);
+  // Rows that go in above the reader are history: nothing enters or glides.
+  const moving = await transcript(page).evaluate((el) => {
+    const rows = [...el.querySelectorAll('[data-message-id]')];
+    return [rows[0].parentElement!, ...rows].filter((node) => node.getAnimations().length > 0).length;
+  });
+  expect(moving).toBe(0);
+  await nextFrames(page);
+  const after = await page.evaluate(() => window.__scrollLab.refTop());
+  expect(Math.abs(after! - reference!)).toBeLessThanOrEqual(1);
 });
 
 test('the reading position holds within a pixel through every older page, the retained-window cap, and the images that arrive with them', async ({ page }) => {
@@ -267,6 +307,42 @@ test('a Harness group opened across the top edge opens where the reader touched 
     return rect.top >= box.top && rect.top < box.bottom;
   });
   expect(onScreen).toBe(true);
+});
+
+test('following the tail, opening something holds it where it was tapped and stops following; a plain tap does not', async ({ page }) => {
+  // count=392 puts the last execution-process chip on screen at the bottom.
+  await open(page, 'delay=0&images=0&activity=1&count=392');
+  const bottomGap = () => transcript(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+  // The transcript item holding the last chip (it re-mounts as it opens), and
+  // its top: what holds still. The conversation's glide must be over first.
+  const settled = () => transcript(page).evaluate((el) => el.querySelector('[data-message-id]')!.parentElement!.getAnimations().length === 0);
+  const itemTop = () => transcript(page).evaluate((el) => {
+    const column = el.querySelector('[data-message-id]')!.parentElement!;
+    const chip = [...el.querySelectorAll('[aria-expanded]')].at(-1)!;
+    return [...column.children].find((child) => child.contains(chip))!.getBoundingClientRect().top;
+  });
+  expect(await bottomGap()).toBeLessThan(1);
+
+  // A plain tap on a message keeps following: a row streaming in is followed.
+  const text = transcript(page).locator('[data-message-id]').last();
+  const textBox = (await text.boundingBox())!;
+  await page.mouse.click(textBox.x + 20, textBox.y + Math.min(20, textBox.height / 2));
+  await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
+  await expect.poll(bottomGap).toBeLessThan(1);
+  await expect.poll(settled).toBe(true);
+
+  // Opening the chip: its item holds still, and the next row does not pull it away.
+  const chip = transcript(page).locator('[aria-expanded]').last();
+  const box = (await chip.boundingBox())!;
+  const before = await itemTop();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(transcript(page).locator('[aria-expanded="true"]')).toHaveCount(1);
+  await nextFrames(page);
+  expect(Math.abs(await itemTop() - before)).toBeLessThanOrEqual(1);
+  await page.evaluate(() => window.__scrollLab.push('Another row streaming in.'));
+  await page.waitForTimeout(400);
+  expect(Math.abs(await itemTop() - before)).toBeLessThanOrEqual(1);
+  expect(await bottomGap()).toBeGreaterThan(1);
 });
 
 test('older rows appear at once after a chat opened on its skeleton', async ({ page }) => {

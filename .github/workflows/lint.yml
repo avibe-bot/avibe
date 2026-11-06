@@ -202,6 +202,8 @@ jobs:
               npm run typecheck:tests
               # Design frames (ui/design) are not part of the production build.
               npm run typecheck:design
+              # Every browser suite, including those whose cases no lane runs.
+              npm run typecheck:e2e
           - part: tests
             commands: |
               npm test
@@ -246,6 +248,10 @@ jobs:
               # Against the built app: StrictMode's dev double-mount drops the picker's first open.
               npm run test:workbench-general-build -- composer-mention-picker.spec.ts
               npm run test:project-order
+              # Paging older history through the retained-window cap (Chromium, desktop and phone).
+              npm run test:chat-paging
+              npm run test:model-provider
+              npm run test:web-fetch
           - lane: 3
             suites: |
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
@@ -253,6 +259,8 @@ jobs:
               npm run test:pdf-preview
               # Motion of the shared surfaces: sheets, popovers, toasts (Chromium and WebKit).
               npm run test:motion
+              npm run test:citations
+              npm run test:session-dot
           - lane: 4
             suites: |
               npm run test:vault-integrity
@@ -316,8 +324,9 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
 
       - name: Test browser interactions
-        # Model Hub catalog/provider regression runs on the scheduled/manual
-        # model-hub-ui-regression workflow instead of blocking every PR.
+        # The Model Hub catalog regression (about ten minutes) runs on the
+        # scheduled/manual model-hub-ui-regression workflow instead of blocking
+        # every PR. Its provider suite also runs here, in lane 2.
         working-directory: ui
         run: |
           # Time the entire npm command (including built-app preparation), not

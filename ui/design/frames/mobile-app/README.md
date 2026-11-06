@@ -132,7 +132,7 @@ supersede the earlier spinner suggestion and exploratory decorative effects.
 | Press / release | Controls scale to `--motion-scale-press-control` (0.94), cards to `--motion-scale-press` (0.97), instant 100ms; release uses snappy 290ms. Respect the approved 60ms scroller touch delay. | Color step only. |
 | First instance load | Shipped Skeleton blocks, one SkeletonShimmer sweep per card on `--motion-shimmer-duration` (1600ms). Use its existing reveal delay; don't flash skeleton for faster reads. No spinner. | Still blocks, no shimmer or reveal fade. |
 | Skeleton → rows / refresh | `--motion-handover-duration` / ease: 240ms / enter. Match row geometry; cached identities remain still. Failure/retry reuses the same region. | Content replaces skeleton in one frame. |
-| Forward / back between entry steps | Follow approved M5: View Transition with sheet 440ms curve on supported iOS 18+, prior page drift `--motion-drift` (30%). Unsupported iOS 17 uses a cut. Skip on new input or native-owned swipe / `hasUAVisualTransition`. | Fast 160ms crossfade, no push. |
+| Forward / back between entry steps | Follow approved M5: View Transition on the `--motion-nav-*` pace (push 260ms, pop 220ms, one decelerating curve) on supported iOS 18+, prior page drift `--motion-drift` (30%). Unsupported iOS 17 uses a cut. Finish on new input; only the app's own Back animates a pop, and a history step the system took (an edge swipe) is a cut. | Fast 160ms crossfade, no push. |
 
 WKWebView budget: compositor transform/opacity only for travelling elements;
 never animate layout dimensions, filters or list shadows. Animate only the

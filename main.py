@@ -91,15 +91,16 @@ def load_config() -> Any:
     return V2Config.load(persist_migrations=True)
 
 
-def ensure_sqlite_state(*args, **kwargs):
-    from storage.importer import ensure_sqlite_state as _ensure_sqlite_state
-
-    return _ensure_sqlite_state(*args, **kwargs)
-
-
 def prepare_sqlite_state(config: Any):
-    """Run safe SQLite state migrations before the service starts."""
-    return ensure_sqlite_state(primary_platform=config.platform)
+    """Repair and validate backups once before the service starts.
+
+    Ordinary CLI/store opens probe first. This startup owner must validate its
+    own backup attempt even when a CLI/UI process already upgraded the schema,
+    so service readiness can still start the existing 72-hour expiry clock.
+    """
+    from storage.importer import repair_sqlite_state
+
+    return repair_sqlite_state(primary_platform=config.platform)
 
 
 def _log_shutdown_signal(logger: logging.Logger, signum: int) -> None:

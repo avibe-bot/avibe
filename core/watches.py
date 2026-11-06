@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from config import paths
 from config.atomic_io import write_atomic
+from core.watch_protocol import DEFAULT_RETRY_EXIT_CODE, NO_EVENT_EXIT_CODE, NO_EVENT_MARKER
 from core import watch_worker
 from core.caller_context import background_command_env
 from core.command_runner import SupervisedCommandStartupError, run_supervised_command
@@ -43,7 +44,6 @@ from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     COMMAND_TIMED_OUT_METADATA_KEY,
     DEFINITION_CYCLE_COLUMNS,
-    NO_EVENT_EXIT_CODE,
     WATCH_CIRCUIT_BREAKER_METADATA_KEY as CIRCUIT_BREAKER_METADATA_KEY,
     WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY as FOLLOW_UP_RUN_ID_METADATA_KEY,
     WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
@@ -66,7 +66,6 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETRY_EXIT_CODE = 75
 # ``NO_EVENT_EXIT_CODE`` (imported above) marks a waiter that ran to completion and
 # decided the cycle is not worth waking the Agent for. It is neither an event (exit 0,
 # which authorises a hook) nor a failure (any other non-zero, which authorises a
@@ -75,9 +74,8 @@ DEFAULT_RETRY_EXIT_CODE = 75
 # that can only report "nothing happened" -- green CI, filtered-out review chatter --
 # had to either fire a useless turn or spin in forever mode.
 #
-# It lives in ``storage.background`` because the lifecycle projections there have to
-# agree that this code is a CLEAN ending. A second literal here is exactly how the
-# supervisor and those projections disagreed about it before.
+# It lives in ``core.watch_protocol`` because the lifecycle projections in
+# storage must agree that this code is a CLEAN ending.
 #
 # The code alone is NOT the signal. 64 is BSD ``sysexits`` EX_USAGE, so any watched
 # command that rejects its own arguments or configuration exits with it -- and reading
@@ -85,7 +83,6 @@ DEFAULT_RETRY_EXIT_CODE = 75
 # rerun the broken command indefinitely. A quiet cycle therefore has to say so: the
 # waiter prints this marker, which a command that never heard of the protocol cannot
 # emit by accident, and everything else keeps failing loudly.
-NO_EVENT_MARKER = "avibe-watch: no-event"
 # A quiet cycle's own output is logged rather than stored: it is diagnostic detail, not
 # state, and the whole point of the code is that it costs nothing to reach. The limit is
 # wider than an error squash because a suppressed summary lists every watched workflow.

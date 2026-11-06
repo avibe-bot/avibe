@@ -194,7 +194,16 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
       .filter((section) => section.rows.length > 0);
   }, [hasBots, roster.sessionIds, visible]);
 
-  const hasMore = !!nextCursor;
+  // "Load more" belongs to the view: it is offered only when a further page could
+  // bring a row this tab shows. On All that is any row. The Unread tab shows only
+  // unread conversations, and the unread map covers every page, so it has more only
+  // while an unread conversation is not loaded yet. A click reads on until such a
+  // row arrives (``loadMore``), so it never ends on nothing new.
+  const unreadNotLoaded = useMemo(() => {
+    const loaded = new Set(inboxSessions.map((row) => row.session_id));
+    return Object.entries(unreadBySession).some(([id, n]) => n > 0 && !loaded.has(id));
+  }, [inboxSessions, unreadBySession]);
+  const hasMore = !!nextCursor && (filter === 'all' || unreadNotLoaded);
   // What the list draws, in order, for its motion (M7): a row the order changes moves,
   // the rows around it glide. Another tab is another list.
   const flipIds = useMemo(() => [
@@ -206,10 +215,8 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     ...(hasMore ? ['more'] : []),
   ], [hasMore, sections, visible.length]);
   // Only declare "all clear" when nothing is visible AND nothing left to load
-  // could match. On the Unread tab that means no unread sessions exist anywhere
-  // (unreadSessions is pagination-independent) — otherwise unread sessions on a
-  // later page would be hidden behind a false "all caught up". On All it means
-  // there are simply no more pages.
+  // could match (``hasMore`` is already the view's). An unread conversation on a
+  // later page keeps the list, its "further down" note and the button instead.
   // Nothing known yet: no rows (from the server or the local snapshot) and the
   // feed's first answer still owed. Skeleton cards, not an empty state that the
   // first page would then replace.
@@ -219,7 +226,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   const showFailed = inboxSessions.length === 0 && feedStatus === 'failed';
   const cardsHandover = useSkeletonHandover(showSkeleton);
   const showEmpty =
-    !showSkeleton && !showFailed && visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
+    !showSkeleton && !showFailed && visible.length === 0 && !hasMore;
 
   return (
     <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-2 md:pt-2">
@@ -425,15 +432,14 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
           })}
 
           {/* Load more walks the full feed by activity; the active tab then
-              re-derives ``visible``. Shown on both tabs (and even when the
-              Unread tab's current page is empty) so unread sessions deeper in
-              history stay reachable. */}
+              re-derives ``visible``. Only while this tab has more to show, and on
+              the Unread tab it reads on until an unread conversation arrives. */}
           {hasMore && loadingMore && <div data-flip-id="more"><InboxCardsSkeleton rows={1} /></div>}
           {hasMore && !loadingMore && (
             <button
               type="button"
               data-flip-id="more"
-              onClick={() => loadMore()}
+              onClick={() => void loadMore(filter === 'unread' ? 'unread' : 'any')}
               className="flex items-center justify-center gap-1.5 self-center rounded-md border border-border-strong px-4 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
             >
               {t('workbench.inbox.loadMore')}

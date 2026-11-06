@@ -366,8 +366,13 @@ def test_cancelled_expiry_does_not_delete(tmp_path):
     assert backup.exists()
 
 
-def test_real_migration_import_and_service_readiness_enable_expiry(monkeypatch, tmp_path):
+@pytest.mark.parametrize("fresh_service", [False, True])
+def test_real_migration_import_and_service_readiness_enable_expiry(monkeypatch, tmp_path, fresh_service):
+    from types import SimpleNamespace
+
+    import main as service_main
     from config import paths
+    from storage.importer import probe_current_sqlite_state, reset_ensured_sqlite_state
     from vibe import runtime
 
     state_dir = tmp_path / "state"
@@ -380,10 +385,27 @@ def test_real_migration_import_and_service_readiness_enable_expiry(monkeypatch, 
     assert record["phase"] == "validated"
     assert backups.expire_sqlite_migration_backups(db_path)["status"] == "unconfirmed"
     monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+    monkeypatch.setattr(paths, "get_state_dir", lambda: state_dir)
+    if fresh_service:
+        # A CLI/UI process can complete the upgrade before the service boots.
+        # Its ready receipts let the next process skip ordinary repair, but the
+        # service must still validate the backup attempt itself before expiry.
+        with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO state_meta (key, value_json, updated_at) VALUES (?, ?, ?)",
+                (
+                    "migrations.legacy_deferred_resource_contexts.v1",
+                    json.dumps({"state": "completed", "schema_version": 3, "instance_id": "synthetic-instance"}),
+                    START.isoformat(),
+                ),
+            )
+        reset_ensured_sqlite_state()
+        assert probe_current_sqlite_state(db_path)
 
     # The real runtime owner, not a synthetic "healthy" flag, confirms readiness.
     runtime.acquire_service_instance_lock()
     try:
+        service_main.prepare_sqlite_state(SimpleNamespace(platform="avibe"))
         runtime.mark_service_instance_started()
         ready = datetime.fromisoformat(_manifest(backup)["expiry_lifecycle"]["ready_at"])
         runtime.mark_service_instance_started()

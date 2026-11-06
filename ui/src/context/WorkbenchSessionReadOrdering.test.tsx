@@ -2071,7 +2071,10 @@ describe('Workbench session read ownership', () => {
     consoleError.mockRestore();
   });
 
-  it('starts the load-more indicator only after a blocking refresh settles', async () => {
+  // The click is answered at once (owner report 2026-11-06: a click that waited
+  // silently behind another read looked like a dead button), while the page read
+  // itself still waits for the refresh, and neither flag is left behind.
+  it('shows the load-more indicator from the click, while its read waits behind a blocking refresh', async () => {
     const refreshRead = deferred({ sessions: [inboxRow], next_cursor: 'cursor_refresh', unread_by_session: { [session.id]: 3 } });
     const loadMoreRead = deferred({ sessions: [], next_cursor: null, unread_by_session: { [session.id]: 3 } });
     const listInbox = vi.fn()
@@ -2103,7 +2106,7 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
     expect(inbox?.loading).toBe(true);
-    expect(inbox?.loadingMore).toBe(false);
+    expect(inbox?.loadingMore).toBe(true);
     expect(listInbox).toHaveBeenCalledTimes(2);
     await act(async () => {
       refreshRead.resolve({ sessions: [inboxRow], next_cursor: 'cursor_refresh', unread_by_session: { [session.id]: 3 } });

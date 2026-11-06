@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import vibe.runtime
+
+
 import asyncio
 import errno
 import hashlib
@@ -4456,17 +4459,17 @@ def test_vibe_stop_ends_the_engine_a_terminated_service_left_running(
     try:
         if stop == "full":
             monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
-            monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
-            monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+            monkeypatch.setattr(vibe.runtime, "stop_service", lambda **kwargs: False)
+            monkeypatch.setattr(vibe.runtime, "stop_ui", lambda **kwargs: False)
             monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
             monkeypatch.setattr(cli, "_stop_jobs", lambda: None)
             monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
             assert cli.cmd_stop() == 0
         else:
             stopped = SimpleNamespace(
-                outcome=cli.runtime.DesktopRuntimeStopOutcome.STOPPED, opencode_stopped=False, remaining=(),
+                outcome=vibe.runtime.DesktopRuntimeStopOutcome.STOPPED, opencode_stopped=False, remaining=(),
             )
-            monkeypatch.setattr(cli.runtime, "stop_desktop_runtime", lambda runtime_id: stopped)
+            monkeypatch.setattr(vibe.runtime, "stop_desktop_runtime", lambda runtime_id: stopped)
             monkeypatch.setattr(cli, "_stop_the_home_s_connector", lambda: 0)
             monkeypatch.setattr(cli, "_print_left_running", lambda result: None)
             assert cli.cmd_stop(expect_runtime_id="desktop-fixture") == 0

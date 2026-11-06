@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import core.scheduled_tasks as scheduled_tasks
+import core.vibe_agents as vibe_agents
+
+
 import json
 import re
 import shlex
@@ -20,7 +24,7 @@ def home(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
-    store = cli.VibeAgentStore()
+    store = vibe_agents.VibeAgentStore()
     try:
         store.ensure_builtin_default_agents([])
     finally:
@@ -79,7 +83,7 @@ def test_bot_commands_are_the_owners():
 
 
 def _agent_run(home, capsys, argv):
-    request_store = cli.TaskExecutionStore(home / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(home / "task_requests")
     args = cli.build_parser().parse_args(["agent", "run", *argv])
     with patch("vibe.cli._task_request_store", return_value=request_store):
         result = cli.cmd_agent_run(args)

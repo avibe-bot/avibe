@@ -16,7 +16,13 @@ let restingHeight = 0;
 // change.
 function isEditableFocused(): boolean {
   const el = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
-  if (!el) return false;
+  return isTextField(el);
+}
+
+/** A field the on-screen keyboard types into: an input, a textarea, or rich
+ *  text (the chat composer is a contenteditable editor). */
+export function isTextField(el: Element | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
   const tag = el.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
 }
@@ -57,6 +63,18 @@ export function isSoftKeyboardOpen(): boolean {
   // then focus a field). Multiply the delta back up by scale to compare in unzoomed
   // CSS px; at scale 1 this is a no-op, so non-zoomed behavior is unchanged.
   return (restingHeight - vv.height) * vv.scale > KEYBOARD_MIN_DELTA;
+}
+
+/** Close the on-screen keyboard once typing is done (a message was sent): the
+ *  focused text field gives up focus. Only while a soft keyboard is open, so a
+ *  desktop, or a tablet typing on a hardware keyboard, keeps its field focused.
+ *  Returns whether it closed one. */
+export function dismissSoftKeyboard(): boolean {
+  if (!isSoftKeyboardOpen()) return false;
+  const el = document.activeElement;
+  if (!isTextField(el)) return false;
+  (el as HTMLElement).blur();
+  return true;
 }
 
 // True on devices with an on-screen keyboard (touch). Callers gate on this to

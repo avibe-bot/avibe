@@ -248,7 +248,7 @@ test('the reply bubble names Vibey as written', async ({ page }) => {
   const eyebrow = page.locator('.pet-mini-bubble-speaker');
   await expect(eyebrow).toBeVisible();
   // innerText applies text-transform, so this is what the user reads.
-  expect(await eyebrow.evaluate((node) => node.innerText)).toContain('Vibey');
+  expect(await eyebrow.evaluate((node) => (node as HTMLElement).innerText)).toContain('Vibey');
 });
 
 test('expanded dismiss controls stay local to hover and focus', async ({ page }) => {

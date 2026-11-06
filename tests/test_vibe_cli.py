@@ -1,3 +1,11 @@
+
+import config.v2_config as v2_config
+import core.scheduled_tasks
+import vibe.api
+import vibe.restart_supervisor
+import vibe.runtime
+import vibe.upgrade
+
 import asyncio
 import builtins
 import contextlib
@@ -92,7 +100,7 @@ def test_cli_text_is_english_whatever_the_ui_language(monkeypatch, tmp_path, cap
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"language": "zh"}), encoding="utf-8")
     monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
-    monkeypatch.setattr(cli.V2Config, "load", lambda *_args, **_kwargs: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(v2_config.V2Config, "load", lambda *_args, **_kwargs: SimpleNamespace(language="zh"))
     han = re.compile(r"[\u4e00-\u9fff]")
 
     for path, parser in _parser_leaves(cli.build_parser()):
@@ -176,7 +184,7 @@ def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatc
     def _load_should_not_run(*_args, **_kwargs):
         raise AssertionError("help construction must not load or migrate V2Config")
 
-    monkeypatch.setattr(cli.V2Config, "load", _load_should_not_run)
+    monkeypatch.setattr(v2_config.V2Config, "load", _load_should_not_run)
     assert cli._configured_trace_retention_days() == 90
     cli.build_parser()
 
@@ -468,7 +476,7 @@ def test_tied_installs_are_never_ranked_by_discovery_order(split_launchers, monk
     monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
     parser = cli.build_parser()
     for generation in (split.old, split.new):
-        monkeypatch.setattr(cli, "current_generation", lambda generation=generation: generation)
+        monkeypatch.setattr(vibe.upgrade, "current_generation", lambda generation=generation: generation)
         with pytest.raises(SystemExit) as exc_info:
             cli._dispatch_parsed_command(parser, parser.parse_args(["start"]))
         assert exc_info.value.code == 0
@@ -497,7 +505,7 @@ def test_stable_launcher_repair_failures_name_the_cause_without_exception_text(s
             raise MigrationLockTimeout("Timed out waiting for migration lock")
             yield
 
-        monkeypatch.setattr(cli, "atomic_upgrade_lock", busy)
+        monkeypatch.setattr(vibe.upgrade, "atomic_upgrade_lock", busy)
 
     try:
         result = cli._repair_stable_launchers()
@@ -520,7 +528,7 @@ def test_windows_repair_leaves_the_launcher_it_runs_from_and_names_the_target(sp
     peer.symlink_to(split.old / "bin" / "vibe")
     monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(split.installer_launcher.parent), str(peer.parent)))
     # Stand-in for Windows holding the stale PATH launcher's image open.
-    monkeypatch.setattr(cli, "launcher_is_current_process", lambda launcher: Path(launcher) == split.path_launcher)
+    monkeypatch.setattr(vibe.upgrade, "launcher_is_current_process", lambda launcher: Path(launcher) == split.path_launcher)
 
     result = cli._repair_stable_launchers()
 
@@ -540,10 +548,10 @@ def test_recovery_commands_stay_pasteable_from_a_launcher_path_with_spaces(split
     spaced.parent.mkdir()
     split.installer_launcher.rename(spaced)
     monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(spaced.parent),))
-    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(vibe.upgrade, "current_generation", lambda: split.old)
     monkeypatch.setattr(cli, "cmd_vibe", lambda: 0)
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 4242)
-    monkeypatch.setattr(cli, "process_generation", lambda pid: split.old if pid == 4242 else None)
+    monkeypatch.setattr(vibe.upgrade, "process_generation", lambda pid: split.old if pid == 4242 else None)
     parser = cli.build_parser()
 
     def commands(text: str) -> list[list[str]]:
@@ -564,14 +572,14 @@ def test_stable_launcher_repair_fails_unless_the_launchers_converge(split_launch
 
     split = split_launchers
     other = _managed_generation("other", "1.3.0")
-    move = cli.move_managed_launcher_locked
+    move = vibe.upgrade.move_managed_launcher_locked
 
     def raced(launcher, selected, target):
         launcher.unlink()
         launcher.symlink_to(other / "bin" / "vibe")
         return move(launcher, selected, target)
 
-    monkeypatch.setattr(cli, "move_managed_launcher_locked", raced)
+    monkeypatch.setattr(vibe.upgrade, "move_managed_launcher_locked", raced)
 
     result = cli._repair_stable_launchers()
 
@@ -585,7 +593,7 @@ def test_unreadable_version_metadata_is_unknown_and_never_blocks_start(split_lau
     metadata = next(split.old.glob("uv/tools/avibe-os/lib/*/site-packages/*.dist-info/METADATA"))
     metadata.write_bytes(b"Metadata-Version: 2.1\nName: avibe-os\nVersion: 1.4.0\nSummary: \xff\xfe\n")
     ran = []
-    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(vibe.upgrade, "current_generation", lambda: split.old)
     monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
     parser = cli.build_parser()
 
@@ -605,7 +613,7 @@ def test_an_older_install_refuses_start_and_restart_unless_downgrade_is_explicit
     split = split_launchers
     old_version = _reinstall_same_version(split) if same_version else "1.4.0"
     ran = []
-    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(vibe.upgrade, "current_generation", lambda: split.old)
     monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
     monkeypatch.setattr(cli, "_cmd_restart_with_delay", lambda _delay: ran.append("restart") or 0)
     parser = cli.build_parser()
@@ -634,7 +642,7 @@ def test_a_supervisor_launch_of_an_older_install_is_warned_not_refused(
 ):
     split = split_launchers
     ran = []
-    monkeypatch.setattr(cli, "current_generation", lambda: split.old)
+    monkeypatch.setattr(vibe.upgrade, "current_generation", lambda: split.old)
     monkeypatch.setattr(cli, "cmd_vibe", lambda: ran.append("vibe") or 0)
     monkeypatch.setattr(cli, "cmd_start", lambda **_kwargs: ran.append("start") or 0)
     if desktop:
@@ -904,7 +912,7 @@ def test_doctor_lists_stored_cron_tasks_with_numeric_weekdays(monkeypatch):
     """Tasks written before numeric weekdays were refused still fire a day off intent."""
     assert cli._scheduled_task_weekday_items() == []
 
-    store = cli.ScheduledTaskStore()
+    store = core.scheduled_tasks.ScheduledTaskStore()
     for cron in ("0 7 * * 6", "0 9 * * mon-fri", "0 * * * *"):
         store.add_task(
             session_key="slack::channel::C123",
@@ -927,13 +935,13 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     config_path.write_text("{}", encoding="utf-8")
     doctor_path = tmp_path / "doctor.json"
     warning = "Recovered invalid config section 'platforms': sk-leaked-platform-token"
-    config = cli.V2Config.default()
+    config = v2_config.V2Config.default()
     config.language = "zh"
     config.load_warnings = (warning,)
 
     monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
     monkeypatch.setattr(paths, "get_runtime_doctor_path", lambda: doctor_path)
-    monkeypatch.setattr(cli.V2Config, "load", lambda _path: config)
+    monkeypatch.setattr(v2_config.V2Config, "load", lambda _path: config)
     monkeypatch.setattr(cli, "_home_migration_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_lifecycle_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_install_family_items", lambda **_kwargs: [])
@@ -943,7 +951,7 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_local_cli_installation_items", lambda **_kwargs: [])
-    monkeypatch.setattr(cli.api, "detect_cli", lambda _path, _backend: {"found": False, "path": None, "status": "missing"})
+    monkeypatch.setattr(vibe.api, "detect_cli", lambda _path, _backend: {"found": False, "path": None, "status": "missing"})
 
     result = cli._doctor(language="zh")
 
@@ -1192,12 +1200,12 @@ def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/usr/local/bin/vibe")
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "schedule_restart",
         lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"},
         raising=False,
     )
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"})
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"})
     monkeypatch.setattr(cli, "cmd_stop", lambda: stop_called.append(True))
     monkeypatch.setattr(cli, "cmd_vibe", lambda: start_called.append(True))
 
@@ -1220,7 +1228,7 @@ def test_cmd_restart_schedules_delayed_restart_without_cached_vibe(monkeypatch):
     scheduled = {}
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job456"})
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job456"})
 
     assert cli._cmd_restart_with_delay(5) == 0
     assert scheduled == {
@@ -1234,7 +1242,7 @@ def test_cmd_restart_schedules_supervisor_by_default(monkeypatch):
     calls = []
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/usr/local/bin/vibe")
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: calls.append(kwargs) or {"job_id": "job789"})
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: calls.append(kwargs) or {"job_id": "job789"})
 
     assert cli._cmd_restart_with_delay(0) == 0
     assert calls == [{"delay_seconds": 0.0, "vibe_path": "/usr/local/bin/vibe", "trigger": "cli"}]
@@ -1271,8 +1279,8 @@ def test_cmd_stop_fails_when_live_service_survives(monkeypatch, capsys):
 def test_cmd_stop_fails_when_lock_owner_survives_without_pidfile(monkeypatch, capsys):
     status = []
 
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
-    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(vibe.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
     monkeypatch.setattr(runtime, "stop_service", lambda **kwargs: False)
     monkeypatch.setattr(runtime, "stop_ui", lambda **kwargs: False)
     monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
@@ -1395,7 +1403,7 @@ def test_binary_architecture_omits_path_prefix_before_token_parsing(tmp_path, mo
 def _no_live_runtime_processes(monkeypatch):
     """Keep cmd_start's process-reuse probes off the developer's real state."""
 
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda **kwargs: None)
 
 
 #: Captured at import, before any test replaces it, for the tests that drive
@@ -1559,15 +1567,15 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
         lambda **kwargs: calls.append(("handover", kwargs)) or 0,
     )
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or _fake_start_result(5678, kwargs),
     )
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
+    monkeypatch.setattr(vibe.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
 
@@ -1588,7 +1596,7 @@ def _superseded_controller(monkeypatch, result):
         lambda: {"desktop_runtime_id": "a" * 64},
     )
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "stop_desktop_runtime",
         lambda runtime_id, **kwargs: calls.append((runtime_id, kwargs)) or result,
     )
@@ -1596,7 +1604,7 @@ def _superseded_controller(monkeypatch, result):
 
 
 def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
-    calls = _superseded_controller(monkeypatch, cli.runtime.DesktopRuntimeStopResult())
+    calls = _superseded_controller(monkeypatch, vibe.runtime.DesktopRuntimeStopResult())
 
     assert cli._handover_superseded_desktop_runtime(allowed=True) == 0
 
@@ -1607,7 +1615,7 @@ def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
 def test_a_start_not_asked_to_hand_over_leaves_the_superseded_controller_running(monkeypatch):
     # Only the desktop host, for a user's launch or retry, may replace another
     # desktop Runtime; a recovery launch or a terminal start refuses instead.
-    calls = _superseded_controller(monkeypatch, cli.runtime.DesktopRuntimeStopResult())
+    calls = _superseded_controller(monkeypatch, vibe.runtime.DesktopRuntimeStopResult())
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: SimpleNamespace())
@@ -1618,17 +1626,17 @@ def test_a_start_not_asked_to_hand_over_leaves_the_superseded_controller_running
 
 
 def _left(role):
-    return (cli.runtime.DesktopRuntimeProcess(pid=4242, role=role, name="python"),)
+    return (vibe.runtime.DesktopRuntimeProcess(pid=4242, role=role, name="python"),)
 
 
 @pytest.mark.parametrize(
     ("result", "status"),
     [
-        (cli.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), 3),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("service")), 2),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), 2),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), 2),
-        (cli.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), 2),
+        (vibe.runtime.DesktopRuntimeStopResult(refusal="service_runtime_id_mismatch"), 3),
+        (vibe.runtime.DesktopRuntimeStopResult(remaining=_left("service")), 2),
+        (vibe.runtime.DesktopRuntimeStopResult(remaining=_left("installer")), 2),
+        (vibe.runtime.DesktopRuntimeStopResult(remaining=_left("opencode")), 2),
+        (vibe.runtime.DesktopRuntimeStopResult(remaining=_left("unknown")), 2),
     ],
 )
 def test_desktop_start_fails_when_the_superseded_controller_is_not_stopped(monkeypatch, result, status):
@@ -1652,7 +1660,7 @@ def test_desktop_start_preserves_external_or_matching_controllers(
         else {"ok": True},
     )
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "stop_desktop_runtime",
         lambda *_args, **_kwargs: pytest.fail("controller must be preserved"),
     )
@@ -1672,11 +1680,11 @@ def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
+    monkeypatch.setattr(vibe.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
 
     assert cli.cmd_start(open_browser=False) == 0
@@ -1779,16 +1787,16 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or _fake_start_result(1234, kwargs))
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or _fake_start_result(5678, kwargs),
     )
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 1234)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
+    monkeypatch.setattr(vibe.runtime, "wait_for_service_ready", lambda pid, timeout: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: pid == 1234)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
 
@@ -1827,24 +1835,24 @@ def test_cmd_start_against_a_live_service_neither_resets_its_uptime_nor_skips_th
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
     # The live pair: `start_service` hands back the pid that already holds the
     # lock, which is what makes this a reuse rather than a start.
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_service",
         lambda **kwargs: _fake_start_result(1234, kwargs, reused=True),
     )
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_ui",
         lambda host, port, **kwargs: _fake_start_result(5678, kwargs, reused=True),
     )
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "wait_for_service_ready",
         lambda pid, timeout=None: calls.append(("wait", pid)) or pid,
     )
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
 
@@ -1864,13 +1872,13 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
+    monkeypatch.setattr(vibe.runtime, "service_pid_recorded", lambda pid: False)
+    monkeypatch.setattr(vibe.runtime, "wait_for_service_ready", lambda pid, timeout: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: statuses.append(args))
 
     with pytest.raises(RuntimeError):
         cli.cmd_start()
@@ -1942,14 +1950,14 @@ def _ui_refuses_to_start(
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234 if reused else None)
-    monkeypatch.setattr(cli.runtime, "start_service", start_service)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", refuse_ui)
-    monkeypatch.setattr(cli.runtime, "stop_service", stop_service)
-    monkeypatch.setattr(cli.runtime, "stop_ui", stop_ui)
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", wait_for_service_ready)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234 if reused else None)
+    monkeypatch.setattr(vibe.runtime, "start_service", start_service)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "start_ui", refuse_ui)
+    monkeypatch.setattr(vibe.runtime, "stop_service", stop_service)
+    monkeypatch.setattr(vibe.runtime, "stop_ui", stop_ui)
+    monkeypatch.setattr(vibe.runtime, "wait_for_service_ready", wait_for_service_ready)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: statuses.append(args))
     return SimpleNamespace(calls=calls, statuses=statuses, stop_ui_kwargs=stop_ui_kwargs)
 
 
@@ -2150,7 +2158,7 @@ def test_cmd_start_undoes_a_service_it_created_even_when_start_service_itself_ra
             _fake_start_result(1234, kwargs, reused=reused)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.runtime, "start_service", interrupted_start)
+    monkeypatch.setattr(vibe.runtime, "start_service", interrupted_start)
 
     with pytest.raises(KeyboardInterrupt):
         cli.cmd_start()
@@ -2196,7 +2204,7 @@ def _real_ui_children(monkeypatch, tmp_path, ui_pid_path):
     fake_python = tmp_path / "avibe-ui-probe-python"
     fake_python.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
     fake_python.chmod(0o755)
-    monkeypatch.setattr(cli.runtime, "start_ui", _REAL_START_UI)
+    monkeypatch.setattr(vibe.runtime, "start_ui", _REAL_START_UI)
     monkeypatch.setattr(
         runtime,
         "current_service_launcher",
@@ -2277,7 +2285,7 @@ def test_cmd_start_leaves_no_service_running_when_interrupted_between_its_reserv
     started = _ui_refuses_to_start(monkeypatch, reused=False)
     script = tmp_path / "avibe-service-probe.py"
     script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
-    monkeypatch.setattr(cli.runtime, "start_service", _REAL_START_SERVICE)
+    monkeypatch.setattr(vibe.runtime, "start_service", _REAL_START_SERVICE)
     monkeypatch.setattr(
         runtime,
         "current_service_launcher",
@@ -2340,7 +2348,7 @@ def test_cmd_start_rolls_back_a_real_ui_it_captured_through_its_record(monkeypat
         assert kwargs == {"stop_remote_access": False}, kwargs
         return _REAL_STOP_UI(**kwargs)
 
-    monkeypatch.setattr(cli.runtime, "stop_ui", stop_ui)
+    monkeypatch.setattr(vibe.runtime, "stop_ui", stop_ui)
 
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -2387,21 +2395,21 @@ def test_ui_pid_probe_accepts_only_a_verified_ui_process(monkeypatch, tmp_path):
     cli.paths.get_runtime_ui_pid_path().parent.mkdir(parents=True, exist_ok=True)
     cli.paths.get_runtime_ui_pid_path().write_text("4321\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 4321)
-    monkeypatch.setattr(cli.runtime, "_pid_matches_ui_server", lambda pid: True)
-    assert cli.runtime.ui_pid_file_points_to_running_ui() is True
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(vibe.runtime, "_pid_matches_ui_server", lambda pid: True)
+    assert vibe.runtime.ui_pid_file_points_to_running_ui() is True
 
-    monkeypatch.setattr(cli.runtime, "_pid_matches_ui_server", lambda pid: False)
-    assert cli.runtime.ui_pid_file_points_to_running_ui() is False
+    monkeypatch.setattr(vibe.runtime, "_pid_matches_ui_server", lambda pid: False)
+    assert vibe.runtime.ui_pid_file_points_to_running_ui() is False
 
 
 def test_service_lifecycle_doctor_warns_when_pidfile_missing_but_lock_owner_exists(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     cli.paths.ensure_data_dirs()
-    cli.runtime.write_status("running", "pid missing", None, None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
-    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 1234)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None, include_unverified=False: [])
+    vibe.runtime.write_status("running", "pid missing", None, None)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(vibe.runtime, "service_lock_holder_pid", lambda: 1234)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None, include_unverified=False: [])
 
     items = cli._service_lifecycle_items()
 
@@ -2413,11 +2421,11 @@ def test_service_lifecycle_doctor_warns_when_pidfile_missing_but_lock_owner_exis
 def test_service_lifecycle_doctor_warns_when_extra_service_process_exists(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     cli.paths.ensure_data_dirs()
-    cli.runtime.write_status("running", "healthy", 1234, None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
-    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 1234)
+    vibe.runtime.write_status("running", "healthy", 1234, None)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(vibe.runtime, "service_lock_holder_pid", lambda: 1234)
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "extra_service_process_pids",
         lambda owner_pid=None, include_unverified=False: [2222] if not include_unverified else [2222],
     )
@@ -2433,14 +2441,14 @@ def test_service_lifecycle_doctor_warns_when_extra_service_process_exists(monkey
 def test_fast_service_lifecycle_doctor_skips_extra_process_scan(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     cli.paths.ensure_data_dirs()
-    cli.runtime.write_status("running", "healthy", 1234, None)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
-    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 1234)
+    vibe.runtime.write_status("running", "healthy", 1234, None)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(vibe.runtime, "service_lock_holder_pid", lambda: 1234)
 
     def fail_process_scan(*args, **kwargs):
         raise AssertionError("fast diagnostics must not scan service processes")
 
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_process_scan)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", fail_process_scan)
 
     items = cli._service_lifecycle_items(detect_extra_processes=False)
 
@@ -2465,10 +2473,10 @@ def test_home_migration_doctor_warns_when_legacy_home_is_unmigrated(monkeypatch,
 
 def test_service_install_doctor_warns_when_service_uses_legacy_package(monkeypatch):
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "get_process_command",
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python "
         "/home/test/.local/share/uv/tools/vibe-remote/lib/python3.13/site-packages/vibe/service_main.py",
@@ -2482,12 +2490,12 @@ def test_service_install_doctor_warns_when_service_uses_legacy_package(monkeypat
 
 def test_fast_service_install_doctor_skips_extra_process_scan(monkeypatch):
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
 
     def fail_process_scan(*args, **kwargs):
         raise AssertionError("fast diagnostics must not scan service processes")
 
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_process_scan)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", fail_process_scan)
 
     items = cli._service_install_family_items(detect_extra_processes=False)
 
@@ -2528,10 +2536,10 @@ def test_current_cli_install_family_resolves_cached_launcher_symlink(monkeypatch
 def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch):
     stopped = []
     paths.ensure_data_dirs()
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(vibe.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(vibe.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: None)
 
     result = cli._repair_duplicate_service_processes()
@@ -2546,25 +2554,25 @@ def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
 
     calls = {"started_service": [], "started_ui": [], "stopped_ui": 0}
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_service",
         lambda *args, **kwargs: calls["started_service"].append((args, kwargs)) or 4321,
     )
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": live_ui_pid})
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": live_ui_pid})
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args, **kwargs: None)
 
     def _stop_ui(*args, **kwargs):
         calls["stopped_ui"] += 1
 
-    monkeypatch.setattr(cli.runtime, "stop_ui", _stop_ui)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "stop_ui", _stop_ui)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
     monkeypatch.setattr(
         cli,
         "_ensure_config",
         lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=5123)),
     )
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_ui",
         lambda *args, **kwargs: calls["started_ui"].append((args, kwargs)) or 5432,
     )
@@ -2584,7 +2592,7 @@ def test_repair_leaves_the_ui_alone_when_none_is_running(monkeypatch):
 def test_repair_does_not_attempt_an_unrelated_ui_restart(monkeypatch):
     calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_ui",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("port busy")),
     )
@@ -2601,20 +2609,20 @@ def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatc
     stopped = []
     refreshed = []
     paths.ensure_data_dirs()
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "get_process_command",
         lambda pid: {
             1111: "/home/test/.local/share/uv/tools/avibe-os/bin/python service_main.py",
             2222: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
         }[pid],
     )
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda: (_ for _ in ()).throw(AssertionError("must not restart current owner")))
+    monkeypatch.setattr(vibe.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda: (_ for _ in ()).throw(AssertionError("must not restart current owner")))
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
 
     result = cli._repair_stale_install_runtime()
@@ -2628,19 +2636,19 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
     stopped = []
     statuses = []
     paths.ensure_data_dirs()
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "get_process_command",
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+    monkeypatch.setattr(vibe.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: 3333)
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 4444})
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: statuses.append(args))
 
     result = cli._repair_stale_install_runtime()
 
@@ -2654,19 +2662,19 @@ def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(mon
     stopped = []
     statuses = []
     paths.ensure_data_dirs()
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "get_process_command",
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+    monkeypatch.setattr(vibe.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: 3333)
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"ui_pid": 4444})
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: statuses.append(args))
 
     result = cli._repair_stale_install_runtime()
 
@@ -2680,17 +2688,17 @@ def test_repair_stale_install_runtime_reports_failed_when_restart_fails(monkeypa
     stopped = []
     refreshed = []
     paths.ensure_data_dirs()
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "get_process_command",
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
-    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(vibe.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
 
     result = cli._repair_stale_install_runtime()
@@ -2740,8 +2748,8 @@ def test_repair_all_targets_skips_empty_home_without_initializing(monkeypatch, t
     def fail_probe(*args, **kwargs):
         raise AssertionError("empty-home repair must not probe runtime state")
 
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", fail_probe)
     monkeypatch.setattr(cli, "_current_cli_install_family", fail_probe)
     monkeypatch.setattr(cli, "_doctor", fail_probe)
 
@@ -2783,7 +2791,7 @@ def test_repair_stale_restart_state_removes_marker(monkeypatch):
     runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
     old_timestamp = time.time() - 120
     os.utime(restart_path, (old_timestamp, old_timestamp))
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: False)
     refreshed = []
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
 
@@ -2800,9 +2808,9 @@ def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkey
     runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
     old_timestamp = time.time() - 120
     os.utime(restart_path, (old_timestamp, old_timestamp))
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: True)
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "process_create_time",
         lambda pid: (_ for _ in ()).throw(AssertionError("missing start time should use marker age")),
     )
@@ -2884,11 +2892,11 @@ def _stub_service_liveness(
     def resolve_owner(*, include_starting=False, **_kwargs):
         return reserved if include_starting else owner_pid
 
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
-    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda **kwargs: (not holds_lock, owner_pid))
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
+    monkeypatch.setattr(vibe.runtime, "service_instance_lock_available", lambda **kwargs: (not holds_lock, owner_pid))
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "service_instance_started",
         lambda pid: holder_finished_starting and pid == owner_pid,
     )
@@ -3049,8 +3057,8 @@ def test_restart_state_items_classify_non_failures_without_probing_the_service(m
     def fail_probe(*args, **kwargs):
         raise AssertionError("classifying a non-failure must not probe the service")
 
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
-    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(vibe.runtime, "extra_service_process_pids", fail_probe)
     succeeded = _restart_status_payload(ok=True, state="succeeded", error=None, new_pid=222)
 
     _seed_restart_status(succeeded)
@@ -3066,7 +3074,7 @@ def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     def fail_runtime_probe(*args, **kwargs):
         raise AssertionError("dry-run must not touch runtime probes")
 
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_runtime_probe)
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", fail_runtime_probe)
 
     result = cli._repair_doctor_targets(["duplicate-service-processes"], dry_run=True)
 
@@ -3183,8 +3191,8 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr(cli.api, "dependencies_status", status)
-    monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: True)
+    monkeypatch.setattr(vibe.api, "dependencies_status", status)
+    monkeypatch.setattr(vibe.api, "askill_auto_install_supported", lambda: True)
 
     items = cli._managed_dependencies_doctor_items(deep=False)
 
@@ -3201,7 +3209,7 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
 
 def test_managed_dependencies_doctor_probes_model_hub_engine_archive(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -3257,7 +3265,7 @@ def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
     code,
 ):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -3291,7 +3299,7 @@ def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
 
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -3300,7 +3308,7 @@ def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkey
             ]
         },
     )
-    monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: False)
+    monkeypatch.setattr(vibe.api, "askill_auto_install_supported", lambda: False)
 
     items = cli._managed_dependencies_doctor_items(deep=False)
 
@@ -3311,7 +3319,7 @@ def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkey
 
 def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -3339,7 +3347,7 @@ def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(
 
 def test_managed_dependencies_doctor_treats_unsupported_cpa_as_nonfatal(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -3376,7 +3384,7 @@ def test_managed_dependencies_doctor_treats_unsupported_cpa_as_nonfatal(monkeypa
 
 
 def test_managed_dependencies_doctor_accepts_usable_system_git(monkeypatch):
-    monkeypatch.setattr(cli.api, "dependencies_status", lambda **_kwargs: {"deps": []})
+    monkeypatch.setattr(vibe.api, "dependencies_status", lambda **_kwargs: {"deps": []})
     monkeypatch.setattr(
         "core.git_runtime.git_runtime_status",
         lambda: {
@@ -3401,7 +3409,7 @@ def test_managed_dependencies_doctor_accepts_usable_system_git(monkeypatch):
 
 
 def test_managed_dependencies_doctor_does_not_offer_unsupported_git_runtime_repair(monkeypatch):
-    monkeypatch.setattr(cli.api, "dependencies_status", lambda **_kwargs: {"deps": []})
+    monkeypatch.setattr(vibe.api, "dependencies_status", lambda **_kwargs: {"deps": []})
     monkeypatch.setattr(
         "core.git_runtime.git_runtime_status",
         lambda: {
@@ -3429,7 +3437,7 @@ def test_managed_dependencies_doctor_does_not_offer_unsupported_git_runtime_repa
 
 def test_managed_dependencies_doctor_rejects_unsupported_archive_url_without_repair(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -3461,7 +3469,7 @@ def test_managed_dependencies_doctor_rejects_unsupported_archive_url_without_rep
 
 def test_managed_dependencies_doctor_deep_reports_retry_exhaustion(monkeypatch):
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -4211,7 +4219,7 @@ def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
     runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
     old_timestamp = time.time() - 120
     os.utime(restart_path, (old_timestamp, old_timestamp))
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: False)
     refreshed = []
     doctor_calls = []
     monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
@@ -4341,13 +4349,13 @@ def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypa
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
-    monkeypatch.setattr(cli.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(vibe.runtime, "claim_desktop_runtime_start", lambda: None)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
     monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("desktop mode must not open a browser"))
-    monkeypatch.setattr(cli.runtime, "claim_ready_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vibe.runtime, "claim_ready_service", lambda *args, **kwargs: None)
     monkeypatch.setattr("vibe.install_generations.collect_install_generations", lambda *_args: None)
 
     def start_service(**kwargs):
@@ -4364,9 +4372,9 @@ def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypa
         calls.append(("ready", pid, host, port, timeout))
         return 1234
 
-    monkeypatch.setattr(cli.runtime, "start_service", start_service)
-    monkeypatch.setattr(cli.runtime, "start_ui", start_ui)
-    monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", wait_ready)
+    monkeypatch.setattr(vibe.runtime, "start_service", start_service)
+    monkeypatch.setattr(vibe.runtime, "start_ui", start_ui)
+    monkeypatch.setattr(vibe.runtime, "wait_for_desktop_startup_ready", wait_ready)
 
     assert cli.cmd_start(open_browser=False, desktop_receipt=True, desktop_ready_timeout=ready_timeout) == 0
 
@@ -4391,8 +4399,8 @@ def test_desktop_receipt_requires_combined_readiness_even_when_service_is_alive(
     state = _ui_refuses_to_start(
         monkeypatch, reused=service_reused, ui_outcome=5678, ui_reused=ui_reused,
     )
-    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: True)
-    monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(vibe.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: None)
     with pytest.raises(RuntimeError, match="did not become ready"):
         cli.cmd_start(open_browser=False, desktop_receipt=True)
     output = capsys.readouterr().out
@@ -4415,17 +4423,17 @@ def test_desktop_receipt_failure_is_emitted_after_rollback(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
-    monkeypatch.setattr(cli.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(vibe.runtime, "claim_desktop_runtime_start", lambda: None)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: 1234)
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "start_ui",
         lambda host, port, **kwargs: (_ for _ in ()).throw(RuntimeError("ui failed")),
     )
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "roll_back_start",
         lambda service, ui: stopped.append((service, ui)),
     )
@@ -4451,17 +4459,17 @@ def test_desktop_receipt_failure_after_commit_keeps_runtime(monkeypatch, capsys,
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
-    monkeypatch.setattr(cli.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(vibe.runtime, "claim_desktop_runtime_start", lambda: None)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: 5678)
-    monkeypatch.setattr(cli.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: 1234)
-    monkeypatch.setattr(cli.runtime, "claim_ready_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: 1234)
+    monkeypatch.setattr(vibe.runtime, "start_ui", lambda host, port, **kwargs: 5678)
+    monkeypatch.setattr(vibe.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: 1234)
+    monkeypatch.setattr(vibe.runtime, "claim_ready_service", lambda *args, **kwargs: None)
     monkeypatch.setattr("vibe.install_generations.collect_install_generations", lambda *_args: None)
-    monkeypatch.setattr(cli.runtime, "roll_back_start", lambda *args: rolled_back.append(args))
+    monkeypatch.setattr(vibe.runtime, "roll_back_start", lambda *args: rolled_back.append(args))
     if failure == "transport":
         monkeypatch.setattr(
             "vibe.desktop_startup.emit_desktop_start_receipt",

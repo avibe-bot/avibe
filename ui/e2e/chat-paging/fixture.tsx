@@ -43,7 +43,9 @@ export function Fixture() {
   const [needsLatestReload, setNeedsLatestReload] = useState(false);
   const followingTailRef = useRef(true);
 
-  const loadOlder = async () => {
+  // As ChatPage does: the fetch starts at once, and rows go in above the reader
+  // only once the transcript is at rest (``whenSettled``).
+  const loadOlder = async (whenSettled: () => Promise<void>) => {
     setLoading(true);
     setLoads((count) => count + 1);
     await new Promise((resolve) => setTimeout(resolve, delay));
@@ -53,6 +55,7 @@ export function Fixture() {
     }
     const start = Math.max(0, before - 50);
     if (loads >= Number(params.get('empty') ?? 0)) {
+      await whenSettled();
       setMessages((current) => [...history.slice(start, before), ...current].slice(0, 300));
       if (messages.length + before - start > 300) setNeedsLatestReload(true);
     }
@@ -69,6 +72,7 @@ export function Fixture() {
         agentDisplayName="Agent"
         working={false}
         hasOlder={before > 0}
+        historyGap={false}
         loadingOlder={loading}
         onLoadOlder={loadOlder}
         needsLatestReload={needsLatestReload}

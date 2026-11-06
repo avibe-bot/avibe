@@ -52,6 +52,11 @@ export const spring = (name: Spring): Curve => ({
   dur: tokenMs(`--motion-spring-${name}-duration`),
   ease: token(`--motion-spring-${name}`),
 });
+/** A page pushed over another on a phone, or popped off it (`--motion-nav-*`). */
+export const nav = (step: 'push' | 'pop'): Curve => ({
+  dur: tokenMs(`--motion-nav-${step}-duration`),
+  ease: token('--motion-nav-ease'),
+});
 /** How far a thing travels (`--motion-offset-*`), in px. */
 export const offset = (size: 'sm' | 'md' | 'lg' = 'md') => parseFloat(token(size === 'md' ? '--motion-offset' : `--motion-offset-${size}`));
 /** A scale a moment moves from or to (`--motion-scale-*`). */

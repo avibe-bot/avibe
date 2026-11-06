@@ -81,6 +81,7 @@ class OpenCodeRuntimeConfigInvalidError(RuntimeError):
 def managed_opencode_runtime_config_content(
     raw: str | bytes | None,
     disabled_mcp: Dict[str, Any] | None = None,
+    opencode_version: str | None = None,
 ) -> str:
     """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
 
@@ -125,14 +126,27 @@ def managed_opencode_runtime_config_content(
     # Computer Use is exposed through ``vibe computer`` and must never be
     # reintroduced from a stale user or runtime configuration.
     managed_mcp.pop("avibe_computer", None)
-    # Native MCP is off in Avibe sessions; agents call MCP through ``vibe mcp``
-    # (core/mcp_hub/native.py supplies the user's entries with enabled=false).
-    for name, entry in (disabled_mcp or {}).items():
-        current = managed_mcp.get(name)
-        managed_mcp[name] = {**(current if isinstance(current, dict) else entry), "enabled": False}
-    for name, entry in list(managed_mcp.items()):
-        if isinstance(entry, dict):
-            managed_mcp[name] = {**entry, "enabled": False}
+    # V2 supports a policy that covers project-native servers whose names are
+    # unknown to Avibe. Unknown versions are treated as V2; V1 keeps the
+    # existing per-name behavior and cannot suppress project-level MCP.
+    is_v1 = isinstance(opencode_version, str) and opencode_version.lstrip("v").split(".", 1)[0] == "1"
+    if is_v1:
+        for name, entry in (disabled_mcp or {}).items():
+            current = managed_mcp.get(name)
+            managed_mcp[name] = {**(current if isinstance(current, dict) else entry), "enabled": False}
+        for name, entry in list(managed_mcp.items()):
+            if isinstance(entry, dict):
+                managed_mcp[name] = {**entry, "enabled": False}
+    else:
+        existing_policies = payload.get("policies")
+        policies = list(existing_policies) if isinstance(existing_policies, list) else []
+        for policy in (
+            {"action": "integration.use", "resource": "mcp:*", "effect": "deny"},
+            {"action": "mcp.use", "resource": "*", "effect": "deny"},
+        ):
+            if policy not in policies:
+                policies.append(policy)
+        payload["policies"] = policies
     if managed_mcp:
         payload["mcp"] = managed_mcp
     else:
@@ -600,14 +614,15 @@ def set_jsonc_top_level_string_property(source: str, key: str, value: str) -> st
         return updated_source[:insertion_point] + insertion + updated_source[insertion_point:]
 
 
-def remove_jsonc_member(source: str, parent_key: str, key: str) -> str:
+def remove_jsonc_member(source: str, parent_key: str | tuple[str, ...], key: str) -> str:
     """Drop ``parent_key.key`` from the text, leaving every other byte in place."""
 
-    _root_start, _root_end, properties = _scan_jsonc_top_level_properties(source)
-    parent = next((prop for prop in reversed(properties) if prop.key == parent_key), None)
-    if parent is None or source[parent.value_start] != "{":
-        raise ValueError(f"{parent_key} is not an object")
-    start, end, members = _scan_jsonc_top_level_properties(source, parent.value_start)
+    start, end, members = _scan_jsonc_top_level_properties(source)
+    for part in (parent_key,) if isinstance(parent_key, str) else parent_key:
+        parent = next((prop for prop in reversed(members) if prop.key == part), None)
+        if parent is None or source[parent.value_start] != "{":
+            raise ValueError(f"{part} is not an object")
+        start, end, members = _scan_jsonc_top_level_properties(source, parent.value_start)
     index = next((i for i in range(len(members) - 1, -1, -1) if members[i].key == key), None)
     if index is None:
         raise KeyError(key)
