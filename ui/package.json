@@ -42,6 +42,7 @@
     "test:model-catalog": "node scripts/e2e-suite.mjs e2e/model-catalog/tsconfig.json playwright.model-catalog.config.ts",
     "test:model-provider": "node scripts/e2e-suite.mjs e2e/model-provider/tsconfig.json playwright.model-provider.config.ts",
     "test:onboarding-fidelity": "node scripts/e2e-suite.mjs e2e/onboarding-fidelity/tsconfig.json playwright.onboarding-fidelity.config.ts",
+    "test:web-fetch": "node scripts/e2e-suite.mjs e2e/web-fetch/tsconfig.json playwright.web-fetch.config.ts",
     "test:workbench-general": "node scripts/e2e-suite.mjs e2e/workbench-general/tsconfig.json playwright.workbench-general.config.ts",
     "test:workbench-general-build": "node scripts/e2e-suite.mjs e2e/workbench-general/tsconfig.json playwright.workbench-general-build.config.ts",
     "test:vault-integrity": "node scripts/e2e-suite.mjs e2e/vault-integrity/tsconfig.json playwright.vault-integrity.config.ts",

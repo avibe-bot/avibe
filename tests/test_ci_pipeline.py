@@ -659,6 +659,11 @@ _BROWSER_COMMANDS = (
     "run test:motion",
     "run test:chat-scroll",
     "run test:chat-paging",
+    "run test:queue-attachments",
+    "run test:web-fetch",
+    "run test:model-provider",
+    "run test:citations",
+    "run test:session-dot",
 )
 
 

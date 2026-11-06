@@ -250,6 +250,8 @@ jobs:
               npm run test:project-order
               # Paging older history through the retained-window cap (Chromium, desktop and phone).
               npm run test:chat-paging
+              npm run test:queue-attachments
+              npm run test:web-fetch
           - lane: 3
             suites: |
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
@@ -257,6 +259,9 @@ jobs:
               npm run test:pdf-preview
               # Motion of the shared surfaces: sheets, popovers, toasts (Chromium and WebKit).
               npm run test:motion
+              npm run test:model-provider
+              npm run test:citations
+              npm run test:session-dot
           - lane: 4
             suites: |
               npm run test:vault-integrity
