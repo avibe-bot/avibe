@@ -360,6 +360,104 @@ describe('mobile onboarding', () => {
     }
   }, 30_000);
 
+  it('applies provider cooldowns to every provider-calling action', async () => {
+    const actions = ['request', 'resend', 'verify'] as const;
+
+    for (const action of actions) {
+      for (const retryAfter of [9, undefined]) {
+        cleanup();
+        resetMobileMocks();
+        const error = {
+          code: 'rate_limited',
+          message: 'slow down',
+          ...(retryAfter === undefined ? {} : { retry_after_seconds: retryAfter }),
+        };
+        const expectedCooldown = retryAfter ?? 15;
+
+        if (action === 'request') {
+          mobile.requestOtp.mockRejectedValueOnce(error);
+        } else if (action === 'resend') {
+          mobile.requestOtp
+            .mockResolvedValueOnce({ cooldown_seconds: 0 })
+            .mockRejectedValueOnce(error);
+        } else {
+          mobile.requestOtp.mockResolvedValueOnce({ cooldown_seconds: 60 });
+          mobile.verifyOtp.mockRejectedValueOnce(error);
+        }
+
+        render(<MobileOnboarding />);
+        fireEvent.click(await screen.findByRole('button', {
+          name: 'mobileApp.welcome.action',
+        }));
+        fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+          target: { value: 'alex@example.com' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+
+        if (action === 'request') {
+          const send = await screen.findByRole('button', {
+            name: `mobileApp.email.sendIn:${expectedCooldown}`,
+          });
+          expect((send as HTMLButtonElement).disabled).toBe(true);
+          fireEvent.click(send);
+          expect(mobile.requestOtp).toHaveBeenCalledTimes(1);
+          expect(mobile.verifyOtp).not.toHaveBeenCalled();
+          continue;
+        }
+
+        const code = await screen.findByLabelText('mobileApp.code.label');
+        fireEvent.change(code, { target: { value: '123456' } });
+        if (action === 'resend') {
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.resend' }));
+        } else {
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+        }
+
+        const verify = await screen.findByRole('button', {
+          name: `mobileApp.email.sendIn:${expectedCooldown}`,
+        });
+        const resend = screen.getByRole('button', {
+          name: `mobileApp.code.resendIn:${expectedCooldown}`,
+        });
+        expect((verify as HTMLButtonElement).disabled).toBe(true);
+        expect((resend as HTMLButtonElement).disabled).toBe(true);
+
+        fireEvent.click(verify);
+        fireEvent.click(resend);
+        expect(mobile.requestOtp).toHaveBeenCalledTimes(action === 'resend' ? 2 : 1);
+        expect(mobile.verifyOtp).toHaveBeenCalledTimes(action === 'verify' ? 1 : 0);
+      }
+    }
+  });
+
+  it('keeps successful send cooldowns scoped to another send', async () => {
+    mobile.requestOtp.mockResolvedValueOnce({ cooldown_seconds: 9 });
+
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'mobileApp.welcome.action',
+    }));
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+      target: { value: 'alex@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+
+    const code = await screen.findByLabelText('mobileApp.code.label');
+    fireEvent.change(code, { target: { value: '123456' } });
+
+    const verify = screen.getByRole('button', { name: 'mobileApp.code.verify' });
+    const resend = screen.getByRole('button', {
+      name: 'mobileApp.code.resendIn:9',
+    });
+    expect((verify as HTMLButtonElement).disabled).toBe(false);
+    expect((resend as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(verify);
+    fireEvent.click(resend);
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(1);
+    expect(mobile.requestOtp).toHaveBeenCalledTimes(1);
+  });
+
   it('retries bootstrap in place and never starts OTP after a discovery failure', async () => {
     mobile.bootstrap
       .mockRejectedValueOnce({ code: 'network', message: 'offline' })

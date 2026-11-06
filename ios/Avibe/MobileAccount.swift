@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import WebKit
 
 struct MobileAccount: Codable, Equatable {
@@ -163,16 +164,56 @@ struct MobileControlPlaneConfiguration: Equatable {
     }
 }
 
+struct AccountWebsiteDataStoreOperations {
+    let makeDataStore: @MainActor (UUID) -> WKWebsiteDataStore
+    let fetchIdentifiers: @MainActor () async -> [UUID]
+    let removeIdentifier: @MainActor (UUID) async -> Error?
+
+    static let live = AccountWebsiteDataStoreOperations(
+        makeDataStore: { WKWebsiteDataStore(forIdentifier: $0) },
+        fetchIdentifiers: {
+            await withCheckedContinuation { continuation in
+                WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                    continuation.resume(returning: $0)
+                }
+            }
+        },
+        removeIdentifier: { identifier in
+            await withCheckedContinuation { continuation in
+                WKWebsiteDataStore.remove(forIdentifier: identifier) {
+                    continuation.resume(returning: $0)
+                }
+            }
+        }
+    )
+}
+
 @MainActor
 final class AccountWebsiteDataStore {
     private static let identifierKey = "avibe.mobile.websiteDataStoreIdentifier"
+    private static let pendingRemovalKey =
+        "avibe.mobile.pendingWebsiteDataStoreIdentifiers"
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.avibe",
+        category: "MobileAccount"
+    )
 
     private let defaults: UserDefaults
+    private let operations: AccountWebsiteDataStoreOperations
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
+    private(set) var pendingRemovalIdentifiers: Set<UUID>
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        operations: AccountWebsiteDataStoreOperations = .live
+    ) {
         self.defaults = defaults
+        self.operations = operations
+        pendingRemovalIdentifiers = Set(
+            (defaults.stringArray(forKey: Self.pendingRemovalKey) ?? [])
+                .compactMap(UUID.init(uuidString:))
+        )
         if
             let rawIdentifier = defaults.string(forKey: Self.identifierKey),
             let savedIdentifier = UUID(uuidString: rawIdentifier)
@@ -182,20 +223,54 @@ final class AccountWebsiteDataStore {
             identifier = UUID()
             defaults.set(identifier.uuidString, forKey: Self.identifierKey)
         }
-        dataStore = WKWebsiteDataStore(forIdentifier: identifier)
+        dataStore = operations.makeDataStore(identifier)
     }
 
     func rotate() async {
         let oldIdentifier = identifier
+        pendingRemovalIdentifiers.insert(oldIdentifier)
+        persistPendingRemovals()
+
         identifier = UUID()
         defaults.set(identifier.uuidString, forKey: Self.identifierKey)
-        dataStore = WKWebsiteDataStore(forIdentifier: identifier)
+        dataStore = operations.makeDataStore(identifier)
 
-        await withCheckedContinuation { continuation in
-            WKWebsiteDataStore.remove(forIdentifier: oldIdentifier) { _ in
-                continuation.resume()
+        await Task.yield()
+        await sweepOrphans()
+    }
+
+    func sweepOrphans() async {
+        let knownIdentifiers = Set(await operations.fetchIdentifiers())
+        let candidates = knownIdentifiers
+            .union(pendingRemovalIdentifiers)
+            .subtracting([identifier])
+        var failedIdentifiers = Set<UUID>()
+
+        for candidate in candidates.sorted(by: {
+            $0.uuidString < $1.uuidString
+        }) {
+            guard knownIdentifiers.contains(candidate) else {
+                continue
+            }
+            if let error = await operations.removeIdentifier(candidate) {
+                failedIdentifiers.insert(candidate)
+                Self.logger.error(
+                    "Named WebKit store cleanup failed for \(candidate.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
             }
         }
+
+        pendingRemovalIdentifiers = failedIdentifiers
+        persistPendingRemovals()
+    }
+
+    private func persistPendingRemovals() {
+        defaults.set(
+            pendingRemovalIdentifiers
+                .map(\.uuidString)
+                .sorted(),
+            forKey: Self.pendingRemovalKey
+        )
     }
 }
 

@@ -78,6 +78,7 @@ final class AppModel: ObservableObject {
     }
 
     private func bootstrap() async {
+        await websiteDataStore.sweepOrphans()
         sessionCoordinator.activateAccountSurface()
         do {
             let state = try await sessionCoordinator.bootstrap()

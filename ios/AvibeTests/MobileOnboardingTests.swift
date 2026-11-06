@@ -307,6 +307,17 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? Bool
         XCTAssertEqual(overflows, true)
 
+        let scrolledToActions = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const target = document.querySelector("[data-mobile-code-actions]");
+              target?.scrollIntoView({block: "end"});
+              return Boolean(target);
+            })()
+            """
+        ) as? Bool
+        XCTAssertEqual(scrolledToActions, true)
+
         let verifyVisible = try await waitForJavaScriptValue(in: webView) {
             """
             (() => {
@@ -795,6 +806,138 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    func testNamedStoreRemovalFailurePersistsUntilALaterSweep() async {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let oldIdentifier = store.identifier
+        registry.failingIdentifiers.insert(oldIdentifier)
+
+        await store.rotate()
+
+        XCTAssertTrue(store.pendingRemovalIdentifiers.contains(oldIdentifier))
+        XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(registry.identifiers.contains(store.identifier))
+
+        let relaunched = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        XCTAssertTrue(
+            relaunched.pendingRemovalIdentifiers.contains(oldIdentifier)
+        )
+
+        registry.failingIdentifiers.remove(oldIdentifier)
+        await relaunched.sweepOrphans()
+
+        XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(registry.identifiers.contains(relaunched.identifier))
+        XCTAssertTrue(relaunched.pendingRemovalIdentifiers.isEmpty)
+        XCTAssertFalse(
+            registry.removalAttempts.contains(relaunched.identifier)
+        )
+    }
+
+    func testLaunchSweepRemovesAnOrphanAndPreservesTheCurrentStore() async {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let orphan = UUID()
+        registry.identifiers.insert(orphan)
+
+        await store.sweepOrphans()
+
+        XCTAssertFalse(registry.identifiers.contains(orphan))
+        XCTAssertTrue(registry.identifiers.contains(store.identifier))
+        XCTAssertEqual(registry.removalAttempts, [orphan])
+    }
+
+    func testAccountTransitionReleasesRuntimeChildrenBeforeStoreRemoval() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let oldIdentifier = store.identifier
+        let controller = WebViewController(
+            instanceOrigin: WebOrigin.parseConfigured(
+                "https://alice-app.avibe.bot"
+            )!,
+            websiteDataStore: store.dataStore,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        controller.loadViewIfNeeded()
+        XCTAssertNotNil(
+            controller.view.subviews
+                .compactMap { $0 as? WKWebView }
+                .first
+        )
+
+        let childConfiguration = WKWebViewConfiguration()
+        childConfiguration.websiteDataStore = store.dataStore
+        var childWebView: WKWebView? = WKWebView(
+            frame: .zero,
+            configuration: childConfiguration
+        )
+        controller.retainPopupForTesting(try XCTUnwrap(childWebView))
+        XCTAssertEqual(controller.managedWebViewCountForTesting, 2)
+        childWebView = nil
+
+        var releasedBeforeRemoval = false
+        registry.beforeRemoval = { identifier in
+            if identifier == oldIdentifier {
+                releasedBeforeRemoval =
+                    controller.managedWebViewCountForTesting == 0
+            }
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+            ],
+            onPrepareAccountTransition: {
+                controller.invalidateForAccountTransition()
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        _ = try await coordinator.logout()
+
+        XCTAssertTrue(releasedBeforeRemoval)
+        XCTAssertEqual(controller.managedWebViewCountForTesting, 0)
+    }
+
+    func testInvalidatedRuntimeControllerDoesNotRecreateAStoreWebView() {
+        let controller = WebViewController(
+            instanceOrigin: WebOrigin.parseConfigured(
+                "https://alice-app.avibe.bot"
+            )!,
+            websiteDataStore: .nonPersistent(),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+
+        controller.invalidateForAccountTransition()
+        controller.loadViewIfNeeded()
+
+        XCTAssertEqual(controller.managedWebViewCountForTesting, 0)
+        XCTAssertTrue(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.isEmpty
+        )
+    }
+
     private var instance: MobileInstance {
         MobileInstance(
             id: "instance-1",
@@ -957,6 +1100,38 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
         self.result = result
         continuation?.resume(with: result)
         continuation = nil
+    }
+}
+
+@MainActor
+private final class FakeNamedDataStoreRegistry {
+    var identifiers = Set<UUID>()
+    var failingIdentifiers = Set<UUID>()
+    var removalAttempts: [UUID] = []
+    var beforeRemoval: ((UUID) -> Void)?
+
+    var operations: AccountWebsiteDataStoreOperations {
+        AccountWebsiteDataStoreOperations(
+            makeDataStore: { [unowned self] identifier in
+                identifiers.insert(identifier)
+                return .nonPersistent()
+            },
+            fetchIdentifiers: { [unowned self] in
+                Array(identifiers)
+            },
+            removeIdentifier: { [unowned self] identifier in
+                beforeRemoval?(identifier)
+                removalAttempts.append(identifier)
+                guard !failingIdentifiers.contains(identifier) else {
+                    return NSError(
+                        domain: "FakeNamedDataStoreRegistry",
+                        code: 1
+                    )
+                }
+                identifiers.remove(identifier)
+                return nil
+            }
+        )
     }
 }
 

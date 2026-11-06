@@ -187,6 +187,7 @@ final class WebViewFactory {
 final class WebViewController: UIViewController {
     private struct PopupRecord {
         let webView: WKWebView
+        let controller: PopupWebViewController
         let navigationController: UINavigationController
         let parentIdentifier: ObjectIdentifier
     }
@@ -217,7 +218,7 @@ final class WebViewController: UIViewController {
     private let didStartLoading: () -> Void
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
-    private let websiteDataStore: WKWebsiteDataStore
+    private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -228,13 +229,31 @@ final class WebViewController: UIViewController {
     private var pendingDialogs: [UUID: PendingJavaScriptDialog] = [:]
     private var dialogIdentifiersByWebView: [ObjectIdentifier: Set<UUID>] = [:]
     private var isInvalidatedForAccountTransition = false
-    private lazy var webViewFactory = WebViewFactory(
-        instanceOrigin: instanceOrigin,
-        websiteDataStore: websiteDataStore,
-        showAccount: showAccount
-    )
-
-    private lazy var webView = webViewFactory.makeWebView(delegate: self)
+    private var retainedWebViewFactory: WebViewFactory?
+    private var retainedWebView: WKWebView?
+    private var webViewFactory: WebViewFactory {
+        if let retainedWebViewFactory {
+            return retainedWebViewFactory
+        }
+        guard let websiteDataStore else {
+            preconditionFailure("The runtime WebView has been released.")
+        }
+        let factory = WebViewFactory(
+            instanceOrigin: instanceOrigin,
+            websiteDataStore: websiteDataStore,
+            showAccount: showAccount
+        )
+        retainedWebViewFactory = factory
+        return factory
+    }
+    private var webView: WKWebView {
+        if let retainedWebView {
+            return retainedWebView
+        }
+        let created = webViewFactory.makeWebView(delegate: self)
+        retainedWebView = created
+        return created
+    }
 
     init(
         instanceOrigin: WebOrigin,
@@ -277,6 +296,9 @@ final class WebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
         webViewFactory.install(webView, in: view)
 
         NotificationCenter.default.addObserver(
@@ -318,9 +340,9 @@ final class WebViewController: UIViewController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        webView.stopLoading()
-        webView.navigationDelegate = nil
-        webView.uiDelegate = nil
+        retainedWebView?.stopLoading()
+        retainedWebView?.navigationDelegate = nil
+        retainedWebView?.uiDelegate = nil
         cancelAllPendingDialogs(dismissAlerts: false)
         for record in popupRecords.values {
             record.webView.stopLoading()
@@ -334,7 +356,7 @@ final class WebViewController: UIViewController {
 
     @objc
     private func resetOuterScrollPosition() {
-        webViewFactory.resetLockedContentOffsetsForKeyboardChange()
+        retainedWebViewFactory?.resetLockedContentOffsetsForKeyboardChange()
     }
 
     private func loadConfiguredInstance() {
@@ -349,13 +371,20 @@ final class WebViewController: UIViewController {
             return
         }
         isInvalidatedForAccountTransition = true
+        NotificationCenter.default.removeObserver(self)
         cancelAllPendingDialogs()
         discardAllPopups(animated: false)
         discardPendingDownloadedFiles()
-        webView.stopLoading()
-        webView.navigationDelegate = nil
-        webView.uiDelegate = nil
-        webViewFactory.unregister(webView)
+        if let retainedWebView {
+            retainedWebView.stopLoading()
+            retainedWebView.navigationDelegate = nil
+            retainedWebView.uiDelegate = nil
+            retainedWebViewFactory?.unregister(retainedWebView)
+            retainedWebView.removeFromSuperview()
+        }
+        retainedWebView = nil
+        retainedWebViewFactory = nil
+        websiteDataStore = nil
     }
 
     private func presentExternalURL(_ url: URL) {
@@ -520,6 +549,7 @@ final class WebViewController: UIViewController {
         let identifier = ObjectIdentifier(childWebView)
         popupRecords[identifier] = PopupRecord(
             webView: childWebView,
+            controller: popupController,
             navigationController: navigationController,
             parentIdentifier: presentation.parentIdentifier
         )
@@ -553,10 +583,7 @@ final class WebViewController: UIViewController {
                 continue
             }
             cancelPendingDialogs(for: descendantIdentifier)
-            record.webView.stopLoading()
-            record.webView.navigationDelegate = nil
-            record.webView.uiDelegate = nil
-            webViewFactory.unregister(record.webView)
+            record.controller.invalidateForAccountTransition()
         }
         rootRecord.navigationController.dismiss(animated: true)
     }
@@ -571,12 +598,31 @@ final class WebViewController: UIViewController {
         }
         for (identifier, record) in popupRecords {
             cancelPendingDialogs(for: identifier)
-            record.webView.stopLoading()
-            record.webView.navigationDelegate = nil
-            record.webView.uiDelegate = nil
-            webViewFactory.unregister(record.webView)
+            record.controller.invalidateForAccountTransition()
         }
         popupRecords.removeAll()
+    }
+
+    func retainPopupForTesting(_ childWebView: WKWebView) {
+        let popupController = PopupWebViewController(
+            webView: childWebView,
+            webViewFactory: webViewFactory,
+            onClose: {},
+            onOpenInSafari: { _ in }
+        )
+        let navigationController = UINavigationController(
+            rootViewController: popupController
+        )
+        popupRecords[ObjectIdentifier(childWebView)] = PopupRecord(
+            webView: childWebView,
+            controller: popupController,
+            navigationController: navigationController,
+            parentIdentifier: ObjectIdentifier(webView)
+        )
+    }
+
+    var managedWebViewCountForTesting: Int {
+        (retainedWebView == nil ? 0 : 1) + popupRecords.count
     }
 
     private func downloadContext(
@@ -1262,8 +1308,8 @@ extension WebViewController: WKDownloadDelegate {
 }
 
 private final class PopupWebViewController: UIViewController {
-    private let webView: WKWebView
-    private let webViewFactory: WebViewFactory
+    private var webView: WKWebView?
+    private var webViewFactory: WebViewFactory?
     private let onClose: () -> Void
     private let onOpenInSafari: (URL) -> Void
     private var didRequestClose = false
@@ -1303,6 +1349,9 @@ private final class PopupWebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
+        guard let webView, let webViewFactory else {
+            return
+        }
         webViewFactory.install(webView, in: view)
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: String(localized: "common.done"),
@@ -1324,7 +1373,7 @@ private final class PopupWebViewController: UIViewController {
     @objc
     private func openInSafari() {
         guard
-            let url = webView.url,
+            let url = webView?.url,
             let scheme = url.scheme?.lowercased(),
             scheme == "http" || scheme == "https"
         else {
@@ -1341,6 +1390,20 @@ private final class PopupWebViewController: UIViewController {
 
         let scheme = url?.scheme?.lowercased()
         openInSafariButton.isEnabled = scheme == "http" || scheme == "https"
+    }
+
+    func invalidateForAccountTransition() {
+        urlObservation?.invalidate()
+        urlObservation = nil
+        if let webView {
+            webView.stopLoading()
+            webView.navigationDelegate = nil
+            webView.uiDelegate = nil
+            webViewFactory?.unregister(webView)
+            webView.removeFromSuperview()
+        }
+        webView = nil
+        webViewFactory = nil
     }
 
     private func requestClose() {

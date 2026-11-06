@@ -51,7 +51,11 @@ and Web resizing cannot both run.
 - Each phone account uses one persistent named `WKWebsiteDataStore`. The hidden
   account transport and runtime WebViews use that store at different lifecycle
   phases, so WebKit remains the only cookie owner and sessions survive app
-  launches without native cookie snapshots.
+  launches without native cookie snapshots. Account transitions release the
+  runtime primary and child WebViews plus the hidden transport before rotating.
+  Failed removal stays in a persisted pending set; launch and post-rotation
+  sweeps remove every named identifier except the current store and log failed
+  UUIDs for later retry.
 - Primary and child WebViews are created through one factory and pinned to
   `keyboardLayoutGuide`. Outer scrolling and automatic content insets use
   WebKit defaults until an instance-origin Workbench document requests
@@ -379,12 +383,14 @@ bounded.
 - Native XCTest covers bridge policy, runtime `app.showAccount`, account
   transport lifecycle, stage-accurate failure mapping, bounded hanging
   readiness/GET/DELETE, cold selection ownership, bundled
-  full-bleed/keyboard constraints, and real WebKit cookie behavior against a
-  hermetic local server.
+  full-bleed/keyboard constraints, named-store failure/relaunch/orphan cleanup,
+  release of runtime primary and child WebViews before removal, and real WebKit
+  cookie behavior against a hermetic local server.
 - Web UI: focused Vitest coverage for the bundled OTP/picker/account flow,
-  bridge adapter, haptics, Workbench outer-scroll lifecycle, keyboard ownership,
-  hidden Web Push/installation surfaces, and all five PWA decisions; production
-  Workbench and bundled-mobile TypeScript/Vite builds.
+  provider rate-limit cooldown across send/resend/verify, send-only success
+  cooldown, bridge adapter, haptics, Workbench outer-scroll lifecycle, keyboard
+  ownership, hidden Web Push/installation surfaces, and all five PWA decisions;
+  production Workbench and bundled-mobile TypeScript/Vite builds.
 - Simulator screenshots and the machine-readable fixture report are stored
   outside the repository and linked from the PR description. XCUITest evidence
   covers scrolling to and selecting the final instance plus OTP button access

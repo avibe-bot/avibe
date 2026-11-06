@@ -84,7 +84,7 @@ Change Instance through the native browser menu.
 | Instance ownership, sharing, and current authorization | Control plane |
 | Instance runtime availability | Control-plane runtime status projection |
 | Selected instance id and URL | App storage, scoped by account id |
-| OTP input, busy state, error, and cooldown | Bundled page state |
+| OTP input, busy state, error, and provider/client cooldown | Bundled page state |
 | Session generation | Native app state |
 
 The app never sends control-plane cookies to an instance URL or third-party
@@ -120,6 +120,22 @@ and real `WKHTTPCookieStore` must prove:
 - delayed responses from an old generation remain confined to the abandoned
   store after logout or account switch;
 - control-plane cookies are not sent to instance or third-party origins.
+
+Before removal, the runtime controller releases its primary and child WebViews,
+the hidden transport is invalidated and released, and the onboarding document
+remains on its non-persistent store. Failed named-store removals remain in a
+persisted pending set. App launch and every rotation enumerate named stores and
+retry removal of every identifier except the current one, covering both
+transient WebKit retention and a crash between identifier persistence and
+cleanup. A failed attempt logs only the store UUID and error; logout still
+completes against the fresh, detached store.
+
+Cooldown has one page owner. A provider `rate_limited` result or retry duration
+from send, resend, or verify replaces the prior timer and gates every control
+that can call the provider until expiry. A successful send's provider
+`cooldown_seconds` gates another send or resend. The bounded client fallback
+when resend fails without a provider duration only dampens repeat resend
+attempts on the code screen. Neither blocks verification.
 
 The production control plane is HTTPS. A local HTTP control-plane override is
 compiled only in Debug/test builds; Release ignores it.
@@ -239,6 +255,12 @@ startup on iOS 26.4.1 can exceed ten seconds, so the product readiness bound is
 bounded. `ios-shell` triggers on the browser input set declared by
 `BROWSER_CHECKOUT` (except `Dockerfile`), with a structural test pinning both
 workflow events to that source.
+
+Focused lifecycle coverage injects named-store removal failures, relaunches
+with persisted pending cleanup, sweeps an orphan while preserving the current
+identifier, and verifies runtime primary and child WebViews are released before
+removal begins. The page failure matrix also covers provider rate limits with
+and without a retry duration for send, resend, and verify.
 
 Any future release, archive, signing, or TestFlight workflow must perform
 `npm ci`, `npm run build:mobile`, and the same bundle verification in the job

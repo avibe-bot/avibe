@@ -61,6 +61,7 @@ type Screen =
 
 type BusyAction = 'boot' | 'send' | 'verify' | 'resend' | 'refresh' | 'select' | 'logout';
 type CooldownSource = 'client' | 'provider' | null;
+type CooldownScope = 'send' | 'all' | null;
 type MobileOperation = 'bootstrap' | 'request' | 'verify' | 'refresh' | 'select' | 'logout';
 type MobileErrorKey =
   | 'mobileApp.email.invalid'
@@ -71,6 +72,13 @@ type MobileErrorKey =
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DEFAULT_COOLDOWN_SECONDS = 60;
 const FAILED_COOLDOWN_SECONDS = 15;
+
+const providerCooldownSeconds = (error: MobileBridgeError): number => {
+  if (typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0) {
+    return Math.max(1, Math.ceil(error.retry_after_seconds));
+  }
+  return error.code === 'rate_limited' ? FAILED_COOLDOWN_SECONDS : 0;
+};
 
 type OperationToken = number;
 
@@ -492,6 +500,7 @@ function CodeEntry({
   locked,
   errorKey,
   cooldown,
+  providerCooldownActive,
   resent,
   onBack,
   onCodeChange,
@@ -504,6 +513,7 @@ function CodeEntry({
   locked: boolean;
   errorKey: MobileErrorKey | null;
   cooldown: number;
+  providerCooldownActive: boolean;
   resent: boolean;
   onBack: () => void;
   onCodeChange: (value: string) => void;
@@ -581,10 +591,14 @@ function CodeEntry({
         </div>
         <div className="mt-5" aria-busy={busy === 'verify'}>
           <Primary
-            disabled={locked || code.length !== 6}
+            disabled={locked || providerCooldownActive || code.length !== 6}
             onClick={onVerify}
           >
-            {busy === 'verify' ? t('mobileApp.code.verifying') : t('mobileApp.code.verify')}
+            {busy === 'verify'
+              ? t('mobileApp.code.verifying')
+              : providerCooldownActive
+                ? t('mobileApp.email.sendIn', { count: cooldown })
+                : t('mobileApp.code.verify')}
           </Primary>
         </div>
       </div>
@@ -1028,6 +1042,7 @@ export function MobileOnboarding() {
   const [errorKey, setErrorKey] = useState<MobileErrorKey | null>(null);
   const [cooldown, setCooldown] = useState(0);
   const [cooldownSource, setCooldownSource] = useState<CooldownSource>(null);
+  const [cooldownScope, setCooldownScope] = useState<CooldownScope>(null);
   const [resent, setResent] = useState(false);
   const [offlineSelection, setOfflineSelection] = useState<MobileInstance | null>(null);
   const {
@@ -1040,6 +1055,7 @@ export function MobileOnboarding() {
   } = useOperationOwner();
 
   const signedIn = session.status === 'signedIn' ? session : null;
+  const providerCooldownActive = cooldownScope === 'all' && cooldown > 0;
   const accountReturnScreen = useMemo(
     () => (signedIn?.instances.length ? 'instances' : 'empty') as Screen,
     [signedIn],
@@ -1100,6 +1116,7 @@ export function MobileOnboarding() {
   };
 
   const requestOtp = async (resend: boolean) => {
+    if (cooldown > 0) return;
     const normalizedEmail = email.trim();
     if (!EMAIL_PATTERN.test(normalizedEmail)) {
       setErrorKey('mobileApp.email.invalid');
@@ -1117,12 +1134,15 @@ export function MobileOnboarding() {
       if (providerCooldown > 0) {
         setCooldown(providerCooldown);
         setCooldownSource('provider');
+        setCooldownScope('send');
       } else if (resend) {
         setCooldown(DEFAULT_COOLDOWN_SECONDS);
         setCooldownSource('client');
+        setCooldownScope('send');
       } else {
         setCooldown(0);
         setCooldownSource(null);
+        setCooldownScope(null);
       }
       setResent(resend);
       setScreen('code');
@@ -1130,12 +1150,15 @@ export function MobileOnboarding() {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
       setErrorKey(pageErrorKey(error, 'request'));
-      if (error.retry_after_seconds) {
-        setCooldown(error.retry_after_seconds);
+      const providerCooldown = providerCooldownSeconds(error);
+      if (providerCooldown > 0) {
+        setCooldown(providerCooldown);
         setCooldownSource('provider');
+        setCooldownScope('all');
       } else if (resend) {
         setCooldown(FAILED_COOLDOWN_SECONDS);
         setCooldownSource('client');
+        setCooldownScope('send');
       }
     } finally {
       finishOperation(token);
@@ -1143,7 +1166,7 @@ export function MobileOnboarding() {
   };
 
   const verifyOtp = async () => {
-    if (!/^\d{6}$/.test(code)) return;
+    if (providerCooldownActive || !/^\d{6}$/.test(code)) return;
     const token = beginOperation('verify');
     if (token === null) return;
     setErrorKey(null);
@@ -1156,7 +1179,12 @@ export function MobileOnboarding() {
       const nextErrorKey = pageErrorKey(error, 'verify');
       setErrorKey(nextErrorKey);
       if (nextErrorKey === 'mobileApp.errors.network') setCode('');
-      if (error.retry_after_seconds) setCooldown(error.retry_after_seconds);
+      const providerCooldown = providerCooldownSeconds(error);
+      if (providerCooldown > 0) {
+        setCooldown(providerCooldown);
+        setCooldownSource('provider');
+        setCooldownScope('all');
+      }
     } finally {
       finishOperation(token);
     }
@@ -1215,6 +1243,7 @@ export function MobileOnboarding() {
       setCode('');
       setCooldown(0);
       setCooldownSource(null);
+      setCooldownScope(null);
       setScreen('welcome');
     } catch (rawError) {
       if (!ownsOperation(token)) return;
@@ -1233,6 +1262,7 @@ export function MobileOnboarding() {
     if (cooldownSource === 'client') {
       setCooldown(0);
       setCooldownSource(null);
+      setCooldownScope(null);
     }
     setScreen('email');
   };
@@ -1285,6 +1315,7 @@ export function MobileOnboarding() {
         locked={locked}
         errorKey={errorKey}
         cooldown={cooldown}
+        providerCooldownActive={providerCooldownActive}
         resent={resent}
         onBack={showEmail}
         onCodeChange={(value) => {
