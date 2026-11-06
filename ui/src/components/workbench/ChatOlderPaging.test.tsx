@@ -556,6 +556,120 @@ describe('transcript older-page loading', () => {
     expect(props.followingTailRef.current).toBe(false);
   });
 
+  // The way back to the latest message glides, one write a frame toward a
+  // bottom read again each frame; from a historical window it first installs
+  // the latest one, and glides only once those rows are in.
+  it('glides to the latest window once it is installed, and follows the tail at the bottom', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const reload = pendingPage();
+      const onReloadLatest = vi.fn().mockReturnValue(reload.promise);
+      const { scroller, rerender, props, getByRole, scrollTo } = renderTranscript({ hasOlder: false, needsLatestReload: true, onReloadLatest });
+      await act(async () => scrollTo(1000));
+      await act(async () => { vi.advanceTimersByTime(1600); });
+      fireEvent.click(getByRole('button', { name: 'chat.scrollToBottom' }));
+      expect(onReloadLatest).toHaveBeenCalledTimes(1);
+      // Nothing moves before the latest window is in.
+      act(flushFrames);
+      expect(scroller.scrollTop).toBe(1000);
+      await act(async () => {
+        rerender({ needsLatestReload: false, messages: messages(1001, 50) });
+        reload.land(true);
+      });
+      const bottom = () => scroller.scrollHeight - scroller.clientHeight;
+      const tops: number[] = [];
+      for (let frame = 0; frame < 30 && scroller.scrollTop < bottom(); frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+        tops.push(scroller.scrollTop);
+      }
+      expect(scroller.scrollTop).toBe(bottom());
+      // Several frames on the way, not one cut.
+      expect(tops.filter((top) => top > 1000 && top < bottom()).length).toBeGreaterThanOrEqual(5);
+      expect(props.followingTailRef.current).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // At the retained-window cap, a row arriving while the glide runs (following
+  // is off) detaches the live tail: the glide lands on the latest window, not on
+  // the bottom of the detached one.
+  it('installs the latest window when the tail detached during the glide, and lands on it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    try {
+      const reload = pendingPage();
+      const onReloadLatest = vi.fn().mockReturnValue(reload.promise);
+      const { scroller, rerender, props, getByRole, scrollTo } = renderTranscript({ hasOlder: false, onReloadLatest });
+      await act(async () => scrollTo(1000));
+      await act(async () => { vi.advanceTimersByTime(1600); });
+      fireEvent.click(getByRole('button', { name: 'chat.scrollToBottom' }));
+      await act(async () => {
+        vi.advanceTimersByTime(16);
+        flushFrames();
+      });
+      // A row came in: ChatPage detached the tail.
+      await act(async () => rerender({ needsLatestReload: true }));
+      for (let frame = 0; frame < 30; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(onReloadLatest).toHaveBeenCalledTimes(1);
+      expect(props.followingTailRef.current).toBe(false);
+      await act(async () => {
+        rerender({ needsLatestReload: false, messages: messages(1001, 50) });
+        reload.land(true);
+      });
+      for (let frame = 0; frame < 40; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(scroller.scrollTop).toBe(scroller.scrollHeight - scroller.clientHeight);
+      expect(props.followingTailRef.current).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Whatever else moves the transcript (here a jump to a search result) takes
+  // over from the glide, which must not write over it.
+  it('stops the glide to the latest message when a jump takes over', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    try {
+      const { scroller, rerender, getByRole, scrollTo } = renderTranscript({ hasOlder: false });
+      await act(async () => scrollTo(1000));
+      await act(async () => { vi.advanceTimersByTime(1600); });
+      fireEvent.click(getByRole('button', { name: 'chat.scrollToBottom' }));
+      for (let frame = 0; frame < 3; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(scroller.scrollTop).toBeGreaterThan(1000);
+      // The jump puts its row at 2000.
+      Element.prototype.scrollIntoView = function scrollIntoViewStub() { scroller.scrollTop = 2000; };
+      await act(async () => rerender({ jumpTarget: 'msg-320', highlightedId: 'msg-320' }));
+      for (let frame = 0; frame < 30; frame += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(16);
+          flushFrames();
+        });
+      }
+      expect(scroller.scrollTop).toBe(2000);
+    } finally {
+      Element.prototype.scrollIntoView = scrollIntoView;
+      vi.useRealTimers();
+    }
+  });
+
   // A second finger elsewhere (the composer) can outlast the one on the
   // transcript and end where the transcript never hears of it.
   it('counts a touch that ends outside the transcript as ended', async () => {

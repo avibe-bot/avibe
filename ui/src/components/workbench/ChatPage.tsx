@@ -92,6 +92,7 @@ import {
   insertMessageOrdered,
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
+import { prefersReducedMotion } from '../../lib/motion';
 import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { BeforeCommit, HEAD_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { AgentRoutePicker } from './AgentRoutePicker';
@@ -266,6 +267,15 @@ const TAKEBACK_WINDOW_MS = 250;
 // its own momentum goes on (measured on iOS 27). One this soon after our last
 // write does not end the platform's scrolling.
 const SCROLLEND_AFTER_WRITE_MS = 100;
+// The way back to the latest message (the down-arrow) is a short glide the
+// reader can see, not a cut: GLIDE_TO_LATEST_MIN_MS for a short way, up to
+// GLIDE_TO_LATEST_MAX_MS for GLIDE_TO_LATEST_SCREENS screens, slowing as it
+// lands. From further up it cuts to a screen above the bottom first, so it never
+// runs long.
+const GLIDE_TO_LATEST_MIN_MS = 250;
+const GLIDE_TO_LATEST_MAX_MS = 350;
+const GLIDE_TO_LATEST_SCREENS = 3;
+const easeOutCubic = (p: number) => 1 - (1 - p) ** 3;
 /** Whether a request failed without the server refusing it: no answer at all
  *  (offline, a timeout), or the server, or the tunnel to it, failing. A refusal
  *  (any 4xx) is the server's say about the chat, and the saved copy defers to it. */
@@ -5016,6 +5026,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const motion = useTranscriptMotion({ scrollRef, columnRef: contentRef, pinnedRef, sessionId: session.id });
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
+  // Read by the glide to the latest message as it lands: rows that came in
+  // while it ran can have detached the live tail from the window.
+  const needsLatestReloadRef = useRef(needsLatestReload);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -5024,6 +5037,9 @@ export const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     reloadLatestRef.current = onReloadLatest;
   }, [onReloadLatest]);
+  useLayoutEffect(() => {
+    needsLatestReloadRef.current = needsLatestReload;
+  }, [needsLatestReload]);
 
   // Whenever the loaded window stops reaching the live tail — a search deep-link
   // window OR the retained-window cap detaching the tail while the reader is
@@ -5299,6 +5315,17 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // Jump to the exact bottom and resume following. Instant, not smooth: a smooth
   // glide emits intermediate scroll events that would flip the pin off mid-flight
   // and, if content grows during the glide, land short of the true bottom.
+  // The glide to the latest message (``glideToLatest``) while it runs or waits
+  // for rest. Anything else that moves the transcript (a sent message, a jump to
+  // a search result, another chat) stops it first, so it never writes over them.
+  const glideRef = useRef<{ frame: number } | null>(null);
+  const stopGlideToLatest = useCallback(() => {
+    const glide = glideRef.current;
+    if (!glide) return;
+    glideRef.current = null;
+    cancelAnimationFrame(glide.frame);
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -5313,23 +5340,93 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // also from a scrolled-up position, the way a sent message lands in any chat.
   useEffect(() => {
     if (!sentRowFollow) return undefined;
+    stopGlideToLatest();
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
-  }, [sentRowFollow, scrollToBottom]);
+  }, [sentRowFollow, scrollToBottom, stopGlideToLatest]);
 
   // Jump-to-latest handler behind the down-arrow button. A search result that
   // was not already loaded installs a centered historical window; its loaded
   // bottom is not necessarily the live tail. In that state, ask ChatPage to swap
   // in a fresh tail window first, then scroll after the rows commit.
-  const jumpToLatest = useCallback(() => {
-    if (!needsLatestReload) {
+  // The glide is the scroller's own writes, one a frame, toward a bottom read
+  // again each frame (rows still arriving are followed into). It starts only
+  // with the transcript at rest, since iOS takes back writes made while it
+  // moves the transcript itself (momentum, the rubber band), and it gives way at
+  // once to the reader: a finger, the wheel, a key, or a pointer stops it where
+  // it is. Following the tail starts at the bottom, not before, so the
+  // conversation's own glide (transcriptMotion) does not run on top of it.
+  const glideToLatest = useCallback(() => {
+    stopGlideToLatest();
+    if (prefersReducedMotion()) {
       scrollToBottom();
       return;
     }
+    const glide = { frame: 0 };
+    glideRef.current = glide;
+    const run = (): void => {
+      const el = scrollRef.current;
+      if (!el || glideRef.current !== glide) return;
+      const screen = el.clientHeight;
+      const far = screen * GLIDE_TO_LATEST_SCREENS;
+      let distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+      if (distance <= 1) {
+        glideRef.current = null;
+        scrollToBottom();
+        return;
+      }
+      setFollowingTail(false);
+      anchorRef.current = null;
+      if (distance > far) {
+        el.scrollTop = el.scrollHeight - el.clientHeight - screen;
+        lastScrollTopRef.current = Math.max(0, el.scrollTop);
+        distance = el.scrollHeight - el.clientHeight - el.scrollTop;
+      }
+      const start = el.scrollTop;
+      const duration = GLIDE_TO_LATEST_MIN_MS
+        + (GLIDE_TO_LATEST_MAX_MS - GLIDE_TO_LATEST_MIN_MS) * Math.min(1, distance / far);
+      const startedAt = performance.now();
+      const step = () => {
+        const current = scrollRef.current;
+        if (!current || glideRef.current !== glide) return;
+        const progress = Math.min(1, Math.max(0, (performance.now() - startedAt) / duration));
+        const end = current.scrollHeight - current.clientHeight;
+        current.scrollTop = start + (end - start) * easeOutCubic(progress);
+        lastScrollTopRef.current = Math.max(0, current.scrollTop);
+        if (progress < 1) {
+          glide.frame = requestAnimationFrame(step);
+          return;
+        }
+        // At the retained-window cap, a row that arrived while the glide ran
+        // (following was off) detached the live tail: the bottom reached is
+        // not the latest. Install the latest window and glide on into it,
+        // unless the reader took over meanwhile.
+        if (needsLatestReloadRef.current) {
+          void reloadLatestRef.current().then((installed) => {
+            if (installed && glideRef.current === glide) glide.frame = requestAnimationFrame(run);
+            else if (glideRef.current === glide) glideRef.current = null;
+          });
+          return;
+        }
+        glideRef.current = null;
+        scrollToBottom();
+      };
+      glide.frame = requestAnimationFrame(step);
+    };
+    if (isAtRest()) run();
+    else void whenSettled().then(run);
+  }, [isAtRest, scrollToBottom, setFollowingTail, stopGlideToLatest, whenSettled]);
+
+  const jumpToLatest = useCallback(() => {
+    if (!needsLatestReload) {
+      glideToLatest();
+      return;
+    }
     void reloadLatestRef.current().then((installed) => {
-      if (installed) requestAnimationFrame(() => scrollToBottom());
+      if (installed) requestAnimationFrame(() => glideToLatest());
     });
-  }, [needsLatestReload, scrollToBottom]);
+  }, [needsLatestReload, glideToLatest]);
+  useEffect(() => stopGlideToLatest, [stopGlideToLatest]);
 
   // The one path that starts an older-page load, so upward input and the
   // retry affordance cannot drift apart on how a failure is recorded.
@@ -5339,10 +5436,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     const count = (event: TouchEvent) => {
       touchesRef.current = event.touches.length;
-      // A finger on the screen takes over from any rubber band.
+      // A finger on the screen takes over from any rubber band, and from the
+      // glide to the latest message.
       if (event.type === 'touchstart') {
         bottomBounceRef.current = false;
         lastInputAtRef.current = performance.now();
+        stopGlideToLatest();
       }
     };
     const types = ['touchstart', 'touchend', 'touchcancel'] as const;
@@ -5350,7 +5449,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     return () => {
       for (const type of types) document.removeEventListener(type, count, { capture: true });
     };
-  }, []);
+  }, [stopGlideToLatest]);
   // Unmounting releases every wait: the page's own guards discard what it read.
   useEffect(() => {
     const waiters = settleWaitersRef.current;
@@ -5521,6 +5620,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     if (lastSessionRef.current === session.id) return;
     lastSessionRef.current = session.id;
+    stopGlideToLatest();
     setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
@@ -5535,7 +5635,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     pagingGestureRef.current = null;
     const id = requestAnimationFrame(() => scrollToBottom());
     return () => cancelAnimationFrame(id);
-  }, [session.id, scrollToBottom, setFollowingTail]);
+  }, [session.id, scrollToBottom, setFollowingTail, stopGlideToLatest]);
 
   // Deep-link jump (P5): once ChatPage has put the target message into
   // ``messages`` (either it was already loaded or the around-window was fetched
@@ -5548,6 +5648,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // suppression lifts.
   useEffect(() => {
     if (!jumpTarget) return;
+    stopGlideToLatest();
     const el = scrollRef.current;
     if (!el) return;
     // If the target is the newest loaded row AND we're genuinely at the live tail
@@ -5596,6 +5697,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     onJumpHandled,
     scrollToBottom,
     setFollowingTail,
+    stopGlideToLatest,
   ]);
 
 
@@ -5726,10 +5828,12 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onClickCapture={(event) => holdTouchedRow(event.target)}
         onPointerDown={() => {
           lastInputAtRef.current = performance.now();
+          stopGlideToLatest();
           pagingGestureRef.current = { kind: 'pointer', consumed: false, at: 0 };
         }}
         onWheel={(event) => {
           lastInputAtRef.current = performance.now();
+          stopGlideToLatest();
           if (event.defaultPrevented || event.ctrlKey) return;
           const at = performance.now();
           const gesture = pagingGestureRef.current;
@@ -5769,6 +5873,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onTouchCancel={settleTouch}
         onKeyDown={(event) => {
           lastInputAtRef.current = performance.now();
+          stopGlideToLatest();
           if (!event.repeat) pagingGestureRef.current = { kind: 'keyboard', consumed: false, at: 0 };
           if (event.defaultPrevented || !transcriptOwnsUpwardInput(event.target, event.currentTarget)) return;
           if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home' || (event.key === ' ' && event.shiftKey)) {

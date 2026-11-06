@@ -36,6 +36,10 @@ to move under the reader:
 - Following the tail, opening something (a disclosure control, `aria-expanded`)
   holds it where it was tapped and stops following, so the next row does not
   pull it away. A plain tap keeps following.
+- The way back to the latest message (the down-arrow) is a glide the reader
+  sees, 250–350 ms and slowing as it lands; from far up it first cuts to a
+  screen above the bottom. At the bottom it follows the tail again. Any input
+  from the reader stops it where it is, and under reduced motion it is a cut.
 - Rows mounted after a chat opened on its skeleton appear at once instead of
   fading in from blank.
 

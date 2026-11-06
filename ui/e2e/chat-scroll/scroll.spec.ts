@@ -345,6 +345,80 @@ test('following the tail, opening something holds it where it was tapped and sto
   expect(await bottomGap()).toBeGreaterThan(1);
 });
 
+// The way back to the latest message (the down-arrow), recorded frame by frame.
+async function glideFrames(page: Page, act: () => Promise<void>) {
+  await page.evaluate(() => window.__scrollLab.start());
+  await act();
+  await page.waitForTimeout(700);
+  await page.evaluate(() => window.__scrollLab.stop());
+  return page.evaluate(() => window.__scrollLab.frames.map((frame) => [frame.t, frame.top, frame.height - frame.client] as const));
+}
+const toLatest = (page: Page) => page.getByRole('button', { name: /Scroll to latest|回到最新/ });
+const gapToBottom = (page: Page) => transcript(page).evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
+// The reader's own scroll, as far from a write of the scroller's as a finger
+// is: a scroll's end within 100 ms of one is taken for that write's own.
+const standAt = async (page: Page, screensUp: number) => {
+  await page.waitForTimeout(200);
+  await transcript(page).evaluate((el, screens) => { el.scrollTop = el.scrollHeight - el.clientHeight * (1 + screens); }, screensUp);
+  await page.waitForTimeout(400);
+};
+
+test('the way back to the latest message is a quick glide that slows as it lands, then follows the tail', async ({ page }) => {
+  // All 50 rows are in the first window: nothing older to load.
+  await open(page, 'delay=0&images=0&count=50');
+  await standAt(page, 2);
+  const frames = await glideFrames(page, () => toLatest(page).click());
+  const startTop = frames[0][1];
+  const bottom = frames.at(-1)![2];
+  expect(frames.at(-1)![1]).toBeGreaterThanOrEqual(bottom - 1);
+  const between = frames.filter(([, top]) => top > startTop + 1 && top < bottom - 1);
+  expect(between.length).toBeGreaterThanOrEqual(5);
+  const firstMove = frames.find(([, top]) => top > startTop + 1)![0];
+  const landed = frames.find(([, top]) => top >= bottom - 1)![0];
+  expect(landed - firstMove).toBeGreaterThan(150);
+  expect(landed - firstMove).toBeLessThan(500);
+  // It slows as it lands: the last third of the way takes longer than the first.
+  const at = (fraction: number) => frames.find(([, top]) => top >= startTop + (bottom - startTop) * fraction)![0];
+  expect(landed - at(2 / 3)).toBeGreaterThan(at(1 / 3) - firstMove);
+  // At the bottom it follows the tail again.
+  await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
+  await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
+
+  // From far up it cuts to a screen above the bottom first, then glides.
+  await standAt(page, 8);
+  const far = await glideFrames(page, () => toLatest(page).click());
+  const farStart = far[0][1];
+  const moved = far.filter(([, top]) => top > farStart + 1);
+  const client = await transcript(page).evaluate((el) => el.clientHeight);
+  expect(moved[0][1]).toBeGreaterThanOrEqual(far.at(-1)![2] - client - 2);
+  expect(moved.filter(([, top, end]) => top < end - 1).length).toBeGreaterThanOrEqual(5);
+  expect(await gapToBottom(page)).toBeLessThan(1);
+});
+
+test('the glide to the latest message gives way to the reader, and is a cut under reduced motion', async ({ page }) => {
+  await open(page, 'delay=0&images=0&count=50');
+  await standAt(page, 2);
+  await toLatest(page).click();
+  await page.waitForTimeout(90);
+  // Shift + wheel down would also count; a wheel up is the reader taking over.
+  const box = (await transcript(page).boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -40);
+  await page.waitForTimeout(150);
+  const stoppedAt = await transcript(page).evaluate((el) => el.scrollTop);
+  await page.waitForTimeout(400);
+  expect(await transcript(page).evaluate((el) => el.scrollTop)).toBeLessThanOrEqual(stoppedAt + 1);
+  expect(await gapToBottom(page)).toBeGreaterThan(1);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await standAt(page, 2);
+  const frames = await glideFrames(page, () => toLatest(page).click());
+  const startTop = frames[0][1];
+  const bottom = frames.at(-1)![2];
+  expect(frames.filter(([, top]) => top > startTop + 1 && top < bottom - 1)).toHaveLength(0);
+  expect(await gapToBottom(page)).toBeLessThan(1);
+});
+
 test('older rows appear at once after a chat opened on its skeleton', async ({ page }) => {
   await open(page, 'reader=local&images=0&inbox=1&boot=600&delay=100');
   // The live window replaced the skeleton (which holds one row, the Inbox's).
