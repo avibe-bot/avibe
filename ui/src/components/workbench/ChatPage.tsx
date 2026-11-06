@@ -1661,7 +1661,10 @@ export const ChatPage: React.FC = () => {
         if (serverUnreachable(error)) return fromDevice();
         // The server answered with a refusal: the saved rows shown ahead of it go,
         // and the rows it was asked about are its call.
-        if (saved.length && await settled()) {
+        if (saved.length) {
+          // Waited for rest: the chat may have changed meanwhile, and nothing
+          // here may touch the one that replaced it.
+          if (!(await settled())) return true;
           const shown = new Set(saved);
           setMessages((prev) => prev.filter((row) => !shown.has(row)));
         }
