@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ArrowRight, CheckCheck, ChevronDown, Filter, Inbox, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
+import { CheckCheck, ChevronDown, Filter, Inbox, RefreshCw, Search } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
@@ -11,8 +11,8 @@ import { useNotificationPreferences } from '../../context/NotificationPreference
 import { useBotRoster } from '../../context/BotRosterContext';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import type { InboxSession } from '../../context/ApiContext';
-import { formatRelativeTime } from '../../lib/relativeTime';
-import { InboxPreview } from './InboxPreview';
+import { InboxCard } from './InboxCard';
+import { useMinute } from '../../lib/useMinute';
 import { Button } from '../ui/button';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
@@ -23,8 +23,8 @@ import { useChatPrefetch } from './useChatPrefetch';
 import { InboxCardsSkeleton } from './listSkeletons';
 import { Skeleton } from '../ui/skeleton';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
-import { BotAvatar } from '../ui/bot-avatar';
-import { BotTag } from './bots/BotTag';
+import { FlipList } from '../ui/flip-list';
+import { Presence } from '../ui/presence';
 import {
   readInboxFilter,
   writeInboxFilter,
@@ -146,10 +146,10 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
 
   const capturePosition = useInboxScrollRestoration(listRef, location.key, filter, visible);
 
-  const openSession = (s: InboxSession) => {
+  const openSession = useCallback((s: InboxSession) => {
     capturePosition();
     navigate(`/chat/${encodeURIComponent(s.session_id)}`);
-  };
+  }, [capturePosition, navigate]);
 
   const onMarkAllRead = async () => {
     const ids = Object.entries(unreadBySession)
@@ -158,105 +158,26 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     await Promise.all(ids.map((id) => markRead(id)));
   };
 
-  // One conversation card. In a muted category an unread card stays marked but
-  // drops the mint that asks for attention, and its count turns grey. Inside the
-  // Bots section the header already says Bot, so the card carries no Bot tag.
+  // A card draws again only when what it shows changed (`InboxCard`); the minute is
+  // what moves its "3 minutes ago" on, rather than any re-render of the page.
+  const minute = useMinute();
   const renderCard = (s: InboxSession, quiet: boolean, inBotSection: boolean) => {
-    const unread = unreadOf(s);
-    const projectLabel = s.project_name || s.project_id || 'avibe';
-    const sessionLabel = s.title?.trim() || s.session_id;
-    // A Bot's conversation reads as the Bot: avatar, name, and a small Bot
-    // tag in place of "project · title" (docs/plans/bots.md D5).
     const bot = botForSession(s.session_id);
     return (
-      <article
+      <InboxCard
         key={s.session_id}
-        data-inbox-session-id={s.session_id}
-        className={clsx(
-          'flex flex-col gap-3 rounded-xl border p-4 transition',
-          unread > 0
-            ? quiet
-              ? 'border-border-strong bg-foreground/[0.03]'
-              : 'border-mint/30 bg-mint/[0.05] shadow-glow-md-mint'
-            : 'border-border bg-surface',
-        )}
-      >
-        <div className="flex items-center gap-2 text-[11px]">
-          {bot ? (
-            <>
-              <BotAvatar avatar={bot.avatar} name={botName(bot)} size={24} inList />
-              <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{botName(bot)}</span>
-              {!inBotSection && <BotTag />}
-              <span className="flex-1" />
-            </>
-          ) : (
-            <>
-              <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
-                {projectLabel}
-              </span>
-              <span className="text-muted">·</span>
-              <span className="flex-1 truncate text-[13px] font-semibold text-foreground">
-                {sessionLabel}
-              </span>
-            </>
-          )}
-          {s.replied && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-cyan-ink">
-              <MessageSquareReply className="size-2.5" />
-              {t('workbench.inbox.replied')}
-            </span>
-          )}
-          <span className="shrink-0 font-mono text-muted">{formatRelativeTime(s.last_activity_at, t)}</span>
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-mint-ink">
-            {t('workbench.inbox.agent')}
-          </div>
-          {s.preview_text ? (
-            <InboxPreview
-              text={s.preview_text}
-              className={clsx(
-                'line-clamp-3 text-[13px] leading-relaxed',
-                unread > 0 ? 'text-foreground' : 'text-muted',
-              )}
-            />
-          ) : (
-            <p className="text-[13px] leading-relaxed text-muted">—</p>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => openSession(s)}
-            className="press inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint-ink hover:bg-mint/[0.12] active:bg-mint/[0.12]"
-          >
-            {unread > 0 && (
-              <span
-                className={clsx(
-                  'inline-flex min-w-[1.1rem] items-center justify-center rounded-full px-1.5 font-mono text-[9px] font-bold',
-                  quiet ? 'bg-foreground/[0.18] text-foreground' : 'bg-mint text-primary-foreground',
-                )}
-              >
-                {unread > 99 ? '99+' : unread}
-              </span>
-            )}
-            {t('workbench.inbox.openSession')}
-            <ArrowRight className="size-3" />
-          </button>
-          {capabilities.can_chat && unread > 0 && (
-            <button
-              type="button"
-              onClick={() => markRead(s.session_id)}
-              className="press inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[11px] font-medium text-foreground hover:bg-foreground/[0.04] active:bg-foreground/[0.04]"
-            >
-              <CheckCheck className="size-3" />
-              {t('workbench.inbox.markRead')}
-            </button>
-          )}
-        </div>
-      </article>
+        session={s}
+        unread={unreadOf(s)}
+        quiet={quiet}
+        inBotSection={inBotSection}
+        bot={bot}
+        botLabel={bot ? botName(bot) : ''}
+        canChat={capabilities.can_chat}
+        minute={minute}
+        t={t}
+        onOpen={openSession}
+        onMarkRead={markRead}
+      />
     );
   };
 
@@ -274,6 +195,16 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
   }, [hasBots, roster.sessionIds, visible]);
 
   const hasMore = !!nextCursor;
+  // What the list draws, in order, for its motion (M7): a row the order changes moves,
+  // the rows around it glide. Another tab is another list.
+  const flipIds = useMemo(() => [
+    ...(visible.length === 0 ? ['beyond'] : []),
+    ...sections.flatMap((section) => [
+      ...(section.category ? [`section:${section.category}`] : []),
+      ...section.rows.map((row) => row.session_id),
+    ]),
+    ...(hasMore ? ['more'] : []),
+  ], [hasMore, sections, visible.length]);
   // Only declare "all clear" when nothing is visible AND nothing left to load
   // could match. On the Unread tab that means no unread sessions exist anywhere
   // (unreadSessions is pagination-independent) — otherwise unread sessions on a
@@ -446,11 +377,11 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
           </div>
         </div>
       ) : (
-        <div className={clsx('flex flex-col gap-3', cardsHandover)}>
+        <FlipList ids={flipIds} group={filter} className={clsx('flex flex-col gap-3', cardsHandover)}>
           {/* Unread tab, current pages hold no unread but more exist further
               down — prompt to load instead of rendering nothing. */}
           {visible.length === 0 && (
-            <div className="rounded-xl border border-dashed border-border bg-surface px-4 py-6 text-center text-[12.5px] text-muted">
+            <div data-flip-id="beyond" className="rounded-xl border border-dashed border-border bg-surface px-4 py-6 text-center text-[12.5px] text-muted">
               {t('workbench.inbox.moreUnreadBeyond')}
             </div>
           )}
@@ -469,16 +400,21 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
                     unread={unreadByCategory[section.category]}
                     quiet={quiet}
                     className="px-1 pt-1"
+                    flipId={`section:${section.category}`}
                     action={
-                      section.category === 'session' && capabilities.can_chat && sectionUnreadIds.length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => void Promise.all(sectionUnreadIds.map((id) => markRead(id)))}
-                          className="inline-flex items-center gap-1 rounded-md border border-border-strong px-2 py-0.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
-                        >
-                          <CheckCheck className="size-3" />
-                          {t('workbench.inbox.sections.markRead')}
-                        </button>
+                      section.category === 'session' && capabilities.can_chat ? (
+                        <Presence show={sectionUnreadIds.length > 0} kind="fade">
+                          {() => (
+                            <button
+                              type="button"
+                              onClick={() => void Promise.all(sectionUnreadIds.map((id) => markRead(id)))}
+                              className="inline-flex items-center gap-1 rounded-md border border-border-strong px-2 py-0.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+                            >
+                              <CheckCheck className="size-3" />
+                              {t('workbench.inbox.sections.markRead')}
+                            </button>
+                          )}
+                        </Presence>
                       ) : null
                     }
                   />
@@ -492,17 +428,18 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               re-derives ``visible``. Shown on both tabs (and even when the
               Unread tab's current page is empty) so unread sessions deeper in
               history stay reachable. */}
-          {hasMore && loadingMore && <InboxCardsSkeleton rows={1} />}
+          {hasMore && loadingMore && <div data-flip-id="more"><InboxCardsSkeleton rows={1} /></div>}
           {hasMore && !loadingMore && (
             <button
               type="button"
+              data-flip-id="more"
               onClick={() => loadMore()}
               className="flex items-center justify-center gap-1.5 self-center rounded-md border border-border-strong px-4 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
             >
               {t('workbench.inbox.loadMore')}
             </button>
           )}
-        </div>
+        </FlipList>
       )}
     </div>
   );

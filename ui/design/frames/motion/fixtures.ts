@@ -2,7 +2,7 @@
 // the states a moment moves between, and what the kit's moments (`kit/motion/`) are told about them.
 import type { InboxSession } from '@/context/ApiContext';
 
-import type { ChatCast, ChatShift, InboxCast } from '../../kit/motion/cast';
+import type { ChatCast, ChatShift } from '../../kit/motion/cast';
 import { inboxRow, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentSays, chatFixtures, idleTurn, runningTurn, userSays } from '../chat/fixtures';
 import { workbenchFixtures } from '../workbench/fixtures';
@@ -100,11 +100,3 @@ export const inboxFixtures = (...states: ChatState[]) => ({
     Object.entries(INBOX).map(([name, { rows, unread }]) => [name, { inboxSessions: [...rows], unreadBySession: { ...unread } }]),
   ),
 });
-
-/** The Inbox move: our conversation goes to the top; where each card of the after list sat in the before
- *  list, relative to its new slot (px, at 390 px), the FLIP offsets the implementation measures. */
-export const INBOX_MOVE: InboxCast = {
-  moved: CHAT.replied,
-  flip: { [CHAT.replied]: 369, ses_demo_cache: -184, ses_demo_pr: -185, ses_demo_docs: 21 },
-};
-

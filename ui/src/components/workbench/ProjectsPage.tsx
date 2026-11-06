@@ -56,6 +56,9 @@ import { SESSION_STATUS_DOT_MOTION_CLASS } from './sessionRowLayout';
 import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 import { MobileProjectCardsSkeleton, MobileSessionRowsSkeleton, SkeletonHandoverRows } from './listSkeletons';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
+import { FlipList } from '../ui/flip-list';
+import { Presence } from '../ui/presence';
+import { treeMotion } from './treeMotion';
 
 // Same status → colour mapping the desktop sidebar draws, and the same pulse
 // while the agent is running; the two surfaces share the motion class so a
@@ -358,7 +361,7 @@ const MobileSessionRow: React.FC<{
 
   if (renaming) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2">
+      <div data-flip-id={session.id} className="flex items-center gap-2 px-3 py-2">
         <span className={clsx('size-1.5 shrink-0 rounded-full', DOT[session.agent_status] ?? DOT.idle)} />
         <Input
           ref={inputRef}
@@ -377,7 +380,7 @@ const MobileSessionRow: React.FC<{
   }
 
   return (
-    <div className="group/sess flex items-center">
+    <div data-flip-id={session.id} className="group/sess flex items-center">
       <button
         type="button"
         onClick={onOpen}
@@ -388,15 +391,21 @@ const MobileSessionRow: React.FC<{
           {session.title || `#${session.id.slice(-6)}`}
         </span>
         <SessionPinIndicator pinned={session.pinned} label={t('workbench.sessionPinned')} />
-        {unread > 0 ? (
-          <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary-foreground">
-            {unread > 99 ? '99+' : unread}
-          </span>
-        ) : (
-          <span className="shrink-0 text-[10.5px] text-muted">
-            {formatRelativeTime(session.last_active_at ?? session.updated_at, t)}
-          </span>
-        )}
+        {/* Read: the count shrinks away as the time fades in (M7). */}
+        <Presence show={unread > 0} value={unread}>
+          {(count) => (
+            <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary-foreground">
+              {count > 99 ? '99+' : count}
+            </span>
+          )}
+        </Presence>
+        <Presence show={unread === 0} kind="fade">
+          {() => (
+            <span className="shrink-0 text-[10.5px] text-muted">
+              {formatRelativeTime(session.last_active_at ?? session.updated_at, t)}
+            </span>
+          )}
+        </Presence>
       </button>
       {canManageMetadata && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
@@ -508,6 +517,18 @@ export const ProjectsPage: React.FC = () => {
   // The list's skeleton, and the fade its cards take where it was.
   const projectsSkeleton = projects === null && !projectsError;
   const projectsHandover = useSkeletonHandover(projectsSkeleton);
+  // The tree as its motion follows it (M7; see `treeMotion`).
+  const tree = treeMotion(projects, (projectId) => {
+    const open = isExpanded(projectId);
+    const state = sessionsOf(projectId);
+    const all = state.sessions ?? [];
+    const shown = visibleSessionCountFor(visibleSessionCounts, projectId);
+    return {
+      open,
+      rows: state.loading && all.length === 0 ? null : all.slice(0, shown),
+      more: (all.length > shown || !!state.cursor) && !state.loadingMore,
+    };
+  });
   // New project sits at the end of the Projects title's row, the same height as the title.
   const newProjectButton = canCreateProject ? (
     <Button
@@ -552,6 +573,7 @@ export const ProjectsPage: React.FC = () => {
         </div>
       )}
 
+      {list.length > 0 && <FlipList ids={tree.ids} group={tree.group} className="flex flex-col gap-2">
       <SortableProjectList projects={list} mobile
         disabled={!capabilities.can_manage_projects || isReorderingProjects}
         onReorder={reorderProjects}
@@ -565,7 +587,7 @@ export const ProjectsPage: React.FC = () => {
         const hasHiddenCachedSessions = allSessionRows.length > visibleSessionCount;
         const hasMoreSessions = hasHiddenCachedSessions || !!state.cursor;
         return (
-          <div key={project.id} className={clsx('overflow-hidden rounded-xl border border-border bg-surface', projectsHandover)}>
+          <div key={project.id} data-flip-id={`project:${project.id}`} className={clsx('overflow-hidden rounded-xl border border-border bg-surface', projectsHandover)}>
             <MobileProjectRow
               dragHandle={dragHandle}
               project={project}
@@ -609,6 +631,7 @@ export const ProjectsPage: React.FC = () => {
                 {hasMoreSessions && !state.loadingMore && (
                   <button
                     type="button"
+                    data-flip-id={`more:${project.id}`}
                     onClick={() => revealMoreSessions(project.id, state, visibleSessionCount, allSessionRows.length)}
                     className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan-ink transition hover:bg-cyan/[0.06]"
                   >
@@ -622,6 +645,7 @@ export const ProjectsPage: React.FC = () => {
         );
       }}
       </SortableProjectList>
+      </FlipList>}
 
       {showNewProject && canCreateProject && (
         <NewProjectDialog

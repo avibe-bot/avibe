@@ -62,6 +62,19 @@ export function Fixture() {
     setSessions((prev) => prev.some((row) => row.session_id === 'session-100') ? prev : [makeRow(100), ...prev]);
     setUnread((prev) => ({ ...prev, 'session-100': 1 }));
   };
+  // A live reply in a conversation lower down: it moves to the top with its new
+  // preview and one more unread (the motion spec drives this).
+  useEffect(() => {
+    (window as unknown as { inboxFixture: unknown }).inboxFixture = {
+      reply: (id: number) => {
+        setSessions((prev) => {
+          const row = prev.find((item) => item.session_id === `session-${id}`) ?? makeRow(id);
+          return [{ ...row, preview_text: `A new reply in ${id}.` }, ...prev.filter((item) => item !== row)];
+        });
+        setUnread((prev) => ({ ...prev, [`session-${id}`]: (prev[`session-${id}`] ?? 0) + 1 }));
+      },
+    };
+  }, []);
   return <WorkbenchInboxContext.Provider value={{
     inboxSessions: sessions, unreadBySession: unread, totalUnread: Object.keys(unread).length,
     unreadSessions: Object.keys(unread).length,

@@ -17,7 +17,3 @@ export type ChatCast = {
  *  the data; FLIP measures them at run time): `send` the message and the working bubble, `arrival` what
  *  the reply adds over the bubble. */
 export type ChatShift = { send: number; arrival: number };
-
-/** The Inbox move: the card that moves to the top, and where each card of the new list sat in the old one,
- *  relative to its new slot (the FLIP offsets). */
-export type InboxCast = { moved: string; flip: Record<string, number> };
