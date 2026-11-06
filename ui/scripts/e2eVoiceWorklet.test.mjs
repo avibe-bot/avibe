@@ -8,7 +8,8 @@
 // pages each suite opens (page.goto paths, fixture .html literals; any other
 // route is the whole app), then each page's module script and its imports,
 // static or dynamic. A suite whose pages cannot be read fails, rather than
-// passing unjudged.
+// passing unjudged. A suite that records from a fake microphone keeps the real
+// worklet (`voiceWorklet: 'real'` in its config), since it captures through it.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +91,11 @@ const suites = fs.readdirSync(E2E, { withFileTypes: true })
 
 const composerSuites = suites.filter((suite) => suite.composer);
 
+/** The Playwright configs that run a suite's directory. */
+const configsOf = (suite) => fs.readdirSync(UI)
+  .filter((name) => /^playwright\..*config\.ts$/.test(name))
+  .filter((name) => read(path.join(UI, name)).includes(`testDir: './e2e/${suite.name}'`));
+
 describe('browser suites that reach the composer', () => {
   it('are found where the composer is known to be, and nowhere it is not', () => {
     expect(fs.existsSync(COMPOSER)).toBe(true);
@@ -100,6 +106,8 @@ describe('browser suites that reach the composer', () => {
     for (const known of ['chat-interactions', 'chat-scroll', 'voice-shortcut', 'workbench-general']) expect(names).toContain(known);
     // A fixture that never shows a chat.
     expect(names).not.toContain('project-order');
+    // Every one of them is run by a config the microphone rule reads.
+    expect(composerSuites.filter((suite) => configsOf(suite).length === 0).map((suite) => suite.name)).toEqual([]);
   });
 
   it.each(composerSuites.map((suite) => [suite.name, suite]))('%s runs every spec on support/browserTest', (_name, suite) => {
@@ -116,6 +124,13 @@ describe('browser suites that reach the composer', () => {
       const made = source.match(/browser\.newContext\(/g)?.length ?? 0;
       const stubbed = source.match(/stubVoiceWorklet\(/g)?.length ?? 0;
       if (made > stubbed) offences.push(`${name} makes ${made} context(s) with browser.newContext() but stubs ${stubbed}`);
+    }
+    // A fake microphone means the suite captures audio, through the real worklet.
+    for (const config of configsOf(suite)) {
+      const source = read(path.join(UI, config));
+      if (source.includes('--use-fake-device-for-media-stream') && !source.includes("voiceWorklet: 'real'")) {
+        offences.push(`${config} records from a fake microphone but stubs the voice worklet: set voiceWorklet: 'real'`);
+      }
     }
     expect(offences, offences.join('\n')).toEqual([]);
   });
