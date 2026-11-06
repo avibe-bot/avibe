@@ -437,7 +437,7 @@ def remove_project_entry(server: NativeServer, root: Path) -> bool:
     """Remove one root-project declaration from a native project source."""
     path = server.path
     if server.source != CLAUDE:
-        return _remove_entry_locked(server.source, server.name, path=path)
+        return remove_entry(server.source, server.name, path=path)
     text = path.read_text(encoding="utf-8")
     data = _parse(server.source, text)
     projects = data.get("projects", {})
