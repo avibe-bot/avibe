@@ -168,15 +168,12 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
         if stored is None:
             raise repository._not_found(key.name)
         # Released global files use the normalized shape. Keep that disk contract.
-        raw = dict(stored["transport"])
-        if "oauth" in stored:
-            raw["oauth"] = stored["oauth"]
-        return raw
+        return _definition_raw(stored)
     native_server = _project_native(key)
     if native_server is not None:
         if native_server.error or native_server.definition is None:
             raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
-        return native_server.raw or native_server.definition
+        return _definition_raw(native_server.definition)
     try:
         _, document = _document(key.scope)
     except (OSError, ValueError) as exc:
@@ -185,6 +182,14 @@ def _raw_entry(key: ScopedName) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise repository._not_found(key.name)
     validate_name(key.name)
+    return raw
+
+
+def _definition_raw(definition: dict[str, Any]) -> dict[str, Any]:
+    """Convert the normalized definition back to the provider shape consumed by _effective."""
+    raw = dict(definition.get("transport") or {})
+    if "oauth" in definition:
+        raw["oauth"] = definition["oauth"]
     return raw
 
 
@@ -437,14 +442,7 @@ def project_add_definition(name: str, raw: object) -> dict[str, Any]:
 
 
 def load_server(key: ScopedName) -> ScopedServer:
-    if repository.is_project(key):
-        native_server = _project_native(key)
-        if native_server is not None:
-            if native_server.error or native_server.definition is None:
-                raise native_server.error or McpHubError("invalid_definition", f"{key}: invalid native entry")
-            raw = native_server.raw or native_server.definition
-            approved = _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
-            return ScopedServer(key, raw, native_server.definition, "ok" if approved else "pending_approval", [], [], native_server.source, native_server.path)
+    native_server = _project_native(key)
     raw = _raw_entry(key)
     definition, missing, placeholders = _effective(key, raw, _secrets(key))
     if missing:
@@ -456,7 +454,9 @@ def load_server(key: ScopedName) -> ScopedServer:
         state = "needs_config"
     else:
         state = "ok"
-    return ScopedServer(key, raw, definition, state, missing, placeholders)
+    return ScopedServer(key, raw, definition, state, missing, placeholders,
+                        native_server.source if native_server else None,
+                        native_server.path if native_server else None)
 
 
 # ---------------------------------------------------------------------------
@@ -510,11 +510,8 @@ def project_servers(scope: Scope) -> dict[str, Optional[ScopedServer]]:
         if native_server.error:
             result[name] = None
             continue
-        key = ScopedName(scope, name)
         try:
-            raw = native_server.raw or native_server.definition
-            approval = _cached(key, "approval.json").get("fingerprint") == fingerprint(raw)
-            result[name] = ScopedServer(key, raw or {}, native_server.definition, "ok" if approval else "pending_approval", [], [], native_server.source, native_server.path)
+            result[name] = load_server(ScopedName(scope, name))
         except McpHubError:
             result[name] = None
     return result

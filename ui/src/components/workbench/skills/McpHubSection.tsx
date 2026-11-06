@@ -244,7 +244,7 @@ export function McpServerDetail({
       </div>
       </>
       ) : null}
-      {!(project && current.source !== 'project') && current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
+      {(!project || projectRow) && current.auth === 'needs_login' ? <LoginLink name={current.name} project={project} className={buttonVariants({ variant: 'brand', size: 'sm' })} onActivate={onActivateLogin}>{t('mcpHub.login')}</LoginLink> : null}
       {canManage ? (
         <div className="flex flex-wrap items-center gap-2 pt-1">
           {projectRow && state === 'pending_approval' && onApprove ? (

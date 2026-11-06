@@ -295,6 +295,8 @@ def read_project(root: Path) -> dict[str, NativeServer]:
                 if not _native_enabled(source, entry):
                     continue
                 raw = _READERS[source](entry)
+                if isinstance(raw.get("cwd"), str) and raw["cwd"].strip():
+                    raw["cwd"] = _resolve_cwd(path, raw["cwd"])
                 definition = definition_from_provider(str(name), raw)
                 if definition.get("transport", {}).get("type") == "stdio" and "cwd" not in definition["transport"]:
                     definition["transport"]["cwd"] = str(root)
@@ -413,16 +415,16 @@ def _remove_codex(text: str, name: str) -> str:
     return "".join(kept)
 
 
-def _remove_text(source: str, text: str, name: str) -> str:
+def _remove_text(source: str, text: str, name: str, container: Optional[tuple[str, ...]] = None) -> str:
     if source == CODEX:
         return _remove_codex(text, name)
     from vibe.opencode_config import remove_jsonc_member
 
-    parent = ("mcp", "servers") if source == OPENCODE and _opencode_v2(_parse(source, text)) else _KEY[source]
+    parent = container or (("mcp", "servers") if source == OPENCODE and _opencode_v2(_parse(source, text)) else (_KEY[source],))
     return remove_jsonc_member(text, parent, name)
 
 
-def remove_entry(source: str, name: str, *, path: Optional[Path] = None) -> bool:
+def remove_entry(source: str, name: str, *, path: Optional[Path] = None, container: Optional[tuple[str, ...]] = None) -> bool:
     """Delete ``name`` from ``source``'s native file; ``False`` if it is already gone.
 
     Re-reads the file, so an edit since discovery is respected. The result must
@@ -430,7 +432,7 @@ def remove_entry(source: str, name: str, *, path: Optional[Path] = None) -> bool
     """
 
     with _EDIT_LOCK:
-        return _remove_entry_locked(source, name, path=path)
+        return _remove_entry_locked(source, name, path=path, container=container)
 
 
 def remove_project_entry(server: NativeServer, root: Path) -> bool:
@@ -438,26 +440,11 @@ def remove_project_entry(server: NativeServer, root: Path) -> bool:
     path = server.path
     if server.source != CLAUDE:
         return remove_entry(server.source, server.name, path=path)
-    text = path.read_text(encoding="utf-8")
-    data = _parse(server.source, text)
-    projects = data.get("projects", {})
-    project = projects.get(str(root.resolve()), {}) if isinstance(projects, dict) else {}
-    servers = project.get("mcpServers", {}) if isinstance(project, dict) else {}
-    if server.name not in servers:
-        return False
-    expected = json.loads(json.dumps(data))
-    del servers[server.name]
-    from vibe.opencode_config import remove_jsonc_member
-    updated = remove_jsonc_member(text, ("projects", str(root.resolve()), "mcpServers"), server.name)
-    del expected["projects"][str(root.resolve())]["mcpServers"][server.name]
-    if _parse(server.source, updated) != expected:
-        raise McpHubError("invalid_native_config", f"could not remove {server.name!r} without changing other content")
-    from config.atomic_io import write_atomic
-    write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777)
-    return True
+    return remove_entry(server.source, server.name, path=path,
+                        container=("projects", str(root.resolve()), "mcpServers"))
 
 
-def _remove_entry_locked(source: str, name: str, *, path: Optional[Path] = None) -> bool:
+def _remove_entry_locked(source: str, name: str, *, path: Optional[Path] = None, container: Optional[tuple[str, ...]] = None) -> bool:
     from config.atomic_io import write_atomic
 
     if path is None:
@@ -471,14 +458,15 @@ def _remove_entry_locked(source: str, name: str, *, path: Optional[Path] = None)
         return False
     except Exception as exc:
         raise _unreadable(source, path, exc) from None
-    if not isinstance(data, dict) or name not in _servers(source, data):
+    entries = _container_entries(source, data, container)
+    if name not in entries:
         return False
     try:
-        updated = _remove_text(source, text, name)
+        updated = _remove_text(source, text, name, container)
         expected = json.loads(json.dumps(data, default=str))
-        _servers(source, expected).pop(name)
+        _container_entries(source, expected, container).pop(name)
         actual = json.loads(json.dumps(_parse(source, updated), default=str))
-        if expected[_KEY[source]] == {} and _KEY[source] not in actual:
+        if container is None and expected[_KEY[source]] == {} and _KEY[source] not in actual:
             expected.pop(_KEY[source])  # an implicit TOML parent table goes with its last child
         if actual != expected:
             raise ValueError("entry is not a standalone block")
@@ -495,6 +483,15 @@ def _remove_entry_locked(source: str, name: str, *, path: Optional[Path] = None)
 
     write_atomic(path, updated, follow_symlinks=True, mode=path.stat().st_mode & 0o777, before_replace=unchanged)
     return True
+
+
+def _container_entries(source: str, data: dict[str, Any], container: Optional[tuple[str, ...]]) -> dict[str, Any]:
+    if container is None:
+        return _servers(source, data)
+    value: Any = data
+    for part in container:
+        value = value.get(part) if isinstance(value, dict) else None
+    return value if isinstance(value, dict) else {}
 
 
 # ---------------------------------------------------------------------------
