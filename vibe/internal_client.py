@@ -316,6 +316,48 @@ def publish_event_sync(
         raise InternalServerUnavailable(str(exc)) from exc
 
 
+def control_request_sync(
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Submit once. Only a failed connection or explicit rejection proves no execution."""
+    from core.control_requests import failure, validate_result
+
+    try:
+        content = json.dumps(payload, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return failure("invalid_control_request", str(exc))
+    endpoint = _resolve_endpoint(socket_path)
+    try:
+        client = httpx.Client(
+            transport=_sync_transport(endpoint),
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        )
+    except (httpx.TransportError, OSError) as exc:
+        # Client/transport construction has not submitted any bytes.
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        with client:
+            response = client.post("/internal/control", content=content, headers={"Content-Type": "application/json"})
+            # Both are pre-handler refusals: auth middleware, or an older service
+            # without this endpoint. Never fall back to direct SQLite or auto-start.
+            if response.status_code in {401, 404}:
+                return failure("service_unavailable", "The service did not accept this control request")
+            try:
+                _validate_response(response, endpoint)
+                return validate_result(response.json())
+            except (InternalServerUnavailable, ValueError) as exc:
+                raise InternalServerTimeout("Control response is ambiguous; do not replay the request") from exc
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except (httpx.TransportError, OSError) as exc:
+        raise InternalServerTimeout("Control request may have executed; do not replay it") from exc
+
+
 def record_skill_observation_sync(
     observation: dict[str, Any], *, socket_path: Optional[Path] = None,
     timeout: float = 0.25,

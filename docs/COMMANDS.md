@@ -983,6 +983,14 @@ point back to this command.
 vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork-self)? (--message <text> | --message-file <file>) [options]
 ```
 
+Requires a running Avibe service that supports control requests. There is no
+offline enqueue or automatic service start. `service_unavailable` with
+`execution: not_executed` means no handoff occurred; explicitly start or update
+the service before trying again. `execution_unknown` means the request may have
+been executed: inspect `vibe runs list` before submitting new work, and do not
+blindly retry. `--message-file` is read in the calling CLI, preserving stdin
+and shell process-substitution inputs.
+
 Important options:
 
 - `--agent`

@@ -269,6 +269,12 @@ def create_app(
             return await supervisor.run_sync(operation)
         return await asyncio.to_thread(operation)
 
+    @app.post("/internal/control")
+    async def _control_request(request: Request) -> Any:
+        from core.handlers.cli_requests import handle_control_request
+
+        return await handle_control_request(controller, await _safe_json(request), run_sync=_run_store_step)
+
     async def _off_loop(operation: Callable[[], Any]) -> tuple["asyncio.Future[Any]", bool]:
         """Run one scheduled-turn store step on the runtime-work executor, the door the
         scheduler's own store work uses, so its write-lock wait and commit never hold

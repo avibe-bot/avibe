@@ -883,6 +883,12 @@ vibe agent models --backend opencode --provider deepseek
 vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork-self)? (--message <文本> | --message-file <文件>) [options]
 ```
 
+需要正在运行且支持控制请求的 Avibe 服务；不会离线入队或自动启动服务。
+`service_unavailable` 中的 `execution: not_executed` 表示没有发生交接，请明确启动
+或更新服务后再试。`execution_unknown` 表示请求可能已经执行：先用 `vibe runs list`
+检查状态，不要盲目重试。`--message-file` 在调用方 CLI 中读取，保留 stdin 和 shell
+进程替换输入的语义。
+
 重要参数：
 
 - `--agent`

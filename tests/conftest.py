@@ -194,6 +194,54 @@ _reaped_processes: list[str] = []
 _TEST_PROCESSES = pytest.StashKey[process_reaper.TestProcesses]()
 
 
+@pytest.fixture
+def in_process_cli_control(monkeypatch):
+    """Keep existing CLI behavior tests on the real warm handler, replacing only IPC.
+
+    The lazy controller reads each test's existing store fixtures at request time.
+    Socket/disconnect behavior is tested separately at the transport boundary.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from core.handlers.cli_requests import handle_control_request
+    from vibe import cli, internal_client
+
+    stores = []
+
+    class Controller:
+        @property
+        def vibe_agent_store(self):
+            store = cli._agent_store()
+            stores.append(store)
+            return store
+
+        @property
+        def scheduled_task_service(self):
+            # Older refusal tests deliberately seed only their Agent/Session DB;
+            # constructing a fresh execution store would import state before the
+            # refusal under test. A real controller already owns this store.
+            class RequestStore:
+                store = None
+
+                def __getattr__(self, name):
+                    if self.store is None:
+                        self.store = cli._task_request_store()
+                        if self.store.sqlite_backend is not None:
+                            stores.append(self.store.sqlite_backend)
+                    return getattr(self.store, name)
+
+            return SimpleNamespace(request_store=RequestStore())
+
+    def request(payload, **_kwargs):
+        return asyncio.run(handle_control_request(Controller(), payload))
+
+    monkeypatch.setattr(internal_client, "control_request_sync", request)
+    yield
+    for store in stores:
+        store.close()
+
+
 @pytest.fixture(autouse=True)
 def _record_test_processes(request):
     """For a ``reap_processes`` test, record every process it starts; ``pytest_runtest_teardown`` kills
