@@ -444,13 +444,16 @@ class CodexTransport:
             response = await self.send_request("config/read", read_params)
             config = response.get("config") if isinstance(response, dict) else None
             servers = config.get("mcp_servers", {}) if isinstance(config, dict) else None
-            if servers is None:
-                servers = {}
             if not isinstance(servers, dict):
                 raise RuntimeError("Codex config/read returned invalid mcp_servers")
             params = dict(params)
             config = dict(params.get("config") or {})
-            config.update({f"mcp_servers.{json.dumps(name)}.enabled": False for name in servers if isinstance(name, str)})
+            if servers:
+                overrides = dict(config.get("mcp_servers") or {})
+                for name in servers:
+                    if isinstance(name, str):
+                        overrides[name] = {**overrides.get(name, {}), "enabled": False}
+                config["mcp_servers"] = overrides
             params["config"] = config
 
         self._request_id += 1

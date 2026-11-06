@@ -311,7 +311,6 @@ def test_spawns_disable_every_native_server(native_files):
     from claude_agent_sdk import ClaudeAgentOptions
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-    from modules.agents.codex.transport import _native_mcp_disabled_args
     from vibe.claude_config import CLAUDE_NATIVE_MCP_DISABLED
     from vibe.opencode_config import managed_opencode_runtime_config_content
 
@@ -323,15 +322,12 @@ def test_spawns_disable_every_native_server(native_files):
     client = ClaudeClient(ClaudeCompatConfig(enabled=True, permission_mode="default", cwd="/tmp"))
     assert client.options.strict_mcp_config and client.options.mcp_servers == {}
 
-    assert _native_mcp_disabled_args() == [
-        "-c", "mcp_servers.local.enabled=false", "-c", "mcp_servers.shared.enabled=false"]
-
-    overlay = json.loads(managed_opencode_runtime_config_content(None, native.opencode_disabled_mcp()))
+    overlay = json.loads(managed_opencode_runtime_config_content(None, native.opencode_disabled_mcp(), opencode_version="1.2.15"))
     assert overlay["mcp"] == {"oc": {**OPENCODE["mcp"]["oc"], "enabled": False}}
 
     only_in_overlay = json.loads(managed_opencode_runtime_config_content(
         json.dumps({"mcp": {"extra": {"type": "local", "command": ["node"], "enabled": True}}}),
-        native.opencode_disabled_mcp(),
+        native.opencode_disabled_mcp(), opencode_version="1.2.15",
     ))
     assert only_in_overlay["mcp"]["extra"]["enabled"] is False
     assert only_in_overlay["mcp"]["oc"]["enabled"] is False

@@ -159,6 +159,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "permission": {"*": "ask", "skill": "deny"},
                 "tools": {"bash": True, "skill": False},
+                "policies": [
+                    {"action": "integration.use", "resource": "mcp:*", "effect": "deny"},
+                    {"action": "mcp.use", "resource": "*", "effect": "deny"},
+                ],
             },
         )
 

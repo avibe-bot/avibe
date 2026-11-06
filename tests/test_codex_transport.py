@@ -385,3 +385,96 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeMcpSuppressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_thread_requests_suppress_effective_native_servers(self):
+        # The transport owns suppression, including callers that bypass CodexAgent.
+        for method in ("thread/start", "thread/resume", "thread/fork"):
+            for cwd in (None, "/project"):
+                for config in ({}, {"mcp_servers": {"project-only": {}, "foo.bar": {}, 'a"b': {}}},
+                               {"mcp_servers": None}, {"mcp_servers": []}, "rpc-error"):
+                    with self.subTest(method=method, cwd=cwd, config=config):
+                        transport = CodexTransport(binary="codex", cwd="/server")
+                        transport._process = SimpleNamespace(returncode=None)
+                        writes = []
+
+                        async def write(message):
+                            writes.append(message)
+                            if message["method"] == "config/read":
+                                response = ({"error": {"code": -32603, "message": "read failed"}}
+                                            if config == "rpc-error" else {"result": {"config": config}})
+                            else:
+                                response = {"result": {"thread": {"id": "thread"}}}
+                            await transport._dispatch({"id": message["id"], **response})
+
+                        transport._write_message = write
+                        params = {"config": {"keep": True, "mcp_servers": {"project-only": {"command": "keep"}}}}
+                        if cwd:
+                            params["cwd"] = cwd
+                        invalid = config == "rpc-error" or (
+                            "mcp_servers" in config and not isinstance(config["mcp_servers"], dict))
+                        if invalid:
+                            with self.assertRaises((RuntimeError, CodexRPCError)):
+                                await transport.send_request(method, params)
+                            self.assertEqual(len(writes), 1)
+                        else:
+                            await transport.send_request(method, params)
+                            expected = {"keep": True, "mcp_servers": {"project-only": {"command": "keep"}}}
+                            if config:
+                                expected["mcp_servers"] = {
+                                    "project-only": {"command": "keep", "enabled": False},
+                                    "foo.bar": {"enabled": False},
+                                    'a"b': {"enabled": False},
+                                }
+                            self.assertEqual(writes[1]["params"]["config"], expected)
+                            self.assertEqual(writes[1]["method"], method)
+                        self.assertEqual(writes[0]["params"], {
+                            "includeLayers": False, **({"cwd": cwd} if cwd else {})})
+                        self.assertEqual(params["config"], {"keep": True, "mcp_servers": {"project-only": {"command": "keep"}}})
+
+    async def test_real_cli_does_not_start_project_mcp(self):
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        from tests.conftest import REAL_USER_HOME, _AMBIENT_AVIBE_HOME
+
+        # Read only the configured executable; never load/migrate production config.
+        config_path = Path(_AMBIENT_AVIBE_HOME or REAL_USER_HOME / ".avibe") / "config/config.json"
+        configured = json.loads(config_path.read_text()) if config_path.exists() else {}
+        binary = shutil.which(configured.get("agents", {}).get("codex", {}).get("cli_path", "codex"))
+        if not binary:
+            self.skipTest("Avibe-configured Codex executable unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "home"
+            codex_home = home / ".codex"
+            project = root / "project"
+            codex_home.mkdir(parents=True)
+            (project / ".codex").mkdir(parents=True)
+            marker = root / "started"
+            codex_home.joinpath("config.toml").write_text(
+                f'[projects.{json.dumps(str(project))}]\ntrust_level = "trusted"\n')
+            project.joinpath(".codex/config.toml").write_text("".join(
+                f'[mcp_servers.{json.dumps(name)}]\ncommand = "/usr/bin/touch"\n'
+                f'args = [{json.dumps(str(marker))}]\n'
+                for name in ("project-only", "foo.bar", 'a"b')
+            ))
+            env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home), "CODEX_HOME": str(codex_home),
+                   "XDG_CONFIG_HOME": str(home / ".config"), "XDG_DATA_HOME": str(home / ".local/share"),
+                   "XDG_CACHE_HOME": str(home / ".cache"), "TMPDIR": str(root)}
+            transport = CodexTransport(binary=binary, cwd=str(project), runtime_env=env)
+            try:
+                await transport.start()
+                effective = await transport.send_request("config/read", {"cwd": str(project)})
+                self.assertIn("project-only", effective["config"]["mcp_servers"])
+                await transport.send_request("thread/start", {
+                    "cwd": str(project), "model": "gpt-5", "approvalPolicy": "never",
+                    "sandbox": "read-only",
+                })
+                await asyncio.sleep(0.5)
+                self.assertFalse(marker.exists())
+            finally:
+                await transport.stop()

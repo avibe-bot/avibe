@@ -2748,7 +2748,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             thread_id = await agent._start_or_resume_thread(transport, request)
 
         self.assertEqual(thread_id, "thread-existing")
-        self.assertEqual(transport.send_request.await_count, 2)
+        self.assertEqual(transport.send_request.await_count, 3)
         method, params = transport.send_request.await_args_list[2].args
         self.assertEqual(method, "thread/resume")
         self.assertEqual(params["threadId"], "thread-existing")
@@ -3596,7 +3596,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/turns/list",
-            "config/read",
             "thread/fork",
             "thread/inject_items",
         ])
@@ -3744,7 +3743,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/turns/list",
-            "config/read",
             "thread/fork",
             "thread/inject_items",
         ])
@@ -3814,7 +3812,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/turns/list",
-            "config/read",
             "thread/fork",
             "thread/inject_items",
         ])
@@ -4015,7 +4012,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/turns/list",
-            "config/read",
             "thread/fork",
             "thread/inject_items",
         ])
@@ -4088,7 +4084,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/turns/list",
-            "config/read",
             "thread/fork",
             "thread/inject_items",
         ])

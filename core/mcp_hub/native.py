@@ -11,7 +11,7 @@ never edits these files except :func:`remove_entry`, which deletes one named
 entry and leaves every other byte in place.
 For a name present in several files the first source in that order is canonical.
 Avibe sessions never load these servers natively; see
-:func:`codex_disable_overrides` and :func:`opencode_disabled_mcp`.
+the Codex transport and :func:`opencode_disabled_mcp`.
 """
 
 from __future__ import annotations
@@ -401,18 +401,6 @@ def _names(source: str) -> list[str]:
     except McpHubError:
         return []
     return sorted(str(name) for name in _servers(source, data))
-
-
-def codex_disable_overrides() -> list[str]:
-    """``-c`` overrides that disable every user ``[mcp_servers]`` entry.
-
-    Codex merges ``-c`` values into its tables, so an empty table cannot remove
-    them; ``enabled=false`` per server does, without touching the user file.
-    """
-
-    from vibe.codex_config import _format_toml_key
-
-    return [f"mcp_servers.{_format_toml_key(name)}.enabled=false" for name in _names(CODEX)]
 
 
 def opencode_disabled_mcp() -> dict[str, Any]:
