@@ -16,13 +16,19 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import cast
 from uuid import uuid4
 
 from packaging.utils import canonicalize_name
 
+from vibe.launcher_path import (
+    CURRENT_VIBE_EXECUTABLE_ENV,
+    cache_running_vibe_path,
+    get_running_vibe_path,
+    is_usable_command_path,
+    resolve_command_path,
+)
+from vibe.restart_state import RestartState
 from vibe.package_shape import CORE_PACKAGE_NAME, LEGACY_CORE_PACKAGE_NAME
 
 from config import paths as config_paths
@@ -44,7 +50,6 @@ PACKAGE_NAME = CORE_PACKAGE_NAME
 LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
-CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 DESKTOP_MANAGED_RUNTIME_ENV = "AVIBE_DESKTOP_MANAGED_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -97,25 +102,6 @@ _PRE_ORDER = {
     "pre": 2,
     "preview": 2,
 }
-
-
-class RestartState(str, Enum):
-    """Closed restart-state vocabulary and its retention policy."""
-
-    def __new__(cls, value: str, retention: str | None):
-        member = str.__new__(cls, value)
-        member._value_ = value
-        member.retention = retention
-        return member
-
-    SCHEDULED = ("scheduled", "seed")
-    RUNNING = ("running", "seed")
-    SUCCEEDED = ("succeeded", "result")
-    FAILED = ("failed", "result")
-    ERROR = ("error", "result")
-    CANCELLED = ("cancelled", "result")
-    SKIPPED = ("skipped", "result")
-    UNKNOWN = ("unknown", None)
 
 
 @dataclass(frozen=True)
@@ -1138,29 +1124,6 @@ def is_desktop_managed_runtime(base_env: Mapping[str, str] | None = None) -> boo
     return value.strip().lower() in TRUTHY_ENV_VALUES
 
 
-def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
-    if not command:
-        return None
-
-    expanded = Path(command).expanduser()
-    if expanded.is_absolute():
-        return os.path.abspath(str(expanded))
-
-    if any(sep in command for sep in (os.sep, "/")):
-        return os.path.abspath(str(Path.cwd() / expanded))
-
-    resolved = shutil.which(command, path=search_path)
-    if not resolved:
-        return None
-    return os.path.abspath(os.path.expanduser(resolved))
-
-
-def is_usable_command_path(path: str | None) -> bool:
-    if not path:
-        return False
-    return os.path.exists(path) and os.access(path, os.X_OK)
-
-
 def get_launcher_bin_dir(command_path: str) -> str:
     current = os.path.abspath(os.path.expanduser(command_path))
 
@@ -1210,39 +1173,6 @@ def find_uv_binary(uv_path: str | None = None, base_env: Mapping[str, str] | Non
             return resolved
 
     return None
-
-
-def get_running_vibe_path(
-    *,
-    vibe_path: str | None = None,
-    argv0: str | None = None,
-    search_path: str | None = None,
-) -> str | None:
-    resolved = resolve_command_path(vibe_path, search_path=search_path)
-    if is_usable_command_path(resolved):
-        return resolved
-
-    env_path = resolve_command_path(os.environ.get(CURRENT_VIBE_EXECUTABLE_ENV), search_path=search_path)
-    if is_usable_command_path(env_path):
-        return env_path
-
-    argv_path = resolve_command_path(argv0 or sys.argv[0], search_path=search_path)
-    if is_usable_command_path(argv_path):
-        argv_path_str = cast(str, argv_path)
-        if Path(argv_path_str).name.startswith("vibe"):
-            return argv_path_str
-
-    fallback_path = resolve_command_path("vibe", search_path=search_path)
-    if is_usable_command_path(fallback_path):
-        return fallback_path
-    return None
-
-
-def cache_running_vibe_path(vibe_path: str | None = None) -> str | None:
-    resolved = get_running_vibe_path(vibe_path=vibe_path)
-    if resolved:
-        os.environ[CURRENT_VIBE_EXECUTABLE_ENV] = resolved
-    return resolved
 
 
 def get_restart_command(

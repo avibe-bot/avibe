@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import config.v2_config as v2_config
+import core.scheduled_tasks as scheduled_tasks
+import core.vibe_agents as vibe_agents
+import storage.db
+
+
 import io
 import json
 import os
@@ -63,7 +69,7 @@ def _capture_stderr_json(func, *args):
 
 def test_agent_enable_disable_cli_toggles_enabled_state(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
 
     with patch("vibe.cli._agent_store", return_value=agent_store):
@@ -86,7 +92,7 @@ def test_agent_enable_disable_cli_toggles_enabled_state(tmp_path: Path, capsys, 
 
 def test_disabled_agent_cannot_run(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex", enabled=False)
     args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hello"])
 
@@ -105,7 +111,7 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     task = store.add_task(
         session_key="",
         prompt="send digest",
@@ -128,7 +134,7 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
     assert result == 1
     assert payload["code"] == "task_schedule_retired"
     assert payload["details"] == {"task_id": task.id}
-    saved = cli.ScheduledTaskStore().get_task(task.id)
+    saved = scheduled_tasks.ScheduledTaskStore().get_task(task.id)
     assert saved is not None
     assert saved.enabled is False
     assert saved.retirement_reason == "schedule_missed"
@@ -136,11 +142,11 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
 
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     try:
         agent_store.create(name="archive-fallback", backend="codex")
         agent = agent_store.create(name="pm", backend="codex")
-        store = cli.ScheduledTaskStore()
+        store = scheduled_tasks.ScheduledTaskStore()
         task = store.add_task(
             name="Daily review",
             session_key="slack::channel::C123",
@@ -162,23 +168,23 @@ def test_task_update_preserves_archived_agent_reference(capsys) -> None:
             patch("vibe.cli._task_store", return_value=store),
             patch(
                 "vibe.cli._agent_store",
-                side_effect=lambda: cli.VibeAgentStore(db_path),
+                side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
             ),
         ):
             assert cli.cmd_task_update(args) == 0
 
         assert json.loads(capsys.readouterr().out)["definition"]["agent_name"] == archived.archived_name
-        assert cli.ScheduledTaskStore().get_task(task.id).agent_name == archived.archived_name
+        assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).agent_name == archived.archived_name
 
         explicit = cli.build_parser().parse_args(
             ["task", "update", task.id, "--agent", archived.archived_name]
         )
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-            patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore()),
+            patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore()),
             patch(
                 "vibe.cli._agent_store",
-                side_effect=lambda: cli.VibeAgentStore(db_path),
+                side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
             ),
         ):
             result, payload = _capture_stderr_json(cli.cmd_task_update, explicit)
@@ -189,7 +195,7 @@ def test_task_update_preserves_archived_agent_reference(capsys) -> None:
 
 
 def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
+    agent_store = vibe_agents.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     try:
         agent_store.create(name="archive-fallback", backend="codex")
         agent_store.create(name="worker", backend="codex")
@@ -206,14 +212,14 @@ def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys, sqlite_schema_d
 
 
 def test_agent_remove_cli_archive_refusal_is_english_under_a_zh_ui(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
+    agent_store = vibe_agents.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     try:
         agent_store.create(name="only-agent", backend="codex")
         agent_store.set_default_agent_name("only-agent")
         with (
             patch("vibe.cli._agent_store", return_value=agent_store),
             patch(
-                "vibe.cli.V2Config.load",
+                'config.v2_config.V2Config.load',
                 return_value=SimpleNamespace(language="zh"),
             ),
         ):
@@ -232,12 +238,12 @@ def test_agent_remove_cli_archive_refusal_is_english_under_a_zh_ui(tmp_path: Pat
 
 def test_agent_remove_cli_invalid_reference_metadata_is_english_under_a_zh_ui() -> None:
     def refuse_archive(_name):
-        raise cli.AgentReferenceRewriteError()
+        raise vibe_agents.AgentReferenceRewriteError()
 
     store = SimpleNamespace(archive=refuse_archive)
     with (
         patch("vibe.cli._agent_store", return_value=store),
-        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+        patch('config.v2_config.V2Config.load', return_value=SimpleNamespace(language="zh")),
     ):
         result, payload = _capture_stderr_json(
             cli.cmd_agent_remove,
@@ -251,7 +257,7 @@ def test_agent_remove_cli_invalid_reference_metadata_is_english_under_a_zh_ui() 
 
 
 def test_agent_update_and_enable_archived_edit_refusal_is_english_under_a_zh_ui(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
+    agent_store = vibe_agents.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     try:
         agent_store.create(name="archive-fallback", backend="codex")
         agent_store.create(name="worker", backend="codex")
@@ -259,7 +265,7 @@ def test_agent_update_and_enable_archived_edit_refusal_is_english_under_a_zh_ui(
         assert archived is not None
         with (
             patch("vibe.cli._agent_store", return_value=agent_store),
-            patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+            patch('config.v2_config.V2Config.load', return_value=SimpleNamespace(language="zh")),
         ):
             update_result, update_payload = _capture_stderr_json(
                 cli.cmd_agent_update,
@@ -280,7 +286,7 @@ def test_agent_update_and_enable_archived_edit_refusal_is_english_under_a_zh_ui(
 
 
 def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
+    agent_store = vibe_agents.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     for index in range(25):
         agent_store.create(
             name=f"worker-{index:02d}",
@@ -510,7 +516,7 @@ def test_task_add_accepts_named_or_unrestricted_weekday(cron: str, capsys) -> No
 
 
 def test_task_update_rejects_numeric_weekday_and_keeps_stored_schedule(tmp_path: Path) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     task = store.add_task(
         session_key="slack::channel::C123",
         prompt="hello",
@@ -545,7 +551,7 @@ def test_task_add_rejects_invalid_timezone() -> None:
 def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
 
-    with patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(store_path)):
+    with patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(store_path)):
         result, payload = _capture_stderr_json(cli.cmd_task_show, "missing")
 
     assert result == 1
@@ -554,7 +560,7 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 
 def test_removed_task_reads_as_removed_and_refuses_mutations(capsys) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -600,7 +606,7 @@ def test_remote_editor_task_add_persists_authorization_context(
     # the Avibe Agent shell that runs the suite and appeared in the asserted metadata.
     _bare_terminal_caller(monkeypatch)
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     args = _parse_task_add(["--cron", "0 * * * *", "--shell", "true"])
     caller_env = {
         "AVIBE_SESSION_ID": "sesCaller",
@@ -632,21 +638,21 @@ def test_remote_editor_task_add_persists_authorization_context(
     payload = json.loads(capsys.readouterr().out)
     # Persisted for the deferred run, hidden from the projection it prints.
     assert "resource_user_context" not in payload["definition"]["metadata"]
-    stored = cli.ScheduledTaskStore(store_path).list_tasks()
+    stored = scheduled_tasks.ScheduledTaskStore(store_path).list_tasks()
     assert len(stored) == 1
     assert stored[0].metadata["resource_user_context"]["vibe_instance_role"] == "editor"
 
 
 def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="project-agent", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-29T00:00:00+00:00"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-scope-task", now=now)
         conn.execute(
@@ -669,7 +675,7 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
         )
 
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     invoke_dir = tmp_path / "invoke"
     invoke_dir.mkdir()
     args = _parse_task_add(
@@ -705,9 +711,9 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
 
 def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     args = _parse_task_add(
         [
             "--agent",
@@ -738,14 +744,14 @@ def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp
 
 def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="project-agent", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-29T00:00:00+00:00"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-once-task", now=now)
         conn.execute(
@@ -768,7 +774,7 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
         )
 
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     invoke_dir = tmp_path / "invoke"
     invoke_dir.mkdir()
     args = _parse_task_add(
@@ -795,7 +801,7 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_policy"] == "create_once"
-    target = cli.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
+    target = scheduled_tasks.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
     assert target.session_key.session_scope == "avibe::project::proj-once-task"
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
@@ -892,9 +898,9 @@ def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_pat
                     updated_at="2026-06-16T00:00:00Z",
                 )
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+        store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
 
         payloads = []
         for cron in ("0 * * * *", "30 * * * *"):
@@ -938,14 +944,14 @@ def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_pat
 
 def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="codex", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import agent_sessions
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-28T00:00:00+00:00"
         scope_id = upsert_scope(conn, "avibe", "project", "proj-cli-defaults", now=now)
         conn.execute(
@@ -965,7 +971,7 @@ def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys, sqli
             )
         )
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     args = _parse_task_add(["--cron", "0 * * * *", "--message", "hello"])
 
     with (
@@ -1014,7 +1020,7 @@ def test_task_update_missing_id_returns_guidance(tmp_path: Path) -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["task", "update", "missing", "--name", "Updated"])
 
-    with patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(store_path)):
+    with patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(store_path)):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -1025,7 +1031,7 @@ def test_task_update_missing_id_returns_guidance(tmp_path: Path) -> None:
 def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
 
-    with patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(store_path)):
+    with patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(store_path)):
         result, payload = _capture_stderr_json(cli.cmd_task_run, "missing")
 
     assert result == 1
@@ -1034,8 +1040,8 @@ def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 
 def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore()
-    requests = cli.TaskExecutionStore()
+    store = scheduled_tasks.ScheduledTaskStore()
+    requests = scheduled_tasks.TaskExecutionStore()
     store.add_task(
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1099,7 +1105,7 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
 def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> None:
     """A list row is the compact projection: no nulls, zero counters, healthy verdicts or legacy keys."""
 
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     named = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -1146,7 +1152,7 @@ def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> N
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     for index in range(25):
         store.add_task(
             name=f"Task {index:02d}",
@@ -1179,7 +1185,7 @@ def test_task_list_orders_enabled_rows_first_then_newest_activity(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     older = store.add_task(
         name="Older active",
         session_key="slack::channel::C123",
@@ -1222,7 +1228,7 @@ def test_task_list_cli_dispatches_pagination_flags(
     capsys,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     for index in range(3):
         store.add_task(
             name=f"Task {index}",
@@ -1246,7 +1252,7 @@ def test_task_list_cli_dispatches_pagination_flags(
 def test_task_list_order_is_stable_across_cron_boundaries(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     later = store.add_task(
         name="Later run",
         session_key="slack::channel::C123",
@@ -1298,7 +1304,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
 
 
 def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -1324,7 +1330,7 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
 
 
 def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     done = store.add_task(
         session_key="slack::channel::C123",
         prompt="one-shot",
@@ -1345,7 +1351,7 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
 
 
 def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     for index in range(3):
         done = store.add_task(
             session_key="slack::channel::C123",
@@ -1375,7 +1381,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
 def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     request_root = tmp_path / "task_requests"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     task = store.add_task(
         session_key="slack::channel::C123",
         prompt="hello",
@@ -1386,7 +1392,7 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
 
     with (
         patch("vibe.cli._task_store", return_value=store),
-        patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(request_root)),
+        patch("vibe.cli._task_request_store", return_value=scheduled_tasks.TaskExecutionStore(request_root)),
     ):
         result = cli.cmd_task_run(task.id)
 
@@ -1402,8 +1408,8 @@ def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store = cli.ScheduledTaskStore()
-    requests = cli.TaskExecutionStore()
+    store = scheduled_tasks.ScheduledTaskStore()
+    requests = scheduled_tasks.TaskExecutionStore()
     task = store.add_task(
         session_key="slack::channel::C123",
         prompt="hello",
@@ -1435,14 +1441,14 @@ def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
     manual = requests.get_run(payload["run"]["id"])
     assert manual is not None and manual["source_kind"] == "cli"
     assert "task_schedule_consumed" not in manual["metadata"]
-    current = cli.ScheduledTaskStore().get_task(task.id)
+    current = scheduled_tasks.ScheduledTaskStore().get_task(task.id)
     assert current is not None and current.enabled is False
     assert (current.retired_at, current.retirement_reason, current.last_run_id) == terminal
 
 
 def test_task_update_requires_at_least_one_change(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     task = store.add_task(
         session_key="slack::channel::C123",
         prompt="hello",
@@ -1465,7 +1471,7 @@ def test_task_update_requires_at_least_one_change(tmp_path: Path) -> None:
 
 def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     task = store.add_task(
         session_key="slack::channel::C123",
         prompt="hello",
@@ -1514,7 +1520,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
     written a pin on its way to failing.
     """
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     try:
         # The Agent the bound Session runs as, and a DIFFERENT current default. The
         # gap between them is what makes the re-pin observable at all.
@@ -1524,7 +1530,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
     finally:
         agent_store.close()
 
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     task = store.add_task(
         name="digest",
         session_key="slack::channel::C123",
@@ -1535,7 +1541,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
         cron="0 * * * *",
         timezone_name="UTC",
         deliver_key="slack::channel::C123",
-        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+        metadata={scheduled_tasks.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
     )
 
     def _update(*argv: str) -> tuple[int, str]:
@@ -1547,7 +1553,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
         """
         parser = cli.build_parser()
         args = parser.parse_args(["task", "update", task.id, *argv])
-        cli_agent_store = cli.VibeAgentStore(db_path)
+        cli_agent_store = vibe_agents.VibeAgentStore(db_path)
         stderr = io.StringIO()
         try:
             with (
@@ -1572,7 +1578,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
         "passed nor the cleared state that was asked for; every future fire now runs "
         "as the wrong Agent"
     )
-    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+    assert stored.metadata.get(scheduled_tasks.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
         "the contradictory pair dropped the follow-the-session state, so the bound "
         "Session no longer governs the definition's Agent"
     )
@@ -1590,7 +1596,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
 
 def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     task = store.add_task(
         session_id="sesExisting",
         session_key="",
@@ -1910,7 +1916,7 @@ def test_task_update_reserves_a_replacement_session_without_the_commands_directo
                     workdir=str(scope_cwd),
                 )
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         store = _command_task_store(tmp_path)
         task = _stored_command_task(
@@ -2001,7 +2007,7 @@ def test_task_update_repoints_a_reserved_command_task_without_replacing_its_sess
 
 def test_task_update_rejects_cwd_for_already_reserved_create_once_task(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     task = store.add_task(
         session_id="sesExisting",
         session_key="",
@@ -2079,9 +2085,9 @@ def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_
                     workdir=str(saved_cwd),
                 )
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+        store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
         task = store.add_task(
             session_id="sesOld",
             session_key="",
@@ -2121,7 +2127,7 @@ def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_
 
 def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = scheduled_tasks.ScheduledTaskStore(store_path)
     task = store.add_task(
         session_key="",
         prompt="hello",
@@ -2136,7 +2142,7 @@ def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: 
             "session_workdir": str(tmp_path),
         },
     )
-    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent_store = vibe_agents.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
     agent_store.create(name="worker", backend="codex")
     parser = cli.build_parser()
     args = parser.parse_args(["task", "update", task.id, "--reset-delivery"])
@@ -2169,7 +2175,7 @@ def test_task_add_returns_reachability_warning_for_unbound_lark_dm(
     with (
         _cli_state(db_path, agent_store),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
-        patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
+        patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
         patch("core.services.settings.get_settings_store", return_value=fake_store),
     ):
         result = cli.cmd_task_add(args)
@@ -2185,7 +2191,7 @@ def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_live_cancel",
         message="keep working",
@@ -2230,7 +2236,7 @@ def test_runs_cancel_shared_turn_detaches_only_the_requested_run(
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_shared_turn",
         message="one shared participant",
@@ -2281,7 +2287,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_una
     from vibe import internal_client
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_controller_down",
         message="keep working",
@@ -2316,7 +2322,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuse
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_stop_failed",
         message="keep working",
@@ -2354,7 +2360,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_no_live_turn(
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_no_live_turn",
         message="keep working",
@@ -2392,7 +2398,7 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_already_finished",
         message="keep working",
@@ -2441,7 +2447,7 @@ def test_runs_cancel_queued_agent_run_does_not_call_live_controller(
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    request_store = cli.TaskExecutionStore()
+    request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_queued_cancel",
         message="queued work",
@@ -2468,9 +2474,9 @@ def test_runs_cancel_queued_agent_run_does_not_call_live_controller(
 
 def test_agent_run_standalone_async_reserves_background_session(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent = agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hello"])
 
     with (
@@ -2557,9 +2563,9 @@ def test_agent_run_caller_scope_default_keeps_caller_cwd_and_same_scope_uses_sco
 
     monkeypatch.setenv("AVIBE_SESSION_ID", caller["id"])
     monkeypatch.chdir(invocation_cwd)
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
 
     def run(extra: list[str]) -> dict:
         args = _parse_agent_run(
@@ -2642,9 +2648,9 @@ def test_agent_run_scope_id_uses_unique_project_anchors(tmp_path: Path, capsys) 
                     updated_at="2026-06-16T00:00:00Z",
                 )
             )
-        agent_store = cli.VibeAgentStore(db_path)
+        agent_store = vibe_agents.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
-        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
 
         payloads = []
         for message in ("one", "two"):
@@ -2684,9 +2690,9 @@ def test_agent_run_scope_id_uses_unique_project_anchors(tmp_path: Path, capsys) 
 
 def test_agent_run_standalone_does_not_create_platform_pseudo_scope(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hello"])
 
     with (
@@ -2713,7 +2719,7 @@ def test_agent_run_standalone_does_not_create_platform_pseudo_scope(tmp_path: Pa
 
 def test_agent_run_rejects_cross_backend_agent_for_existing_session(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="codex-worker", backend="codex")
     from storage.sessions_service import SQLiteSessionsService
 
@@ -2745,9 +2751,9 @@ def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, c
     # and drop the rows seeded below. Establish the state first, as the rest of
     # this module does, then seed what the command is meant to find.
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="codex-worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     from storage.sessions_service import SQLiteSessionsService
 
     service = SQLiteSessionsService(db_path)
@@ -2788,7 +2794,7 @@ def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, c
 
 def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="session-worker", backend="codex")
     agent_store.create(name="other-worker", backend="codex")
     from storage.sessions_service import SQLiteSessionsService
@@ -2822,9 +2828,9 @@ def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_pa
     # and drop the rows seeded below. Establish the state first, as the rest of
     # this module does, then seed what the command is meant to find.
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     from storage.sessions_service import SQLiteSessionsService
 
     service = SQLiteSessionsService(db_path)
@@ -2865,12 +2871,12 @@ def test_agent_run_rejects_default_async_wait_timeout_combo() -> None:
 
 
 def test_agent_create_reserved_name_error_is_english_under_a_zh_ui(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
+    agent_store = vibe_agents.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     args = _parse_agent(["create", "_hidden", "--backend", "codex"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+        patch('config.v2_config.V2Config.load', return_value=SimpleNamespace(language="zh")),
     ):
         result, payload = _capture_stderr_json(cli.cmd_agent_create, args)
 
@@ -2882,7 +2888,7 @@ def test_agent_create_reserved_name_error_is_english_under_a_zh_ui(tmp_path: Pat
 
 def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.ensure_builtin_default_agents(["opencode", "codex"])
     args = _parse_agent(["default", "codex"])
 
@@ -2897,7 +2903,7 @@ def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys, sqlite_sch
 
 def test_agent_default_cli_bootstraps_builtin_backend_agent(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     args = _parse_agent(["default", "codex"])
 
     with patch("vibe.cli._agent_store", return_value=agent_store):
@@ -2915,7 +2921,7 @@ def test_agent_default_cli_bootstraps_builtin_backend_agent(tmp_path: Path, caps
 
 def test_agent_import_name_filters_global_candidates(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     keep = tmp_path / "reviewer.md"
     skip = tmp_path / "builder.md"
     keep.write_text("---\nname: reviewer\n---\nReview carefully.", encoding="utf-8")
@@ -2924,7 +2930,7 @@ def test_agent_import_name_filters_global_candidates(tmp_path: Path, capsys, sql
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli.iter_global_agent_files", return_value=[(keep, "codex"), (skip, "codex")]),
+        patch('core.vibe_agents.iter_global_agent_files', return_value=[(keep, "codex"), (skip, "codex")]),
     ):
         result = cli.cmd_agent_import(args)
 
@@ -2936,7 +2942,7 @@ def test_agent_import_name_filters_global_candidates(tmp_path: Path, capsys, sql
 
 def test_agent_import_skips_malformed_global_candidates(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     valid = tmp_path / "reviewer.md"
     broken = tmp_path / "broken.md"
     valid.write_text("---\nname: reviewer\n---\nReview carefully.", encoding="utf-8")
@@ -2945,7 +2951,7 @@ def test_agent_import_skips_malformed_global_candidates(tmp_path: Path, capsys, 
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli.iter_global_agent_files", return_value=[(broken, "codex"), (valid, "codex")]),
+        patch('core.vibe_agents.iter_global_agent_files', return_value=[(broken, "codex"), (valid, "codex")]),
     ):
         result = cli.cmd_agent_import(args)
 
@@ -2957,7 +2963,7 @@ def test_agent_import_skips_malformed_global_candidates(tmp_path: Path, capsys, 
 
 
 def test_default_agent_pointer_is_created(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
+    agent_store = vibe_agents.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     agent = agent_store.ensure_default_agent(backend="codex")
 
     assert agent.name == "default"
@@ -2995,13 +3001,13 @@ def test_resolve_agent_for_target_bootstraps_sqlite_before_scope_lookup(tmp_path
 
 def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    default_agent = cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
+    default_agent = vibe_agents.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import make_scope_id, upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3052,7 +3058,7 @@ def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Pat
 
 def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     original = agent_store.create(name="pm", backend="claude")
     agent_store.create(name="archive-fallback", backend="codex")
     from storage.importer import ensure_sqlite_state
@@ -3060,7 +3066,7 @@ def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Pat
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-08-01T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3118,7 +3124,7 @@ def test_scope_derived_agent_target_preserves_the_stable_reference(tmp_path: Pat
 
 def test_session_derived_agent_target_prefers_the_stable_id(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     original = agent_store.create(name="pm", backend="claude")
     agent_store.create(name="archive-fallback", backend="codex")
     archived = agent_store.archive(original.name)
@@ -3128,7 +3134,7 @@ def test_session_derived_agent_target_prefers_the_stable_id(tmp_path: Path, sqli
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
         patch(
-            "vibe.cli.resolve_session_id_target",
+            'core.scheduled_tasks.resolve_session_id_target',
             return_value=SimpleNamespace(
                 agent_id=original.id,
                 agent_name=replacement.name,
@@ -3156,7 +3162,7 @@ def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without
     tmp_path: Path, sqlite_schema_db_factory,
 ) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
@@ -3165,7 +3171,7 @@ def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3206,7 +3212,7 @@ def test_resolve_agent_for_target_ignores_unresolved_legacy_scope_backend_for_se
     tmp_path: Path, sqlite_schema_db_factory,
 ) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
@@ -3215,7 +3221,7 @@ def test_resolve_agent_for_target_ignores_unresolved_legacy_scope_backend_for_se
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3254,13 +3260,13 @@ def test_resolve_agent_for_target_ignores_unresolved_legacy_scope_backend_for_se
 
 def test_reserve_definition_session_ignores_deprecated_scope_backend(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    default_agent = cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
+    default_agent = vibe_agents.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3292,7 +3298,7 @@ def test_reserve_definition_session_ignores_deprecated_scope_backend(tmp_path: P
             deliver_key="slack::channel::C123",
             help_command="vibe task add --help",
         )
-        target = cli.resolve_session_id_target(session_id, db_path=db_path)
+        target = scheduled_tasks.resolve_session_id_target(session_id, db_path=db_path)
 
     assert target.agent_backend == default_agent.backend
     assert target.agent_name == default_agent.name
@@ -3301,7 +3307,7 @@ def test_reserve_definition_session_ignores_deprecated_scope_backend(tmp_path: P
 
 def test_reserve_definition_session_ignores_unresolved_legacy_scope_backend(tmp_path: Path, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
@@ -3310,7 +3316,7 @@ def test_reserve_definition_session_ignores_unresolved_legacy_scope_backend(tmp_
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3342,7 +3348,7 @@ def test_reserve_definition_session_ignores_unresolved_legacy_scope_backend(tmp_
             deliver_key="slack::channel::C123",
             help_command="vibe task add --help",
         )
-        target = cli.resolve_session_id_target(session_id, db_path=db_path)
+        target = scheduled_tasks.resolve_session_id_target(session_id, db_path=db_path)
 
     assert target.agent_backend == default_agent.backend
     assert target.agent_name == default_agent.name
@@ -3350,7 +3356,7 @@ def test_reserve_definition_session_ignores_unresolved_legacy_scope_backend(tmp_
 
 def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
@@ -3359,7 +3365,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-05-22T00:00:00+00:00"
         scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
         conn.execute(
@@ -3391,7 +3397,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
             "hello",
         ]
     )
-    task_store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task_store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     original_add_task = task_store.add_task
     captured: dict[str, object] = {}
 
@@ -3496,7 +3502,7 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
     """
     from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
 
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     session_id = _create_bare_agent_session(workdir=tmp_path)
     task = store.add_task(
         name="Nightly summary",
@@ -3539,7 +3545,7 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
     assert payload["code"] == "definition_write_conflict"
     assert payload["details"]["task_id"] == task.id
 
-    stored = cli.ScheduledTaskStore().get_task(task.id)
+    stored = scheduled_tasks.ScheduledTaskStore().get_task(task.id)
     assert stored is not None
     assert stored.enabled is False, (
         "the stale full-row write re-enabled a definition the teardown paused; it now "
@@ -3630,11 +3636,11 @@ def _reserved_session_cli_db(tmp_path: Path, sqlite_schema_db_factory):
     from storage.sessions_service import SQLiteSessionsService
 
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
 
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         assert resolve_workspace_notice_session(conn, title="Workspace notifications") == (
             "ses-workspace-notices"
         )
@@ -3656,13 +3662,13 @@ def _reserved_session_cli_db(tmp_path: Path, sqlite_schema_db_factory):
 @pytest.mark.parametrize("language", ["en", "zh"])
 def test_reserved_session_cli_hint_is_english_whatever_the_ui_language(language: str) -> None:
     expected_hint = "This session only receives Avibe's workspace failure notifications — it does not accept messages."
-    exc = cli.UnresolvableSessionTarget(
+    exc = scheduled_tasks.UnresolvableSessionTarget(
         "reserved",
         session_id="ses-workspace-notices",
         reason="reserved",
     )
     with patch.object(
-        cli.V2Config,
+        v2_config.V2Config,
         "load",
         return_value=SimpleNamespace(language=language),
     ):
@@ -3674,7 +3680,7 @@ def test_reserved_session_cli_hint_is_english_whatever_the_ui_language(language:
 def _message_rows(db_path: Path, session_id: str) -> list[tuple]:
     from sqlalchemy import text as sa_text
 
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         return [
             tuple(row)
             for row in conn.execute(
@@ -3709,8 +3715,8 @@ def test_task_add_refuses_the_reserved_session_with_no_side_effects(
     """
     _no_caller_context(monkeypatch)
     db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path, sqlite_schema_db_factory)
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    store = scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_task_add(
         ["--session-id", "ses-workspace-notices", "--cron", "0 * * * *", "--message", "hello"]
     )
@@ -3750,7 +3756,7 @@ def test_task_add_refuses_the_reserved_session_with_no_side_effects(
     }, f"and it must carry the machine-readable subject and reason: {payload}"
 
     # --- zero side effects --------------------------------------------------
-    assert cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json").list_tasks() == [], (
+    assert scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json").list_tasks() == [], (
         "a definition pinned to a row that takes no turns must never be PERSISTED: "
         "every later fire would re-resolve the same pin"
     )
@@ -3805,7 +3811,7 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
     """
     _no_caller_context(monkeypatch)
     db_path, agent_store, ordinary = _reserved_session_cli_db(tmp_path, sqlite_schema_db_factory)
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(
         [
             "--no-callback",
@@ -3853,7 +3859,7 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
         "against d00bc038 this held one queued agent_run for the reserved session; a "
         "queued Run is the artifact the scheduler would dispatch"
     )
-    assert cli.TaskExecutionStore(tmp_path / "task_requests").list_pending() == [], (
+    assert scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests").list_pending() == [], (
         "and durably so, not only in the store instance the command happened to hold"
     )
     assert _message_rows(db_path, "ses-workspace-notices") == [], (
@@ -3929,7 +3935,7 @@ def _parse_task_update(task_id: str, argv: list[str]):
 
 
 def _command_task_store(tmp_path: Path):
-    return cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    return scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
 
 
 def _caller_session_state(
@@ -3944,14 +3950,14 @@ def _caller_session_state(
     """A migrated CLI state DB holding one active Session owned by an enabled Agent."""
 
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="codex", backend="codex")
     from storage.importer import ensure_sqlite_state
     from storage.models import agent_sessions
     from storage.settings_service import upsert_scope
 
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
+    with storage.db.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-28T00:00:00+00:00"
         scope_id = upsert_scope(conn, platform, scope_type, scope_key, now=now)
         conn.execute(
@@ -4353,7 +4359,7 @@ def test_task_add_per_run_command_records_the_directory_it_was_described_in(
 
     _bare_terminal_caller(monkeypatch)
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     store = _command_task_store(tmp_path)
     invoke_dir = tmp_path / "repo"
@@ -4694,7 +4700,7 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
-    store = cli.ScheduledTaskStore()
+    store = scheduled_tasks.ScheduledTaskStore()
     task = store.add_task(
         name="Orphaned command",
         session_key="",
@@ -4715,7 +4721,7 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
 
     with (
         patch("vibe.cli._task_store", return_value=store),
-        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
+        patch('config.v2_config.V2Config.load', return_value=SimpleNamespace(language="zh")),
     ):
         result, payload = _capture_stderr_json(
             cli.cmd_task_set_enabled,
@@ -4734,7 +4740,7 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
         "task_id": task.id,
         "owner_session_id": "ses-removed",
     }
-    assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
+    assert scheduled_tasks.ScheduledTaskStore().get_task(task.id).enabled is False
 
 
 # The target Agent's model catalog (``api.agent_model_options``): Vibey's is its Model Hub menu, authoritative; codex's
@@ -4758,7 +4764,7 @@ def _run_on_new_session(tmp_path: Path, capsys, db_path: Path, agent_store, requ
         patch("vibe.cli._agent_store", return_value=agent_store),
         patch("vibe.cli._task_request_store", return_value=request_store),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        patch("vibe.cli.api.agent_model_options", side_effect=lambda backend, **_: _CATALOGS[backend]),
+        patch('vibe.api.agent_model_options', side_effect=lambda backend, **_: _CATALOGS[backend]),
         patch(
             "storage.sessions_service.paths.get_show_page_dir",
             side_effect=lambda session_id: tmp_path / "show" / session_id,
@@ -4781,9 +4787,9 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
     of it is dispatched with (``resolve_session_id_target``), so a later run into it needs no flags. A codex model its
     bundled catalog does not list yet is kept with a warning, as `vibe agent create` gives."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend=backend)
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
 
     result, payload = _run_on_new_session(
         tmp_path, capsys, db_path, agent_store, request_store,
@@ -4805,7 +4811,7 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
     )
     assert result == 0, payload
     with patch("core.scheduled_tasks.paths.get_sqlite_state_path", return_value=db_path):
-        target = cli.resolve_session_id_target(session_id)
+        target = scheduled_tasks.resolve_session_id_target(session_id)
     assert (target.model, target.reasoning_effort) == (model, effort)
 
 
@@ -4842,9 +4848,9 @@ def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_and_keeps_no_se
     the Model Hub menu, which is authoritative: a pair it does not offer, or a menu that cannot load, is refused with the
     catalog hint; the reserved Session is released and no run is queued."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="vibey", **defaults)
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
 
     with patch.dict(_CATALOGS, {"vibey": catalog} if catalog is not None else {}):
         result, payload = _run_on_new_session(
@@ -4867,9 +4873,9 @@ def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
     once the fork service has admitted the caller to the source: a source it refuses answers with the fork's own
     refusal, never a catalog one that would tell what the source runs on. The fork it reserved is released."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
+    agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="vibey")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    request_store = scheduled_tasks.TaskExecutionStore(tmp_path / "task_requests")
     result, payload = _run_on_new_session(
         tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", "--message", "source"]
     )

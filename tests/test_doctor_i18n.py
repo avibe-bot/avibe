@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import config.v2_config as v2_config
+import core.install_integrity as install_integrity
+import vibe.api
+import vibe.runtime
+
+
 import ast
 import json
 import re
@@ -249,7 +255,7 @@ def test_package_integrity_doctor_items_are_localized(
     monkeypatch.setattr(cli, "_uv_tool_site_packages_for_vibe", lambda _path: [site_packages])
     monkeypatch.setattr(cli, "_is_uv_tool_editable", lambda _path: False)
     monkeypatch.setattr(cli, "_current_sqlite_revision", lambda: None)
-    monkeypatch.setattr(cli, "verify_site_packages", lambda _path: integrity)
+    monkeypatch.setattr(install_integrity, "verify_site_packages", lambda _path: integrity)
 
     item = next(
         item
@@ -290,9 +296,9 @@ def test_restart_failure_summary_localizes_labels_and_preserves_raw_payload(
     original = dict(payload)
     status_path = tmp_path / "restart.json"
     status_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(cli.runtime, "get_restart_status_path", lambda: status_path)
-    monkeypatch.setattr(cli.runtime, "read_json", lambda _path: payload)
-    monkeypatch.setattr(cli.runtime, "verified_service_running", lambda: False)
+    monkeypatch.setattr(vibe.runtime, "get_restart_status_path", lambda: status_path)
+    monkeypatch.setattr(vibe.runtime, "read_json", lambda _path: payload)
+    monkeypatch.setattr(vibe.runtime, "verified_service_running", lambda: False)
 
     item = cli._restart_state_items(language=language)[0]
 
@@ -312,9 +318,9 @@ def test_service_pid_sentinel_is_localized_only_at_rendering_boundary(
     missing_marker: str,
 ) -> None:
     monkeypatch.setattr(cli.paths, "get_runtime_pid_path", lambda: tmp_path / "absent.pid")
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 4242)
-    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 4242)
-    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"service_pid": None})
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda **_kwargs: 4242)
+    monkeypatch.setattr(vibe.runtime, "service_lock_holder_pid", lambda: 4242)
+    monkeypatch.setattr(vibe.runtime, "read_status", lambda: {"service_pid": None})
 
     items = cli._service_lifecycle_items(language=language, detect_extra_processes=False)
 
@@ -365,7 +371,7 @@ def test_doctor_dependency_status_stays_machine_data_and_out_of_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -380,7 +386,7 @@ def test_doctor_dependency_status_stays_machine_data_and_out_of_sentence(
             ]
         },
     )
-    monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: True)
+    monkeypatch.setattr(vibe.api, "askill_auto_install_supported", lambda: True)
 
     items = cli._managed_dependencies_doctor_items(language="zh", deep=False)
 
@@ -400,7 +406,7 @@ def test_doctor_ready_and_unsupported_dependencies_keep_stable_codes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        cli.api,
+        vibe.api,
         "dependencies_status",
         lambda **_kwargs: {
             "deps": [
@@ -586,14 +592,14 @@ def test_doctor_tunnel_quality_projects_every_finite_value(
     shape: str,
     expected_key: str,
 ) -> None:
-    config = cli.V2Config.default()
+    config = v2_config.V2Config.default()
     config.language = "zh"
     config.remote_access.vibe_cloud.enabled = True
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
     monkeypatch.setattr(cli.paths, "get_runtime_doctor_path", lambda: tmp_path / "doctor.json")
-    monkeypatch.setattr(cli.V2Config, "load", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(v2_config.V2Config, "load", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(cli, "_home_migration_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_lifecycle_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_install_family_items", lambda **_kwargs: [])
@@ -603,7 +609,7 @@ def test_doctor_tunnel_quality_projects_every_finite_value(
     monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_local_cli_installation_items", lambda **_kwargs: [])
-    monkeypatch.setattr(cli.api, "detect_cli", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(vibe.api, "detect_cli", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         cli.paths,
         "get_logs_dir",
@@ -694,13 +700,13 @@ def test_managed_repair_failure_contract_has_structured_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(cli.api, "resolve_cli_path", lambda _binary: None)
-    monkeypatch.setattr(cli.api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(vibe.api, "resolve_cli_path", lambda _binary: None)
+    monkeypatch.setattr(vibe.api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr("platform.system", lambda: "FreeBSD")
     monkeypatch.setattr("platform.machine", lambda: "riscv64")
     producer_failures = {
-        "askill": cli.api.install_askill(),
-        "avault": cli.api.install_avault(),
+        "askill": vibe.api.install_askill(),
+        "avault": vibe.api.install_avault(),
     }
     from core.git_runtime import GitRuntimeManager
     producer_failures.update(

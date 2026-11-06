@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import vibe.runtime
+
+
 import asyncio
 import io
 import json
@@ -1352,7 +1355,7 @@ def test_desktop_endpoint_cli_emits_only_schema_v1_json(monkeypatch, capsys):
     config = SimpleNamespace(ui=SimpleNamespace(setup_port=6123))
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "100.97.103.112")
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda _config: "100.97.103.112")
     monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("desktop endpoint must not open a browser"))
 
     assert cli.cmd_desktop_endpoint() == 0
@@ -1588,17 +1591,17 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: controller.pid)
-    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda **_kwargs: controller.pid)
+    monkeypatch.setattr(vibe.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("browser is disabled"))
 
     def reused_service(**kwargs):
         kwargs["start_info"].capture(controller.pid, reused=True)
         return controller.pid
 
-    monkeypatch.setattr(cli.runtime, "start_service", reused_service)
+    monkeypatch.setattr(vibe.runtime, "start_service", reused_service)
     monkeypatch.setattr(
         internal_client,
         "health_identity_sync",
@@ -1616,7 +1619,7 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         kwargs["start_info"].capture(5678, reused=False)
         return 5678
 
-    monkeypatch.setattr(cli.runtime, "spawn_background", spawn_ui)
+    monkeypatch.setattr(vibe.runtime, "spawn_background", spawn_ui)
 
     def wait_for_ui(host, port):
         response = app.test_client().get("/ready", base_url=f"http://{host}:{port}")
@@ -1624,10 +1627,10 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
         assert response.get_json() == READY_EXTERNAL_CONTROLLER_BUNDLED_UI_FIXTURE
         return True
 
-    monkeypatch.setattr(cli.runtime, "wait_for_ui_server", wait_for_ui)
-    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: pytest.fail("reused Controller must survive"))
+    monkeypatch.setattr(vibe.runtime, "wait_for_ui_server", wait_for_ui)
+    monkeypatch.setattr(vibe.runtime, "stop_service", lambda **kwargs: pytest.fail("reused Controller must survive"))
     monkeypatch.setattr(
-        cli.runtime,
+        vibe.runtime,
         "stop_ui",
         lambda **_kwargs: pytest.fail("the missing UI path must not stop a surviving UI"),
     )

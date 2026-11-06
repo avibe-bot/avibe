@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 
+DEFAULT_RETENTION_DAYS = 30
 MIN_RETENTION_DAYS = 1
 # A thousand years is intentionally generous while remaining well inside the
 # representable datetime range for current runtime timestamps.

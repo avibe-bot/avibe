@@ -43,12 +43,12 @@ from sqlalchemy.engine import Connection
 
 from storage.models import agent_events, skill_usage_daily, state_meta
 from vibe.trace_retention_policy import (
+    DEFAULT_RETENTION_DAYS,
     MAX_RETENTION_DAYS,
     MIN_RETENTION_DAYS,
     validate_retention_days,
 )
 
-DEFAULT_RETENTION_DAYS = 30
 MIN_RUN_INTERVAL_SECONDS = 24 * 3600
 DELETE_BATCH_ROWS = 1000
 LEASE_TTL_SECONDS = 3600
