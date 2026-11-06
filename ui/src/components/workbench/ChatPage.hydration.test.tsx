@@ -264,6 +264,11 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.mutateConfig.mockResolvedValue({ ui: {} });
     mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
     mocks.api.onSessionArchived.mockReturnValue(() => {});
+    // A deep link (a search-history jump) centers its row in the next frame by
+    // id; jsdom has neither CSS.escape nor scrollIntoView, and that frame can
+    // run while a case is still mounted.
+    vi.stubGlobal('CSS', { escape: (value: string) => value });
+    Element.prototype.scrollIntoView = vi.fn();
   });
 
   afterEach(() => {

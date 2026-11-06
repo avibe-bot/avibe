@@ -96,3 +96,22 @@ scenarios:
     kind: security
     layer: unit
     test: "ui/src/lib/chatSnapshots.test.ts::LSYNC-024 deletes them once a reader is named, every reader's, and nothing else in the snapshot store"
+  - id: LSYNC-025
+    name: A conversation seen before opens and its saved history scrolls when the server cannot be reached; where saved history ends, a marker says so, and a refusal still withdraws it
+    status: partial
+    kind: failure
+    layer: integration
+    test:
+      - ui/src/components/workbench/ChatPage.localSnapshot.test.tsx::keeps a saved chat readable when the server cannot be reached, pages its saved history, and marks where it ends
+      - ui/src/components/workbench/ChatPage.localSnapshot.test.tsx::still withdraws a saved chat the server refuses
+      - ui/src/components/workbench/ChatPage.localSnapshot.test.tsx::keeps the saved window when the server cannot be reached
+      - ui/src/lib/localStore/localStore.test.ts::stops at a gap the store cannot account for, and gives nothing for a row on no full stretch
+  - id: LSYNC-026
+    name: Saved rows shown ahead of the server, for an older page or a deep link, give way to the server's answer for the same stretch, so a row the server no longer has disappears
+    status: covered
+    kind: recovery
+    layer: integration
+    test:
+      - ui/src/components/workbench/ChatPage.localSnapshot.test.tsx::shows saved older rows at once, and lets the server page for the same stretch replace them
+      - "ui/src/components/workbench/ChatPage.localSnapshot.test.tsx::shows the saved window around its message first, and the server's replaces it"
+      - ui/src/components/workbench/ChatPage.localSnapshot.test.tsx::goes back to the live tail when the server no longer has the message

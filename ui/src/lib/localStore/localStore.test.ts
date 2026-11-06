@@ -16,6 +16,8 @@ import {
   noteLocalStoreStreamGap,
   noteLocalStoreStreamState,
   readLocalStoreMediaMeta,
+  readLocalStoreAround,
+  readLocalStoreOlder,
   readLocalStoreWindow,
   recordLocalStoreMediaMeta,
   recordLocalStorePage,
@@ -190,6 +192,59 @@ describe('P2: a page speaks only for what it proves', () => {
     const across = await readLocalStoreWindow('ses_a', { limit: 60 });
     expect(across?.messages.map((message) => message.id)).toContain('msg_050');
     expect(across?.contiguous).toBe(false);
+  });
+});
+
+describe('reading history next to what the reader has', () => {
+  // A chat shows stored rows at once only where the store holds the stretch in
+  // full, so nothing can be missing between them and what is on screen.
+  const num = (messages: WorkbenchMessage[] | undefined) => (messages ?? []).map((message) => Number(message.id.slice(-3)));
+
+  it('gives the page just older than a row, joined to it, and says whether more is stored or history starts', async () => {
+    await tail(rows(1, 60), null);
+    const page = await readLocalStoreOlder('ses_a', row(51), 20);
+    expect(num(page?.messages)).toEqual(rows(31, 50).map((_, i) => 31 + i));
+    expect([page?.moreStored, page?.startReached]).toEqual([true, false]);
+    const last = await readLocalStoreOlder('ses_a', row(31), 50);
+    expect(num(last?.messages)).toEqual(rows(1, 30).map((_, i) => 1 + i));
+    expect([last?.moreStored, last?.startReached]).toEqual([false, true]);
+  });
+
+  it('stops at a gap the store cannot account for, and gives nothing for a row on no full stretch', async () => {
+    await tail(rows(1, 50), null);
+    noteLocalStoreStreamGap();
+    await tail(rows(71, 120));
+    // Rows 71 to 120 were proved from row 71 up; what lies below is not known here.
+    const atGap = await readLocalStoreOlder('ses_a', row(80), 50);
+    expect(num(atGap?.messages)).toEqual(rows(71, 79).map((_, i) => 71 + i));
+    expect([atGap?.moreStored, atGap?.startReached]).toEqual([false, false]);
+    expect((await readLocalStoreOlder('ses_a', row(71), 50))?.messages).toEqual([]);
+    expect((await readLocalStoreOlder('ses_a', row(60), 50))?.messages).toEqual([]);
+  });
+
+  it('gives a window around a stored row, and nothing for one the store does not hold in full', async () => {
+    await tail(rows(1, 60), null);
+    const middle = await readLocalStoreAround('ses_a', 'msg_030', 5);
+    expect(num(middle?.messages)).toEqual(rows(25, 35).map((_, i) => 25 + i));
+    expect([middle?.moreStored, middle?.startReached, middle?.reachesTail]).toEqual([true, false, false]);
+    const nearTail = await readLocalStoreAround('ses_a', 'msg_058', 5);
+    expect(num(nearTail?.messages)).toEqual(rows(53, 60).map((_, i) => 53 + i));
+    expect(nearTail?.reachesTail).toBe(true);
+    const nearStart = await readLocalStoreAround('ses_a', 'msg_002', 5);
+    expect(nearStart?.startReached).toBe(true);
+    // Once the stream broke, nothing says the stored newest row is the newest.
+    noteLocalStoreStreamGap();
+    expect((await readLocalStoreAround('ses_a', 'msg_058', 5))?.reachesTail).toBe(false);
+
+    expect(await readLocalStoreAround('ses_a', 'msg_999', 5)).toBeNull();
+    await tail(rows(1, 3, 'ses_b'), null, Date.now(), 'ses_b');
+    expect(await readLocalStoreAround('ses_a', 'msg_ses_b_001', 5)).toBeNull();
+    // A row the stream delivered while a read was out is stored, but no page
+    // proved what lies around it.
+    beginLocalStoreRead('ses_c');
+    await recordLocalStoreStreamRow(row(5, {}, 'ses_c'));
+    expect(num((await readLocalStoreWindow('ses_c'))?.messages)).toEqual([5]);
+    expect(await readLocalStoreAround('ses_c', 'msg_ses_c_005', 5)).toBeNull();
   });
 });
 

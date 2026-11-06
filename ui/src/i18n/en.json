@@ -5392,6 +5392,10 @@
     "loadingOlder": "Loading earlier messages",
     "noEarlierMessages": "No earlier messages",
     "olderLoadFailed": "Couldn't load earlier messages — tap to retry",
+    "offline": {
+      "notice": "Can't reach Avibe. Showing what this device saved.",
+      "historyGap": "Earlier messages aren't saved on this device — tap to retry"
+    },
     "organizationNotice": "This is an organization session — messages show who sent them.",
     "senderUnknown": "Unknown sender",
     "senderYou": "You",

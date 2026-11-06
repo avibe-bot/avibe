@@ -42,6 +42,7 @@ import {
   isCovered,
   mergePageCoverage,
   orderKeyOf,
+  tailHolds,
   withinReach,
 } from './ranges';
 
@@ -1258,6 +1259,108 @@ export async function readLocalStoreChat(sessionId: string): Promise<LocalStoreC
   const reader = getLocalSnapshotPrincipal();
   if (!reader) return null;
   return (await loadHot(reader, [sessionId])).get(sessionId) ?? null;
+}
+
+/** Stored rows next to a row the reader has, in server order, with what the
+ *  store can vouch for: only rows on the stretch the store holds in full around
+ *  that row, so nothing is missing between them and it (plan section 4.3). */
+export type LocalStoreHistory = {
+  messages: WorkbenchMessage[];
+  /** More such rows are stored beyond the ones returned. */
+  moreStored: boolean;
+  /** Nothing older exists: the stretch reaches the start of history. */
+  startReached: boolean;
+};
+
+/** The stretch the store holds in full that ``key`` lies on, or null. */
+function rangeAt(ranges: readonly CoverageRange[], key: OrderKey): CoverageRange | null {
+  const token = currentStreamToken();
+  return ranges.find((range) => isCovered([range], key, token)) ?? null;
+}
+
+/** Up to ``limit`` stored rows of ``sessionId`` with keys from ``low`` to
+ *  ``high`` (null for open; ``low`` inclusive, ``high`` inclusive unless
+ *  ``highExclusive``), walked from the high end (``newestFirst``) or the low
+ *  end; ``more`` says more remain. */
+function rowsBetween(
+  tx: IDBTransaction,
+  sessionId: string,
+  { low, high, highExclusive = false, newestFirst, limit }: {
+    low: OrderKey | null;
+    high: OrderKey | null;
+    highExclusive?: boolean;
+    newestFirst: boolean;
+    limit: number;
+  },
+): Promise<{ rows: WorkbenchMessage[]; more: boolean }> {
+  // An empty stretch (the row is the first one the stretch holds) has no keys,
+  // and IndexedDB refuses such a bound rather than matching nothing.
+  if (low && high && (highExclusive ? compareKeys(low, high) >= 0 : compareKeys(low, high) > 0)) {
+    return Promise.resolve({ rows: [], more: false });
+  }
+  const lower = low ? [sessionId, low.at, low.id] : [sessionId];
+  const upper = high ? [sessionId, high.at, high.id] : [sessionId, []];
+  const range = IDBKeyRange.bound(lower, upper, false, high !== null && highExclusive);
+  const rows: WorkbenchMessage[] = [];
+  return new Promise((resolve, reject) => {
+    const cursor = tx.objectStore(MESSAGES).index(BY_SESSION).openCursor(range, newestFirst ? 'prev' : 'next');
+    cursor.onsuccess = () => {
+      const current = cursor.result;
+      if (!current || rows.length > limit) {
+        const more = rows.length > limit;
+        if (more) rows.length = limit;
+        resolve({ rows: newestFirst ? rows.reverse() : rows, more });
+        return;
+      }
+      rows.push((current.value as StoredMessage).row);
+      current.continue();
+    };
+    cursor.onerror = () => reject(cursor.error);
+  });
+}
+
+/** Up to ``limit`` stored rows just older than ``row``, joined to it: the page a
+ *  chat can show at once when the reader scrolls past ``row``, before the
+ *  server's page for the same stretch answers. */
+export function readLocalStoreOlder(sessionId: string, row: WorkbenchMessage, limit = 50): Promise<LocalStoreHistory | null> {
+  return readAsReader([MESSAGES, RANGES], async (tx) => {
+    const ranges = (await settle(tx.objectStore(RANGES).get(sessionId) as IDBRequest<StoredRanges | undefined>))?.ranges ?? [];
+    const range = rangeAt(ranges, orderKeyOf(row));
+    if (!range) return { messages: [], moreStored: false, startReached: false };
+    const { rows, more } = await rowsBetween(tx, sessionId, {
+      low: range.from, high: orderKeyOf(row), highExclusive: true, newestFirst: true, limit,
+    });
+    return { messages: rows, moreStored: more, startReached: !more && range.from === null };
+  });
+}
+
+/** A window of stored rows around the row ``anchorId`` (a deep link): up to
+ *  ``limit`` on each side, joined to it; null when the store does not hold the
+ *  anchor on a stretch it holds in full. ``reachesTail``: nothing newer exists,
+ *  as far as the store can tell while its stream stayed continuous. */
+export function readLocalStoreAround(
+  sessionId: string,
+  anchorId: string,
+  limit = 50,
+): Promise<(LocalStoreHistory & { reachesTail: boolean }) | null> {
+  return readAsReader([MESSAGES, RANGES], async (tx) => {
+    const anchor = await settle(tx.objectStore(MESSAGES).get(anchorId) as IDBRequest<StoredMessage | undefined>);
+    if (!anchor || anchor.sessionId !== sessionId) return null;
+    const ranges = (await settle(tx.objectStore(RANGES).get(sessionId) as IDBRequest<StoredRanges | undefined>))?.ranges ?? [];
+    const key = orderKeyOf(anchor.row);
+    const range = rangeAt(ranges, key);
+    if (!range) return null;
+    const older = await rowsBetween(tx, sessionId, { low: range.from, high: key, highExclusive: true, newestFirst: true, limit });
+    const toTail = tailHolds(range, currentStreamToken());
+    // From the anchor itself (``low`` is inclusive), so one more than ``limit``.
+    const newer = await rowsBetween(tx, sessionId, { low: key, high: toTail ? null : range.to, newestFirst: false, limit: limit + 1 });
+    return {
+      messages: [...older.rows, ...newer.rows],
+      moreStored: older.more,
+      startReached: !older.more && range.from === null,
+      reachesTail: toTail && !newer.more,
+    };
+  });
 }
 
 /** Run a read for the reader this document names, and only while the store is
