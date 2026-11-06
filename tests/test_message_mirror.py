@@ -401,10 +401,10 @@ def test_persist_agent_reuses_cached_sqlite_engine(isolated_state, monkeypatch):
     create_calls = 0
     real_create = sqlite_db.create_sqlite_engine
 
-    def counting_create(db_path=None):
+    def counting_create(db_path=None, *, read_only=False):
         nonlocal create_calls
         create_calls += 1
-        return real_create(db_path)
+        return real_create(db_path, read_only=read_only)
 
     monkeypatch.setattr(sqlite_db, "create_sqlite_engine", counting_create)
     ctx = _slack_ctx()
