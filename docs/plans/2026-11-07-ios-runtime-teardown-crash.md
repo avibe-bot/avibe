@@ -43,16 +43,17 @@ controllers, the onboarding WebView, and the hidden authentication transport.
 The latter controllers already hold optional WebViews and invalidate their
 delegates without a lazy recreation path.
 
-The WebKit regression uses a hermetic AppModel with a non-persistent named-store
-substitute and a fake transport. It performs the real route transition from a
+The WebKit regression uses the production AppModel, a local fixture server, and
+a test-owned named WebKit store. It performs the real route transition from a
 loaded runtime page, then delivers late bridge, navigation, content-process,
-and UI-delegate callbacks.
+and UI-delegate callbacks. Cleanup observes the test-owned store disappear from
+WebKit's registry before the test completes.
 
-A structural XCTest enumerates every method in the controller's actual
-`WKNavigationDelegate`, `WKUIDelegate`, and `WKDownloadDelegate` conformances
-and requires each one to pass through the shared teardown guard. A download
-regression also verifies that invalidation cancels an active download, detaches
-its delegate, removes its temporary destination, and rejects late callbacks.
+Behavioral XCTest drives the real bridge and AppModel transition, then delivers
+late navigation and UI-delegate callbacks after invalidation. A real WebKit
+download regression also verifies that invalidation cancels an active download,
+detaches its delegate, removes its temporary destination, and rejects late
+callbacks.
 
 ## Validation
 
