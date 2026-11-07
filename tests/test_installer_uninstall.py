@@ -840,13 +840,18 @@ def test_uninstall_keeps_the_generation_root_while_a_launcher_could_not_be_remov
 def test_uninstall_waits_for_a_process_started_by_a_relative_path(installed):
     layout, first, second, foreign, legacy_home, env = installed
     binary = layout.root / "current" / "bin" / "cloudflared"
-    shutil.copy2(shutil.which("sleep"), binary)
-    process = subprocess.Popen(["./cloudflared", "60"], cwd=binary.parent)
+    # A copy of bash stands in for cloudflared and stays up in the script "60",
+    # waiting on its stdin. A copy of sleep would not: on Ubuntu 26.04 it is the
+    # uutils multi-call binary, which picks its tool by name and exits at once.
+    shutil.copy2(shutil.which("bash"), binary)
+    (binary.parent / "60").write_text("read -r _\n")
+    process = subprocess.Popen(["./cloudflared", "60"], cwd=binary.parent, stdin=subprocess.PIPE)
     try:
         result = _installer_shell(layout, "main --uninstall", **env)
     finally:
         process.kill()
         process.wait()
+        process.stdin.close()
 
     assert result.returncode == 1
     # The command line shows only ./cloudflared; the executable names the generation.
