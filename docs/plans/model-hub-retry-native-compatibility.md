@@ -7,6 +7,47 @@ This records the isolated native audit supporting the transport mapping in
 It is not evidence of an integrated controller, managed-engine, browser, or
 Incus acceptance pass.
 
+## Longer transient recovery: November 7, 2026
+
+The 30-minute network/server recovery window requires the native caller not to
+end a live gateway request first. This is a pre-response ownership change, not
+permission to replay output or relax post-response idle policy.
+
+- **OpenCode 1.19.5:** its independent header timer defaults to 300,000 ms.
+  The generated Hub provider options now set `headerTimeout: false`; direct
+  providers and the post-header chunk timer are unchanged. Version-matched
+  `packages/opencode/src/provider/provider.ts` separates the header timer from
+  overall and chunk timeouts, clearing it only after fetch returns headers.
+- **Codex 0.167.0:** version-matched source sets the provider request timeout to
+  `None` and awaits transport headers before spawning the Responses stream
+  reader. `stream_idle_timeout_ms` applies to subsequent SSE reads, not this
+  pre-header recovery wait; no Codex timeout override is added.
+- **Vibey:** its existing gateway request waits for headers with no caller
+  silence timeout; the gateway owns per-attempt upstream timing. Direct
+  provider silence limits and post-header reads remain unchanged.
+- **Anthropic native transport:** retain the existing gateway's 240-second
+  early-header/keepalive path and current Claude Hub launch bounds. No new
+  keepalive mechanism is introduced.
+
+An installed-OpenCode native probe used a fresh HOME, all XDG/config/cache/state
+and temporary directories, fixture credentials, disabled native updates/model
+fetches/plugins/external skills, and a macOS sandbox restricting network to
+loopback and writes to test-owned scratch. The same fake Responses endpoint
+withheld headers for 600 ms:
+
+| Hub provider header option | Observed first request | Native result |
+| --- | --- | --- |
+| `headerTimeout: 100` | Disconnected after 108 ms; one retry explicitly refused by the fixture | Exit 1; no completion |
+| `headerTimeout: false` | Received headers after 602 ms; one request | Exit 0; expected text and `step_finish` with `stop` |
+
+This scaled native probe proves that the header override is consumed. It is not
+a real 30-minute outage or Incus acceptance run. Injected-clock gateway tests
+(`MH-RETRY-LONG-001`) separately prove recovery after a ten-minute outage,
+exhaustion near thirty minutes, unchanged terminal code/message, capped jitter,
+and authoritative Stop during a wait. Re-running their six success cases with
+the original retry module produces the old exhausted terminal instead of a
+successful response in all six cases.
+
 ## Isolation and procedure
 
 The audit ran installed Codex 0.153.2, Claude Code 2.1.263, and OpenCode 1.18.18

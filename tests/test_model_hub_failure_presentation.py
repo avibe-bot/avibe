@@ -179,7 +179,7 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
     """MH-RETRY-COPY-001: actual HTTP terminal -> native recorder -> one clean notice."""
     service, clock = clock_service(tmp_path, outcomes=[
         _outcome(RawOutcomeKind.NETWORK_ERROR, source_id="src_recovery01")
-        for _ in range(20)
+        for _ in range(60)
     ])
     service.store.load().sources[0].display_name = "Relay 服务"
     models = _canonicalize_fixed_test_routes(service)
@@ -212,8 +212,8 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
                 assert response.status == status
                 assert (await response.json())["error"]["code"] == "model_hub_recovery_exhausted"
                 assert "Retry-After" not in response.headers
-        assert clock.elapsed == 91
-        assert len(service.adapter.invocations) == 8
+        assert clock.elapsed == 1789
+        assert len(service.adapter.invocations) == 43
         controller.emit_agent_message.assert_not_awaited()
         projection = gateway.correlation.terminal_projection("turn-copy", backend=backend)
         assert projection is not None
@@ -244,11 +244,11 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
     if last_said == "connection":
         # The engine's own transport envelope: no upstream answered at all.
-        texts = [detail] * 12
+        texts = [detail] * 60
         failure = _outcome(RawOutcomeKind.NETWORK_ERROR, source_id="src_recovery01")
     else:
         # Only the first refusal carries text when the last one said nothing.
-        texts = [detail] + [detail if last_said == "text" else None] * 4
+        texts = [detail] + [detail if last_said == "text" else None] * 30
         failure = _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error")
     service, _clock = clock_service(tmp_path, outcomes=[
         replace(failure, upstream_detail=text) for text in texts

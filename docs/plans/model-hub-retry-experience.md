@@ -117,10 +117,18 @@ model, restart a backend, or change credentials implicitly.
 
 ### One bounded automatic recovery window
 
-Approved default: **120 seconds per pending model request**, starting at its
-first retryable failure or first blocked admission. The same window covers
-fallback passes, cooldown waits, and recovery admission; it never resets
-because another Source was tried. For a blocked Hub chain with a hop that may
+Approved default (November 7, 2026): **30 minutes per pending model request for
+`network` and `server_error` recovery**. Rate limits, quota resets, and unknown
+persisted cooldown reasons retain the **120-second** admission window. Both
+budgets use the original first retryable failure or first blocked admission;
+changing Source or failure class never restarts that clock. Switching from a
+transient failure to a rate/quota limit does not inherit the longer budget.
+A viable transient hop keeps the request's longer window open even beside a
+short-budget hop; each hop's own class deadline is checked both when choosing
+waits and again at admission. This also applies to half-open peer owners and
+stronger persisted cooldowns beneath a live network overlay.
+The same window covers fallback passes, cooldown waits, and recovery admission.
+For a blocked Hub chain with a hop that may
 heal unattended, preflight constructs the gateway launch immediately without
 waiting, starting a recovery clock, or reserving a half-open slot. The first
 gateway request then owns its window. Dispatch acknowledgement and native
@@ -146,10 +154,13 @@ This is an admission limit, not an inference timeout:
   does not end the wait for a cooling Source. A request that itself observes
   such a failure ends at once with it.
 
-Two minutes allows two recovery opportunities after typical 30-second and
-60-second transient delays while bounding unattended outage waits. It is a
-starting policy, not a measured optimum. Do not add a user-facing
-timeout control in the first release.
+The longer transient window keeps a multi-minute network/server outage inside
+the existing live Turn instead of requiring a person to resume lost work.
+There is no new user-facing timeout control. Rate/quota behavior is intentionally
+unchanged: a 120-second `Retry-After` cannot fit the short window, the second
+ordinary rate-limit delay normally cannot fit, and a 300-second quota delay
+ends recovery immediately. Those paths can still end work; extending them is
+separate scope rather than silently ignoring upstream advice.
 
 Native transport compatibility is a release gate, not an assumption. Validate
 the full window through each supported backend before enabling this loop.
@@ -178,17 +189,23 @@ whose settlement generation is stale.
 
 | Classified failure | Approved local delay, before upstream advice | Storage / action |
 | --- | --- | --- |
-| Unclassified pre-output connection failure | 1, 2, 4, 8, 16, 30 seconds; cap 30 | Reuse contracted live Source-scoped backoff; no Source/config write. |
+| Unclassified pre-output connection failure | 1, 2, 4, 8, 16, 30, 60 seconds; cap 60 | Reuse contracted live Source-scoped backoff; no Source/config write. |
 | Retryable server/overload | 30, 60, 120 seconds; cap 120 | Keep existing shaped-error Source cooldown; streak is live state. |
 | Recoverable rate limit | 60, 120, 240, 300 seconds; cap 300 | Keep existing cooldown classification. |
 | Recoverable quota exhaustion | 300 seconds | Keep existing cooldown; normally beyond the automatic window. |
 | Refreshable credential rejection | Existing same-Source retry once | No independent retry loop; a second rejection follows the existing terminal rule. |
 | Bad key, revoked access, balance requiring action, request/schema/context/model errors, local engine failure | No new automatic retry | Keep existing classification/remedy; `engine_down` never blames or cools an upstream Source. The engine's pre-egress "unknown provider" for its own routed model is a local `engine_down`, not an upstream rejection, and is not retried. |
 
-Apply bounded positive jitter to the local base: a sampled delay in
-`[base, min(cap, base * 1.2)]`. This preserves minimum delays and hard caps;
-at the cap, source-scoped admission still prevents a waiting-client stampede.
-Do not sample a separate delay per waiter. Shared state owns one deadline.
+Apply bounded positive jitter below the local cap: a sampled delay in
+`[base, min(cap, base * 1.2)]`. At the `network` and `server_error` caps,
+sample `[0.8 * cap, cap]` (48–60 and 96–120 seconds) so independent instances
+do not synchronize for the rest of a long outage. Rate/quota jitter and
+Retry-After/reset minimums remain unchanged. Do not sample a separate delay
+per waiter. Shared Source state owns one deadline and one half-open admission.
+Recovery wait logs carry the attributed Turn (when known), backend, model,
+Source, attempt count, classified reason, monotonic wait duration, and outcome
+(`retry_due`, `notified`, `canceled`, or `failed`), alongside existing attempt
+provenance. No prompts, credentials, or raw headers are logged.
 
 Carry upstream retry advice through the existing `RawCallOutcome` boundary.
 The adapter preserves a bounded, allowlisted `Retry-After` value; the Hub
@@ -257,6 +274,15 @@ exact-hop contract changes; it is not silently bundled into this revision.
 
 ## Turn lifecycle and user actions
 
+- OpenCode's Hub-only provider overlay disables its independent **header**
+  timeout (`headerTimeout: false`); the gateway owns that pre-response wait.
+  Its post-header chunk timeout and direct/native provider options are unchanged.
+  Vibey already delegates pre-response timing to the gateway; Codex's stream
+  idle timer starts after headers. Anthropic's existing gateway keepalive path
+  remains unchanged. See the native compatibility record for versioned evidence.
+- The Web recovery status already shows a localized retry countdown after five
+  seconds, then an attempting state. It consumes the same recovery snapshot and
+  does not expire it on a UI timer; no new chip or frontend code is required.
 - **Before native acceptance:** retain the same original Delivery, prompt,
   attachments, and queue ownership. Waiting does not mean “native accepted.”
   Do not resubmit input or reopen a backend merely to check supply.
