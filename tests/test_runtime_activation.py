@@ -833,7 +833,7 @@ def test_hfr_137_native_start_cleanup_first_rejects_old_generation_commit() -> N
 
 
 @pytest.mark.parametrize("session_id", [None, "ses-1"])
-def test_hfr_137_claude_receiver_forwards_generation_to_activity_admission(
+async def test_hfr_137_claude_receiver_forwards_generation_to_activity_admission(
     session_id: str | None,
 ) -> None:
     activation_registry = RuntimeActivationRegistry()
@@ -870,7 +870,7 @@ def test_hfr_137_claude_receiver_forwards_generation_to_activity_admission(
         description="Delayed receiver event",
     )
 
-    handled = agent._handle_activity_message(
+    handled = await agent._handle_activity_message(
         message,
         "runtime-1",
         context,

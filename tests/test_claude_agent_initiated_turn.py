@@ -301,6 +301,11 @@ def _build_agent(*, running_calls=None, mark_idle_calls=None, active_calls=None)
     service.register(agent)
     controller.agent_service = service
 
+    async def on_activity_terminal_async(activity):
+        return service.on_activity_terminal(activity)
+
+    service.on_activity_terminal_async = on_activity_terminal_async
+
     # Stub the external bits the assistant/result branches touch so the test
     # isolates the agent-initiated-turn contract (mirrors the result-settle test).
     agent._maybe_capture_session_id = lambda *a, **k: None
@@ -1493,7 +1498,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 TaskNotificationMessage(),
                 composite_key,
                 context,
@@ -1522,8 +1527,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         agent.controller.scheduled_task_service = SimpleNamespace(
             settle_activity_runs=Mock(side_effect=RuntimeError("store unavailable")),
         )
-        original_complete = service.activities.complete
-        service.activities.complete = Mock(wraps=original_complete)
+        original_complete = service.activities.complete_async
+        service.activities.complete_async = AsyncMock(wraps=original_complete)
         original_ack = service.activities.ack_recovered_terminal
         service.activities.ack_recovered_terminal = Mock(wraps=original_ack)
         failed = SimpleNamespace(
@@ -1535,14 +1540,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 failed,
                 composite_key,
                 context,
             )
         )
 
-        call = service.activities.complete.call_args
+        call = service.activities.complete_async.call_args
         self.assertTrue(call.kwargs["retain_terminal_snapshot"])
         completed = agent.controller.scheduled_task_service.settle_activity_runs.call_args.args[0]
         self.assertEqual(completed.status, "failed")
@@ -1563,7 +1568,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 TaskStartedMessage(),
                 composite_key,
                 receiver_context,
@@ -1581,7 +1586,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 TaskNotificationMessage(),
                 composite_key,
                 receiver_context,
@@ -1789,6 +1794,17 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 if self.fail:
                     raise RuntimeError("activity store unavailable")
                 self.records[payload["id"]] = (dict(payload), phase)
+
+            def commit_activity_completion(self, *, expected, expected_phase, replacement, phase):
+                if self.fail:
+                    raise RuntimeError("activity store unavailable")
+                if self.records.get(expected["id"]) != (expected, expected_phase):
+                    return False
+                if replacement is None:
+                    self.records.pop(expected["id"], None)
+                else:
+                    self.records[expected["id"]] = (dict(replacement), phase)
+                return True
 
         agent, service = _build_agent()
         store = _ToggleStore()
@@ -2709,7 +2725,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             agent.controller.emit_agent_message.await_args.kwargs,
         )
 
-    def test_foreground_tool_failure_does_not_settle_owned_run(self):
+    async def test_foreground_tool_failure_does_not_settle_owned_run(self):
         agent, service = _build_agent()
         composite_key = "session-foreground-failure:/tmp/work"
         context = SimpleNamespace(
@@ -2738,7 +2754,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         started.task_type = "local_bash"
         started.data = {}
         self.assertTrue(
-            agent._handle_activity_message(started, composite_key, context)
+            await agent._handle_activity_message(started, composite_key, context)
         )
 
         failed = TaskNotificationMessage()
@@ -2748,7 +2764,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         failed.tool_use_id = "toolu_failure"
         failed.data = {}
         self.assertTrue(
-            agent._handle_activity_message(failed, composite_key, context)
+            await agent._handle_activity_message(failed, composite_key, context)
         )
 
         on_terminal.assert_not_called()
@@ -3985,7 +4001,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 TaskStartedMessage(),
                 composite_key,
                 receiver_context,
@@ -4013,7 +4029,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={"agent_session_id": "sess-progress-lineage"},
         )
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 TaskStartedMessage(),
                 composite_key,
                 receiver_context,
@@ -4035,7 +4051,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             data={},
         )
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 progress,
                 composite_key,
                 receiver_context,
@@ -4049,7 +4065,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(activity.metadata["provenance_pending"])
 
         self.assertTrue(
-            agent._handle_activity_message(
+            await agent._handle_activity_message(
                 TaskNotificationMessage(),
                 composite_key,
                 receiver_context,
@@ -4072,8 +4088,8 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         failed = TaskNotificationMessage()
         failed.status = "failed"
 
-        self.assertTrue(agent._handle_activity_message(TaskStartedMessage(), composite_key, context))
-        self.assertTrue(agent._handle_activity_message(failed, composite_key, context))
+        self.assertTrue(await agent._handle_activity_message(TaskStartedMessage(), composite_key, context))
+        self.assertTrue(await agent._handle_activity_message(failed, composite_key, context))
 
         self.assertIsNone(service.activities.claim_completed_output("claude", composite_key))
         self.assertEqual(mark_idle_calls, [composite_key])

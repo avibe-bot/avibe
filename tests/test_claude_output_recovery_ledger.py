@@ -1361,7 +1361,7 @@ def test_restart_resolves_unclassified_terminal_without_borrowing_new_generation
 
 @pytest.mark.parametrize("status", ["completed", "failed", "stopped", "killed"])
 @pytest.mark.parametrize("new_human", [False, True])
-def test_provisional_task_can_finish_after_pending_human_has_retired(status, new_human):
+async def test_provisional_task_can_finish_after_pending_human_has_retired(status, new_human):
     agent, service = _build_agent()
     key = "unclassified-after-human:/tmp/work"
     service.activities.start(
@@ -1381,7 +1381,7 @@ def test_provisional_task_can_finish_after_pending_human_has_retired(status, new
         status=status,
         data={},
     )
-    assert agent._handle_activity_message(terminal, key, context_for(key))
+    assert await agent._handle_activity_message(terminal, key, context_for(key))
     assert not service.activities.active_for_runtime("claude", key)
     assert agent._has_pending_requests(key) is new_human
     assert "unbound-task" not in agent._provisional_activity_ids.get(key, set())
