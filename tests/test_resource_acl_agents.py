@@ -1254,9 +1254,8 @@ def test_scheduled_claim_uses_definition_authority_after_restart(
             ),
             store=reloaded_definitions, request_store=reloaded_requests,
         )
-        # Establish the polling probe before an external edit, as the running
-        # scheduler does. Its first data_version read only sets a baseline.
-        reloaded_definitions.maybe_reload()
+        # Do not prime the new store's probe: an edit before its first refresh
+        # must still replace the mirror before the recovered claim executes.
         reloaded_requests.recover_processing()
         assert reloaded_requests.get_run(run.id)["status"] == "queued"
 

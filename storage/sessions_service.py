@@ -329,8 +329,15 @@ class SQLiteSessionsService:
         with self.engine.begin() as conn:
             with loop_writers.track_autocommit_write(conn):
                 metadata.create_all(conn)
-        self._probe = SqliteInvalidationProbe(self.engine)
-        self._session_lookup_probe = SqliteInvalidationProbe(self.engine)
+        try:
+            self._probe = SqliteInvalidationProbe(self.engine)
+            self._session_lookup_probe = SqliteInvalidationProbe(self.engine)
+        except BaseException:
+            probe = getattr(self, "_probe", None)
+            if probe is not None:
+                probe.close()
+            self.engine.dispose()
+            raise
 
     def close(self) -> None:
         self._probe.close()
