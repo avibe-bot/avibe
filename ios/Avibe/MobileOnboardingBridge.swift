@@ -387,6 +387,8 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
     private let handler: MobileBridgeHandler
     private let webView: WKWebView
     private var hasLoadedBundledPage = false
+    private var keyboardViewportLayoutController:
+        KeyboardViewportLayoutController?
 
     init(
         coordinator: MobileSessionCoordinator,
@@ -433,14 +435,32 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         view.addSubview(webView)
+        let keyboardViewportLayoutController =
+            KeyboardViewportLayoutController(
+                contentView: webView,
+                containerView: view
+            )
+        self.keyboardViewportLayoutController =
+            keyboardViewportLayoutController
         NSLayoutConstraint.activate([
             webView.topAnchor.constraint(equalTo: view.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            webView.bottomAnchor.constraint(
-                equalTo: view.keyboardLayoutGuide.topAnchor
-            ),
+            keyboardViewportLayoutController.bottomConstraint,
         ])
+        keyboardViewportLayoutController.refreshForContainerGeometryChange()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        keyboardViewportLayoutController?
+            .refreshForContainerGeometryChange()
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        keyboardViewportLayoutController?
+            .refreshForContainerGeometryChange()
     }
 
     override func viewDidAppear(_ animated: Bool) {

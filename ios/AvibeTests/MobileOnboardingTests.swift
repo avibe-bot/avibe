@@ -40,7 +40,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(rendered)
     }
 
-    func testBundledPageFillsItsContainerAndStillTracksTheKeyboard() throws {
+    func testBundledPageFillsItsContainerAndUsesTheKeyboardViewportOwner() throws {
         let controller = MobileOnboardingViewController(
             coordinator: makeCoordinator(
                 defaults: makeDefaults(),
@@ -81,8 +81,8 @@ final class MobileOnboardingTests: XCTestCase {
             constraints.contains {
                 $0.firstItem === webView
                     && $0.firstAttribute == .bottom
-                    && $0.secondItem === controller.view.keyboardLayoutGuide
-                    && $0.secondAttribute == .top
+                    && $0.secondItem === controller.view.safeAreaLayoutGuide
+                    && $0.secondAttribute == .bottom
             }
         )
     }
