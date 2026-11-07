@@ -40,6 +40,40 @@ def _jobs() -> dict:
     return yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())["jobs"]
 
 
+def _strings(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(key)
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
+def test_linux_runners_are_pinned_to_an_image_release() -> None:
+    """``ubuntu-latest`` moved to 26.04 in batches on 2026-11-07, where the test process's home
+    resolved to an unreadable /root and every unit-test shard failed. A Linux runner names its
+    image (``ubuntu-24.04``, ``ubuntu-24.04-arm``), so an image change is a reviewed edit.
+    """
+    floating = [
+        (path.name, value)
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+        for value in _strings(yaml.safe_load(path.read_text(encoding="utf-8")))
+        if "ubuntu-latest" in value
+    ]
+    assert floating == []
+    labels = {
+        label
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+        for value in _strings(yaml.safe_load(path.read_text(encoding="utf-8")))
+        for label in value.split()
+        if label.startswith("ubuntu-")
+    }
+    assert labels == {"ubuntu-24.04", "ubuntu-24.04-arm"}, labels
+
+
 def _run_isolated_unit_files(
     tmp_path: Path,
     sources: dict[str, str],
@@ -1112,9 +1146,9 @@ def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path
     job = _jobs()["web-fetch-runtime"]
     legs = job["strategy"]["matrix"]["include"]
     assert job["strategy"]["fail-fast"] is False
-    assert [leg["os"] for leg in legs].count("ubuntu-latest") == 1
+    assert [leg["os"] for leg in legs].count("ubuntu-24.04") == 1
     assert {(leg["os"], version) for leg in legs for version in leg["python"].split()} == {
-        *(("ubuntu-latest", version) for version in ("3.10", "3.11", "3.12", "3.13", "3.14")),
+        *(("ubuntu-24.04", version) for version in ("3.10", "3.11", "3.12", "3.13", "3.14")),
         *((runner, "3.12") for runner in ("ubuntu-24.04-arm", "macos-15-intel", "macos-15", "windows-latest")),
     }
     step, = [step for step in job["steps"] if "PYTHON_VERSIONS" in step.get("env", {})]

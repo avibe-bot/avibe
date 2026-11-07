@@ -24,7 +24,7 @@ jobs:
     # changed path can reach their inputs (docs/plans/ci-affected-routing.md).
     # Each routed job reports through a required gate that checks it against its
     # route.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
@@ -59,7 +59,7 @@ jobs:
     # Repository branch protection still requires this historical context name.
     # An administrator can rename that requirement after this compatibility job
     # has landed; the job itself is a substantive removal contract, not a shim.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -100,7 +100,7 @@ jobs:
   ruff:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
@@ -131,7 +131,7 @@ jobs:
         # legs held runners for under a minute of setup each, so one ubuntu job
         # verifies all five Pythons in turn, each in its own interpreter.
         include:
-          - {os: ubuntu-latest, label: "3.10-3.14", python: "3.10\n3.11\n3.12\n3.13\n3.14"}
+          - {os: ubuntu-24.04, label: "3.10-3.14", python: "3.10\n3.11\n3.12\n3.13\n3.14"}
           - {os: ubuntu-24.04-arm, label: "3.12", python: "3.12"}
           - {os: macos-15-intel, label: "3.12", python: "3.12"}
           - {os: macos-15, label: "3.12", python: "3.12"}
@@ -189,7 +189,7 @@ jobs:
     # were the workflow's longest job. Each part runs once on its own runner;
     # the required unit-tests gate needs this job, so it needs both parts.
     name: ui-checks (${{ matrix.part }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -228,7 +228,7 @@ jobs:
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for every lane, including failure/cancellation. Design captures stay manual.
     name: ui-browser-checks (${{ matrix.lane }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -356,7 +356,7 @@ jobs:
   show-router-integration:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -395,7 +395,7 @@ jobs:
   build-linux-artifacts:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -463,7 +463,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
     name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -531,7 +531,7 @@ jobs:
     # hosted tools through, unless labeled engine-hosted-wire-change
     # (docs/plans/model-hub-cpa-dependency.md). Any other change passes after
     # one diff, without installing anything.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -599,7 +599,7 @@ jobs:
           retention-days: 14
 
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built. The
     # hosted wire gate reports through it too, under no new required context.
@@ -660,7 +660,7 @@ jobs:
       - windows-control-ipc
       - windows-agent
     if: always() && needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -698,7 +698,7 @@ jobs:
   migration-release-guard:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -778,7 +778,7 @@ jobs:
 
   install-upgrade-shards:
     name: install-upgrade-regression (${{ matrix.suite }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build-linux-artifacts
     strategy:
       fail-fast: false
@@ -867,7 +867,7 @@ jobs:
           retention-days: 7
 
   install-upgrade-regression:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changes, install-upgrade-shards]
     if: always()
     steps:
@@ -1071,7 +1071,7 @@ jobs:
           if (-not (Select-String -Path purge.log -Pattern "session kept" -SimpleMatch -Quiet)) { throw "The script-block form ended the session" }
 
   windows-install-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The required gate of the installed-package platform route: the Windows
     # installer smoke and web-fetch-runtime on all five platforms. Skipped by
     # route, both must report skipped; otherwise both must succeed. Any

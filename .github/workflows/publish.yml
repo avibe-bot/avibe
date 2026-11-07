@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   resolve-tag:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       publish_legacy: ${{ steps.tag.outputs.publish_legacy }}
@@ -75,7 +75,7 @@ jobs:
           echo "workflow_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
   resolve-show-runtime-ref:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -98,7 +98,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact: linux-x64
           - os: ubuntu-24.04-arm
             artifact: linux-arm64
@@ -162,7 +162,7 @@ jobs:
     needs:
       - resolve-tag
       - show-runtime-bundles
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -452,7 +452,7 @@ jobs:
     needs:
       - build
       - finalize-github-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: pypi
     permissions:
       id-token: write  # Required for trusted publishing
@@ -483,7 +483,7 @@ jobs:
       - build
       - finalize-github-release
     if: needs.resolve-tag.outputs.publish_legacy == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # PyPI trusted publishers issue project-scoped tokens for the exact OIDC
     # claim, including the GitHub environment. Keep the legacy shim on a
     # separate environment so it can be configured for the vibe-remote project
@@ -521,7 +521,7 @@ jobs:
       group: avibe-official-release-finalization
       cancel-in-progress: false
       queue: max
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: write

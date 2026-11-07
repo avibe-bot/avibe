@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   resolve-desktop-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       enabled: ${{ steps.resolve.outputs.enabled }}
       updater_enabled: ${{ steps.resolve.outputs.updater_enabled }}
@@ -262,7 +262,7 @@ jobs:
   resolve-show-runtime-ref:
     needs: resolve-desktop-release
     if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -285,7 +285,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             artifact: linux-x64
           - os: ubuntu-24.04-arm
             artifact: linux-arm64
@@ -346,7 +346,7 @@ jobs:
     needs:
       - resolve-desktop-release
       - show-runtime-bundles
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -477,7 +477,7 @@ jobs:
           (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
            (needs.certum-windows-sign.result == 'success' &&
             (needs.windows-updater-finalize.result == 'success' || needs.windows-updater-finalize.result == 'skipped'))) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

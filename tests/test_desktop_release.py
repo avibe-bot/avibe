@@ -876,7 +876,7 @@ def test_signpath_test_signing_is_a_dispatch_only_isolated_lane():
     assert set(lane) == {"signpath-test-build", "signpath-test-sign", "signpath-test-verify"}
     for name, job in lane.items():
         assert job["if"] == "inputs.signpath_test == true", name
-        assert job["runs-on"] in {"windows-latest", "ubuntu-latest"}, name
+        assert job["runs-on"] in {"windows-latest", "ubuntu-24.04"}, name
         assert "secrets" not in job and "uses" not in job, name
         assert job["permissions"] == ({"contents": "read", "actions": "read"} if name == "signpath-test-sign"
                                       else {"contents": "read"}), name

@@ -20,7 +20,7 @@ env:
 jobs:
   source:
     name: Verify and constrain source
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Fetch and verify upstream source
         shell: bash
@@ -438,7 +438,7 @@ jobs:
   build-linux:
     name: linux-${{ matrix.arch }}
     needs: source
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -707,7 +707,7 @@ jobs:
   manifest:
     name: Manifest and optional release
     needs: [build-linux, build-macos]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
