@@ -33,7 +33,7 @@ const viewport = vi.hoisted(() => {
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
-      matches: state.isDesktop,
+      matches: query === '(max-width: 767px)' ? !state.isDesktop : state.isDesktop,
       media: query,
       onchange: null,
       addListener: vi.fn(),
@@ -227,6 +227,7 @@ afterEach(() => {
   cleanup();
   clearMobileProjectsListSnapshot();
   Reflect.deleteProperty(window, 'avibeNative');
+  Reflect.deleteProperty(window, 'visualViewport');
   vi.clearAllMocks();
 });
 
@@ -244,6 +245,41 @@ const installNativeAccountBridge = () => {
     },
   });
   return call;
+};
+
+class FakeVisualViewport extends EventTarget {
+  height = 844;
+  width = 390;
+  offsetTop = 0;
+  offsetLeft = 0;
+  pageTop = 0;
+  pageLeft = 0;
+  scale = 1;
+}
+
+const installNativeKeyboardBridge = () => {
+  const call = vi.fn(async () => null);
+  Object.defineProperty(window, 'avibeNative', {
+    configurable: true,
+    value: {
+      contract: 1,
+      platform: 'ios',
+      shellVersion: '1.0 (1)',
+      capabilities: { keyboardResizesViewport: 1 },
+      call,
+      on: vi.fn(() => () => undefined),
+    },
+  });
+  return call;
+};
+
+const installVisualViewport = () => {
+  const visualViewport = new FakeVisualViewport();
+  Object.defineProperty(window, 'visualViewport', {
+    configurable: true,
+    value: visualViewport,
+  });
+  return visualViewport;
 };
 
 describe('AppShell stale login session notice', () => {
@@ -784,6 +820,73 @@ describe('AppShell sidebar width', () => {
 });
 
 describe('AppShell persistent Workbench chrome', () => {
+  it('removes the native phone tab bar and its clearance only for a contracted software-keyboard viewport', async () => {
+    installNativeKeyboardBridge();
+    const visualViewport = installVisualViewport();
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<textarea aria-label="Home composer" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    const main = view.container.querySelector('main#app-shell-scroll')!;
+    const tabBar = () => view.container.querySelector('nav.fixed.bottom-0');
+    const composer = screen.getByRole('textbox', { name: 'Home composer' });
+
+    expect(tabBar()).not.toBeNull();
+    expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
+
+    composer.focus();
+    await act(async () => undefined);
+    // Focus with a hardware keyboard does not change the viewport.
+    expect(tabBar()).not.toBeNull();
+    expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
+
+    act(() => {
+      visualViewport.height = 500;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await waitFor(() => expect(tabBar()).toBeNull());
+    expect(main.className).toContain('pb-0');
+    expect(main.className).not.toContain('pb-[var(--mobile-nav-clearance)]');
+
+    composer.blur();
+    act(() => {
+      visualViewport.height = 844;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await waitFor(() => expect(tabBar()).not.toBeNull());
+    expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
+  });
+
+  it('keeps browser and PWA bottom chrome when the native keyboard contract is absent', async () => {
+    const visualViewport = installVisualViewport();
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<textarea aria-label="Browser composer" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    const main = view.container.querySelector('main#app-shell-scroll')!;
+    const composer = screen.getByRole('textbox', { name: 'Browser composer' });
+
+    composer.focus();
+    act(() => {
+      visualViewport.height = 500;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await act(async () => undefined);
+
+    expect(view.container.querySelector('nav.fixed.bottom-0')).not.toBeNull();
+    expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
+  });
+
   it('applies the instance language while Settings controls stay unmounted', async () => {
     viewport.isDesktop = true;
     api.getConfig.mockResolvedValue({ language: 'zh', platforms: { enabled: [] } });

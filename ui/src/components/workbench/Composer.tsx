@@ -79,6 +79,7 @@ import { useImageViewer } from '../ui/image-viewer-context';
 import { inForegroundSurface } from './chatShortcuts';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
+import { revealComposerAfterNativeKeyboardResize } from '../../lib/nativeKeyboard';
 import {
   MentionEditor,
   type MentionSearchResult,
@@ -596,6 +597,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Set by setDraft; consumed by the layout effect that focuses after the seeded
   // text has rendered.
   const seedFocusRef = useRef(false);
+  const cancelSeedRevealRef = useRef<() => void>(() => undefined);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentFilesRef = useRef(new Map<string, File>());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
@@ -1907,13 +1909,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     seedFocusRef.current = false;
     if (useMentions) {
       mentionRef.current?.focus();
-      return;
+    } else {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
     }
-    const el = textareaRef.current;
-    if (!el) return;
-    el.focus();
-    el.setSelectionRange(el.value.length, el.value.length);
+    cancelSeedRevealRef.current();
+    cancelSeedRevealRef.current = revealComposerAfterNativeKeyboardResize(composerRootRef.current);
   }, [value, useMentions]);
+
+  useEffect(() => () => cancelSeedRevealRef.current(), []);
 
   useEffect(() => {
     if (!busyControls) {
@@ -2352,6 +2358,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   return (
     <div
       ref={composerRootRef}
+      data-composer-root
       className={cn('relative mx-auto flex w-full max-w-[1080px] flex-col gap-2', holdBusy && 'z-50', className)}
     >
       {holdLayer}

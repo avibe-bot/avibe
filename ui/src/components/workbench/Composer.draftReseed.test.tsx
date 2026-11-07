@@ -17,6 +17,7 @@ vi.hoisted(() => {
 });
 const apiFetch = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
+const originalScrollIntoView = Element.prototype.scrollIntoView;
 
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
@@ -77,7 +78,18 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  Reflect.deleteProperty(window, 'avibeNative');
+  Reflect.deleteProperty(window, 'visualViewport');
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  });
+  if (originalScrollIntoView) Element.prototype.scrollIntoView = originalScrollIntoView;
+  else Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+});
 
 describe.each([
   { path: 'mention editor', mentions: true },
@@ -122,5 +134,64 @@ describe.each([
     view.rerender(composer({ initialDraft: 'sent before the bootstrap', mentions, handle }, () => undefined));
     await act(async () => undefined);
     expect(textOf(screen.getByRole('textbox'))).toBe('');
+  });
+});
+
+describe('Composer programmatic Home focus', () => {
+  it('reveals the complete composer after the native keyboard viewport settles', async () => {
+    vi.useFakeTimers();
+    const viewport = Object.assign(new EventTarget(), {
+      height: 500,
+      width: 390,
+      offsetTop: 0,
+      offsetLeft: 0,
+      pageTop: 0,
+      pageLeft: 0,
+      scale: 1,
+    });
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    });
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+    });
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: '1.0 (1)',
+        capabilities: { keyboardResizesViewport: 1 },
+        call: vi.fn(async () => null),
+        on: vi.fn(() => () => undefined),
+      },
+    });
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const handle = createRef<ComposerHandle>();
+    const view = render(composer({ initialDraft: null, mentions: false, handle }, () => undefined));
+    const root = view.container.querySelector<HTMLElement>('[data-composer-root]')!;
+    root.getBoundingClientRect = () => ({
+      x: 0,
+      y: 430,
+      top: 430,
+      right: 390,
+      bottom: 560,
+      left: 0,
+      width: 390,
+      height: 130,
+      toJSON: () => ({}),
+    });
+
+    act(() => handle.current!.setDraft('Add a Bot that owns security'));
+    expect(document.activeElement).toBe(screen.getByRole('textbox'));
+    act(() => {
+      viewport.dispatchEvent(new Event('resize'));
+      vi.advanceTimersByTime(150);
+    });
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'end', inline: 'nearest' });
   });
 });
