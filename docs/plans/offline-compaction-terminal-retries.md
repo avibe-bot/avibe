@@ -44,7 +44,9 @@ orphan settlement, and a new global writer system or disk recovery journal.
 - Offline admission retains the raw service lock and the UI-start gate from
   before SQLite/bootstrap work through the final checkpoint, lease cleanup,
   and engine disposal. UI direct entry, ordinary launch, and reload participate;
-  no service identity is claimed and no process is stopped.
+  no service identity is claimed and no process is stopped. Direct UI entry
+  refuses a different live or unverifiable recorded UI owner before publishing
+  its PID; ordinary launch/reload can retain their already-published child PID.
 - Worker-owned command stamps opt into bounded transaction retry. Creation/edit
   and legacy synchronous lifecycle callers do not acquire new sleeping retries.
   Atomic escalation outbox attempts rebuild mutable values and publish only
@@ -137,5 +139,8 @@ steps classified before retry publication, both healthy and exhausted ack writes
 all four fail before the retirement fix, and none lets a step settle its Run.
 The expanded Activity/service/Claude/dispatcher suite passed 562 tests and
 35 subtests; the scheduler/failure-visibility suite passed another 777 tests.
-All checks use isolated state;
+All checks use isolated state. Two cross-process duplicate-UI cases fail before
+PID-owner preservation (readable and unreadable owner commands); parent handover
+and dead-owner replacement remain admitted. The runtime/retention consumer suite
+passes 260 tests and four subtests, with three platform skips.
 PR CI and exact-head Codex review remain delivery gates.

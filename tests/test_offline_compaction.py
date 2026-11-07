@@ -361,6 +361,54 @@ def test_direct_ui_entry_that_wins_admission_refuses_compaction(state, children)
     ui.finish(release=True)
 
 
+@pytest.mark.parametrize("owner_command", ["known", "unreadable"])
+def test_duplicate_direct_ui_cannot_replace_live_owner(children, owner_command):
+    """A failed duplicate must not lose the serving UI's only lifecycle record.
+
+    Offline admission tests proved exclusion from VACUUM, but did not cover a
+    second direct entry taking the PID record before failing to bind.
+    """
+    owner = children(_UI_ENTRY + "\nimport sys\nsys.stdin.readline()\n")
+    owner.expect("UI admitted")
+    pid_path = paths.get_runtime_ui_pid_path()
+    original = pid_path.read_bytes()
+    source = _UI_ENTRY.replace(
+        "except Admitted:\n    print('UI admitted')",
+        "except RuntimeError as exc:\n"
+        "    assert 'already running or starting' in str(exc)\n"
+        "    print('UI refused')\n"
+        "except Admitted:\n    print('incorrectly admitted')",
+    )
+    if owner_command == "unreadable":
+        source = "from vibe import runtime\nruntime.get_process_command = lambda pid: None\n" + source
+    duplicate = children(source)
+    duplicate.expect("UI refused")
+    duplicate.finish()
+    assert pid_path.read_bytes() == original
+    assert runtime.ui_pid_file_points_to_running_ui()
+    assert owner.process.poll() is None
+    owner.finish(release=True)
+
+
+@pytest.mark.parametrize("record", ["self", "dead"])
+def test_direct_ui_accepts_parent_handover_or_dead_owner(children, record):
+    """Ordinary spawn/reload prepublishes its child; dead owners are replaceable."""
+    if record == "dead":
+        previous = children(_UI_ENTRY)
+        previous.expect("UI admitted")
+        previous.finish()
+        prefix = ""
+    else:
+        prefix = (
+            "import os\nfrom config import paths\nfrom vibe import runtime\n"
+            "runtime.write_atomic(paths.get_runtime_ui_pid_path(), str(os.getpid()))\n"
+        )
+    child = children(prefix + _UI_ENTRY)
+    child.expect("UI admitted")
+    child.finish()
+    assert paths.get_runtime_ui_pid_path().read_text() == str(child.process.pid)
+
+
 @pytest.mark.parametrize("entry", ["start", "reload"])
 def test_ui_launch_and_reload_cannot_spawn_inside_maintenance(children, entry):
     source = """

@@ -2610,7 +2610,17 @@ def register_ui_start() -> None:
     before the old UI exits, and the service may start alongside the UI.
     """
     with ui_start_exclusion():
-        write_atomic(paths.get_runtime_ui_pid_path(), str(os.getpid()))
+        pid_path = paths.get_runtime_ui_pid_path()
+        current_pid = os.getpid()
+        recorded_pid = _read_pid_file(pid_path)
+        # A launcher/reload already published this child under the same gate.
+        # A separate direct entry must not steal a live owner's record before
+        # it binds: a failed duplicate would otherwise leave that UI unowned.
+        if recorded_pid != current_pid and not recorded_ui_is_gone(pid_path):
+            raise RuntimeError(
+                f"Avibe Web UI is already running or starting (pid={recorded_pid}); refusing duplicate startup"
+            )
+        write_atomic(pid_path, str(current_pid))
 
 
 class OfflineMaintenanceUnavailable(RuntimeError):
