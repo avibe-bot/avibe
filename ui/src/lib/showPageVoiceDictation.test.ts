@@ -3,6 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { ShowPageVoiceDictation } from './showPageVoiceDictation';
 import { claimVoiceCapture, isVoiceCaptureActive, type VoiceRecordingPipelineOptions } from './voiceRecording';
 import type { VoiceRealtimeOptions } from './voiceRealtime';
+
+const telemetry = vi.hoisted(() => ({ emit: vi.fn() }));
+vi.mock('./voiceTelemetry', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./voiceTelemetry')>()),
+  emitVoiceTelemetry: telemetry.emit,
+}));
 import { VoiceTranscriptionError, type VoiceTranscriptionSegment } from './voiceTranscription';
 
 type Deferred<T> = {
@@ -119,6 +125,63 @@ describe('ShowPageVoiceDictation', () => {
     expect(abort).toHaveBeenCalledOnce();
   });
 
+  it('logs a take whose microphone never opened, and why', async () => {
+    telemetry.emit.mockReset();
+    const createPipeline = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold' }, {
+      // On iOS another app holding the microphone refuses it so.
+      getUserMedia: async () => {
+        throw new DOMException('The I/O read operation failed.', 'NotReadableError');
+      },
+      createPipeline,
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    await expect(dictation.start()).rejects.toMatchObject({ name: 'NotReadableError' });
+
+    expect(createPipeline).not.toHaveBeenCalled();
+    expect(dictation.captureClass()).toBe('no_microphone');
+    expect(telemetry.emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      event: 'capture_trace',
+      outcome: 'failed',
+      dictationId: dictation.id,
+      entry: 'hold',
+      captureClass: 'no_microphone',
+      mic: 'NotReadableError',
+      micMs: expect.any(Number),
+      attempts: [],
+    }));
+    // The browser's message is not what it logs.
+    expect(JSON.stringify(telemetry.emit.mock.calls)).not.toContain('I/O read');
+  });
+
+  it('records its capture in the same trace it reads its microphone from', async () => {
+    const { stream } = fakeStream();
+    let options: VoiceRecordingPipelineOptions | undefined;
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold' }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: '', cleanup: 'success' as const }),
+        abort: vi.fn(),
+      }),
+      createPipeline: (pipelineOptions) => {
+        options = pipelineOptions;
+        return { start: async () => true, finish: vi.fn(), abort: vi.fn() };
+      },
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    await dictation.start();
+    // What the pipeline records there is what the hold reads back.
+    options?.trace?.attempt('initial', stream);
+    options?.trace?.observePcm(new Int16Array(2048).fill(8000));
+    expect(options?.trace).toMatchObject({ entry: 'hold', dictationId: dictation.id });
+    expect(dictation.captureClass()).toBe('sound');
+    dictation.abort();
+  });
+
   it('closes a microphone granted after the take was cancelled, and frees the capture', async () => {
     // A permission alert can answer after the press that asked has ended.
     const { stream, stop } = fakeStream();
@@ -141,6 +204,9 @@ describe('ShowPageVoiceDictation', () => {
     expect(stop).toHaveBeenCalled();
     expect(createPipeline).not.toHaveBeenCalled();
     expect(isVoiceCaptureActive()).toBe(false);
+    // And the take is still logged, once.
+    expect(telemetry.emit.mock.calls.filter(([event]) => event.event === 'capture_trace' && event.dictationId === dictation.id))
+      .toEqual([[expect.objectContaining({ outcome: 'cancelled', mic: 'ok', attempts: [] })]]);
   });
 
   it('preserves finalization when ownership changes during capture startup', async () => {

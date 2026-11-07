@@ -10986,7 +10986,6 @@ class ModelHubService:
                     if hop.source_id not in excluded_source_ids
                     and (hop.source_id, hop.model_id) not in (excluded_hops or ())
                     and (pinned_hop is None or (hop.source_id, hop.model_id) == pinned_hop)
-                    and (recovery_request is None or recovery_request.admits(hop.cooldown_reason))
                 ]
                 candidate = next(
                     (
@@ -11512,7 +11511,6 @@ class ModelHubService:
                         if hop.source_id not in globally_blocked_source_ids
                         and (hop.source_id, hop.model_id) not in unsupported_hops
                         and (pinned_hop is None or (hop.source_id, hop.model_id) == pinned_hop)
-                        and (recovery_request is None or recovery_request.admits(hop.cooldown_reason))
                     ),
                     None,
                 )
@@ -11833,7 +11831,7 @@ class ModelHubService:
                 non_retryable_failure |= decision.reason not in RETRY_DELAYS
                 if recovery_request is not None and decision.reason in RETRY_DELAYS:
                     recovery_request.start()
-                    recovery_request.observe_reason(decision.reason)
+                    recovery_request.reason = decision.reason
                 elif recovery_request is not None:
                     recovery_request.non_retryable_failure = True
                 # The newest refusal wins even without text: an older message
@@ -11933,7 +11931,6 @@ class ModelHubService:
 
     async def resolve_with_recovery(
         self, *, recovery_observer: Callable[[dict | None], None] | None = None,
-        turn_id: str | None = None,
         prepare_response: Callable[[ResolvedInvocation], Awaitable[RawCallOutcome | None]] | None = None,
         **kwargs,
     ) -> ResolvedInvocation:
@@ -11957,7 +11954,7 @@ class ModelHubService:
                     if retry_outcome is None:
                         return resolved
                     pending.start()
-                    pending.observe_reason("server_error")
+                    pending.reason = "server_error"
                     pending.last_upstream_failure = self._upstream_failure(resolved.source_label, retry_outcome)
                     if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
                         # Never replay opaque continuation content on a different
@@ -11983,7 +11980,6 @@ class ModelHubService:
                         hop.source is not None
                         and hop.model_id is not None
                         and not self._effort_refused(hop.source, hop.model_id, request)
-                        and pending.admits(hop.cooldown_reason)
                         for hop in resolution.candidate_hops
                     ):
                         # Retry now only for a hop this request may use: a hop
@@ -11994,58 +11990,30 @@ class ModelHubService:
                     # while another hop may still heal.
                     waitable = resolution.self_healing_hops(supply_channel)
                     if not waitable:
-                        if any(not pending.admits(hop.cooldown_reason) for hop in resolution.candidate_hops):
-                            raise self._recovery_exhausted(exc, pending.reason) from exc
                         raise
-                    waits = []
-                    owners = []
-                    for hop in waitable:
-                        reason = hop.cooldown_reason
-                        remaining = pending.remaining_for(reason)
-                        if hop.recovery == "in_flight":
-                            if remaining > 0:
-                                owners.append((remaining, hop, reason))
-                                pending.observe_reason(reason)
-                        elif hop.retry_at:
-                            delay = max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds())
-                            if delay < remaining - RECOVERY_ADMISSION_MARGIN_SECONDS:
-                                waits.append((delay, hop, reason))
-                                pending.observe_reason(reason)
-                    if waits:
-                        delay, hop, reason = min(waits, key=lambda item: item[0])
-                    elif owners:
-                        # A short-budget peer cannot end another owner's viable
-                        # transient recovery. Any owner's settlement wakes us.
-                        delay, hop, reason = max(owners, key=lambda item: item[0])
-                    else:
-                        # Preserve the refusal's cause for the unchanged closed terminal.
-                        hop = min(waitable, key=lambda item: item.retry_at or "")
-                        reason = hop.cooldown_reason if hop.cooldown_reason is not None else pending.reason
-                        raise self._recovery_exhausted(exc, reason) from exc
+                    annotations = self.recovery.annotations(config)
+                    waits = [
+                        (
+                            max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds()),
+                            hop,
+                        )
+                        for hop in waitable
+                        if hop.recovery != "in_flight" and hop.retry_at
+                    ]
+                    selected = min(waits, key=lambda item: item[0]) if waits else None
+                    delay = selected[0] if selected is not None else pending.remaining
+                    hop = selected[1] if selected is not None else waitable[0]
                     pending.source_id = hop.source_id
-                    pending.observe_reason(reason)
+                    annotation = annotations.get(hop.source_id)
+                    pending.reason = annotation.reason if annotation else pending.reason
+                    if delay >= pending.remaining - RECOVERY_ADMISSION_MARGIN_SECONDS:
+                        # Another admitted owner can still wake this request early.
+                        if not any(hop.recovery == "in_flight" for hop in waitable):
+                            raise self._recovery_exhausted(exc, pending.reason) from exc
+                        delay = pending.remaining
                     changed = self.recovery.changed
                     pending.publish("waiting", next_eligible_at=hop.retry_at)
-                    wait_started = self.recovery.monotonic()
-                    wait_outcome = "failed"
-                    try:
-                        wait_outcome = await self.recovery.wait(delay, changed)
-                    except asyncio.CancelledError:
-                        wait_outcome = "canceled"
-                        raise
-                    finally:
-                        waited = self.recovery.monotonic() - wait_started
-                        logger.info(
-                            "Model Hub recovery wait ended turn=%s backend=%s model=%s source=%s attempt=%s "
-                            "reason=%s wait_seconds=%.3f outcome=%s",
-                            turn_id, kwargs["backend"], kwargs["model_id"], pending.source_id, pending.attempt_count,
-                            pending.reason, waited, wait_outcome,
-                            extra={
-                                "turn_id": turn_id, "backend": kwargs["backend"], "model_id": kwargs["model_id"],
-                                "source_id": pending.source_id, "attempt_count": pending.attempt_count,
-                                "reason": pending.reason, "wait_seconds": waited, "outcome": wait_outcome,
-                            },
-                        )
+                    await self.recovery.wait(delay, changed)
                     if pending.expired:
                         # Preserve this request's admission-expiry cause even
                         # if an owner succeeded or configuration changed on wake.

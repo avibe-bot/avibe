@@ -15,6 +15,14 @@ import {
   VoiceRecordingPipeline,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
+import { VoiceCaptureTrace } from './voiceCaptureTrace';
+
+// The reliability log: every take's capture trace goes through here.
+const telemetry = vi.hoisted(() => ({ emit: vi.fn() }));
+vi.mock('./voiceTelemetry', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./voiceTelemetry')>()),
+  emitVoiceTelemetry: telemetry.emit,
+}));
 
 const initialNavigatorLocks = Object.getOwnPropertyDescriptor(navigator, 'locks');
 
@@ -648,6 +656,8 @@ describe('voice capture audio context', () => {
   let nextResume: Resume[] = [];
   class FakeAudioContext {
     state: string = 'suspended';
+    /** The context clock, in seconds: it moves only while the context renders. */
+    currentTime = 0;
     readonly resumeBehavior: Resume;
     readonly audioWorklet = { addModule: vi.fn(async () => undefined) };
     readonly destination = {};
@@ -677,7 +687,7 @@ describe('voice capture audio context', () => {
     onprocessorerror = null;
     readonly connect = vi.fn();
     readonly disconnect = vi.fn();
-    constructor(readonly context: FakeAudioContext) {
+    constructor(readonly context: FakeAudioContext, _name?: string, readonly options?: unknown) {
       nodes.push(this);
     }
     /** The rendering thread delivering a chunk of frames. */
@@ -862,6 +872,175 @@ describe('voice capture audio context', () => {
     await vi.advanceTimersByTimeAsync(3 * VOICE_RENDER_WINDOW_MS);
     expect(nodes).toHaveLength(1);
   });
+
+  describe('its capture trace', () => {
+    const traces = () => telemetry.emit.mock.calls
+      .map(([event]) => event as Record<string, unknown>)
+      .filter((event) => event.event === 'capture_trace');
+    /** A microphone with what a real one carries that the log must never hold. */
+    const named = () => {
+      const mic = microphone();
+      Object.assign(mic.track, {
+        id: 'track-id-secret',
+        label: 'iPhone Microphone',
+        getSettings: () => ({ deviceId: 'device-id-secret', groupId: 'group-id-secret' }),
+      });
+      return mic;
+    };
+
+    beforeEach(() => {
+      telemetry.emit.mockReset();
+    });
+
+    it('says, stage by stage, that a take on a Home Screen app got no frames, and nothing private', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal('window', Object.assign(new EventTarget(), { matchMedia: (query: string) => ({ matches: query === '(display-mode: standalone)' }) }));
+      const fresh = named();
+      const getUserMedia = vi.fn(async () => fresh.stream);
+      vi.stubGlobal('navigator', { mediaDevices: { getUserMedia }, audioSession: { type: 'auto', state: 'active' } });
+      vi.stubGlobal('MediaRecorder', { isTypeSupported: (type: string) => type === 'audio/mp4' || type === 'audio/webm' });
+      await prewarmVoiceCapture();
+      const { stream } = named();
+      const trace = new VoiceCaptureTrace('hold', 'dictation-1');
+      trace.micSettled(trace.mark());
+      const pipeline = pipelineOn(stream, { trace });
+      await pipeline.start();
+
+      // The owner's iPhone, 2026-11-07: no frame on the take's graph, its rebuild, or a fresh microphone.
+      await vi.advanceTimersByTimeAsync(3 * VOICE_RENDER_WINDOW_MS);
+      nodes[2].port.onmessage?.({ data: { type: 'stopped' } });
+
+      expect(traces()).toHaveLength(1);
+      const event = traces()[0];
+      expect(event).toMatchObject({
+        event: 'capture_trace',
+        outcome: 'empty',
+        dictationId: 'dictation-1',
+        entry: 'hold',
+        surface: 'standalone',
+        captureClass: 'no_frames',
+        stop: 'error',
+        mic: 'ok',
+        prewarm: 'reused',
+        audioSession: 'auto',
+        audioSessionState: 'active',
+        recorderTypes: ['audio/mp4', 'audio/webm'],
+        chunks: 0,
+        levels: 0,
+        trackEvents: [],
+      });
+      expect((event.attempts as Record<string, unknown>[]).map(({ kind, end, chunks, trackStart, module }) => ({ kind, end, chunks, trackStart, module }))).toEqual([
+        { kind: 'initial', end: 'no_frames', chunks: 0, trackStart: 'live', module: 'prewarmed' },
+        { kind: 'context', end: 'no_frames', chunks: 0, trackStart: 'live', module: 'ok' },
+        { kind: 'microphone', end: 'no_frames', chunks: 0, trackStart: 'live', module: 'ok' },
+      ]);
+      expect(event.attempts).toEqual([
+        expect.objectContaining({ contextState: 'running', resumedState: 'running' }),
+        expect.objectContaining({ contextState: 'suspended', resumedState: 'running', moduleMs: expect.any(Number) }),
+        expect.objectContaining({ mic: 'ok', micMs: expect.any(Number) }),
+      ]);
+      // The shape the server keeps (vibe/ui_server.py asr_telemetry), and nothing a device names.
+      expect(Object.keys(event).sort()).toEqual([
+        'attempts', 'audioSession', 'audioSessionState', 'audioSessionStateEnd', 'captureClass', 'chunks', 'dictationId', 'entry',
+        'event', 'hiddenCount', 'levels', 'mic', 'micMs', 'outcome', 'pageAgeMs', 'prewarm', 'prewarmAgeMs', 'recorderTypes', 'stop',
+        'surface', 'totalMs', 'trackEvents',
+      ]);
+      const attemptKeys = new Set(['kind', 'atMs', 'micMs', 'mic', 'contextState', 'resumedState', 'resumeMs', 'sampleRate', 'module', 'moduleMs', 'chunks', 'firstFrameMs', 'levels', 'clockAdvanceMs', 'renderCalls', 'emptyInputs', 'trackStart', 'trackEnd', 'end']);
+      for (const attempt of event.attempts as Record<string, unknown>[]) {
+        expect(Object.keys(attempt).filter((key) => !attemptKeys.has(key))).toEqual([]);
+      }
+      const logged = JSON.stringify(event);
+      for (const secret of ['iPhone', 'track-id-secret', 'device-id-secret', 'group-id-secret']) expect(logged).not.toContain(secret);
+    });
+
+    it('tells a graph that never renders from one whose microphone node gives it nothing', async () => {
+      vi.useFakeTimers();
+      const { stream } = microphone();
+      const pipeline = pipelineOn(stream);
+      await pipeline.start();
+      // The take's graph: its context clock stands still, and the worklet is never called.
+      await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS);
+      // Its rebuild renders (the clock moves, the worklet is called) with no input at all.
+      nodes[1].context.currentTime = 0.75;
+      nodes[1].port.onmessage?.({ data: { type: 'tick', calls: 282, empty: 282 } } as never);
+      pipeline.finish();
+      nodes[1].port.onmessage?.({ data: { type: 'stopped' } });
+
+      const [stalled, empty] = traces()[0].attempts as Record<string, unknown>[];
+      expect(stalled).toMatchObject({ kind: 'initial', end: 'no_frames', clockAdvanceMs: 0 });
+      expect(stalled).not.toHaveProperty('renderCalls');
+      expect(empty).toMatchObject({ kind: 'context', end: 'stopped', clockAdvanceMs: 750, renderCalls: 282, emptyInputs: 282 });
+      // The capture asks every graph's worklet for that heartbeat.
+      expect(nodes.map((node) => (node.options as { processorOptions: { tickMs?: number } }).processorOptions.tickMs)).toEqual([250, 250]);
+    });
+
+    it('logs a released take that delivered frames as a success', async () => {
+      vi.useFakeTimers();
+      const { stream } = microphone();
+      const pipeline = pipelineOn(stream);
+      await pipeline.start();
+      nodes[0].deliver(0, 0, 0);
+      pipeline.finish();
+      nodes[0].port.onmessage?.({ data: { type: 'stopped' } });
+      pipeline.abort();
+
+      expect(traces()).toEqual([expect.objectContaining({ outcome: 'success', stop: 'finish', chunks: 1 })]);
+    });
+
+    it.each([
+      ['a microphone the system holds back', true, [0, 0, 0], 'muted'],
+      ['a graph that delivers only silence', false, [0, 0, 0], 'silence'],
+      ['a microphone that hears speech', false, Array.from({ length: 2048 }, () => 8000), 'sound'],
+    ] as const)('tells %s (%s)', async (_name, muted, samples, delivered) => {
+      vi.useFakeTimers();
+      const { stream, track } = microphone();
+      track.muted = muted;
+      const pipeline = pipelineOn(stream);
+      await pipeline.start();
+      nodes[0].deliver(...samples);
+      pipeline.finish();
+      nodes[0].port.onmessage?.({ data: { type: 'stopped' } });
+
+      expect(traces()).toEqual([expect.objectContaining({ captureClass: delivered })]);
+    });
+
+    it('records the microphone muting and coming back while it records', async () => {
+      vi.useFakeTimers();
+      const { stream, track } = microphone();
+      const pipeline = pipelineOn(stream);
+      await pipeline.start();
+      track.muted = true;
+      track.dispatchEvent(new Event('mute'));
+      track.muted = false;
+      track.dispatchEvent(new Event('unmute'));
+      pipeline.finish();
+      nodes[0].port.onmessage?.({ data: { type: 'stopped' } });
+
+      expect(traces()[0]).toMatchObject({ captureClass: 'muted', trackEvents: [['mute', expect.any(Number)], ['unmute', expect.any(Number)]] });
+    });
+
+    it('names why a prewarmed context was not used: it lived through a hidden page', async () => {
+      const page = Object.assign(new EventTarget(), { visibilityState: 'visible' as DocumentVisibilityState });
+      vi.stubGlobal('document', page);
+      vi.stubGlobal('window', new EventTarget());
+      vi.resetModules();
+      const voice = await import('./voiceRecording');
+      await voice.prewarmVoiceCapture();
+      page.visibilityState = 'hidden';
+      page.dispatchEvent(new Event('visibilitychange'));
+      page.visibilityState = 'visible';
+      page.dispatchEvent(new Event('visibilitychange'));
+
+      const { stream } = microphone();
+      const pipeline = new voice.VoiceRecordingPipeline({ stream, segmentMs: 1000, onSegment: vi.fn(), onStopped: vi.fn() });
+      pipelines.push(pipeline);
+      await pipeline.start();
+      pipeline.abort();
+      nodes.at(-1)!.port.onmessage?.({ data: { type: 'stopped' } });
+
+      expect(traces()).toEqual([expect.objectContaining({ outcome: 'cancelled', prewarm: 'none', prewarmDrop: 'hidden', hiddenCount: 1, sinceHiddenMs: expect.any(Number) })]);
+    });
+  });
 });
 
 describe('voice PCM worklet', () => {
@@ -954,6 +1133,34 @@ describe('voice PCM worklet', () => {
     new Processor!({ processorOptions: { targetSampleRate: 1000, chunkSamples: 2 } })
       .process([[Float32Array.from([0.5, -0.5, 0.5, -0.5])]]);
     expect(postMessage.mock.calls.every(([message]) => message.type === 'samples')).toBe(true);
+  });
+
+  it('reports a heartbeat of its calls, and of calls with no input, every tickMs when asked', () => {
+    const postMessage = vi.fn();
+    class FakeAudioWorkletProcessor {
+      readonly port = { onmessage: null, postMessage };
+    }
+    let Processor: (new (options: {
+      processorOptions: { targetSampleRate: number; chunkSamples: number; tickMs?: number };
+    }) => { process: (inputs: Float32Array[][]) => boolean }) | null = null;
+    new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', voicePcmWorkletSource)(
+      FakeAudioWorkletProcessor,
+      (_name: string, constructor: typeof Processor) => {
+        Processor = constructor;
+      },
+      12_800,
+    );
+
+    // 12.8 kHz in render quanta of 128 frames: a tick every 10 calls for 100 ms.
+    const processor = new Processor!({ processorOptions: { targetSampleRate: 16_000, chunkSamples: 4_000, tickMs: 100 } });
+    for (let call = 0; call < 10; call += 1) processor.process([[]]);
+    const ticks = () => postMessage.mock.calls.map(([message]) => message).filter((message) => message.type === 'tick');
+    expect(ticks()).toEqual([{ type: 'tick', calls: 1, empty: 1 }, { type: 'tick', calls: 10, empty: 10 }]);
+
+    // Off unless asked for.
+    postMessage.mockClear();
+    new Processor!({ processorOptions: { targetSampleRate: 16_000, chunkSamples: 4_000 } }).process([[]]);
+    expect(ticks()).toEqual([]);
   });
 
   it('upsamples low-rate input before emitting target-rate PCM', () => {
