@@ -17,6 +17,41 @@ from core.caller_context import CALLER_CONTEXT_ENV_NAMES
 VERSION = 1
 ADMISSION_SECONDS = 30.0
 
+#: The finite set of named operations, each the CLI command whose existing
+#: semantics it executes. The service checks arguments against that command's
+#: own parser leaf; no other command, path or query is reachable.
+OPERATIONS: dict[str, tuple[str, ...]] = {
+    "agent.run": ("agent", "run"),
+    "task.add": ("task", "add"),
+    "task.update": ("task", "update"),
+    "task.pause": ("task", "pause"),
+    "task.resume": ("task", "resume"),
+    "task.remove": ("task", "remove"),
+    "task.run": ("task", "run"),
+    "watch.add": ("watch", "add"),
+    "watch.update": ("watch", "update"),
+    "watch.pause": ("watch", "pause"),
+    "watch.resume": ("watch", "resume"),
+    "watch.remove": ("watch", "remove"),
+    "session.update": ("session", "update"),
+    "session.send-now": ("session", "send-now"),
+    "session.queue.remove": ("session", "queue", "remove"),
+    "runs.cancel": ("runs", "cancel"),
+}
+
+#: The live Session owner's bound, the transport bound its HTTP adapter had.
+LIVE_OWNER_SECONDS = 30.0
+#: How long an admitted operation may wait on other work before it answers.
+#: ``None`` is a wait only the service can bound: Watch startup confirmation
+#: computes its bound from the recovering waiters in state the client cannot read.
+OPERATION_WAIT_SECONDS: dict[str, float | None] = {
+    "watch.add": None,
+    "runs.cancel": LIVE_OWNER_SECONDS,
+    "session.send-now": LIVE_OWNER_SECONDS,
+}
+#: Response allowance for an admitted operation's own store work.
+EXECUTION_SECONDS = 30.0
+
 
 @dataclass(frozen=True)
 class ControlRequest:

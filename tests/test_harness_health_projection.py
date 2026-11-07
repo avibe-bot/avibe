@@ -36,6 +36,7 @@ from core import scheduled_tasks as scheduled_tasks_module
 from core.watches import ManagedWatchStore, WatchRuntimeStateStore
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import cli
+from tests.cli_control_support import lent
 
 #: The fields ``_enrich_definitions`` derives that a mutation response must not
 #: answer for itself. ``lifecycle_*`` rides along because health and lifecycle
@@ -51,6 +52,8 @@ PROJECTED_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
 )
+
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 
 
 def _configured_v2():
@@ -191,7 +194,7 @@ def test_the_cli_is_a_projection_consumer_not_a_second_health_read_model(
     )
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2()),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         assert cli.cmd_task_add(add_args) == 0
         task_id = _definition(capsys)["id"]
@@ -251,7 +254,7 @@ def test_task_and_watch_mutations_return_the_enriched_projection(capsys) -> None
     )
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2()),
-        patch("vibe.cli._task_store", return_value=task_store),
+        patch.object(lent, "task_store", task_store),
     ):
         assert cli.cmd_task_add(add_args) == 0
         created = _definition(capsys)
@@ -291,8 +294,8 @@ def test_task_and_watch_mutations_return_the_enriched_projection(capsys) -> None
     )
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2()),
-        patch("vibe.cli._watch_store", return_value=watch_store),
-        patch("vibe.cli._watch_runtime_store", return_value=watch_runtime),
+        patch.object(lent, "watch_store", watch_store),
+        patch.object(lent, "watch_runtime_store", watch_runtime),
         patch("vibe.cli._wait_for_watch_startup", side_effect=_startup),
     ):
         assert cli.cmd_watch_add(watch_add_args) == 0

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage.importer import ensure_sqlite_state
 from vibe import cli
+from tests.cli_control_support import lent
 
 pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 
@@ -126,7 +127,7 @@ def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
     task.retirement_reason = "schedule_missed"
     store.upsert_task(task)
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(
             cli.cmd_task_set_enabled,
             task.id,
@@ -167,7 +168,7 @@ def test_task_update_preserves_archived_agent_reference(capsys) -> None:
         )
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-            patch("vibe.cli._task_store", return_value=store),
+            patch.object(lent, "task_store", store),
             patch(
                 "vibe.cli._agent_store",
                 side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
@@ -183,7 +184,7 @@ def test_task_update_preserves_archived_agent_reference(capsys) -> None:
         )
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-            patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore()),
+            patch.object(lent, "task_store", scheduled_tasks.ScheduledTaskStore()),
             patch(
                 "vibe.cli._agent_store",
                 side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
@@ -530,7 +531,7 @@ def test_task_update_rejects_numeric_weekday_and_keeps_stored_schedule(tmp_path:
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
@@ -553,7 +554,7 @@ def test_task_add_rejects_invalid_timezone() -> None:
 def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
 
-    with patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(store_path)):
+    with patch.object(lent, "task_store", scheduled_tasks.ScheduledTaskStore(store_path)):
         result, payload = _capture_stderr_json(cli.cmd_task_show, "missing")
 
     assert result == 1
@@ -606,7 +607,11 @@ def test_remote_editor_task_add_persists_authorization_context(
     # ``patch.dict(..., clear=False)`` below pins only the five ids this test names, so
     # the ORIGIN half of the contract (platform/channel/session_key/...) leaked in from
     # the Avibe Agent shell that runs the suite and appeared in the asserted metadata.
+    from tests.scenarios.permissions.test_cli_invocation_authority import _pair_instance, _snapshot
+
     _bare_terminal_caller(monkeypatch)
+    # The caller's snapshot is admitted against a real pairing, as every command is.
+    _pair_instance()
     store_path = tmp_path / "scheduled_tasks.json"
     store = scheduled_tasks.ScheduledTaskStore(store_path)
     args = _parse_task_add(["--cron", "0 * * * *", "--shell", "true"])
@@ -617,22 +622,13 @@ def test_remote_editor_task_add_persists_authorization_context(
         "AVIBE_CALLER_BACKEND": "codex",
         "AVIBE_NATIVE_SESSION_ID": "native-codex-1",
         "AVIBE_CALLER_REMOTE": "1",
-        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(
-            {
-                "sub": "remote-editor",
-                "vibe_instance_role": "editor",
-                "vibe_instance_access_source": "email",
-                "vibe_group_ids": [],
-                "claims_issued_at": 1_900_000_000,
-                "authorization_expires_at": 1_900_043_200,
-            }
-        ),
+        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(_snapshot("editor")),
     }
 
     with (
         patch.dict(os.environ, caller_env, clear=False),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -697,7 +693,7 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -731,7 +727,7 @@ def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp
     with (
         patch.dict(os.environ, {"AVIBE_SESSION_ID": ""}, clear=False),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -796,7 +792,7 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -841,12 +837,14 @@ def test_task_add_releases_create_once_session_when_definition_write_fails(monke
         patch("vibe.cli._resolve_definition_session_cwd", return_value=None),
         patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-task"),
         patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
-        patch(
-            "vibe.cli._task_store",
-            return_value=SimpleNamespace(
+        patch.object(
+            lent,
+            "task_store",
+            SimpleNamespace(
+                maybe_reload=lambda: False,
                 add_task=lambda **_kwargs: (_ for _ in ()).throw(
                     ValueError("agent 'pm' was archived before the write")
-                )
+                ),
             ),
         ),
         patch(
@@ -922,7 +920,7 @@ def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_pat
             with (
                 patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
                 patch("vibe.cli._agent_store", return_value=agent_store),
-                patch("vibe.cli._task_store", return_value=store),
+                patch.object(lent, "task_store", store),
                 patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
                 patch("os.getcwd", return_value=str(invoke_dir)),
             ):
@@ -981,7 +979,7 @@ def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys, sqli
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -1022,7 +1020,7 @@ def test_task_update_missing_id_returns_guidance(tmp_path: Path) -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["task", "update", "missing", "--name", "Updated"])
 
-    with patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(store_path)):
+    with patch.object(lent, "task_store", scheduled_tasks.ScheduledTaskStore(store_path)):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -1033,7 +1031,7 @@ def test_task_update_missing_id_returns_guidance(tmp_path: Path) -> None:
 def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
 
-    with patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(store_path)):
+    with patch.object(lent, "task_store", scheduled_tasks.ScheduledTaskStore(store_path)):
         result, payload = _capture_stderr_json(cli.cmd_task_run, "missing")
 
     assert result == 1
@@ -1092,7 +1090,7 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         claimed_failed, ok=False, error="delivery failed"
     ) == "failed"
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_list(scope=cli.SessionListScope())
 
     assert result == 0
@@ -1134,7 +1132,7 @@ def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> N
     store.mark_task_result(paused.id, error="delivery failed")
     store.set_enabled(paused.id, False)
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["definitions"]}
@@ -1165,7 +1163,7 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
             timezone_name="UTC",
         )
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_list(scope=cli.SessionListScope())
 
     assert result == 0
@@ -1215,7 +1213,7 @@ def test_task_list_orders_enabled_rows_first_then_newest_activity(
         timezone_name="UTC",
     )
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -1242,7 +1240,7 @@ def test_task_list_cli_dispatches_pagination_flags(
         )
 
     monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--global", "--limit", "2"])
-    with patch("vibe.cli._task_store", return_value=store), pytest.raises(SystemExit) as exc:
+    with patch.object(lent, "task_store", store), pytest.raises(SystemExit) as exc:
         cli.main()
 
     assert exc.value.code == 0
@@ -1284,7 +1282,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
         lambda **kwargs: first_next_runs[str(kwargs["timezone_name"])],
     )
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
@@ -1297,7 +1295,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
         "storage.background.compute_next_run_at",
         lambda **kwargs: second_next_runs[str(kwargs["timezone_name"])],
     )
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
@@ -1316,7 +1314,7 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
         timezone_name="Asia/Shanghai",
     )
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_show(task.id)
 
     assert result == 0
@@ -1342,7 +1340,7 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
     )
     store.mark_task_result(done.id, error=None)
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_list(scope=cli.SessionListScope(), include_finished=True)
 
     assert result == 0
@@ -1364,7 +1362,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
         )
         store.mark_task_result(done.id, error=None)
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_list(
             scope=cli.SessionListScope(),
             include_finished=True,
@@ -1393,7 +1391,7 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     )
 
     with (
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch("vibe.cli._task_request_store", return_value=scheduled_tasks.TaskExecutionStore(request_root)),
     ):
         result = cli.cmd_task_run(task.id)
@@ -1433,7 +1431,7 @@ def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
     terminal = (retired.retired_at, retired.retirement_reason, retired.last_run_id)
 
     with (
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch("vibe.cli._task_request_store", return_value=requests),
     ):
         result = cli.cmd_task_run(task.id)
@@ -1463,7 +1461,7 @@ def test_task_update_requires_at_least_one_change(tmp_path: Path) -> None:
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
@@ -1488,7 +1486,7 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -1560,7 +1558,7 @@ def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sql
         try:
             with (
                 patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-                patch("vibe.cli._task_store", return_value=store),
+                patch.object(lent, "task_store", store),
                 patch("vibe.cli._agent_store", return_value=cli_agent_store),
                 redirect_stderr(stderr),
             ):
@@ -1610,7 +1608,7 @@ def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> N
     parser = cli.build_parser()
     args = parser.parse_args(["task", "update", task.id, "--scope-id", "avibe::project::proj-ignored"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -1642,7 +1640,7 @@ def test_task_update_repoints_an_escalating_command_tasks_cwd(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -1681,7 +1679,7 @@ def test_task_update_keeps_a_command_tasks_cwd_through_an_unrelated_edit(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -1734,7 +1732,7 @@ def test_task_update_retarget_does_not_pull_the_command_back_to_its_sessions_dir
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch("os.getcwd", return_value=str(tmp_path)),
     ):
         result = cli.cmd_task_update(args)
@@ -1787,7 +1785,7 @@ def test_task_update_unrelated_edit_leaves_a_per_run_definitions_sessions_unplac
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -1834,7 +1832,7 @@ def test_task_update_retarget_does_not_promote_a_command_cwd_onto_a_new_session(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch("os.getcwd", return_value=str(tmp_path)),
     ):
         result = cli.cmd_task_update(args)
@@ -1935,7 +1933,7 @@ def test_task_update_reserves_a_replacement_session_without_the_commands_directo
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
             patch("vibe.cli._agent_store", return_value=agent_store),
-            patch("vibe.cli._task_store", return_value=store),
+            patch.object(lent, "task_store", store),
             patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         ):
             result = cli.cmd_task_update(args)
@@ -1993,7 +1991,7 @@ def test_task_update_repoints_a_reserved_command_task_without_replacing_its_sess
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -2027,7 +2025,7 @@ def test_task_update_rejects_cwd_for_already_reserved_create_once_task(tmp_path:
     parser = cli.build_parser()
     args = parser.parse_args(["task", "update", task.id, "--cwd", str(new_cwd)])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -2108,7 +2106,7 @@ def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
             patch("vibe.cli._agent_store", return_value=agent_store),
-            patch("vibe.cli._task_store", return_value=store),
+            patch.object(lent, "task_store", store),
             patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
             patch("os.getcwd", return_value=str(invoke_dir)),
         ):
@@ -2152,7 +2150,7 @@ def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -2177,7 +2175,7 @@ def test_task_add_returns_reachability_warning_for_unbound_lark_dm(
     with (
         _cli_state(db_path, agent_store),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
-        patch("vibe.cli._task_store", return_value=scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
+        patch.object(lent, "task_store", scheduled_tasks.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
         patch("core.services.settings.get_settings_store", return_value=fake_store),
     ):
         result = cli.cmd_task_add(args)
@@ -2201,21 +2199,16 @@ def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
         callback_session_id="ses_callback",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(
-        return_value={
-            "status_code": 200,
-            "body": {"ok": True, "session_id": "ses_live_cancel", "status": "cancel_requested"},
-        }
-    )
+    owner_cancel = AsyncMock(return_value={"ok": True, "session_id": "ses_live_cancel", "status": "cancel_requested"})
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        patch.object(lent, "session_turns", SimpleNamespace(cancel=owner_cancel)),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_live_cancel", run_id=request.id)
+    owner_cancel.assert_awaited_once_with("ses_live_cancel", agent_run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "canceled"
@@ -2250,25 +2243,22 @@ def test_runs_cancel_shared_turn_detaches_only_the_requested_run(
         request_store.update_callback_status(request.id, status="skipped")
         request_store.mark_run_canceled(request.id)
         return {
-            "status_code": 200,
-            "body": {
-                "ok": True,
-                "session_id": "ses_shared_turn",
-                "status": "run_detached",
-                "reason": "turn_has_other_participants",
-            },
+            "ok": True,
+            "session_id": "ses_shared_turn",
+            "status": "run_detached",
+            "reason": "turn_has_other_participants",
         }
 
-    cancel_dispatch = AsyncMock(side_effect=detach_in_controller)
+    owner_cancel = AsyncMock(side_effect=detach_in_controller)
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        patch.object(lent, "session_turns", SimpleNamespace(cancel=owner_cancel)),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_shared_turn", run_id=request.id)
+    owner_cancel.assert_awaited_once_with("ses_shared_turn", agent_run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "canceled"
@@ -2286,8 +2276,6 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_una
     tmp_path: Path,
     capsys,
 ) -> None:
-    from vibe import internal_client
-
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -2296,16 +2284,14 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_una
         agent_name="worker",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(side_effect=internal_client.InternalServerUnavailable("missing socket"))
-
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        # No live Session owner to ask: the controller has none for this turn.
+        patch.object(lent, "session_turns", None),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_controller_down", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2331,21 +2317,16 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuse
         agent_name="worker",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(
-        return_value={
-            "status_code": 409,
-            "body": {"ok": False, "code": "stop_failed", "reason": "interrupt_failed"},
-        }
-    )
+    owner_cancel = AsyncMock(return_value={"ok": False, "code": "stop_failed", "reason": "interrupt_failed"})
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        patch.object(lent, "session_turns", SimpleNamespace(cancel=owner_cancel)),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_stop_failed", run_id=request.id)
+    owner_cancel.assert_awaited_once_with("ses_stop_failed", agent_run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2369,21 +2350,16 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_no_live_turn(
         agent_name="worker",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(
-        return_value={
-            "status_code": 404,
-            "body": {"ok": False, "code": "not_in_flight", "session_id": "ses_no_live_turn"},
-        }
-    )
+    owner_cancel = AsyncMock(return_value={"ok": False, "code": "not_in_flight", "session_id": "ses_no_live_turn"})
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        patch.object(lent, "session_turns", SimpleNamespace(cancel=owner_cancel)),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_no_live_turn", run_id=request.id)
+    owner_cancel.assert_awaited_once_with("ses_no_live_turn", agent_run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2413,25 +2389,22 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
             terminal_status="succeeded",
         ) == "succeeded"
         return {
-            "status_code": 200,
-            "body": {
-                "ok": True,
-                "session_id": "ses_already_finished",
-                "status": "run_settled",
-                "reason": "run_already_terminal",
-            },
+            "ok": True,
+            "session_id": "ses_already_finished",
+            "status": "run_settled",
+            "reason": "run_already_terminal",
         }
 
-    cancel_dispatch = AsyncMock(side_effect=settle_before_cancel)
+    owner_cancel = AsyncMock(side_effect=settle_before_cancel)
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        patch.object(lent, "session_turns", SimpleNamespace(cancel=owner_cancel)),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_already_finished", run_id=request.id)
+    owner_cancel.assert_awaited_once_with("ses_already_finished", agent_run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "succeeded"
@@ -2455,16 +2428,16 @@ def test_runs_cancel_queued_agent_run_does_not_call_live_controller(
         message="queued work",
         agent_name="worker",
     )
-    cancel_dispatch = AsyncMock()
+    owner_cancel = AsyncMock()
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+        patch.object(lent, "session_turns", SimpleNamespace(cancel=owner_cancel)),
     ):
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_not_awaited()
+    owner_cancel.assert_not_awaited()
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "canceled"
@@ -3411,7 +3384,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=task_store),
+        patch.object(lent, "task_store", task_store),
         patch.object(task_store, "add_task", side_effect=add_task),
     ):
         result = cli.cmd_task_add(args)
@@ -3535,7 +3508,7 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
     with (
         redirect_stderr(stderr),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -3728,7 +3701,7 @@ def test_task_add_refuses_the_reserved_session_with_no_side_effects(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch("vibe.cli._task_request_store", return_value=request_store),
     ):
         result, stderr_text = _capture_stderr_text(cli.cmd_task_add, args)
@@ -3779,7 +3752,7 @@ def test_task_add_refuses_the_reserved_session_with_no_side_effects(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch("vibe.cli._task_request_store", return_value=request_store),
     ):
         assert cli.cmd_task_add(ok_args) == 0
@@ -4161,7 +4134,7 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -4199,7 +4172,7 @@ def test_task_add_escalating_command_task_binds_caller_session(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -4255,7 +4228,7 @@ def test_task_add_escalating_command_task_accepts_an_explicit_cwd(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -4302,7 +4275,7 @@ def test_task_add_escalating_command_task_rejects_a_missing_cwd(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
@@ -4333,7 +4306,7 @@ def test_task_add_message_task_still_refuses_cwd_for_a_bound_session(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
@@ -4383,7 +4356,7 @@ def test_task_add_per_run_command_records_the_directory_it_was_described_in(
     with (
         patch("os.getcwd", return_value=str(invoke_dir)),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -4422,7 +4395,7 @@ def test_task_add_pure_shell_command_persists_command_fields(
         ]
     )
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_add(args)
 
     assert result == 0
@@ -4452,7 +4425,7 @@ def test_task_add_command_argv_persists_the_argv_list(
         ["--cron", "0 3 * * *", "--cwd", str(tmp_path), "--", "python3", "sync.py", "--target", "prod"]
     )
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_add(args)
 
     assert result == 0
@@ -4475,7 +4448,7 @@ def test_task_add_message_task_stores_no_command_fields(
     with (
         _cli_state(db_path, agent_store),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_add(args)
 
@@ -4515,7 +4488,7 @@ def test_task_update_replaces_pure_command_task_shell(tmp_path: Path, capsys, mo
     task = _stored_command_task(store, cwd=str(tmp_path))
     args = _parse_task_update(task.id, ["--shell", "./scripts/new.sh"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_update(args)
 
     assert result == 0
@@ -4541,7 +4514,7 @@ def test_task_update_timeout_only_preserves_stored_command(
     )
     args = _parse_task_update(task.id, ["--timeout", "900"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result = cli.cmd_task_update(args)
 
     assert result == 0
@@ -4557,7 +4530,7 @@ def test_task_update_rejects_message_flags_on_command_task(tmp_path: Path, monke
     task = _stored_command_task(store, cwd=str(tmp_path))
     args = _parse_task_update(task.id, ["--message", "please look"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -4590,7 +4563,7 @@ def test_task_update_rewords_escalation_guidance_on_an_agent_command_task(
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
     ):
         result = cli.cmd_task_update(args)
 
@@ -4614,7 +4587,7 @@ def test_task_update_rejects_command_flags_on_message_task(tmp_path: Path, monke
     )
     args = _parse_task_update(task.id, ["--shell", "./scripts/new.sh"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -4631,7 +4604,7 @@ def test_task_update_rejects_failure_handling_change(tmp_path: Path, monkeypatch
     task = _stored_command_task(store, cwd=str(tmp_path))
     args = _parse_task_update(task.id, ["--on-failure", "agent"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -4648,7 +4621,7 @@ def test_task_update_rejects_session_flags_on_pure_command_task(
     task = _stored_command_task(store, cwd=str(tmp_path))
     args = _parse_task_update(task.id, ["--session-id", "sesTarget"])
 
-    with patch("vibe.cli._task_store", return_value=store):
+    with patch.object(lent, "task_store", store):
         result, payload = _capture_stderr_json(cli.cmd_task_update, args)
 
     assert result == 1
@@ -4722,7 +4695,7 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
     store.upsert_task(task)
 
     with (
-        patch("vibe.cli._task_store", return_value=store),
+        patch.object(lent, "task_store", store),
         patch('config.v2_config.V2Config.load', return_value=SimpleNamespace(language="zh")),
     ):
         result, payload = _capture_stderr_json(

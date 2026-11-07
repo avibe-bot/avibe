@@ -514,6 +514,16 @@ bind vr-a3x9k2
 命令输出文本，其中大多数加 `--json` 时输出该信封。CLI 文本始终是英文。命令和参数
 都没有别名。完整的语法与输出规则见 [CLI 参考手册](CLI_ZH.md#命令详解)。
 
+`vibe agent run` 以及变更 Task、Watch、Session 和 Run 的命令
+（`vibe task add|update|pause|resume|run|remove`、
+`vibe watch add|update|pause|resume|remove`、`vibe session update|send-now`、
+`vibe session queue remove`、`vibe runs cancel`）由正在运行的服务执行。它们不会离线
+写入，也不会自动启动服务：`execution: not_executed`（`service_unavailable`，或版本
+过旧的服务返回的 `unsupported_operation`）表示没有任何变更；`execution_unknown` 表示
+变更可能已经生效，再次尝试前请先检查结果。`--message-file`、相对路径、开头的 `~`
+和默认目录都属于调用方 shell。见
+[由服务执行的变更](CLI_ZH.md#由服务执行的变更)。
+
 ## 5.1 顶层 CLI 命令
 
 | 命令 | 作用 |
@@ -883,11 +893,7 @@ vibe agent models --backend opencode --provider deepseek
 vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork-self)? (--message <文本> | --message-file <文件>) [options]
 ```
 
-需要正在运行且支持控制请求的 Avibe 服务；不会离线入队或自动启动服务。
-`service_unavailable` 中的 `execution: not_executed` 表示没有发生交接，请明确启动
-或更新服务后再试。`execution_unknown` 表示请求可能已经执行：先用 `vibe runs list`
-检查状态，不要盲目重试。`--message-file` 在调用方 CLI 中读取，保留 stdin 和 shell
-进程替换输入的语义。
+由正在运行的服务执行，见[由服务执行的变更](CLI_ZH.md#由服务执行的变更)。
 
 重要参数：
 

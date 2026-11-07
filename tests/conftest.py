@@ -198,47 +198,100 @@ _TEST_PROCESSES = pytest.StashKey[process_reaper.TestProcesses]()
 def in_process_cli_control(monkeypatch):
     """Keep existing CLI behavior tests on the real warm handler, replacing only IPC.
 
-    The lazy controller reads each test's existing store fixtures at request time.
-    Socket/disconnect behavior is tested separately at the transport boundary.
+    The stand-in controller builds each store a real one owns lazily, per request,
+    from the test's state; a test lends its own through
+    ``tests.cli_control_support.lent``. Socket/disconnect behavior is tested
+    separately at the transport boundary.
     """
     import asyncio
-    from types import SimpleNamespace
+    import concurrent.futures
 
-    from core.handlers.cli_requests import handle_control_request
+    from core.handlers.cli_requests import WarmCliStores, handle_control_request
+    from core.scheduled_tasks import ScheduledTaskStore
+    from core.watches import ManagedWatchStore, WatchRuntimeStateStore
+    from tests import cli_control_support
     from vibe import cli, internal_client
 
-    stores = []
+    opened = []
 
     class Controller:
+        def __init__(self):
+            self._stores = {}
+            self.cli_control_stores = WarmCliStores(self)
+            opened.append(self.cli_control_stores)
+            self.scheduled_task_service = TaskService(self)
+            self.watch_service = WatchService(self)
+
+        def _store(self, name, factory, backend=lambda store: getattr(store, "_sqlite", None)):
+            # Older refusal tests deliberately seed only their Agent/Session DB;
+            # building a store before the refusal under test would import state.
+            # A real controller already owns every one of these stores.
+            if name not in self._stores:
+                lent_store = getattr(cli_control_support.lent, name, None)
+                store = self._stores[name] = lent_store if lent_store is not None else factory()
+                if lent_store is None and backend(store) is not None:
+                    opened.append(backend(store))
+            return self._stores[name]
+
         @property
         def vibe_agent_store(self):
-            store = cli._agent_store()
-            stores.append(store)
-            return store
+            return self._store("agent_store", cli._agent_store, backend=lambda store: store)
 
         @property
-        def scheduled_task_service(self):
-            # Older refusal tests deliberately seed only their Agent/Session DB;
-            # constructing a fresh execution store would import state before the
-            # refusal under test. A real controller already owns this store.
-            class RequestStore:
-                store = None
+        def session_turns(self):
+            return cli_control_support.lent.session_turns
 
-                def __getattr__(self, name):
-                    if self.store is None:
-                        self.store = cli._task_request_store()
-                        if self.store.sqlite_backend is not None:
-                            stores.append(self.store.sqlite_backend)
-                    return getattr(self.store, name)
+    class RequestStore:
+        """Built on first use: Agent Run reads this store before its refusals."""
 
-            return SimpleNamespace(request_store=RequestStore())
+        def __init__(self, controller):
+            self._controller = controller
+
+        def __getattr__(self, name):
+            store = self._controller._store(
+                "request_store", cli._task_request_store, backend=lambda store: store.sqlite_backend
+            )
+            return getattr(store, name)
+
+    class TaskService:
+        def __init__(self, controller):
+            self._controller = controller
+            self.request_store = RequestStore(controller)
+
+        @property
+        def store(self):
+            return self._controller._store("task_store", ScheduledTaskStore)
+
+    class WatchService:
+        def __init__(self, controller):
+            self._controller = controller
+
+        @property
+        def store(self):
+            return self._controller._store("watch_store", ManagedWatchStore)
+
+        @property
+        def runtime_store(self):
+            return self._controller._store("watch_runtime_store", WatchRuntimeStateStore)
 
     def request(payload, **_kwargs):
-        return asyncio.run(handle_control_request(Controller(), payload))
+        def serve():
+            return asyncio.run(handle_control_request(Controller(), payload))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return serve()
+        # A test driving the sync CLI from inside its own loop: the service is
+        # another process's loop, so serve this request on a loop of its own.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as service:
+            return service.submit(serve).result()
 
     monkeypatch.setattr(internal_client, "control_request_sync", request)
-    yield
-    for store in stores:
+    lent = dict(vars(cli_control_support.lent))
+    yield cli_control_support.lent
+    vars(cli_control_support.lent).update(lent)
+    for store in opened:
         store.close()
 
 

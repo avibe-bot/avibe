@@ -120,6 +120,31 @@ page with its id; Watches and Tasks match the Workbench's "this Session" filter.
 `vibe harness status` keeps controller faults and any working-directory conflict
 that involves the Session.
 
+### Changes run in the service
+
+`vibe agent run`, `vibe task add|update|pause|resume|run|remove`,
+`vibe watch add|update|pause|resume|remove`, `vibe session update|send-now`,
+`vibe session queue remove`, and `vibe runs cancel` hand the parsed command to
+the running Avibe service, which checks the caller and applies it. Reading
+commands (`list`, `show`, `get`, `queue list`) still read state directly.
+
+- These commands need a running Avibe service that supports them. They never
+  write offline or start the service. `execution: not_executed` means nothing
+  was applied: `service_unavailable` when no service answered, and
+  `unsupported_operation` from a running service too old for the command. Start
+  or update the service explicitly, then try again.
+- `execution_unknown` means the change may have been applied, but its answer
+  was lost. Inspect the result first (`vibe runs list`, `vibe task show`,
+  `vibe watch show`, `vibe session get`); do not retry blindly.
+- The CLI reads `--message-file` itself, including stdin and shell
+  process-substitution descriptors, before the service checks the request, so
+  even a request the service then refuses reads (and may wait for) that input.
+  Relative paths, a leading `~`, and default directories (`--cwd`, a command
+  task's directory) mean your shell's directory and home.
+- `vibe watch add` waits for the new Watch's first cycle as before. That wait is
+  bounded by the service, which allows longer when many waiters are recovering,
+  so the CLI sets no response deadline of its own for it.
+
 ## Remote Web UI Access
 
 By default, the Web UI binds to `127.0.0.1:5123` on the machine where Avibe is running.
@@ -712,14 +737,8 @@ for one that already exists.
 Run an Agent directly. Runs are async by default and do not store a scheduled
 task definition. Use `--sync` only when the terminal should wait for completion.
 
-This command requires a running Avibe service that supports control requests;
-it does not enqueue offline or start the service automatically. A
-`service_unavailable` error with `execution: not_executed` means there was no
-handoff. Start or update the service explicitly before trying again.
-`execution_unknown` means submission may have succeeded but its response could
-not be confirmed: inspect `vibe runs list` before submitting new work, rather
-than blindly retrying. The CLI reads `--message-file` itself, including caller
-stdin and shell process-substitution descriptors.
+This command needs the running service; see
+[Changes run in the service](#changes-run-in-the-service).
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'

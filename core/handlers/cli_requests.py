@@ -5,12 +5,18 @@ Only named operations are supported; this is not an arbitrary CLI/SQL endpoint.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import functools
+import logging
 import math
+import threading
 from argparse import Namespace
 from typing import Any, Awaitable, Callable
 
-from core.control_requests import ControlRequest, failure, result
+from core.control_requests import OPERATIONS, ControlRequest, failure, result
+
+logger = logging.getLogger(__name__)
 
 _AGENT_RUN_STRINGS = frozenset({
     "agent", "bot", "session_id", "fork_session", "scope_id", "visibility",
@@ -20,10 +26,22 @@ _AGENT_RUN_BOOLS = frozenset({
     "queue", "fork_self", "same_scope", "callback", "no_callback", "close_after", "sync_run", "json",
 })
 
+#: The ``help_command`` each command's own error printer adds to an error that names none.
+_HELP_COMMANDS = {
+    "task.add": "vibe task add --help",
+    "task.update": "vibe task update --help",
+    "watch.add": "vibe watch add --help",
+    "watch.update": "vibe watch update --help",
+    "session.update": "vibe session update --help",
+    "session.send-now": "vibe session send-now --help",
+    "session.queue.remove": "vibe session queue remove --help",
+}
+_NON_FINITE = {"inf", "-inf", "nan"}
+
 
 def _agent_run_arguments(arguments: dict[str, Any]) -> Namespace:
     defaults = {**dict.fromkeys(_AGENT_RUN_STRINGS), **dict.fromkeys(_AGENT_RUN_BOOLS, False), "wait_timeout": None}
-    allowed = {*defaults, "command", "agent_command", "message_input_error"}
+    allowed = {*defaults, "command", "agent_command", "message_input_error", "invocation_home"}
     if arguments.keys() - allowed:
         raise ValueError("Unknown Agent Run arguments")
     values = {**defaults, **arguments}
@@ -48,7 +66,200 @@ def _agent_run_arguments(arguments: dict[str, Any]) -> Namespace:
     wait = values["wait_timeout"]
     if wait is not None and (type(wait) not in {int, float} or not math.isfinite(wait)):
         raise ValueError("Invalid Agent Run wait timeout")
+    if values.get("invocation_home") is not None and not isinstance(values["invocation_home"], str):
+        raise ValueError("Invalid invocation home")
     return Namespace(**values)
+
+
+@functools.lru_cache(maxsize=None)
+def _command_schema(path: tuple[str, ...]) -> tuple[dict[str, str], dict[str, list], dict[str, Any]]:
+    """``(command words, actions by dest, defaults)`` of one command's own parser leaf."""
+    from vibe import cli
+
+    parser = cli.build_parser()
+    words: dict[str, str] = {}
+    for word in path:
+        subparsers = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
+        words[subparsers.dest] = word
+        parser = subparsers.choices[word]
+    actions: dict[str, list] = {}
+    defaults: dict[str, Any] = {}
+    for action in parser._actions:
+        if isinstance(action, argparse._HelpAction) or action.dest == argparse.SUPPRESS:
+            continue
+        actions.setdefault(action.dest, []).append(action)
+        defaults.setdefault(action.dest, action.default)
+    for dest, value in parser._defaults.items():
+        # ``set_defaults`` landing slots: the lifted ``-- <command ...>`` tails.
+        actions.setdefault(dest, [])
+        defaults.setdefault(dest, value)
+    return words, actions, defaults
+
+
+def _is_strings(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _checked_value(dest: str, actions: list, value: Any) -> Any:
+    """The parser's value for ``dest``, or ``ValueError`` when the parser could not produce it."""
+    if not actions:
+        if value is None or _is_strings(value):
+            return value
+    elif all(isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)) for action in actions):
+        if type(value) is bool:
+            return value
+    elif all(isinstance(action, argparse._StoreConstAction) for action in actions):
+        if value is None or any(value == action.const for action in actions):
+            return value
+    elif len(actions) == 1:
+        action = actions[0]
+        if isinstance(action, argparse._AppendAction) and action.type is int:
+            if value is None or (isinstance(value, list) and all(type(item) is int for item in value)):
+                return value
+        elif isinstance(action, argparse._StoreAction) and action.nargs == argparse.REMAINDER:
+            if value is None or _is_strings(value):
+                return value
+        elif isinstance(action, argparse._StoreAction) and action.nargs is None:
+            if value is None and action.option_strings and action.default is None:
+                return value
+            if action.type is None and isinstance(value, str):
+                if not action.choices or value in action.choices:
+                    return value
+            if action.type is float:
+                if isinstance(value, str) and value in _NON_FINITE:
+                    return float(value)
+                if type(value) in {int, float} and math.isfinite(value):
+                    return value
+            if action.type is int and type(value) is int:
+                return value
+    raise ValueError(f"Invalid argument: {dest}")
+
+
+def _command_arguments(operation: str, path: tuple[str, ...], arguments: dict[str, Any]) -> Namespace:
+    words, actions, defaults = _command_schema(path)
+    extras = {"message_file_input"} if "message_file" in actions else set()
+    if operation == "task.add":
+        extras.add("invocation_timezone")
+    if "cwd" in actions:
+        extras.add("invocation_home")
+    unknown = arguments.keys() - {*words, *actions, *extras}
+    if unknown:
+        raise ValueError(f"Unknown arguments: {', '.join(sorted(unknown))}")
+    if any(arguments.get(dest, word) != word for dest, word in words.items()):
+        raise ValueError("Arguments name a different command")
+    values = {**words, **defaults, **{dest: arguments[dest] for dest in actions if dest in arguments}}
+    # Every final value, a default included: an omitted required id is no id.
+    for dest in actions:
+        values[dest] = _checked_value(dest, actions[dest], values[dest])
+    if "message_file_input" in extras:
+        # Preparation is caller-owned and precedes service checks. A command may
+        # reject before consuming it; the service must never open the caller path.
+        materialized = arguments.get("message_file_input")
+        needed = values["message"] is None and bool(values["message_file"])
+        if needed != (materialized is not None) or (
+            materialized is not None and (
+                not isinstance(materialized, dict)
+                or len(materialized) != 1
+                or not isinstance(next(iter(materialized.values())), str)
+                or next(iter(materialized)) not in {"text", "os_error", "error"}
+            )
+        ):
+            raise ValueError("Message files must be read by the invoking client")
+        values["message_file_input"] = materialized
+    if "invocation_timezone" in extras:
+        zone = arguments.get("invocation_timezone")
+        if (not values["timezone"]) != isinstance(zone, str) or (zone is not None and not isinstance(zone, str)):
+            raise ValueError("The invocation timezone must come from the invoking client")
+        values["invocation_timezone"] = zone
+    if "invocation_home" in extras:
+        home = arguments.get("invocation_home")
+        if home is not None and not isinstance(home, str):
+            raise ValueError("Invalid invocation home")
+        values["invocation_home"] = home
+    return Namespace(**values)
+
+
+class WarmCliStores:
+    """What a service-owned CLI command reads and writes through, never rebuilt per request.
+
+    Definition, execution and Agent stores are the controller's own. A mutation
+    publishes the in-process ``definitions.updated`` hint and the runtime-work
+    lanes reconcile from these same mirrors whatever any reader's change probe
+    reported, so nothing waits for a second mirror to notice. Each request
+    refreshes the mirrors first, so a commit made by another process (the Web UI)
+    is seen exactly as a fresh CLI process saw it. The definition projection
+    reader is this channel's one addition: no controller store serves the
+    public projection the CLI prints.
+    """
+
+    def __init__(self, controller: Any):
+        self._controller = controller
+        self._lock = threading.Lock()
+        self._reader: Any = None
+
+    @property
+    def task_store(self):
+        store = self._controller.scheduled_task_service.store
+        store.maybe_reload()
+        return store
+
+    @property
+    def watch_store(self):
+        store = self._controller.watch_service.store
+        store.maybe_reload()
+        return store
+
+    @property
+    def watch_runtime_store(self):
+        return self._controller.watch_service.runtime_store
+
+    @property
+    def request_store(self):
+        return self._controller.scheduled_task_service.request_store
+
+    @property
+    def agent_store(self):
+        return self._controller.vibe_agent_store
+
+    @property
+    def definition_reader(self):
+        from vibe import cli
+
+        with self._lock:
+            if self._reader is None:
+                self._reader = cli._definition_reader()
+            return self._reader
+
+    @property
+    def session_engine(self):
+        from storage.db import get_cached_sqlite_engine
+        from vibe import cli
+
+        cli._ensure_cli_sqlite_state()
+        return get_cached_sqlite_engine()
+
+    @property
+    def session_turns(self):
+        return getattr(self._controller, "session_turns", None)
+
+    def close(self) -> None:
+        with self._lock:
+            reader, self._reader = self._reader, None
+        if reader is not None:
+            reader.close()
+
+
+_STORES_LOCK = threading.Lock()
+
+
+def _warm_stores(controller: Any) -> WarmCliStores:
+    stores = getattr(controller, "cli_control_stores", None)
+    if stores is None:
+        with _STORES_LOCK:
+            stores = getattr(controller, "cli_control_stores", None)
+            if stores is None:
+                stores = controller.cli_control_stores = WarmCliStores(controller)
+    return stores
 
 
 async def handle_control_request(
@@ -59,12 +270,86 @@ async def handle_control_request(
 ) -> dict[str, Any]:
     try:
         request = ControlRequest.from_payload(payload)
-        if request.operation != "agent.run":
+        path = OPERATIONS.get(request.operation)
+        if path is None:
             return failure("unsupported_operation", "This service does not support the requested operation")
-        args = _agent_run_arguments(request.arguments)
+        args = _agent_run_arguments(request.arguments) if request.operation == "agent.run" else None
     except ValueError as exc:
         return failure("invalid_control_request", str(exc))
+    if request.expired:
+        return failure("deadline_expired", "Control request expired before execution")
+    if request.operation == "agent.run":
+        return await _agent_run(controller, request, args, run_sync)
+    return await _command(controller, request, path, run_sync)
 
+
+async def _command(controller, request: ControlRequest, path, run_sync) -> dict[str, Any]:
+    help_command = _HELP_COMMANDS.get(request.operation)
+
+    # Argument decoding (the parser, its import), admission, store work and its
+    # first effects all run off the loop. The second deadline check is inside the
+    # worker, after any executor queue wait. An operation that still has to wait
+    # on other work hands back a continuation rather than holding this worker.
+    def start():
+        if request.expired:
+            return failure("deadline_expired", "Control request expired before execution"), None
+        try:
+            args = _command_arguments(request.operation, path, request.arguments)
+        except ValueError as exc:
+            return failure("invalid_control_request", str(exc)), None
+        from vibe import cli
+        from vibe.authorization import invocation_authority
+
+        try:
+            authority = cli._cli_invocation_authority(request.caller_env)
+            with invocation_authority(authority):
+                try:
+                    cli._require_command_path_admission(path)
+                except cli.TaskCliError as exc:
+                    return result(cli._task_error_payload(exc), execution="not_executed"), None
+                if request.expired:
+                    return failure("deadline_expired", "Control request expired before execution"), None
+                invocation = cli._ServiceInvocation(
+                    caller_env=request.caller_env,
+                    cwd=request.cwd,
+                    stores=_warm_stores(controller),
+                    home=getattr(args, "invocation_home", None),
+                )
+                outcome = cli._SERVICE_COMMANDS[request.operation](args, invocation)
+                if callable(outcome):
+                    return None, (authority, outcome)
+                return result(outcome), None
+        except Exception as exc:
+            return result(_error_payload(cli, request, exc, help_command)), None
+
+    response, pending = await run_sync(start)
+    if pending is None:
+        return response
+    from vibe import cli
+    from vibe.authorization import invocation_authority
+
+    authority, finish = pending
+    with invocation_authority(authority):
+        try:
+            return result(await finish())
+        except Exception as exc:
+            return result(await asyncio.to_thread(_error_payload, cli, request, exc, help_command))
+
+
+def _error_payload(cli, request: ControlRequest, exc: Exception, help_command) -> dict[str, Any]:
+    """The command's own error payload; an unexpected failure also keeps its traceback.
+
+    The direct command let some of these escape as a traceback. The caller now
+    gets the generic structured error, and the service log keeps the traceback,
+    naming only the operation: arguments can carry message text.
+    """
+    payload = cli._task_error_payload(exc, help_command=help_command)
+    if payload.get("code") == "task_command_failed":
+        logger.error("CLI control operation %s failed unexpectedly", request.operation, exc_info=exc)
+    return payload
+
+
+async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dict[str, Any]:
     # Admission, file access, configuration and SQLite all run off the loop. The
     # second deadline check is inside the worker, after any executor queue wait.
     def enqueue():
@@ -92,8 +377,6 @@ async def handle_control_request(
         except Exception as exc:
             return result(cli._task_error_payload(exc, help_command="vibe agent run --help")), None
 
-    if request.expired:
-        return failure("deadline_expired", "Control request expired before execution")
     response, submission = await run_sync(enqueue)
     if submission is None or not args.sync_run:
         return response

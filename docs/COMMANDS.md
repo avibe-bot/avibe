@@ -563,6 +563,18 @@ commands print text, and most of them print the envelope with `--json`. CLI text
 is English. There are no command or flag aliases. See
 [CLI Reference](CLI.md#commands) for the full grammar and output rule.
 
+`vibe agent run` and the commands that change Tasks, Watches, Sessions, and
+Runs (`vibe task add|update|pause|resume|run|remove`,
+`vibe watch add|update|pause|resume|remove`, `vibe session update|send-now`,
+`vibe session queue remove`, `vibe runs cancel`) are applied by the running
+service. They never write offline or start the service: `execution:
+not_executed` (`service_unavailable`, or `unsupported_operation` from a service
+too old for the command) means nothing was applied, and `execution_unknown`
+means the change may have been applied, so inspect it before trying again.
+`--message-file`, relative paths, a leading `~`, and default directories belong
+to the calling shell. See
+[Changes run in the service](CLI.md#changes-run-in-the-service).
+
 ## 5.1 Top-level CLI commands
 
 | Command | Purpose |
@@ -983,13 +995,8 @@ point back to this command.
 vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork-self)? (--message <text> | --message-file <file>) [options]
 ```
 
-Requires a running Avibe service that supports control requests. There is no
-offline enqueue or automatic service start. `service_unavailable` with
-`execution: not_executed` means no handoff occurred; explicitly start or update
-the service before trying again. `execution_unknown` means the request may have
-been executed: inspect `vibe runs list` before submitting new work, and do not
-blindly retry. `--message-file` is read in the calling CLI, preserving stdin
-and shell process-substitution inputs.
+Applied by the running service; see
+[Changes run in the service](CLI.md#changes-run-in-the-service).
 
 Important options:
 

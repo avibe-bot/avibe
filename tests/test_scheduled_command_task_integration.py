@@ -41,6 +41,7 @@ from core.scheduled_tasks import (
     TaskExecutionStore,
 )
 from vibe import cli
+from tests.cli_control_support import lent
 
 _CALLER_ENV_VARS = (
     AVIBE_SESSION_ID_ENV,
@@ -57,6 +58,8 @@ _CALLER_ENV_VARS = (
     AVIBE_CALLER_REMOTE_ENV,
     AVIBE_CALLER_RESOURCE_CONTEXT_ENV,
 )
+
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 
 
 def _isolate(tmp_path: Path, monkeypatch) -> None:
@@ -126,7 +129,7 @@ def _service(tmp_path: Path, calls: list) -> ScheduledTaskService:
 
 def _add_via_cli(tmp_path: Path, argv: list[str]) -> None:
     args = cli.build_parser().parse_args(["task", "add", *argv])
-    with patch("vibe.cli._task_store", return_value=_store(tmp_path)):
+    with patch.object(lent, "task_store", _store(tmp_path)):
         assert cli.cmd_task_add(args) == 0, "the CLI refused to create the command task"
 
 

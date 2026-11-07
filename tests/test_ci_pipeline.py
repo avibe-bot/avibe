@@ -753,6 +753,12 @@ def test_windows_platform_checks_route_queue_entries_like_pull_requests() -> Non
     )
     assert "tests/test_managed_skills.py" in skill_step["run"]
     assert "zero_directory_entry_identities" in skill_step["run"]
+    ipc_steps = jobs["windows-control-ipc"]["steps"]
+    mutation_step = next(step for step in ipc_steps if step.get("name") == "Verify CLI mutations over Windows control IPC")
+    assert "tests/test_cli_mutation_control_requests.py" in mutation_step["run"]
+    assert not mutation_step.get("if") and not mutation_step.get("continue-on-error")
+    install = next(step for step in ipc_steps if step.get("name") == "Install package and focused test dependency")
+    assert "pytest-asyncio" in install["run"]
     assert jobs["windows-agent"]["if"] == (
         expected_scope + " && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'"
     )

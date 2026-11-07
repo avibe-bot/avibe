@@ -101,6 +101,26 @@ Task 归属于创建它的 Session（创建方未知或已不存在时归属于�
 Show Page 按 Session id 归属；Watch 和 Task 的归属与 Workbench 的“只看本会话”一致。
 `vibe harness status` 会保留控制器故障，以及涉及该 Session 的工作目录冲突。
 
+### 由服务执行的变更
+
+`vibe agent run`、`vibe task add|update|pause|resume|run|remove`、
+`vibe watch add|update|pause|resume|remove`、`vibe session update|send-now`、
+`vibe session queue remove` 和 `vibe runs cancel` 会把解析后的命令交给正在运行的
+Avibe 服务，由服务检查调用方并执行。读取命令（`list`、`show`、`get`、`queue list`）
+仍然直接读取状态。
+
+- 这些命令需要正在运行且支持它们的 Avibe 服务，不会离线写入，也不会自动启动服务。
+  `execution: not_executed` 表示没有任何变更：没有服务应答时是 `service_unavailable`，
+  正在运行的服务版本过旧、不认识该命令时是 `unsupported_operation`。请明确启动或更新
+  服务后再试。
+- `execution_unknown` 表示变更可能已经生效，只是响应丢失。先检查结果（`vibe runs list`、
+  `vibe task show`、`vibe watch show`、`vibe session get`），不要盲目重试。
+- `--message-file` 由 CLI 自身读取，包括 stdin 和 shell 进程替换文件描述符，而且在服务
+  检查请求之前读取，所以即使请求随后被服务拒绝，也会读取（并可能等待）这些输入。相对
+  路径、开头的 `~` 和默认目录（`--cwd`、命令任务的目录）指你所在 shell 的目录和主目录。
+- `vibe watch add` 仍会等待新 Watch 的首个周期。这个等待由服务限定上限，在大量 waiter
+  正在恢复时会放宽，因此 CLI 不为它另设响应期限。
+
 ## 远程访问 Web UI
 
 默认情况下，Web UI 只监听在运行 Avibe 的那台机器的 `127.0.0.1:5123`。
@@ -574,11 +594,7 @@ Session，且在目标 Session 已存在时仍然会被拒绝。
 直接运行一个 Agent。Run 默认异步，并且不会创建持久化任务定义。只有终端需要等待完成时才使用
 `--sync`。
 
-此命令需要正在运行且支持控制请求的 Avibe 服务；服务停止时不会离线入队，也不会自动
-启动服务。`service_unavailable` 错误中的 `execution: not_executed` 表示没有发生交接，
-请明确启动或更新服务后再试。`execution_unknown` 表示请求可能已提交成功，只是无法
-确认响应：先用 `vibe runs list` 检查状态，不要盲目重试。`--message-file` 由 CLI
-自身读取，包括调用方的 stdin 和 shell 进程替换文件描述符。
+此命令需要正在运行的服务，见[由服务执行的变更](#由服务执行的变更)。
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'

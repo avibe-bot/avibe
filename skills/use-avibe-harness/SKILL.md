@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.1.1
+version: 0.1.2
 ---
 
 # Use Avibe Harness
@@ -80,6 +80,8 @@ Use `vibe session update --session-id <id> --visible` or `--hidden` to promote o
 For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--message "..."` or `--message-file <path>` as the follow-up instruction template sent with waiter output. Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement.
 
 Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Use `vibe harness status` for one unified live/anomaly snapshot. These lists cover this Session unless you pass `--session-id <id>` or `--global`. List rows carry only the fields needed to decide the next step and omit unset ones; find a definition by text with `vibe watch list --q <text>` (for example a PR number) instead of filtering output yourself, and add `--brief` to a `show` command for just its list row. `vibe agent run` prints one `run` object, so read its id from `run.id`. `vibe runs show` can default to the current Run from the injected environment; `vibe runs cancel` still requires an explicit run id; once that run's input reached the live Session turn, it stops the whole turn like Session Stop, including other runs sharing it.
+
+The running Avibe service applies these commands: `vibe agent run`, `vibe task add`/`update`/`pause`/`resume`/`run`/`remove`, `vibe watch add`/`update`/`pause`/`resume`/`remove`, `vibe session update`/`send-now`/`queue remove`, and `vibe runs cancel`. `service_unavailable` or `unsupported_operation` with `execution: not_executed` means nothing changed (no service, or one too old for the command); report it rather than starting, restarting, or updating the service yourself. `execution_unknown` means the change may have landed: inspect it with the matching `list` or `show` command before trying again, and never retry blindly.
 
 The CLI exposes more options than this prompt lists. Before creating or changing Harness state, or whenever syntax/runtime effects are uncertain, read the relevant help: `vibe <command> --help` or `vibe <command> <subcommand> --help`.
 

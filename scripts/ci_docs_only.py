@@ -27,9 +27,14 @@ ROOT_DOCS = frozenset({
 CONTRACT_DOCS = frozenset({"docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md"})
 # Built-in Skill publication compares directory identities. Windows DirEntry
 # listings zero those identities, so that path must run on the real Windows job.
+# CLI mutations served by the control channel resolve caller paths and the
+# Windows descriptor endpoint, which only a Windows runner exercises.
 WINDOWS_CONTROL_IPC_PATHS = frozenset({
     "core/managed_skills.py",
     "tests/test_managed_skills.py",
+    "core/control_requests.py",
+    "core/handlers/cli_requests.py",
+    "tests/test_cli_mutation_control_requests.py",
 })
 
 RUN, SKIP = "run", "skip"
