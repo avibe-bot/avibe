@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import json
 import logging
@@ -20,6 +19,7 @@ from typing import Any, Awaitable, Callable, Collection, Final, Iterable, Litera
 from sqlalchemy import func, literal_column, select
 
 from config import paths
+from config.model_hub_snapshot import freeze_model_hub
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
@@ -545,6 +545,8 @@ class EngineUnavailableError(RuntimeError):
 
 
 class ModelHubConfigStore(Protocol):
+    """Loads are shared read-only snapshots; writers must explicitly own their edits."""
+
     def load(self) -> ModelHubConfig: ...
 
     def save(self, config: ModelHubConfig) -> None: ...
@@ -567,8 +569,9 @@ class V2ModelHubConfigStore:
 
     Reading the file parses the whole config, which grows with Sources,
     inventories and routes, and Model Hub reads it on every request. So the
-    store keeps the last parse and serves a copy of it while the file is
-    unchanged: a read costs one ``stat`` and a copy, never a parse. Any change to
+    store keeps the last parse as a deeply read-only snapshot while the file is
+    unchanged: a read costs one ``stat``, never a copy or parse. Writers clone
+    their edit, or replace just the nodes they change. Any change to
     the file (a write through this store, another writer in this process, the UI
     process or the CLI) replaces or rewrites it, which changes its identity, and
     the next read parses again. A write through this store keeps what it
@@ -630,22 +633,21 @@ class V2ModelHubConfigStore:
         with self._snapshot_lock:
             snapshot = self._snapshot
         if snapshot is not None and identity is not None and snapshot[0] == identity:
-            # Callers own what they load and may change it; the snapshot stays as the file holds it.
-            return copy.deepcopy(snapshot[1])
+            return snapshot[1]
         fresh = self._read(path)
-        return default_config().model_hub if fresh is None else fresh[1]
+        return freeze_model_hub(default_config().model_hub) if fresh is None else fresh[1]
 
     def _read(self, path: Path) -> tuple[tuple, ModelHubConfig] | None:
         """Parse the file and keep the parse, when the file did not change while it was read."""
 
         before = _file_identity(path)
         try:
-            model_hub = V2Config.load().model_hub
+            model_hub = freeze_model_hub(V2Config.load().model_hub)
         except FileNotFoundError:
             return None
         if before is not None and _file_identity(path) == before:
             with self._snapshot_lock:
-                self._snapshot = (before, copy.deepcopy(model_hub))
+                self._snapshot = (before, model_hub)
         return (before or (), model_hub)
 
     def ensure_writable(self) -> None:
@@ -687,7 +689,7 @@ class V2ModelHubConfigStore:
 
         identity = _file_identity(path)
         if identity is not None:
-            settled = ModelHubConfig.from_payload(model_hub.to_payload(), repairing=True)
+            settled = freeze_model_hub(ModelHubConfig.from_payload(model_hub.to_payload(), repairing=True))
             with self._snapshot_lock:
                 self._snapshot = (identity, settled)
 
@@ -1910,6 +1912,14 @@ class ModelHubService:
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
         return ModelHubConfig.from_payload(config.to_payload())
+
+    @staticmethod
+    def _replace_source(config: ModelHubConfig, source: ModelHubSourceConfig) -> ModelHubConfig:
+        """Copy the edited Source's path, not any of the unchanged model inventories."""
+
+        updated = replace(config, sources=[source if item.id == source.id else item for item in config.sources])
+        updated.vibey_supply_pending = config.vibey_supply_pending
+        return updated
 
     @staticmethod
     def _persisted_credential(
@@ -9427,12 +9437,11 @@ class ModelHubService:
         )
         if unchanged:
             return False
-        previous = self._clone_config(config)
-        source.state = ModelHubSourceStateConfig(
+        updated = self._replace_source(config, replace(source, state=ModelHubSourceStateConfig(
             status=status,
             detail_key=detail_key,
-        )
-        persisted = await self._save_runtime_config(previous, config)
+        )))
+        persisted = await self._save_runtime_config(config, updated)
         if persisted:
             # A blocked grant must not keep reporting the windows it had while usable.
             self.quota.forget(source.id)
@@ -9789,9 +9798,9 @@ class ModelHubService:
             recovered = source.state.status in {"needs_action", "error"}
 
             def mark_native_irreversible_start() -> Callable[[], None]:
-                previous = self._clone_config(config)
+                updated = self._clone_config(config)
                 affected_backend = _NATIVE_VENDOR_BACKENDS[source.vendor]
-                for candidate in config.sources:
+                for candidate in updated.sources:
                     if (
                         candidate.supply_channel != "native_cli"
                         or _NATIVE_VENDOR_BACKENDS.get(candidate.vendor)
@@ -9808,10 +9817,10 @@ class ModelHubService:
                         status="needs_action",
                         detail_key="models.source.needs_action.oauth_expired",
                     )
-                self._save_projection_neutral_blocking(previous, config)
+                self._save_projection_neutral_blocking(config, updated)
 
                 def restore_after_spawn_failure() -> None:
-                    self._save_projection_neutral_blocking(config, previous)
+                    self._save_projection_neutral_blocking(updated, config)
 
                 return restore_after_spawn_failure
 
@@ -10358,10 +10367,11 @@ class ModelHubService:
             self._latest_source_attempt_generation[source_id] = generation
             recovered = self.recovery.succeeded(source)
             if recovered and source.state.status == "cooldown":
-                previous = self._clone_config(config)
-                source.state = ModelHubSourceStateConfig(status="standby")
+                updated = self._replace_source(
+                    config, replace(source, state=ModelHubSourceStateConfig(status="standby")),
+                )
                 try:
-                    await self._save_runtime_config(previous, config)
+                    await self._save_runtime_config(config, updated)
                 except OSError:
                     # Inference is authoritative; the policy remembers exactly
                     # which stale persisted cooldown must not be imported again.
@@ -10398,15 +10408,14 @@ class ModelHubService:
             and parse_model_hub_timestamp(source.state.retry_at) >= retry_at
         ):
             return False
-        previous = self._clone_config(config)
         already_cooling = source.state.status == "cooldown"
-        source.state = ModelHubSourceStateConfig(
+        updated = self._replace_source(config, replace(source, state=ModelHubSourceStateConfig(
             status="cooldown",
             retry_at=retry_at.isoformat(),
             detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
-        )
+        )))
         try:
-            persisted = await self._save_runtime_config(previous, config)
+            persisted = await self._save_runtime_config(config, updated)
         except OSError:
             # HTTP recovery already owns the live deadline. Failed telemetry
             # cannot replace the upstream result or erase temporary eligibility.
