@@ -1431,7 +1431,11 @@ class SessionHandler(BaseHandler):
         # enabled would resume the MAIN transcript under the subagent. IM/CLI turns
         # carry no reserved target, so this is a no-op for them.
         routing_subagent = (getattr(context, "platform_specific", None) or {}).get("routing_subagent")
-        stored_claude_session_id = self.sessions.get_claude_session_id(session_key, base_session_id)
+        stored_claude_session_id = await asyncio.to_thread(
+            self.sessions.get_claude_session_id,
+            session_key,
+            base_session_id,
+        )
         if not subagent_name and not routing_subagent:
             stored_claude_session_id = self._reserved_native_session_id(context) or stored_claude_session_id
         fork_source_claude_session_id: Optional[str] = None
@@ -1523,10 +1527,11 @@ class SessionHandler(BaseHandler):
 
         if effective_agent:
             assert cached_base is not None and cached_key is not None
-            cached_session_id = self.sessions.get_agent_session_id(
+            cached_session_id = await asyncio.to_thread(
+                self.sessions.get_agent_session_id,
                 session_key,
                 cached_base,
-                agent_name="claude",
+                "claude",
             )
             client = await self._reuse_cached_claude_subagent_session_if_available(
                 composite_key=cached_key,

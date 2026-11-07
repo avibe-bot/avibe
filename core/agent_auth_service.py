@@ -875,9 +875,19 @@ class AgentAuthService:
         get_session_id = getattr(sessions, "get_agent_session_id", None)
         if not callable(get_session_id):
             return None
-        session_id = get_session_id(session_key, composite_key, "opencode")
+        session_id = await asyncio.to_thread(
+            get_session_id,
+            session_key,
+            composite_key,
+            "opencode",
+        )
         if not session_id:
-            session_id = get_session_id(session_key, base_session_id, "opencode")
+            session_id = await asyncio.to_thread(
+                get_session_id,
+                session_key,
+                base_session_id,
+                "opencode",
+            )
         if not session_id:
             return None
 

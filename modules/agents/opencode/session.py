@@ -469,10 +469,11 @@ class OpenCodeSessionManager:
         use_backend_anchor = BaseAgent._uses_namespaced_backend_session(request.context)
         session_id = (
             None if use_backend_anchor else BaseAgent._reserved_native_session_id(request.context, self._agent_name)
-        ) or sessions.get_agent_session_id(
+        ) or await asyncio.to_thread(
+            sessions.get_agent_session_id,
             request.session_key,
             anchor,
-            agent_name=self._agent_name,
+            self._agent_name,
         )
 
         if not session_id:

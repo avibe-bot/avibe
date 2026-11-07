@@ -1,7 +1,9 @@
 import json
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, List, Optional
 
 from config import paths
@@ -245,10 +247,14 @@ class SessionsStore:
     sessions_path: Path = field(default_factory=paths.get_sessions_path)
     state: SessionState = field(default_factory=SessionState)
 
+    _AGENT_SESSION_LOOKUP_CACHE_MAX = 256
+
     def __post_init__(self) -> None:
         self.sessions_path = Path(self.sessions_path)
         self.db_path: Path | None = None
         self._service = None
+        self._agent_session_lookup_cache: OrderedDict[tuple[str, str, str], Optional[str]] = OrderedDict()
+        self._agent_session_lookup_lock = RLock()
         self._ensure_service()
         self.load()
         self._service.has_external_write()
@@ -278,6 +284,8 @@ class SessionsStore:
     def load(self) -> None:
         self._ensure_service()
         self.state = self._service.load_state()
+        with self._agent_session_lookup_lock:
+            self._agent_session_lookup_cache.clear()
 
     def maybe_reload(self) -> None:
         self._ensure_service()
@@ -363,23 +371,64 @@ class SessionsStore:
         return sum(len(thread_map) for thread_map in agent_maps.values() if isinstance(thread_map, dict))
 
     def _sync_session_mappings_for_user(self, user_id: str) -> None:
-        fresh_maps = self._service.load_state().session_mappings.get(user_id, {})
-        self.state.session_mappings[user_id] = {
-            str(agent_name): dict(thread_map)
-            for agent_name, thread_map in fresh_maps.items()
-            if isinstance(thread_map, dict)
-        }
+        fresh_rows = self.list_agent_session_mappings(user_id)
+        fresh_maps: dict[str, dict[str, Any]] = {}
+        for row in fresh_rows:
+            fresh_maps.setdefault(str(row["agent_name"]), {})[str(row["session_anchor"])] = row[
+                "native_session_id"
+            ]
+        self.state.session_mappings[user_id] = fresh_maps
         self._ensure_user_namespace(user_id)
 
     def get_agent_map(self, user_id: str, agent_name: str) -> Dict[str, str]:
-        """Get mapping of thread_id -> session_id for a user and agent."""
-        self.maybe_reload()
+        """Get the cached mapping of thread_id -> session_id for a user and agent.
+
+        Session lookup on the turn path uses ``lookup_agent_session_id`` below.
+        Do not invalidate this whole in-memory snapshot here: any reload would
+        read every historical Session and block the controller loop. The map is
+        retained for bulk/legacy callers, while point lookups read through the
+        bounded SQLite query when necessary.
+        """
         self._ensure_user_namespace(user_id)
         agent_map = self.state.session_mappings[user_id].get(agent_name)
         if agent_map is None:
             agent_map = {}
             self.state.session_mappings[user_id][agent_name] = agent_map
         return agent_map
+
+    def lookup_agent_session_id(self, user_id: str, agent_name: str, thread_id: str) -> Optional[str]:
+        """Read one session binding without rebuilding the historical mapping."""
+        self._ensure_service()
+        cache_key = (str(user_id), str(agent_name), str(thread_id))
+        with self._agent_session_lookup_lock:
+            if self._service.has_external_session_lookup_write():
+                self._agent_session_lookup_cache.clear()
+            if cache_key in self._agent_session_lookup_cache:
+                value = self._agent_session_lookup_cache.pop(cache_key)
+                self._agent_session_lookup_cache[cache_key] = value
+                return value
+            value = self._service.lookup_agent_session_id(
+                scope_key=cache_key[0],
+                agent_name=cache_key[1],
+                session_anchor=cache_key[2],
+            )
+            self._agent_session_lookup_cache[cache_key] = value
+            while len(self._agent_session_lookup_cache) > self._AGENT_SESSION_LOOKUP_CACHE_MAX:
+                self._agent_session_lookup_cache.popitem(last=False)
+            return value
+
+    def list_agent_session_mappings(
+        self,
+        user_id: str,
+        *,
+        session_anchor_prefix: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read mappings for one scope, optionally bounded to an anchor prefix."""
+        self._ensure_service()
+        return self._service.list_agent_session_mappings(
+            scope_key=str(user_id),
+            session_anchor_prefix=session_anchor_prefix,
+        )
 
     def get_agent_session_row_id(self, user_id: str, agent_name: str, thread_id: str) -> Optional[str]:
         self._ensure_service()
@@ -528,7 +577,8 @@ class SessionsStore:
             vibe_agent_backend=vibe_agent_backend,
         )
         if bound_id:
-            self.load()
+            with self._agent_session_lookup_lock:
+                self._agent_session_lookup_cache.clear()
         return bound_id
 
     def replace_agent_session_native(
@@ -545,7 +595,8 @@ class SessionsStore:
             replacement_native_session_id=replacement_native_session_id,
         )
         if replaced_id:
-            self.load()
+            with self._agent_session_lookup_lock:
+                self._agent_session_lookup_cache.clear()
         return replaced_id
 
     def remove_agent_session(self, user_id: str, agent_name: str, thread_id: str) -> bool:
