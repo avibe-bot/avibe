@@ -2,8 +2,8 @@
 // The drawer ends at the tab bar's top edge. The main Bot's circle, which rises above that edge by
 // `--mobile-nav-center-rise`, always draws over the drawer, whole; the drawer's foot keeps that rise
 // plus 16px, so its last row (设置 / 账号 / 更多) is never under the circle (owner request,
-// 2026-11-07). A take started by holding the circle with the drawer open draws its card and toast
-// above the drawer too. The More and Account sheets and the long-press sheet cover the bar instead:
+// 2026-11-07). Anything opened over the drawer (a take started by holding the circle, the
+// new-session sheet) draws above both the drawer and the bar. The More and Account sheets and the long-press sheet cover the bar instead:
 // they are modal over everything, the bar included.
 import { MobileDockDrawer } from '@/components/apps/MobileDockDrawer';
 import { InboxPage } from '@/components/workbench/InboxPage';

@@ -418,6 +418,46 @@ test.describe('phone tab bar under the Apps drawer', () => {
     await expect(drawer).toHaveCount(0);
     expect(denied).toEqual([]);
   });
+
+  // The bar is raised only above the drawer, not above what opens over it: a member's
+  // center ＋ opens the new-session sheet with the drawer still up, and that sheet has to
+  // cover the bar, or the bar would sit on the sheet's own controls.
+  test('lets a sheet opened over the drawer cover the bar', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.route('**/api/session', (route) => route.fulfill({ json: {
+      ...MODEL_HUB_SESSION,
+      remote: true,
+      email: 'member@example.com',
+      instance_role: 'member',
+      capabilities: { ...MODEL_HUB_SESSION.capabilities, is_instance_owner: false, can_manage_instance: false },
+    } }));
+    await page.setViewportSize(NARROW);
+    await open(page, '/inbox');
+
+    const nav = page.locator(MOBILE_NAV);
+    await nav.getByRole('button', { name: 'Apps', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Apps' }).locator('.motion-sheet')).toBeVisible();
+    await nav.getByRole('button', { name: 'New', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'New session' });
+    await expect(sheet).toBeVisible();
+    await sheet.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+    // Still mounted under the sheet (the sheet hides the page from assistive tech, so by selector).
+    await expect(page.locator('[role="dialog"][aria-label="Apps"] .motion-sheet')).toHaveCount(1);
+
+    const barBox = (await nav.boundingBox())!;
+    // What is painted on top there. The open sheet turns pointer events off for the page
+    // behind it, which would hide the bar from a hit test whatever its layer, so the probe
+    // makes the bar hit-testable again for the moment it asks.
+    const covered = await page.evaluate(([x, y]) => {
+      const bar = document.querySelector('nav.fixed.bottom-0') as HTMLElement;
+      bar.style.pointerEvents = 'auto';
+      const node = document.elementFromPoint(x, y);
+      bar.style.pointerEvents = '';
+      return { inBar: Boolean(node?.closest('nav')), inSheet: Boolean(node?.closest('[role="dialog"]:not([aria-label="Apps"])')) };
+    }, [barBox.x + 24, barBox.y + barBox.height / 2]);
+    expect(covered).toEqual({ inBar: false, inSheet: true });
+    expect(denied).toEqual([]);
+  });
 });
 
 test.describe('settings overlay geometry', () => {

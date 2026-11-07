@@ -56,12 +56,14 @@
   }
 }
 
-/* A sheet that ends at the phone tab bar's edge (`[data-tab-bar-sheet]`, the Apps drawer) draws
-   the bar above itself for as long as it is on screen, rising and sinking included, so the
-   circle the bar lifts above its edge is never cut off. The sheet keeps that circle's room at its
-   foot (`--mobile-nav-center-rise`). Sheets stacked over it (z-[60]) still cover the bar. */
+/* A sheet that ends at the phone tab bar's edge (`[data-tab-bar-sheet]`, the Apps drawer, z-[45])
+   draws the bar just above itself for as long as it is on screen, rising and sinking included, so
+   the circle the bar lifts above its edge is never cut off. The sheet keeps that circle's room at
+   its foot (`--mobile-nav-center-rise`). The pair stays below the modal layer (z-50 and up: a
+   dialog such as the new-session sheet, the main Bot's take, the sheets stacked over the drawer),
+   so anything opened over the drawer covers the bar as well. */
 body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
-  z-index: 55;
+  z-index: 46;
 }
 
 /* Height of the desktop shell's overlay title bar. On macOS the shell draws the

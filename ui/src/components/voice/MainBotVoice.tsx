@@ -40,9 +40,7 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
   const holding = phase === 'listening' || phase === 'recording' || phase === 'armed';
   return (
     <div className="md:hidden" role="dialog" aria-label={t('voice.to', { name: bot.name })}>
-      {/* z-[56]: above the bar, even where an open Apps drawer raises the bar to 55 (index.css), so a
-          take started with the drawer open is not drawn under it; below the sheets stacked over the drawer (z-[60]). */}
-      <div className="fixed inset-x-0 bottom-(--mobile-nav-height) z-[56] flex flex-col items-center gap-5 px-5 pb-10">
+      <div className="fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex flex-col items-center gap-5 px-5 pb-10">
         <VoiceCard
           to={{ name: bot.name, avatar: bot.avatar }}
           phase={phase}
@@ -90,8 +88,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
   return (
     <div
       className={clsx(
-        // Above an open Apps drawer on a phone, as the take's card is (z-[56]); a desktop keeps z-50.
-        'pointer-events-none fixed inset-x-0 bottom-(--mobile-nav-height) z-[56] flex justify-center px-4 pb-9 md:z-50',
+        'pointer-events-none fixed inset-x-0 bottom-(--mobile-nav-height) z-50 flex justify-center px-4 pb-9',
         placement === 'bar' ? 'md:hidden' : 'md:inset-x-auto md:right-4 md:bottom-4 md:w-sm md:px-0 md:pb-0',
       )}
       role="status"

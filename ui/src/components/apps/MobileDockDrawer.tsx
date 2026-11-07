@@ -38,7 +38,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
 
   // Long-press manage sheet (touch): a bottom action sheet keyed to a tile. Tap
   // opens the app; a press-hold opens the sheet. A cursor-positioned ContextMenu
-  // isn't used here — its close backdrop is z-40, below this z-50 drawer, so taps
+  // isn't used here — its close backdrop is z-40, below this z-[45] drawer, so taps
   // outside the menu would fall through to the tiles instead of dismissing it.
   const [menu, setMenu] = useState<{ item: ResidentTile; label: string } | null>(null);
   // Which footer overflow sheet is open (账号 / 更多) — one reusable shell.
@@ -147,8 +147,11 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
       {/* The drawer sheet: sits directly above the bottom tab bar, and moves inside a frame that ends
           at the bar's edge, so it rises from behind the bar and sinks back behind it. Its foot keeps
           the room the bar's raised center takes above that edge, plus the sheet's own 16px, so the
-          last row is never under the circle; the bar's top border is its bottom edge. */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 bottom-(--mobile-nav-height) z-50 overflow-hidden">
+          last row is never under the circle; the bar's top border is its bottom edge.
+          z-[45]: above the page and its chrome (z-40), just below the bar it sits on (raised to 46
+          while the drawer shows, index.css), and below every modal layer (z-50: dialogs, the main
+          Bot's take), so what opens over the drawer covers the bar too. */}
+      <div className="pointer-events-none fixed inset-x-0 top-0 bottom-(--mobile-nav-height) z-[45] overflow-hidden">
       <div
         ref={setDrawer}
         data-state={state}
