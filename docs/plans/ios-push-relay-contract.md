@@ -253,14 +253,15 @@ The server derives `device_token_sha256`, `account_id`, and timestamps.
 Keychain value. The client cannot submit `account_id`.
 
 This route is the sole rebind-capable management operation. The relay locks
-the installation row in a transaction. If the stored owner differs from the
-bearer-token subject, it revokes every active registration for that
+the installation row in a transaction. If no row exists, it creates the
+installation for the bearer-token subject. If the stored owner differs from
+the bearer-token subject, it revokes every active registration for that
 installation and changes `account_id` to the new subject before committing
 the device-token update. If the owner is unchanged, it updates only the
 installation fields. The random `installation_id` in the path is the
 possession proof; the route never trusts a caller-supplied account identifier.
 
-Success is `200`:
+Success is `201` for first-use creation and `200` for an update or rebind:
 
 ```json
 {
@@ -283,7 +284,6 @@ The route returns:
 | --- | --- | --- |
 | `400` | `invalid_installation_id`, `invalid_device_token`, `invalid_environment`, `invalid_topic`, `invalid_json` | The request shape or value is invalid. |
 | `401` | `unauthenticated` | The Supabase access token is absent or invalid. |
-| `404` | `installation_not_found` | No installation exists for the requested random `installation_id`. |
 | `413` | `request_too_large` | The JSON request exceeds the management body limit. |
 | `429` | `rate_limited` | The account management limit was exceeded. |
 | `502` | `auth_unavailable` | The backend could not validate the account token against its configured auth provider. |
@@ -639,7 +639,8 @@ account_id: current phone account
 private_key: native-only P-256 private key
 auth_secret: native-only 16-byte secret
 state: pending | active | retiring
-retire_after: UTC timestamp, present only for retiring records
+retire_after: Nullable UTC timestamp; set only after a retiring registration
+is confirmed revoked
 ```
 
 The public key returned as `keys.p256dh` is the uncompressed 65-byte P-256
@@ -648,8 +649,8 @@ point encoded as base64url without padding. The `keys.auth` value is the
 account access token never enter Web content.
 
 At most one key record per `(account_id, instance_origin)` is `active` and
-visible to the bridge. A bounded set of `retiring` records may coexist only
-while their already-accepted APNs notifications can still arrive.
+visible to the bridge, and at most one older record may be `retiring` while
+its already-accepted APNs notifications can still arrive.
 
 If the instance VAPID public key changes, the native coordinator performs a
 serialized replacement:
@@ -662,17 +663,19 @@ serialized replacement:
 4. delete the old instance subscription and revoke the old relay
    registration;
 5. mark the old key record `retiring` with
-   `retire_after = rotation_started_at + 86400 seconds`, then delete it after
-   that time.
+   `retire_after = revoked_at + 86400 seconds` from the relay's successful
+   revoke response, then delete it after that time.
 
 The old path remains usable until step 2 succeeds, so a failed replacement
 does not leave the instance without a subscription. The old key remains
 available through the maximum accepted Web Push TTL window for notifications
 that APNs accepted before the old registration was closed. If the old revoke
-is offline, the pending revoke is retried while the old key follows the same
-bounded retirement deadline; the instance's old subscription deletion stops
-ordinary sends. A failed new registration is revoked and its candidate key is
-deleted, leaving the old record active.
+is offline, the retiring key remains available with a null `retire_after`
+while the pending revoke is retried; the instance's old subscription deletion
+stops ordinary sends. A second VAPID replacement for the same instance waits
+until the prior retiring record has been deleted, so there is never more than
+one retiring record. A failed new registration is revoked and its candidate
+key is deleted, leaving the old record active.
 
 ### 7.2 NSE processing
 
@@ -855,6 +858,16 @@ When APNs supplies a new device token, native repeats the installation
 `PUT`. The relay updates only `device_token`, its hash, environment, and
 `updated_at`; all active registrations and endpoint IDs remain valid. The
 next delivery uses the new token.
+
+If a delivery using the old token already returned relay `410`, the instance
+may already have disabled that subscription row through its existing failure
+path. After the installation `PUT` succeeds, the next authenticated instance
+session MUST repeat `push.subscribe({vapidPublicKey})` for each active native
+record and POST the unchanged `{endpoint, keys}` object to the instance.
+The instance upsert re-enables that row; native does not create a new
+registration or key for an APNs token rotation. If the recovery POST cannot
+complete, the native/Web coordinator retries it on the next authenticated
+instance session.
 
 ### 9.8 App uninstall
 
@@ -1059,9 +1072,11 @@ property below holds:
 - management routes authorize through the Supabase account and enforce the
   installation owner transaction;
 - the bind route accepts a new authenticated account only with the random
-  `installation_id` possession proof, while registration and revoke routes
-  remain owner-only;
+  `installation_id` possession proof, creates the first installation, and
+  returns `201`; registration and revoke routes remain owner-only;
 - a device-token rotation preserves active registrations;
+- token recovery re-posts each active subscription so an instance row
+  disabled by an APNs `410` is enabled again;
 - a cross-account rebind revokes all old-account registrations atomically;
 - every revoked or unknown delivery registration returns `410`;
 - the relay verifies ES256 VAPID, exact audience, expiry bound, and VAPID key
@@ -1076,8 +1091,8 @@ property below holds:
   every push key uses `AfterFirstUnlockThisDeviceOnly`, and the pre-first-
   unlock path shows the defined fallback;
 - VAPID rotation has no gap in the active instance subscription, revokes the
-  old registration, and retains the old key through the maximum accepted TTL
-  window;
+  old registration, and retains the old key until `revoked_at + 86400`
+  seconds;
 - the instance payload serializer enforces 2800 UTF-8 bytes with
   `ensure_ascii=False`;
 - the outer APNs JSON remains at most 4036 bytes for the contracted maximum,
