@@ -1832,7 +1832,8 @@ def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> 
         engine.dispose()
 
 
-def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retired", [False, True])
+def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path, retired: bool) -> None:
     """HFR-261, watch half — ``upsert_watch`` is the same full-row write.
 
     Watches live in the same ``run_definitions`` table, are reclaimed by the same
@@ -1866,13 +1867,27 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
         metadata={"origin": "cli"},
     )
 
-    summary = _reclaim_bound_definitions_now(
-        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
-    )
-    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
-        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
-        "meaningless"
-    )
+    if retired:
+        assert store.mark_cycle_result(watch.id, exit_code=64, error=None, disable=True)
+
+    def reclaim():
+        summary = _reclaim_bound_definitions_now(
+            session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+        )
+        assert summary == {"paused": 0 if retired else 1, "deleted": 0, "snapshotted": 1}
+
+    if not retired:
+        reclaim()
+    read_watch = store.get_watch
+    reclaimed = False
+
+    def read_then_reclaim(watch_id):
+        nonlocal reclaimed
+        row = read_watch(watch_id)
+        if retired and not reclaimed:
+            reclaimed = True
+            reclaim()
+        return row
 
     args = _parse_watch_update([watch.id, "--name", "Renamed by the user"])
     stderr = io.StringIO()
@@ -1881,6 +1896,7 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch.object(lent, "watch_store", store),
         patch.object(lent, "watch_runtime_store", runtime_store),
+        patch.object(store, "get_watch", side_effect=read_then_reclaim),
     ):
         result = cli.cmd_watch_update(args)
 
@@ -1898,7 +1914,7 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
         "the stale full-row write re-enabled a watch the teardown paused; its "
         "supervisor starts cycles again against a session that no longer exists"
     )
-    assert stored.last_error == "the bound agent session was cleared"
+    assert stored.last_error == (None if retired else "the bound agent session was cleared")
     assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
         "the stale write replaced the reclaim's settings snapshot with the "
         "pre-teardown metadata"

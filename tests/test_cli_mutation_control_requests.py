@@ -539,7 +539,7 @@ async def test_startup_errors_project_the_watch_off_the_loop_with_the_lent_reade
         last_error="waiter crashed" if failed else None, last_started_at=None,
         last_finished_at=None, last_exit_code=None,
     )
-    store = SimpleNamespace(maybe_reload=lambda: False, get_watch=lambda _id: watch)
+    store = SimpleNamespace(sqlite_backend=None, maybe_reload=lambda: False, get_watch=lambda _id: watch)
     runtime = SimpleNamespace(load=lambda: {"watches": {}})
     read_on = []
 
@@ -568,11 +568,12 @@ async def test_watch_startup_keeps_its_whole_computed_recovery_bound(controller,
     # Only this module's clock jumps 901 s, past any fixed cap; the loop's does not.
     ticks = iter([0.0, 901.0])
     monkeypatch.setattr(cli, "time", SimpleNamespace(**{**vars(time), "monotonic": lambda: next(ticks, 901.0)}))
-    watches = controller.watch_service.store
+    from storage.background import SQLiteBackgroundTaskStore
+
     started = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-    monkeypatch.setattr(controller.watch_service.runtime_store, "load", lambda: {
-        "watches": {watch.id: {"running": True, "started_at": started} for watch in watches.list_watches()}
-    })
+    monkeypatch.setattr(SQLiteBackgroundTaskStore, "_watch_runtimes", staticmethod(lambda _conn, ids: {
+        watch_id: {"running": True, "started_at": started} for watch_id in ids
+    }))
     response = await handle_control_request(controller, _request(
         "watch.add", ["watch", "add", "--create-session-per-run", "--agent", "worker", "--shell", "true"]
     ).to_payload())

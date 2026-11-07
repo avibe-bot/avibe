@@ -387,7 +387,7 @@ class ManagedWatchStore:
             if self._sqlite is not None:
                 self._watches = {
                     item["id"]: ManagedWatch.from_dict(item)
-                    for item in self._sqlite.list_watches()
+                    for item in self._sqlite.list_watches(include_retired=False)
                 }
                 self._reload_required = False
                 return
@@ -525,10 +525,26 @@ class ManagedWatchStore:
         return sorted(watches, key=lambda item: (item.created_at, item.id))
 
     def get_watch(self, watch_id: str) -> Optional[ManagedWatch]:
-        return self._watches.get(watch_id)
+        watch = self._watches.get(watch_id)
+        if watch is None and self._sqlite is not None and not self._reload_required:
+            # History remains addressable, but never becomes resident again just
+            # because a result writer or a CLI command reads it.
+            row = self._sqlite.get_definition_record("watch", watch_id)
+            if row is not None and row.get("retired_at") is not None:
+                return ManagedWatch.from_dict(row)
+        return watch
+
+    def _required_watch(self, watch_id: str) -> ManagedWatch:
+        watch = self.get_watch(watch_id)
+        if watch is None:
+            raise KeyError(watch_id)
+        return watch
 
     def _publish(self, watch: ManagedWatch) -> None:
-        self._watches = {**self._watches, watch.id: watch}
+        if self._sqlite is not None and watch.retired_at is not None:
+            self._unpublish(watch.id)
+        else:
+            self._watches = {**self._watches, watch.id: watch}
 
     def _unpublish(self, watch_id: str) -> None:
         if watch_id in self._watches:
@@ -599,6 +615,8 @@ class ManagedWatchStore:
                 # Preserve mutation-result identity; outcome readers capture this
                 # namespace once rather than reading across its publication point.
                 cached.__dict__ = watch.__dict__
+            if self._sqlite is not None and watch.retired_at is not None:
+                self._unpublish(watch.id)
 
         with self._mirror_lock:
             try:
@@ -696,7 +714,7 @@ class ManagedWatchStore:
             # Published only once the row has landed (#2705); a reference-checked
             # SQLite write was reloaded above.
             if self._sqlite is not None and expected_reference_agent_id is not None:
-                result = self._watches[watch.id]
+                result = self._required_watch(watch.id)
             else:
                 self._publish(watch)
                 result = watch
@@ -955,7 +973,7 @@ class ManagedWatchStore:
         """
 
         with self._mirror_lock:
-            if watch_id not in self._watches:
+            if self.get_watch(watch_id) is None:
                 return False
             try:
                 if self._sqlite is not None:
@@ -972,7 +990,7 @@ class ManagedWatchStore:
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         with self._mirror_lock:
             # A private copy: the published entry changes only once the write lands.
-            watch = replace(self._watches[watch_id])
+            watch = replace(self._required_watch(watch_id))
             expect = self._read_state(watch)
             if enabled and not watch.enabled:
                 # First, because it may refuse (a job Watch): nothing is mutated yet.
@@ -994,12 +1012,13 @@ class ManagedWatchStore:
                 # Session binding, so a pause/resume that lost to a teardown must fail
                 # loudly rather than quietly undo it.
                 raise DefinitionWriteConflict(watch_id, definition_type="watch")
-            return self._watches[watch_id]
+            return self._required_watch(watch_id)
 
     def update_watch(
         self,
         watch_id: str,
         *,
+        expected_state: DefinitionWriteExpectation | None = None,
         name: Optional[str],
         session_key: str,
         session_id: Optional[str],
@@ -1032,10 +1051,10 @@ class ManagedWatchStore:
         ensure_agent_name_access(agent_name, user_context=user_context)
         with self._mirror_lock:
             # A private copy: the published entry changes only once the write lands.
-            watch = replace(self._watches[watch_id])
-            # Captured before the first mutation: the state ``vibe watch update`` read and
-            # resolved its payload from.
-            expect = self._read_state(watch)
+            watch = replace(self._required_watch(watch_id))
+            # A historical reread must not replace the expectation belonging to
+            # the caller's already-resolved update payload.
+            expect = expected_state or self._read_state(watch)
             if watch.job_target is not None:
                 # A job Watch is a read-only projection of its job: the hand-over fixed
                 # its Session, Agent, delivery, and waiter. Only what it says and how
@@ -1111,7 +1130,7 @@ class ManagedWatchStore:
                 raise DefinitionWriteConflict(watch_id, definition_type="watch")
             if expected_reference_agent_id is not None:
                 self.load()
-            return self._watches[watch_id]
+            return self._required_watch(watch_id)
 
     @staticmethod
     def _clear_cycle_state(watch: ManagedWatch, columns: tuple[str, ...]) -> None:
@@ -1162,7 +1181,7 @@ class ManagedWatchStore:
             raise ValueError("a watch cycle cannot retire and pause at the same time")
         with self._mirror_lock:
             self.maybe_reload()
-            watch = self._watches.get(watch_id)
+            watch = self.get_watch(watch_id)
             if watch is None:
                 return False
             expect = self._read_state(watch)

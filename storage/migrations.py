@@ -857,6 +857,8 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     if live_row is None or _normalized_index_sql(live_row[0]) != _normalized_index_sql(live_index.CREATE_INDEX_SQL):
         conn.execute(live_index.DROP_INDEX_SQL)
         conn.execute(live_index.CREATE_INDEX_SQL)
+    resident_index = import_module("storage.alembic.versions.20261107_0074_resident_definitions_index")
+    conn.execute(resident_index.CREATE_INDEX_SQL)
     if not _agent_runs_managed_indexes_ready(conn):
         _ensure_agent_runs_managed_indexes(conn)
 

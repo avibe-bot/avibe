@@ -3453,7 +3453,8 @@ def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> 
         engine.dispose()
 
 
-def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize("retired", [False, True])
+def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path, retired: bool) -> None:
     """HFR-261 — ``vibe task update`` wrote the WHOLE row from a stale read.
 
     THE PRODUCTION STORY. A task is pinned to Session S. The user renames it. While
@@ -3485,22 +3486,36 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         session_id=session_id,
         session_policy="existing",
         prompt="summarise the day",
-        schedule_type="cron",
-        cron="0 3 * * *",
+        schedule_type="at" if retired else "cron",
+        run_at="2030-01-01T00:00:00+00:00" if retired else None,
+        cron=None if retired else "0 3 * * *",
         timezone_name="UTC",
         metadata={"origin": "cli"},
     )
+    if retired:
+        assert store.retire_missed_one_shot(
+            task.id, expected_run_at=task.run_at, expected_timezone=task.timezone,
+            expected_updated_at=task.updated_at,
+        )
 
-    # The teardown, committed after the CLI's read of this definition and before its
-    # write. ``store`` is deliberately NOT reloaded: that stale mirror is exactly what
-    # production holds.
-    summary = _reclaim_bound_definitions_now(
-        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
-    )
-    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
-        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
-        "meaningless"
-    )
+    def reclaim():
+        summary = _reclaim_bound_definitions_now(
+            session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+        )
+        assert summary == {"paused": 0 if retired else 1, "deleted": 0, "snapshotted": 1}
+
+    if not retired:
+        reclaim()
+    read_task = store.get_task
+    reclaimed = False
+
+    def read_then_reclaim(task_id):
+        nonlocal reclaimed
+        row = read_task(task_id)
+        if retired and not reclaimed:
+            reclaimed = True
+            reclaim()
+        return row
 
     parser = cli.build_parser()
     args = parser.parse_args(["task", "update", task.id, "--name", "Renamed by the user"])
@@ -3509,6 +3524,7 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         redirect_stderr(stderr),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch.object(lent, "task_store", store),
+        patch.object(store, "get_task", side_effect=read_then_reclaim),
     ):
         result = cli.cmd_task_update(args)
 
@@ -3526,7 +3542,7 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         "the stale full-row write re-enabled a definition the teardown paused; it now "
         "fires forever against a session that no longer exists"
     )
-    assert stored.last_error == "the bound agent session was cleared", (
+    assert stored.last_error == (None if retired else "the bound agent session was cleared"), (
         f"the pause reason was overwritten with {stored.last_error!r}, so the user "
         "cannot see why the task stopped"
     )
