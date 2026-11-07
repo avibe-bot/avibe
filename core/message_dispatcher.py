@@ -3810,7 +3810,11 @@ class ConsolidatedMessageDispatcher:
 
                 if scheduled_anchor_message_id and mutates_turn_lifecycle:
                     try:
-                        self.controller.session_handler.finalize_scheduled_delivery(context, scheduled_anchor_message_id)
+                        await asyncio.to_thread(
+                            self.controller.session_handler.finalize_scheduled_delivery,
+                            context,
+                            scheduled_anchor_message_id,
+                        )
                     except Exception as err:
                         logger.warning("Failed to finalize scheduled delivery anchor: %s", err)
 

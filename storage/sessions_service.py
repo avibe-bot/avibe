@@ -330,13 +330,19 @@ class SQLiteSessionsService:
             with loop_writers.track_autocommit_write(conn):
                 metadata.create_all(conn)
         self._probe = SqliteInvalidationProbe(self.engine)
+        self._session_lookup_probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:
         self._probe.close()
+        self._session_lookup_probe.close()
         self.engine.dispose()
 
     def has_external_write(self) -> bool:
         return self._probe.has_external_write()
+
+    def has_external_session_lookup_write(self) -> bool:
+        """Detect writes for the point-lookup cache without consuming bulk-state invalidation."""
+        return self._session_lookup_probe.has_external_write()
 
     def get_agent_session_row_id(
         self,
@@ -396,23 +402,33 @@ class SQLiteSessionsService:
                     agent_sessions.c.native_session_id,
                 )
                 .where(agent_sessions.c.scope_id == scope_id)
-                .order_by(agent_sessions.c.agent_variant, agent_sessions.c.session_anchor)
             )
-            if session_anchor_prefix is not None:
+            if session_anchor_prefix is None:
+                rows = conn.execute(statement).mappings().all()
+            else:
                 prefix = str(session_anchor_prefix)
-                statement = statement.where(
-                    (agent_sessions.c.session_anchor == prefix)
-                    | agent_sessions.c.session_anchor.like(
-                        f"{_escape_sql_like(prefix)}:%", escape="\\"
+                # SQLite's default LIKE collation cannot use the binary anchor
+                # index as a range. The exact anchor is one lookup; anchors that
+                # continue it use the binary interval [prefix + ':', prefix + ';').
+                # ':' and ';' are adjacent ASCII bytes, so every descendant is
+                # inside the interval and anchors such as ``prefix-other`` are not.
+                exact_rows = conn.execute(
+                    statement.where(agent_sessions.c.session_anchor == prefix)
+                ).mappings().all()
+                descendant_rows = conn.execute(
+                    statement.where(
+                        agent_sessions.c.session_anchor >= f"{prefix}:",
+                        agent_sessions.c.session_anchor < f"{prefix};",
                     )
-                )
+                ).mappings().all()
+                rows = exact_rows + descendant_rows
             return [
                 {
                     "agent_name": str(row["agent_variant"] or "default"),
                     "session_anchor": str(row["session_anchor"]),
                     "native_session_id": decode_session_value(row["native_session_id"]),
                 }
-                for row in conn.execute(statement).mappings()
+                for row in rows
             ]
 
     def get_agent_session_by_id(self, session_id: str) -> dict[str, Any] | None:

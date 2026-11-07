@@ -292,7 +292,8 @@ class MessageHandler(BaseHandler):
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
-                self.session_handler.alias_session_base(
+                await asyncio.to_thread(
+                    self.session_handler.alias_session_base,
                     context,
                     source_base_session_id=reply_anchor_base_session_id,
                     alias_base_session_id=base_session_id,

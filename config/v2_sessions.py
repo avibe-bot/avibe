@@ -401,7 +401,7 @@ class SessionsStore:
         self._ensure_service()
         cache_key = (str(user_id), str(agent_name), str(thread_id))
         with self._agent_session_lookup_lock:
-            if self._service.has_external_write():
+            if self._service.has_external_session_lookup_write():
                 self._agent_session_lookup_cache.clear()
             if cache_key in self._agent_session_lookup_cache:
                 value = self._agent_session_lookup_cache.pop(cache_key)

@@ -147,6 +147,47 @@ def test_agent_session_lookup_reads_external_row_without_full_reload(tmp_path: P
         store.close()
 
 
+def test_point_lookup_invalidation_does_not_consume_bulk_state_invalidation(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    external = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        # Prime the separate point-lookup probe before the external commit.
+        assert store.lookup_agent_session_id(
+            "slack::channel::C1",
+            "claude",
+            "missing-anchor",
+        ) is None
+        external.save_state(
+            SessionState(
+                active_polls={
+                    "oc-external": ActivePollInfo(
+                        opencode_session_id="oc-external",
+                        base_session_id="base",
+                        channel_id="C1",
+                        thread_id="t1",
+                        settings_key="C1",
+                        working_path="/repo",
+                        platform="slack",
+                    ).to_dict()
+                }
+            )
+        )
+
+        # A point lookup may consume its own invalidation without hiding the
+        # pending bulk-state refresh from maybe_reload().
+        assert store.lookup_agent_session_id(
+            "slack::channel::C1",
+            "claude",
+            "missing-anchor",
+        ) is None
+        store.maybe_reload()
+        assert store.get_active_poll("oc-external") is not None
+    finally:
+        external.close()
+        store.close()
+
+
 def test_agent_session_lookup_uses_scope_anchor_index(tmp_path: Path) -> None:
     service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
     try:
@@ -165,6 +206,38 @@ def test_agent_session_lookup_uses_scope_anchor_index(tmp_path: Path) -> None:
                 "SELECT native_session_id FROM agent_sessions "
                 "WHERE scope_id = ? AND agent_variant = ? AND session_anchor = ? LIMIT 1",
                 (scope_id, "claude", "slack_thread_indexed"),
+            ).fetchall()
+        assert any(
+            "SEARCH agent_sessions USING INDEX uq_agent_sessions_scope_anchor" in str(row[-1])
+            for row in plan
+        )
+    finally:
+        service.close()
+
+
+def test_agent_session_prefix_lookup_uses_scope_anchor_index(tmp_path: Path) -> None:
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        session_id = service.ensure_agent_session_id(
+            scope_key="slack::channel::C1",
+            agent_name="claude",
+            session_anchor="slack_thread_prefix:child",
+        )
+        assert session_id is not None
+        rows = service.list_agent_session_mappings(
+            scope_key="slack::channel::C1",
+            session_anchor_prefix="slack_thread_prefix",
+        )
+        assert [row["session_anchor"] for row in rows] == ["slack_thread_prefix:child"]
+        with service.engine.connect() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+            plan = conn.exec_driver_sql(
+                "EXPLAIN QUERY PLAN "
+                "SELECT native_session_id FROM agent_sessions "
+                "WHERE scope_id = ? AND session_anchor >= ? AND session_anchor < ?",
+                (scope_id, "slack_thread_prefix:", "slack_thread_prefix;"),
             ).fetchall()
         assert any(
             "SEARCH agent_sessions USING INDEX uq_agent_sessions_scope_anchor" in str(row[-1])
