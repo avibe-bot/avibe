@@ -89,17 +89,23 @@ VAPID private key.
 
 ### 2.3 Account and installation ownership
 
-The app generates `installation_id` once per app installation and keeps it in
-the app-group Keychain. The relay derives `account_id` from the authenticated
-Supabase access token. `account_id` is never accepted as an authority-bearing
-request field.
+The app generates a cryptographically random `installation_id` once per app
+installation and keeps it in the app-group Keychain. The relay derives
+`account_id` from the authenticated Supabase access token. `account_id` is
+never accepted as an authority-bearing request field.
 
 An installation has exactly one current account owner. Binding the same
-`installation_id` to a new account atomically:
+`installation_id` to a new account through the bind route atomically:
 
 1. changes the installation owner;
 2. revokes every registration currently owned through that installation;
 3. commits the owner change and revocations in one transaction.
+
+The bind route is the sole management route that may perform this
+cross-account rebind. A valid access token for the new account plus possession
+of the random `installation_id` is the rebind proof; the route does not accept
+an old account token or a client-selected `account_id`. All other management
+routes remain owner-only.
 
 Binding the same installation to the same account with a changed APNs device
 token updates only the installation. Existing registrations remain valid.
@@ -124,7 +130,7 @@ names and constraints are part of the cross-repository contract.
 
 | Field | Type and wire shape | Owner and invariant |
 | --- | --- | --- |
-| `installation_id` | UUID string, primary key | App generates it once and keeps it in the app-group Keychain. It never changes during the installation lifetime. |
+| `installation_id` | Cryptographically random UUID string, primary key | App generates it once and keeps it in the app-group Keychain. It never changes during the installation lifetime and is not exposed to Web content. |
 | `account_id` | Supabase subject string | Relay derives it from the bearer token. The client cannot choose it. |
 | `device_token` | Opaque APNs token bytes, represented by base64url without padding at the API boundary | App receives it from APNs. Relay stores it as an encrypted-at-rest secret or in an equivalent secret store. It is never written to logs or telemetry. |
 | `device_token_sha256` | Lowercase hexadecimal SHA-256 | Relay derives it for redacted diagnostics and equality checks. It is the only token form permitted in logs and audit records. |
@@ -217,8 +223,9 @@ Authorization: Bearer <Supabase access token>
 
 The backend validates the token using its existing Supabase auth boundary and
 uses the token subject as `account_id`. Expired, malformed, or missing tokens
-return `401`. A valid account token that cannot access the installation
-returns `404` so the route does not become an installation ownership oracle.
+return `401`. Except for the bind route in section 5.2, a valid account token
+that cannot access the installation returns `404` so the route does not become
+an installation ownership oracle.
 
 The delivery route does not accept a Supabase bearer token. It requires the
 VAPID authorization described in section 5.4.
@@ -245,6 +252,14 @@ The server derives `device_token_sha256`, `account_id`, and timestamps.
 `installation_id` in the path must be a UUID and must equal the app's
 Keychain value. The client cannot submit `account_id`.
 
+This route is the sole rebind-capable management operation. The relay locks
+the installation row in a transaction. If the stored owner differs from the
+bearer-token subject, it revokes every active registration for that
+installation and changes `account_id` to the new subject before committing
+the device-token update. If the owner is unchanged, it updates only the
+installation fields. The random `installation_id` in the path is the
+possession proof; the route never trusts a caller-supplied account identifier.
+
 Success is `200`:
 
 ```json
@@ -268,7 +283,7 @@ The route returns:
 | --- | --- | --- |
 | `400` | `invalid_installation_id`, `invalid_device_token`, `invalid_environment`, `invalid_topic`, `invalid_json` | The request shape or value is invalid. |
 | `401` | `unauthenticated` | The Supabase access token is absent or invalid. |
-| `404` | `installation_not_found` | The route cannot bind the requested installation under this account context. |
+| `404` | `installation_not_found` | No installation exists for the requested random `installation_id`. |
 | `413` | `request_too_large` | The JSON request exceeds the management body limit. |
 | `429` | `rate_limited` | The account management limit was exceeded. |
 | `502` | `auth_unavailable` | The backend could not validate the account token against its configured auth provider. |
@@ -602,6 +617,19 @@ For each `(account_id, instance_origin)` pair, the app creates:
 - one cryptographically random 16-byte Web Push authentication secret;
 - one key record in the app-group Keychain.
 
+The main app target and the NSE target MUST both enable the App Group
+`group.bot.avibe.ios` and the Keychain Sharing access group
+`$(AppIdentifierPrefix)bot.avibe.ios.push`. The App Group provides the shared
+container; it does not replace the `keychain-access-groups` entitlement.
+Both provisioning profiles MUST include the same Keychain access group.
+
+Every private key and auth secret item MUST use
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. This allows the NSE to
+read the material while the device is locked after the first unlock without
+making it eligible for keychain migration to another device. Before the first
+unlock after boot, the keychain may be unavailable and the NSE MUST use the
+same localized fallback path defined in section 7.2.
+
 The key record contains:
 
 ```text
@@ -610,6 +638,8 @@ instance_origin: configured HTTPS origin
 account_id: current phone account
 private_key: native-only P-256 private key
 auth_secret: native-only 16-byte secret
+state: pending | active | retiring
+retire_after: UTC timestamp, present only for retiring records
 ```
 
 The public key returned as `keys.p256dh` is the uncompressed 65-byte P-256
@@ -617,10 +647,32 @@ point encoded as base64url without padding. The `keys.auth` value is the
 16-byte authentication secret encoded the same way. The private key and
 account access token never enter Web content.
 
-The app uses one registration record per instance. If the VAPID public key
-for an instance changes, a new registration and key record are created after
-the Web UI has posted the new subscription; the old registration remains
-valid until explicitly revoked or invalidated by delivery.
+At most one key record per `(account_id, instance_origin)` is `active` and
+visible to the bridge. A bounded set of `retiring` records may coexist only
+while their already-accepted APNs notifications can still arrive.
+
+If the instance VAPID public key changes, the native coordinator performs a
+serialized replacement:
+
+1. create the new P-256 key, auth secret, relay registration, and native
+   `pending` candidate;
+2. post the new subscription to the instance and wait for the instance to
+   store it;
+3. make the new record the active bridge record;
+4. delete the old instance subscription and revoke the old relay
+   registration;
+5. mark the old key record `retiring` with
+   `retire_after = rotation_started_at + 86400 seconds`, then delete it after
+   that time.
+
+The old path remains usable until step 2 succeeds, so a failed replacement
+does not leave the instance without a subscription. The old key remains
+available through the maximum accepted Web Push TTL window for notifications
+that APNs accepted before the old registration was closed. If the old revoke
+is offline, the pending revoke is retried while the old key follows the same
+bounded retirement deadline; the instance's old subscription deletion stops
+ordinary sends. A failed new registration is revoked and its candidate key is
+deleted, leaving the old record active.
 
 ### 7.2 NSE processing
 
@@ -641,6 +693,8 @@ The Notification Service Extension:
 If lookup, base64url decoding, decryption, UTF-8 decoding, or JSON parsing
 fails, the NSE keeps the localized `AVIBE_PUSH_FALLBACK` alert. It MUST NOT
 show ciphertext, an exception, a token, or a private key in the notification.
+This fallback also applies before the device's first unlock after boot when
+the `AfterFirstUnlockThisDeviceOnly` keychain item is unavailable.
 
 The implementation does not request Apple's filtering entitlement. Muted
 categories and hidden Sessions are already filtered by the instance before
@@ -709,7 +763,7 @@ that every field has an independent signature.
    registration route.
 6. The relay returns a new or existing `registration_id` and endpoint.
 7. Native stores `kid`, instance origin, account ID, private key, and auth
-   secret in the app-group Keychain.
+   secret in the shared App Group and Keychain Sharing access group.
 8. The bridge returns `{endpoint, keys:{p256dh,auth}}`.
 9. The Web UI POSTs that object to the instance's existing
    `/api/web-push/subscriptions` route.
@@ -823,7 +877,7 @@ encrypted bytes and therefore needs the same review gate.
 | Threat | Invariant and control |
 | --- | --- |
 | Open relay abuse | Every delivery resolves a random stateful registration, validates RFC 8292 VAPID against the bound key hash, enforces the 2903-byte body limit, and consumes registration, installation, and account rate buckets before APNs. No delivery route accepts an arbitrary APNs token or arbitrary topic. |
-| Cross-account registration or revocation | Management routes derive `account_id` from the Supabase token, require installation ownership, return `404` for other-account rows, and atomically revoke all registrations on cross-account rebind. |
+| Cross-account registration or revocation | Management routes derive `account_id` from the Supabase token. Only the bind route accepts the random `installation_id` as a rebind proof and atomically revokes all registrations before changing ownership; registration and revoke routes remain owner-only and return `404` for other-account rows. |
 | Cross-instance delivery | The relay binds each registration to `vapid_key_sha256`; the delivery VAPID `k` must hash to it. The endpoint ID is random and never derived from account or origin. |
 | Exact request replay | The relay keeps an expiring deduplication record keyed by `(registration_id, SHA-256(ciphertext))`, never the ciphertext itself. An already accepted exact body returns the prior result during the VAPID validity window without sending a second APNs request. Fresh `pywebpush` sends use fresh RFC 8291 salt and ephemeral sender keys, so a legitimate resend has a different ciphertext hash. |
 | VAPID token reuse | `aud` is exact, `exp` is future and at most 24 hours ahead, and the delivery deduplication cache limits an identical body to one APNs submission per registration. |
@@ -925,6 +979,7 @@ displayed text.
 | Account Holder creates the NSE App ID `bot.avibe.ios.notification-service` | Phase 1 device setup | No for pure crypto tests | Yes for NSE signing and device delivery |
 | Account Holder enables Push Notifications for app and NSE | Phase 1 device setup | No for compile-only work | Yes for APNs token delivery |
 | Account Holder creates App Group `group.bot.avibe.ios` and enables it for both targets | Phase 1 device setup | No for isolated tests | Yes for shared Keychain access and NSE decryption |
+| Account Holder enables Keychain Sharing with `$(AppIdentifierPrefix)bot.avibe.ios.push` for app and NSE, and includes it in both provisioning profiles | Phase 1 device setup | No for isolated tests | Yes for NSE key access on a device |
 | Account Holder creates the APNs `.p8` key | Phase 1 integration | No for mock APNs or local unit tests | Yes for relay-to-Apple integration and launch |
 | Configure `sandbox` for Xcode Debug builds | Phase 1 device testing | No for backend code | Yes for Debug device push |
 | Configure `production` for TestFlight | Phase 1 TestFlight | No for local code | Yes for TestFlight push |
@@ -1003,6 +1058,9 @@ property below holds:
   branches;
 - management routes authorize through the Supabase account and enforce the
   installation owner transaction;
+- the bind route accepts a new authenticated account only with the random
+  `installation_id` possession proof, while registration and revoke routes
+  remain owner-only;
 - a device-token rotation preserves active registrations;
 - a cross-account rebind revokes all old-account registrations atomically;
 - every revoked or unknown delivery registration returns `410`;
@@ -1012,6 +1070,14 @@ property below holds:
 - the relay forwards only the original encrypted body and never logs body
   bytes, plaintext, or a full APNs token;
 - the APNs mapping and response table are exact;
+- `TTL: 0` maps to APNs `apns-expiration: 0`, and a supplied Topic produces a
+  registration-scoped 43-byte collapse identifier;
+- both app targets share the App Group and Keychain Sharing access group,
+  every push key uses `AfterFirstUnlockThisDeviceOnly`, and the pre-first-
+  unlock path shows the defined fallback;
+- VAPID rotation has no gap in the active instance subscription, revokes the
+  old registration, and retains the old key through the maximum accepted TTL
+  window;
 - the instance payload serializer enforces 2800 UTF-8 bytes with
   `ensure_ascii=False`;
 - the outer APNs JSON remains at most 4036 bytes for the contracted maximum,
