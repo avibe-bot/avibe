@@ -92,8 +92,8 @@ async def fail(service, source, reason="network", *, generation=None, outcome=No
 
 
 @pytest.mark.parametrize("reason,delays", [
-    ("network", [1, 2, 4, 8, 16, 30, 30]),
-    ("server_error", [30, 60, 120, 120]),
+    ("network", [1, 2, 4, 8, 16, 30, 48, 48]),
+    ("server_error", [30, 60, 96, 96]),
     ("rate_limited", [60, 120, 240, 300, 300]),
     ("quota_exhausted", [300, 300]),
 ])
@@ -129,12 +129,12 @@ def test_retry_after_uses_response_receipt_and_keeps_long_upstream_advice(tmp_pa
     async def run():
         service, clock = clock_service(tmp_path)
         source = service.store.load().sources[0]
-        for advice in ("300", format_datetime(NOW + timedelta(seconds=300), usegmt=True)):
+        for advice in ("3600", format_datetime(NOW + timedelta(seconds=3600), usegmt=True)):
             service.recovery._sources.clear()
             clock.elapsed = 20
             outcome = SimpleNamespace(retry_after=advice, response_received_at=NOW, stream_started=False)
             await fail(service, source, "server_error", outcome=outcome)
-            assert service.recovery.annotations(service.store.load())[source.id].retry_at == (NOW + timedelta(seconds=300)).isoformat()
+            assert service.recovery.annotations(service.store.load())[source.id].retry_at == (NOW + timedelta(seconds=3600)).isoformat()
             with pytest.raises(ModelHubError):
                 await service.resolve_with_recovery(
                     backend="codex", model_id="shared-model", request={}, supply_channel="hub",
@@ -206,6 +206,14 @@ def test_live_network_overlay_preserves_stronger_blockers(tmp_path, blocker):
         assert chain["supply_state"] == ("waiting" if blocker in {"none", "cooldown"} else "interrupted")
         agents = {agent["backend"]: agent for agent in service.list_agents()}
         assert agents["codex"]["supply_status"] == chain["supply_state"]
+        if blocker == "cooldown":
+            # A live network overlay cannot lend its longer budget to a
+            # stronger persisted rate limit. Its next delay cannot fit 120s.
+            source.state.retry_at = (clock.now() + timedelta(seconds=300)).isoformat()
+            with pytest.raises(ModelHubError) as ended:
+                await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
+            assert ended.value.code == RECOVERY_EXHAUSTED_CODE
+            assert clock.delays == [] and service.adapter.invocations == []
     asyncio.run(run())
 
 
@@ -286,18 +294,18 @@ def test_one_window_covers_all_fallback_passes_without_replaying_after_output(tm
     async def run():
         service, clock = clock_service(tmp_path, outcomes=[
             _outcome(RawOutcomeKind.NETWORK_ERROR, source_id="src_recovery01")
-            for _ in range(20)
+            for _ in range(60)
         ])
         snapshots = []
         with pytest.raises(ModelHubError):
             await service.resolve_with_recovery(
                 backend="codex", model_id="shared-model", request={}, recovery_observer=snapshots.append,
             )
-        assert clock.delays == [1, 2, 4, 8, 16, 30, 30]
-        assert len(service.adapter.invocations) == 8
-        assert clock.elapsed == 91
+        assert clock.delays == [1, 2, 4, 8, 16, 30] + [48] * 36
+        assert len(service.adapter.invocations) == 43
+        assert clock.elapsed == 1789
         assert snapshots[-1] is None
-        assert {snapshot["window_end"] for snapshot in snapshots if snapshot} == {(NOW + timedelta(seconds=120)).isoformat()}
+        assert {snapshot["window_end"] for snapshot in snapshots if snapshot} == {(NOW + timedelta(seconds=1800)).isoformat()}
         assert {snapshot["started_at"] for snapshot in snapshots if snapshot} == {NOW.isoformat()}
     asyncio.run(run())
 
@@ -360,8 +368,8 @@ def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, pr
             calls.append(await request.json())
             if len(calls) <= 2:
                 return web.json_response({"error": {"type": "server_error"}}, status=503)
-            # An admitted recovery attempt may think beyond the 120s window.
-            clock.advance(121)
+            # An admitted recovery attempt may think beyond the 30-minute window.
+            clock.advance(1801)
             return web.Response(
                 body=metadata + output + terminal if streaming else buffered,
                 content_type="text/event-stream" if streaming else "application/json",
@@ -519,7 +527,7 @@ def test_real_gateway_has_one_half_open_owner_and_interruptible_waiters(tmp_path
                     assert response.status == 200 and await response.read() == buffered
                     assert len(calls) == 2
                 else:
-                    clock.advance(121)
+                    clock.advance(1801)
                     service.recovery.notify()
                     response = await asyncio.wait_for(waiter, 2)
                     assert response.status == (400 if backend == "codex" else 424)

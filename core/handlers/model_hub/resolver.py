@@ -461,7 +461,7 @@ def inspect_exact_hop(
     backoff = False
     recovery = None
     cooldown = source.state.status == "cooldown"
-    cooldown_reason = None
+    cooldown_reason = (source.state.detail_key or "").rsplit(".", 1)[-1] if cooldown else None
     retry_at = source.state.retry_at if source.state.status == "cooldown" else None
     if annotation is not None and supply_eligible and source.state.status not in {"needs_action", "error"}:
         if not structural_blocker:
@@ -471,7 +471,10 @@ def inspect_exact_hop(
             )
             if retired:
                 cooldown = False
-            if annotation.reason != "recovery" and (annotation.reason != "network" or not cooldown):
+                cooldown_reason = None
+            if annotation.reason != "recovery" and (
+                annotation.reason != "network" or not cooldown or source_retry_ready(source, now)
+            ):
                 cooldown_reason = annotation.reason
             if annotation.reason == "recovery":
                 if retired:

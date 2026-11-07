@@ -5895,6 +5895,7 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     assert provider["options"] == {
         "apiKey": "gateway-token",
         "baseURL": "http://127.0.0.1:19000/v1",
+        "headerTimeout": False,
     }
     assert provider["models"]["menu-model"]["id"] == "menu-model"
     assert provider["models"]["menu-model"]["variants"] == {
@@ -6230,6 +6231,7 @@ def test_opencode_empty_menu_writes_the_empty_overlay(tmp_path: Path) -> None:
                 "options": {
                     "apiKey": "gateway-token",
                     "baseURL": "http://127.0.0.1:19000/opencode/v1",
+                    "headerTimeout": False,
                 },
             }
         },

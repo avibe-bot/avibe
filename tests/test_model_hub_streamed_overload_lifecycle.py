@@ -136,7 +136,7 @@ def test_initial_response_waits_for_terminal_and_owns_spool_until_cleanup(tmp_pa
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("late_seconds,expected_calls", [(0, 3), (121, 2)])
+@pytest.mark.parametrize("late_seconds,expected_calls", [(0, 3), (1801, 2)])
 def test_replay_keeps_preoutput_recovery_window(tmp_path, late_seconds, expected_calls):
     """MH-RETRY-OVERLOAD-003: an earlier refusal's window must not reset at replay."""
     async def run():
