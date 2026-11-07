@@ -667,9 +667,10 @@ def test_status_endpoint_uses_fast_runtime_status(monkeypatch):
     assert calls == [False]
 
 
-def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path):
-    """GET /api/sessions/<id>/activity: summary (no params) lists turn groups;
-    ``?group_id=`` returns that group's rows; an unknown session is 404."""
+@pytest.mark.parametrize("text_storage", ["column", "duplicated", "json"])
+def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path, text_storage):
+    """New column-only traces and released dual/JSON-only rows render identically
+    through the activity API, while staying outside the conversation transcript."""
     import json as _json
 
     from storage.db import create_sqlite_engine
@@ -700,7 +701,8 @@ def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path
         _m("m_a", "assistant", "agent", "2026-06-01T10:00:01.000000+00:00", "thinking")
         conn.execute(agent_events.insert().values(
             id="e_t", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call",
-            visibility="trace", content_text="🔧 `Bash`", content_json=_json.dumps({"kind": "tool_call", "text": "🔧 `Bash`"}),
+            visibility="trace", content_text=None if text_storage == "json" else "🔧 `Bash`",
+            content_json=_json.dumps({"kind": "tool_call", **({"text": "🔧 `Bash`"} if text_storage != "column" else {})}),
             metadata_json="{}", source="agent", created_at="2026-06-01T10:00:02Z", updated_at="2026-06-01T10:00:02Z",
         ))
         _m("m_r", "result", "agent", "2026-06-01T10:00:03.000000+00:00", "answer")
@@ -719,7 +721,11 @@ def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path
     detail = client.get(f"/api/sessions/{sid}/activity?group_id={group_id}")
     assert detail.status_code == 200
     rows = detail.get_json()["rows"]
-    assert [r["kind"] for r in rows] == ["assistant", "tool_call"]
+    assert [(r["kind"], r["text"]) for r in rows] == [("assistant", "thinking"), ("tool_call", "🔧 `Bash`")]
+
+    transcript = client.get(f"/api/sessions/{sid}/messages")
+    assert transcript.status_code == 200
+    assert [m["text"] for m in transcript.get_json()["messages"]] == ["q", "answer"]
 
     assert client.get(f"/api/sessions/{sid}/activity?group_id=nope").status_code == 404
     assert client.get("/api/sessions/ses_missing/activity").status_code == 404

@@ -448,6 +448,9 @@ def test_persist_agent_toolcall_writes_event_not_message(isolated_state):
     assert event_row["platform"] == "slack"
     assert event_row["session_id"] is None
     assert event_row["content_text"] == "ran a tool"
+    # The column remains readable by generic SQL and released activity readers;
+    # storing the same rendered text in the JSON body wastes each new trace row.
+    assert json.loads(event_row["content_json"]) == {"kind": "toolcall"}
 
 
 def test_persist_agent_im_uses_delivery_scope_not_session(isolated_state):
