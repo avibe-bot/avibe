@@ -15,6 +15,7 @@ import {
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
 import { createVoiceActivity, reportVoiceSilenceGate, VOICE_SPEECH_RMS } from './voiceActivity';
+import { VoiceCaptureTrace, type VoiceCaptureClass, type VoiceCaptureEntry } from './voiceCaptureTrace';
 import { VoiceTakeKeeper, type VoiceTakeKeep } from './voiceTakeKeeper';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
@@ -51,6 +52,8 @@ export type ShowPageVoiceDictationInput = {
    *  preview while the microphone heard speech for `VOICE_LIVE_SILENT_SPEECH_MS`. What is said
    *  is still recorded and transcribed when the take ends. */
   onLiveChange?: (live: boolean) => void;
+  /** Where the take started, for the capture trace: a press-and-hold, or a Show Page (default). */
+  entry?: VoiceCaptureEntry;
 };
 
 /** Speech heard without one live preview for this long: the realtime path is taken as not
@@ -131,6 +134,8 @@ export class ShowPageVoiceDictation {
   private speechWithoutPreviewMs = 0;
   private live = true;
   private readonly keeper: VoiceTakeKeeper | null;
+  /** What the take's capture did, from the microphone request on (lib/voiceCaptureTrace). */
+  private readonly trace: VoiceCaptureTrace;
   private stopped = false;
   private settled = false;
   private resolveDone!: (text: string) => void;
@@ -156,6 +161,7 @@ export class ShowPageVoiceDictation {
       newDictationId: dependencies.newDictationId ?? newDictationId,
     };
     this.dictationId = this.dependencies.newDictationId();
+    this.trace = new VoiceCaptureTrace(input.entry ?? 'show_page', this.dictationId);
     this.keeper = input.keep ? new VoiceTakeKeeper(this.dictationId, input.keep) : null;
     this.context = resolveVoiceContext(input.context);
     this.queue = this.dependencies.createQueue({
@@ -187,7 +193,16 @@ export class ShowPageVoiceDictation {
     this.captureClaim = captureClaim;
     try {
       await captureClaim.ready;
-      const stream = await this.dependencies.getUserMedia();
+      const requestedAt = this.trace.mark();
+      let stream: MediaStream;
+      try {
+        stream = await this.dependencies.getUserMedia();
+      } catch (error) {
+        // The microphone never opened: refused, missing, or held by something else.
+        this.trace.micSettled(requestedAt, error);
+        throw error;
+      }
+      this.trace.micSettled(requestedAt);
       if (this.abortController.signal.aborted || !captureClaim.isCurrent()) {
         stream.getTracks().forEach((track) => track.stop());
         throw cancelledError();
@@ -220,6 +235,7 @@ export class ShowPageVoiceDictation {
 
       const pipeline = this.dependencies.createPipeline({
         stream,
+        trace: this.trace,
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: this.input.maxFileBytes,
         onSegment: (blob, metadata) => this.queueSegment(
@@ -272,6 +288,9 @@ export class ShowPageVoiceDictation {
         pipeline.finish();
       }
     } catch (error) {
+      // Every take is logged once, however its start ended: refused, cancelled (released while
+      // its microphone was granted), or failed. A pipeline that started has logged it already.
+      this.trace.finish(error instanceof VoiceTranscriptionError && error.code === 'cancelled' ? 'cancelled' : 'failed');
       this.abortController.abort();
       this.realtime?.abort();
       this.stream?.getTracks().forEach((track) => track.stop());
@@ -284,6 +303,17 @@ export class ShowPageVoiceDictation {
   finish(): void {
     if (this.pipeline) this.endedAt ??= Date.now();
     this.pipeline?.finish();
+  }
+
+  /** This take's id, as its telemetry carries it. */
+  get id(): string {
+    return this.dictationId;
+  }
+
+  /** What the microphone delivered so far (lib/voiceCaptureTrace): no frames, muted by the
+   *  system, silence, or sound; `no_microphone` before it opened. */
+  captureClass(): VoiceCaptureClass {
+    return this.trace.captureClass();
   }
 
   /** The take's words were inserted or sent: its kept copy is deleted. */

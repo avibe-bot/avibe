@@ -1269,7 +1269,6 @@ class ModelHubTurnGateway:
                     supply_channel="hub",
                     attempt_observer=observe_attempt,
                     recovery_observer=terminalizer.update_recovery,
-                    turn_id=terminalizer.turn_id,
                     prepare_response=(
                         prepare_response if stream and protocol == "openai_responses"
                         and self.service.recovery.window_seconds > 0 else None

@@ -18,10 +18,7 @@ from .resolver import SourceRecoveryAnnotation, parse_model_hub_timestamp
 
 
 logger = logging.getLogger(__name__)
-RECOVERY_WINDOW_SECONDS = 1800.0
-# Rate limits and quota resets retain their shipped short admission window.
-LIMIT_RECOVERY_WINDOW_SECONDS = 120.0
-TRANSIENT_RECOVERY_REASONS = frozenset({"network", "server_error"})
+RECOVERY_WINDOW_SECONDS = 120.0
 # A wait must end with time left to attempt inside the window. Retry-After has one-second resolution, and the window
 # opens at the refusal, after the response its advice counts from: advice equal to the window lands a few
 # milliseconds inside it, and the attempt it was waited for would find the window closed. So a retry due within the
@@ -30,7 +27,7 @@ RECOVERY_ADMISSION_MARGIN_SECONDS = 1.0
 RECOVERY_EXHAUSTED_CODE = "model_hub_recovery_exhausted"
 RECOVERY_EXHAUSTED_MESSAGE = "Automatic recovery has ended. Try again or choose another model."
 RETRY_DELAYS = {
-    "network": (1, 2, 4, 8, 16, 30, 60),
+    "network": (1, 2, 4, 8, 16, 30),
     "server_error": (30, 60, 120),
     "rate_limited": (60, 120, 240, 300),
     "quota_exhausted": (300,),
@@ -90,12 +87,10 @@ class RecoveryRequest:
     policy: RecoveryPolicy
     started: float | None = None
     started_at: datetime | None = None
+    window_end: datetime | None = None
     attempt_count: int = 0
     source_id: str | None = None
     reason: str | None = None
-    # Once a transient hop can help, a shorter-budget peer cannot end its
-    # request clock. Each recovering hop still has its own class admission bound.
-    transient_recovery: bool = False
     observer: Callable[[dict | None], None] | None = None
     # A hard failure this request itself observed ends it with that verdict.
     non_retryable_failure: bool = False
@@ -106,42 +101,13 @@ class RecoveryRequest:
         if self.started is None:
             self.started = self.policy.monotonic()
             self.started_at = self.policy.now()
-
-    @property
-    def window_seconds(self) -> float:
-        if self.transient_recovery:
-            return self.policy.window_seconds
-        return min(self.policy.window_seconds, LIMIT_RECOVERY_WINDOW_SECONDS)
-
-    def observe_reason(self, reason: str | None) -> None:
-        self.reason = reason
-        self.transient_recovery |= reason in TRANSIENT_RECOVERY_REASONS
-
-    def remaining_for(self, reason: str | None) -> float:
-        window = self.policy.window_seconds
-        if reason not in TRANSIENT_RECOVERY_REASONS:
-            window = min(window, LIMIT_RECOVERY_WINDOW_SECONDS)
-        elapsed = 0.0 if self.started is None else self.policy.monotonic() - self.started
-        return max(0.0, window - elapsed)
-
-    def admits(self, cooldown_reason: str | None) -> bool:
-        # A healthy/new hop uses the request's window. A recovering hop must
-        # also fit its own class bound, even if a peer opened the long window.
-        return not self.expired and (
-            cooldown_reason is None or self.remaining_for(cooldown_reason) > 0
-        )
-
-    @property
-    def window_end(self) -> datetime | None:
-        if self.started_at is None:
-            return None
-        return self.started_at + timedelta(seconds=self.window_seconds)
+            self.window_end = self.started_at + timedelta(seconds=self.policy.window_seconds)
 
     @property
     def remaining(self) -> float:
         if self.started is None:
-            return self.window_seconds
-        return max(0.0, self.window_seconds - (self.policy.monotonic() - self.started))
+            return self.policy.window_seconds
+        return max(0.0, self.policy.window_seconds - (self.policy.monotonic() - self.started))
 
     @property
     def expired(self) -> bool:
@@ -304,10 +270,7 @@ class RecoveryPolicy:
         failures = state.failures + 1 if state is not None else 1
         delays = RETRY_DELAYS[reason]
         base, cap = delays[min(failures - 1, len(delays) - 1)], delays[-1]
-        # Keep jitter at the transient cap too: a fixed capped delay would
-        # synchronize independent instances for the rest of a long outage.
-        lower = base * 0.8 if reason in TRANSIENT_RECOVERY_REASONS and base == cap else base
-        local = self.jitter(lower, min(cap, base * 1.2))
+        local = self.jitter(base, min(cap, base * 1.2))
         now, mono = self.now(), self.monotonic()
         received = response_received_at
         if received is None or received.tzinfo is None:
@@ -356,14 +319,13 @@ class RecoveryPolicy:
         self.notify()
         return True
 
-    async def wait(self, delay: float, changed: asyncio.Event) -> str:
+    async def wait(self, delay: float, changed: asyncio.Event) -> None:
         """Wait without owning the configuration lock or a transport."""
 
         timer = asyncio.create_task(self.sleep(delay))
         notification = asyncio.create_task(changed.wait())
         try:
-            completed, _ = await asyncio.wait((timer, notification), return_when=asyncio.FIRST_COMPLETED)
-            return "notified" if notification in completed else "retry_due"
+            await asyncio.wait((timer, notification), return_when=asyncio.FIRST_COMPLETED)
         finally:
             timer.cancel()
             notification.cancel()

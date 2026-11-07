@@ -35,7 +35,6 @@ capability:
     - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
-    - tests/test_model_hub_long_recovery.py
     - tests/test_model_hub_retry_lifecycle.py
     - tests/test_model_hub_streamed_overload.py
     - tests/test_model_hub_streamed_overload_lifecycle.py
@@ -743,18 +742,6 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_policy.py::test_one_window_covers_all_fallback_passes_without_replaying_after_output
-  - id: MH-RETRY-LONG-001
-    name: A ten-minute transient outage completes within one request while Stop and the thirty-minute bound remain authoritative
-    status: covered
-    kind: recovery
-    layer: unit
-    test: tests/test_model_hub_long_recovery.py::test_long_outage_keeps_one_gateway_request_alive
-    related_tests:
-      - tests/test_model_hub_long_recovery.py::test_transient_jitter_still_varies_at_the_cap
-      - tests/test_model_hub_long_recovery.py::test_limits_and_terminal_failures_do_not_inherit_long_window
-      - tests/test_model_hub_long_recovery.py::test_short_budget_peer_cannot_starve_viable_transient_recovery
-      - tests/test_model_hub_long_recovery.py::test_long_attempt_cannot_admit_a_short_budget_peer_after_its_deadline
-      - tests/test_model_hub_long_recovery.py::test_expired_limit_cannot_shorten_a_subsequent_network_outage
   - id: MH-RETRY-OVERLOAD-001
     name: Exact Responses overload discards the first body and replays once with independent accounting
     status: covered

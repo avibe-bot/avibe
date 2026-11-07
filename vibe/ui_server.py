@@ -12830,6 +12830,110 @@ async def asr_transcribe():
     return jsonify(result)
 
 
+# A take's capture trace (`capture_trace`, ui/src/lib/voiceCaptureTrace.ts): states, counts and
+# times of each audio graph the take tried. Only these keys and values are kept; nothing that was
+# said, and no device label or id.
+_VOICE_MIC_RESULTS = {
+    "ok",
+    "NotAllowedError",
+    "NotFoundError",
+    "NotReadableError",
+    "OverconstrainedError",
+    "SecurityError",
+    "AbortError",
+    "InvalidStateError",
+    "TypeError",
+    "other",
+}
+_VOICE_CONTEXT_STATES = {"running", "suspended", "interrupted", "closed", "other"}
+_VOICE_TRACK_STATES = {"none", "ended", "live", "live_muted", "live_disabled", "live_muted_disabled"}
+_VOICE_AUDIO_SESSION_STATES = {"active", "interrupted", "inactive"}
+_VOICE_CAPTURE_ATTEMPT_ENUMS = {
+    "kind": {"initial", "start_rebuild", "context", "microphone"},
+    "mic": _VOICE_MIC_RESULTS,
+    "contextState": _VOICE_CONTEXT_STATES,
+    "resumedState": _VOICE_CONTEXT_STATES,
+    "module": {"prewarmed", "ok", "failed"},
+    "trackStart": _VOICE_TRACK_STATES,
+    "trackEnd": _VOICE_TRACK_STATES,
+    "end": {"rendered", "no_frames", "not_running", "stopped", "error"},
+}
+_VOICE_CAPTURE_ATTEMPT_INTS = {
+    "atMs",
+    "micMs",
+    "resumeMs",
+    "sampleRate",
+    "moduleMs",
+    "chunks",
+    "firstFrameMs",
+    "levels",
+    "clockAdvanceMs",
+    "renderCalls",
+    "emptyInputs",
+}
+_VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
+_VOICE_CAPTURE_MAX_ATTEMPTS = 6
+_VOICE_CAPTURE_MAX_TRACK_EVENTS = 24
+
+
+def _voice_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10**12
+
+
+def _sanitize_voice_capture_lists(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """The trace's attempts and microphone events: only their known keys; anything else in them
+    is a malformed trace (returned as the invalid field's name)."""
+    sanitized: dict[str, Any] = {}
+    if "attempts" in payload:
+        attempts = payload["attempts"]
+        if not isinstance(attempts, list) or len(attempts) > _VOICE_CAPTURE_MAX_ATTEMPTS:
+            return {}, "attempts"
+        kept = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                return {}, "attempts"
+            entry: dict[str, Any] = {}
+            for key, allowed in _VOICE_CAPTURE_ATTEMPT_ENUMS.items():
+                if key not in attempt:
+                    continue
+                if not isinstance(attempt[key], str) or attempt[key] not in allowed:
+                    return {}, "attempts"
+                entry[key] = attempt[key]
+            for key in _VOICE_CAPTURE_ATTEMPT_INTS:
+                if key not in attempt:
+                    continue
+                if not _voice_count(attempt[key]):
+                    return {}, "attempts"
+                entry[key] = attempt[key]
+            kept.append(entry)
+        sanitized["attempts"] = kept
+    if "trackEvents" in payload:
+        events = payload["trackEvents"]
+        if not isinstance(events, list) or len(events) > _VOICE_CAPTURE_MAX_TRACK_EVENTS:
+            return {}, "trackEvents"
+        kept_events = []
+        for event in events:
+            if (
+                not isinstance(event, list)
+                or len(event) != 2
+                or event[0] not in {"mute", "unmute", "ended"}
+                or not _voice_count(event[1])
+            ):
+                return {}, "trackEvents"
+            kept_events.append([event[0], event[1]])
+        sanitized["trackEvents"] = kept_events
+    if "recorderTypes" in payload:
+        types = payload["recorderTypes"]
+        if (
+            not isinstance(types, list)
+            or len(types) > len(_VOICE_RECORDER_TYPES)
+            or not all(isinstance(value, str) and value in _VOICE_RECORDER_TYPES for value in types)
+        ):
+            return {}, "recorderTypes"
+        sanitized["recorderTypes"] = list(types)
+    return sanitized, None
+
+
 @app.route("/api/asr/telemetry", methods=["POST"])
 def asr_telemetry():
     """Persist privacy-safe browser voice metrics in the normal service log."""
@@ -12847,6 +12951,8 @@ def asr_telemetry():
         # A take the browser's silence gate kept away from recognition: only its length, how
         # many of its loudness readings reached the gate, and its loudest reading.
         "dictation_gated",
+        # What a take's microphone and audio graphs did, stage by stage.
+        "capture_trace",
     }:
         return jsonify({"error": "invalid_event"}), 400
 
@@ -12860,10 +12966,30 @@ def asr_telemetry():
             "timeout",
             "too_large",
             "unavailable",
+            # How a press-and-hold ended.
+            "sent",
+            "too_short",
+            "no_frames",
+            "muted",
+            "denied",
+            "asking",
+            "kept",
+            "interrupted",
         },
         "path": {"cloud", "local"},
         "providerStage": {"token", "upload", "refresh", "response", "finalization"},
         "browserFamily": {"chrome", "firefox", "edge", "safari", "other", "unknown"},
+        "entry": {"tap", "hold", "show_page"},
+        "captureClass": {"no_microphone", "no_frames", "muted", "silence", "sound"},
+        "interruptReason": {"dropped", "failed", "system", "send-failed"},
+        "surface": {"app_shell", "standalone", "mobile_browser", "desktop_browser"},
+        "stop": {"finish", "hidden", "abort", "error"},
+        "mic": _VOICE_MIC_RESULTS,
+        "prewarm": {"reused", "none"},
+        "prewarmDrop": {"hidden", "state", "constructor", "module_failed"},
+        "audioSession": {"auto", "playback", "transient", "transient-solo", "ambient", "play-and-record"},
+        "audioSessionState": _VOICE_AUDIO_SESSION_STATES,
+        "audioSessionStateEnd": _VOICE_AUDIO_SESSION_STATES,
     }
     outcome = payload.get("outcome")
     if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
@@ -12915,6 +13041,14 @@ def asr_telemetry():
         "firstPreviewMs",
         "stopToFinalMs",
         "voicedReadings",
+        "micMs",
+        "totalMs",
+        "pageAgeMs",
+        "hiddenCount",
+        "sinceHiddenMs",
+        "prewarmAgeMs",
+        "chunks",
+        "levels",
     }
     for key in integer_fields:
         if key not in payload:
@@ -12953,6 +13087,11 @@ def asr_telemetry():
         if not isinstance(payload["realtime"], bool):
             return jsonify({"error": "invalid_field", "field": "realtime"}), 400
         sanitized["realtime"] = payload["realtime"]
+
+    capture_lists, invalid = _sanitize_voice_capture_lists(payload)
+    if invalid:
+        return jsonify({"error": "invalid_field", "field": invalid}), 400
+    sanitized.update(capture_lists)
 
     logger.info(
         "voice_reliability %s",
