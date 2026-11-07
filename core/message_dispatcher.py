@@ -33,8 +33,8 @@ from core.message_context import TERMINAL_COMMIT_KEY, resolve_turn_sink_key
 from core.message_mirror import (
     agent_message_exists,
     delivered_committed_row,
-    persist_agent_message,
-    persist_silent_terminal,
+    persist_agent_message_async as persist_agent_message,
+    persist_silent_terminal_async as persist_silent_terminal,
 )
 from core.presentation import (
     DefaultPresentationPolicy,
@@ -3182,7 +3182,7 @@ class ConsolidatedMessageDispatcher:
                     and self._turn_release_settlement(output_semantics)
                     != SETTLED_BY_STOPPED
                 ):
-                    persist_silent_terminal(
+                    await persist_silent_terminal(
                         context,
                         is_error=is_error,
                         settled_by=self._turn_release_settlement(output_semantics),
@@ -3449,7 +3449,7 @@ class ConsolidatedMessageDispatcher:
                             ),
                             keep_file_links=True,
                         )
-                        persisted_output = persist_agent_message(
+                        persisted_output = await persist_agent_message(
                             target_context,
                             communication_type,
                             background_enhanced.text or persist_text,
@@ -3469,7 +3469,7 @@ class ConsolidatedMessageDispatcher:
                             **background_reply,
                         )
                     else:
-                        persisted_output = persist_agent_message(
+                        persisted_output = await persist_agent_message(
                             target_context,
                             communication_type,
                             recorded_text,
@@ -3482,7 +3482,7 @@ class ConsolidatedMessageDispatcher:
                             **background_reply,
                         )
                 else:
-                    persisted_output = persist_agent_message(
+                    persisted_output = await persist_agent_message(
                         target_context,
                         canonical_type,
                         recorded_text,
@@ -3586,7 +3586,7 @@ class ConsolidatedMessageDispatcher:
             # IM send isn't stored as if the user received it.
             if persists_without_delivery or message_id is not None:
                 persist_errors: list[BaseException] = []
-                persisted_notify = persist_agent_message(
+                persisted_notify = await persist_agent_message(
                     target_context,
                     "notify",
                     text,
@@ -3890,7 +3890,7 @@ class ConsolidatedMessageDispatcher:
                             ),
                             keep_file_links=True,
                         )
-                        persisted_output = persist_agent_message(
+                        persisted_output = await persist_agent_message(
                             target_context,
                             communication_type,
                             avibe_enhanced.text or persist_text,
@@ -3908,7 +3908,7 @@ class ConsolidatedMessageDispatcher:
                             **delivered_reply,
                         )
                     else:
-                        persisted_output = persist_agent_message(
+                        persisted_output = await persist_agent_message(
                             target_context,
                             communication_type,
                             persisted_result_text,
@@ -4134,7 +4134,7 @@ class ConsolidatedMessageDispatcher:
         # duplicates the result.
         interim_row = None
         if decision.transcript and narration is not None:
-            interim_row = persist_agent_message(
+            interim_row = await persist_agent_message(
                 target_context,
                 "interim",
                 narration.text,
@@ -4146,7 +4146,7 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         # Only a narration whose bubble was stored is left out of Activity.
-        persist_agent_message(
+        await persist_agent_message(
             target_context,
             canonical_type,
             persist_text,

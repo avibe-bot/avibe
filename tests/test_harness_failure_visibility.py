@@ -3875,6 +3875,8 @@ def _drain_service(tmp_path: Path, controller, sqlite, requests):
     # a request, so the pass is a no-op — but the attribute has to exist, because an
     # AttributeError inside the tick aborts every LATER pass in it.
     service._inflight_executions = {}
+    service._pending_terminal_writes = {}
+    service._pending_terminal_snapshot = ()
     service.controller = controller
     service._owns_service_instance = lambda: True
     service.validate_platform = lambda platform: None
@@ -4311,21 +4313,18 @@ def test_a_wedged_delivery_times_out_into_one_durably_retryable_claim(
     service_a = _drain_service(tmp_path, controller_a, sqlite_a, requests_a)
     service_b = _drain_service(tmp_path, controller_b, sqlite_b, requests_b)
 
-    # ``raising=False`` is load-bearing rather than defensive: this test has to be
-    # runnable against the tree where no such bound exists, and the missing constant
-    # IS the defect. With ``raising=True`` the red would be a fixture error.
-    monkeypatch.setattr(
-        failure_notices, "NOTICE_DELIVERY_TIMEOUT_SECONDS", 0.05, raising=False
-    )
-
     run_a = sqlite_a.list_owed_failure_notices()[0]
     assert run_a["id"] == run_id
 
     async def scenario() -> None:
         armed_from = datetime.now(timezone.utc)
-        # The outer bound is what makes the red a clean failure instead of a hung
-        # pytest: against an unbounded await this pass never returns at all.
-        await asyncio.wait_for(service_a._deliver_one_failure_notice(sqlite_a, run_a), 5.0)
+        # The outer bound makes an unbounded delivery fail rather than hang.
+        # Keep the short deadline local to the wedged transport, not healthy
+        # SQLite worker scheduling under load. raising=False preserves the
+        # intended red against the version with no delivery deadline.
+        with monkeypatch.context() as deadline:
+            deadline.setattr(failure_notices, "NOTICE_DELIVERY_TIMEOUT_SECONDS", 0.05, raising=False)
+            await asyncio.wait_for(service_a._deliver_one_failure_notice(sqlite_a, run_a), 5.0)
 
         assert entered.is_set(), "the wedge must have reached the transport"
         assert cancelled == ["A"], (
@@ -4359,7 +4358,7 @@ def test_a_wedged_delivery_times_out_into_one_durably_retryable_claim(
         assert [item["id"] for item in owed] == [run_id], (
             f"a timed-out claim must return the row to the eligible set: {owed}"
         )
-        await service_b._deliver_one_failure_notice(sqlite_b, owed[0])
+        await asyncio.wait_for(service_b._deliver_one_failure_notice(sqlite_b, owed[0]), 5.0)
 
     asyncio.run(scenario())
 

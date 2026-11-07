@@ -569,12 +569,17 @@ def run_once(
     *,
     retention_days: int,
     force: bool = False,
-    compact: bool = True,
+    compact: bool = False,
     db_path: Optional[Path] = None,
     now: Optional[datetime] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, Any]:
-    """One full maintenance pass: gate -> lease -> batched delete -> marker -> compact."""
+    """One maintenance pass: gate -> lease -> batched delete -> marker.
+
+    Explicit compaction callers must hold the runtime's offline maintenance
+    boundary through this call and engine disposal; automatic retention never
+    rewrites the database.
+    """
     moment = now or _utc_now()
     with engine.connect() as conn:
         last_run = get_last_run(conn)

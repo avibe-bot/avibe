@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -1050,7 +1051,7 @@ def _process_cwd(proc) -> str | None:
         return None
 
 
-def _process_home_matches_current(proc) -> bool | None:
+def _process_home_matches_current(proc, *, require_marker: bool = True) -> bool | None:
     current_home = _safe_resolve_path(paths.get_vibe_remote_dir())
     if current_home is None:
         return None
@@ -1067,7 +1068,7 @@ def _process_home_matches_current(proc) -> bool | None:
         "true",
         "yes",
     }
-    if not has_avibe_marker:
+    if require_marker and not has_avibe_marker:
         return None
     home = env.get("HOME")
     if not home:
@@ -1442,14 +1443,19 @@ def spawn_background(
         if start_info is not None:
             start_info.capture(process.pid, reused=False)
 
-    return _spawn_owned_process(
-        args,
-        stdout_name,
-        stderr_name,
-        env,
-        hand_over=hand_over,
-        withdraw=lambda pid: _forget_pid_record(pid_path, pid),
-    ).pid
+    # UI reload and ordinary launches share this primitive. Publish the child
+    # under the same gate its entry point uses; never wait for readiness here,
+    # since the child must take that gate before it can touch runtime state.
+    gate = ui_start_exclusion() if Path(pid_path) == paths.get_runtime_ui_pid_path() else nullcontext()
+    with gate:
+        return _spawn_owned_process(
+            args,
+            stdout_name,
+            stderr_name,
+            env,
+            hand_over=hand_over,
+            withdraw=lambda pid: _forget_pid_record(pid_path, pid),
+        ).pid
 
 
 def spawn_service_background_process(
@@ -2585,6 +2591,99 @@ def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
         return True
     command = get_process_command(pid)
     return command is not None and not _is_ui_server_command(command)
+
+
+@contextmanager
+def ui_start_exclusion(*, timeout_seconds: float | None = None):
+    """Serialize UI admission with offline maintenance, not the UI's lifetime."""
+    from storage.lock import MigrationFileLock
+
+    with MigrationFileLock(paths.get_runtime_dir() / "ui-start.lock", timeout_seconds=timeout_seconds):
+        yield
+
+
+def register_ui_start() -> None:
+    """Make direct, container and reload entries visible before accessing state.
+
+    The gate closes the gap between an offline check and a new UI becoming
+    visible. It is released before serving: a reload may start its successor
+    before the old UI exits, and the service may start alongside the UI.
+    """
+    with ui_start_exclusion():
+        pid_path = paths.get_runtime_ui_pid_path()
+        current_pid = os.getpid()
+        recorded_pid = _read_pid_file(pid_path)
+        # A launcher/reload already published this child under the same gate.
+        # A separate direct entry must not steal a live owner's record before
+        # it binds: a failed duplicate would otherwise leave that UI unowned.
+        if recorded_pid != current_pid and not recorded_ui_is_gone(pid_path):
+            raise RuntimeError(
+                f"Avibe Web UI is already running or starting (pid={recorded_pid}); refusing duplicate startup"
+            )
+        write_atomic(pid_path, str(current_pid))
+
+
+class OfflineMaintenanceUnavailable(RuntimeError):
+    def __init__(self, reason: str):
+        super().__init__(
+            f"Offline compaction refused: {reason}. --compact requires both the Avibe service and Web UI "
+            "to be stopped. Run 'vibe stop' explicitly from a separate terminal, then retry; "
+            "omit --compact to run retention online. No retention was performed."
+        )
+
+
+def _ui_process_may_be_running() -> bool:
+    pid_path = paths.get_runtime_ui_pid_path()
+    if pid_path.exists() and _read_pid_file(pid_path) is None:
+        return True
+    if not recorded_ui_is_gone():
+        return True
+    # Older/direct entries may have no pidfile, and reload can replace the
+    # record while the old UI is still serving. A home-scoped scan covers both.
+    # A known UI whose home cannot be read cannot establish safe absence.
+    for proc in psutil.process_iter(attrs=["pid", "cmdline"]):
+        command = _process_command_from_info(proc)
+        if not command or not _is_ui_server_command(command):
+            continue
+        if _process_home_matches_current(proc, require_marker=False) is not False and pid_alive(proc.pid):
+            return True
+    return False
+
+
+@contextmanager
+def offline_maintenance():
+    """Keep this home offline until the caller's last database handle is closed.
+
+    Lock order: UI admission, then the *raw* service lock, then database work.
+    Do not claim service identity or rewrite its pid/lock records. Holding the
+    existing service lock also excludes direct main.py launches; the UI gate
+    covers entries that do not pass through start_ui(). Neither stops anything.
+    """
+    from storage.lock import MigrationLockTimeout
+
+    with ExitStack() as held:
+        try:
+            held.enter_context(ui_start_exclusion(timeout_seconds=0))
+            lock_path = get_service_lock_path()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = held.enter_context(lock_path.open("a+", encoding="utf-8"))
+            if not _take_service_lock(lock_file):
+                raise OfflineMaintenanceUnavailable("the service is running or starting")
+            held.callback(_unlock_file, lock_file)
+        except MigrationLockTimeout as exc:
+            raise OfflineMaintenanceUnavailable("UI startup or another maintenance operation is active") from exc
+        except OSError as exc:
+            raise OfflineMaintenanceUnavailable("runtime exclusion could not be established") from exc
+        try:
+            if extra_service_process_pids(include_unverified=True):
+                raise OfflineMaintenanceUnavailable("a service process is still live")
+            if _ui_process_may_be_running():
+                raise OfflineMaintenanceUnavailable("the Web UI is running or its absence cannot be verified")
+        except (OSError, psutil.Error) as exc:
+            raise OfflineMaintenanceUnavailable("runtime absence could not be verified") from exc
+        # Body failures are not admission failures: retention may already have
+        # committed batches, so never relabel them as "No retention performed".
+        yield
 
 
 def resolve_localhost_family() -> str:

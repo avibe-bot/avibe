@@ -1893,7 +1893,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        with patch("core.message_mirror.mirror_harness_inbound") as mirror:
+        with patch("core.message_mirror.mirror_harness_inbound_async") as mirror:
             await handler.handle_scheduled_message(context, "hello")
 
         mirror.assert_not_called()

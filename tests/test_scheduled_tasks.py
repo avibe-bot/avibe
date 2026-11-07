@@ -10944,7 +10944,10 @@ def test_hfr_477_retired_manual_escalation_refuses_lost_authority(
                     mode=RECLAIM_PAUSE,
                     reason="the bound session was replaced",
                 )
-            assert summary["paused"] == 1
+            # A retired one-shot is already disabled: reclaim changes its
+            # binding snapshot, not the pause count. Prove that write landed.
+            assert summary["paused"] == 0
+            assert summary["snapshotted"] == 1
         else:
             assert backend.cancel_run(manual.id)
         return original_enqueue(backend, definition_id, **kwargs)
@@ -20425,20 +20428,44 @@ def test_a_refused_result_stamp_queues_no_escalation_and_leaves_a_notice(
     )
     service = _scheduled_service_with_ledger(tmp_path, store, [])
 
-    race = _commit_reclaim_after(
-        store._sqlite.engine,
-        session_id,
-        read=_DEFINITION_EXISTS_SELECT,
-        mode=RECLAIM_DELETE,
-        reason="the session was archived",
-    )
+    import storage.background as background
+    from storage.session_reclaim import reclaim_bound_definitions
 
+    race = {"fired": 0}
+    original_enqueue = background.enqueue_run_in_connection
+    original_retry = background.retry_sqlite_write
+    fail_first = True
+
+    def enqueue_then_busy(conn, values):
+        nonlocal fail_first
+        original_enqueue(conn, values)
+        if fail_first and values.get("run_type") == "task_escalation":
+            fail_first = False
+            raise sqlite3.OperationalError("database is locked")
+
+    def retry_after_archive(operation):
+        def attempt():
+            try:
+                return operation()
+            except sqlite3.OperationalError:
+                # engine.begin has rolled back both the stamp and outbox here.
+                # A competing archive can now genuinely commit, unlike trying
+                # a second writer from inside an already-reserved transaction.
+                with store._sqlite.engine.begin() as conn:
+                    summary = reclaim_bound_definitions(
+                        conn, session_id, mode=RECLAIM_DELETE,
+                        reason="the session was archived",
+                    )
+                assert summary["deleted"] == 1
+                race["fired"] += 1
+                raise
+        return original_retry(attempt)
+
+    monkeypatch.setattr(background, "enqueue_run_in_connection", enqueue_then_busy)
+    monkeypatch.setattr(background, "retry_sqlite_write", retry_after_archive)
     run = _fire_command_task(service, task)
 
-    assert race["fired"] == 1, (
-        "the competing archive never landed inside the write window, so this test "
-        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
-    )
+    assert race["fired"] == 1, "the competing archive did not commit between retry attempts"
     assert run["status"] == "failed"
     assert _escalation_runs(store) == [], (
         "an escalation survived a refused stamp: a durable turn nothing authorises"
@@ -21128,3 +21155,474 @@ def test_stop_waits_for_the_settlement_of_a_claim_cancelled_just_before_it(tmp_p
         return request_store.get_run(claimed.id)["status"]
 
     assert asyncio.run(_go()) == "queued", "stop returned before the cancelled claim was given back to the queue"
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_command_outcome_survives_exhausted_definition_projection_and_reconciles(
+    tmp_path: Path, monkeypatch, exit_code: int, caplog
+) -> None:
+    """A result-stamp error used to discard the already-completed command output."""
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="test-only", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    original_stamp = store.mark_task_result
+    fail_projection = True
+    spawns: list[str] = []
+
+    def stamp(*args, **kwargs):
+        if fail_projection:
+            raise sqlite3.OperationalError("database is locked")
+        return original_stamp(*args, **kwargs)
+
+    async def completed_command(**kwargs):
+        spawns.append(kwargs["shell_command"])
+        return SimpleNamespace(exit_code=exit_code, stdout="completed output", stderr="command detail", timed_out=False)
+
+    monkeypatch.setattr(store, "mark_task_result", stamp)
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", completed_command)
+    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    async def run():
+        nonlocal fail_projection
+        service._spawn_execution(claimed, f"task:{task.id}")
+        await service._inflight_executions[claimed.id]
+        await asyncio.sleep(0)  # land the execution's done callback
+        row = service.request_store.get_run(claimed.id)
+        assert row["status"] == "running"
+        intent = service._pending_terminal_writes[claimed.id]
+        assert intent.outcome["exit_code"] == exit_code
+        assert intent.outcome["stdout"] == "completed output"
+        assert intent.outcome["stderr"] == "command detail"
+        assert "database is locked" in intent.outcome["definition_projection_error"]
+        assert claimed.id in service._live_claimed_run_ids
+        assert not service._release_leaked_session_locks()
+        handler = scheduled_tasks._ScheduledRuntimeWorkHandler(service, RuntimeWorkLane.REQUESTS)
+        items, _ = handler.scan(limit=32, occupied=frozenset(), cursor=None)
+        pending = next(item for item in items if item.observation[0] == "terminal")
+        assert pending.partition_key == f"task:{task.id}"
+        fail_projection = False
+        assert await handler.process(pending)
+        assert await handler.process(pending)  # a stale observation cannot replay anything
+        row = service.request_store.get_run(claimed.id)
+        assert row["exit_code"] == exit_code
+        assert row["stdout"] == "completed output"
+        assert row["stderr"] == "command detail"
+        assert row["status"] == ("succeeded" if exit_code == 0 else "failed")
+        assert "database is locked" in row["metadata"]["definition_projection_error"]
+        assert claimed.id not in service._live_claimed_run_ids
+        assert f"task:{task.id}" not in service._inflight_sessions
+        assert not service._pending_terminal_snapshot
+
+    asyncio.run(run())
+    assert spawns == ["test-only"]
+    assert store.get_task(task.id).last_exit_code == exit_code
+    assert "retaining outcome for reconciliation" in caplog.text
+
+
+def test_exhausted_run_terminal_write_reconciles_without_spawning_again(tmp_path: Path, monkeypatch) -> None:
+    """The current owner retains terminal facts; this is not an orphan re-execution."""
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="test-only", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    backend = service.request_store.sqlite_backend
+    original_settle = backend.settle_run_terminal
+    fail_terminal = True
+    calls: list[str] = []
+
+    def settle(*args, **kwargs):
+        if fail_terminal:
+            raise sqlite3.OperationalError("database is locked")
+        return original_settle(*args, **kwargs)
+
+    async def completed_command(**kwargs):
+        calls.append("spawn")
+        return SimpleNamespace(exit_code=0, stdout="keep me", stderr="", timed_out=False)
+
+    monkeypatch.setattr(backend, "settle_run_terminal", settle)
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", completed_command)
+    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    async def run():
+        nonlocal fail_terminal
+        service._spawn_execution(claimed, f"task:{task.id}")
+        await service._inflight_executions[claimed.id]
+        await asyncio.sleep(0)
+        assert service.request_store.get_run(claimed.id)["status"] == "running"
+        intent = service._pending_terminal_writes[claimed.id]
+        assert intent.outcome["stdout"] == "keep me"
+        fail_terminal = False
+        assert await service._process_pending_terminal_write(intent)
+        row = service.request_store.get_run(claimed.id)
+        assert row["status"] == "succeeded" and row["stdout"] == "keep me"
+        assert not service._pending_terminal_snapshot
+        assert claimed.id not in service._live_claimed_run_ids
+
+    asyncio.run(run())
+    assert calls == ["spawn"]
+
+
+@pytest.mark.parametrize("owner", ["definition", "outbox", "terminal"])
+def test_terminal_transaction_retries_past_sqlite_timeout_off_loop(
+    tmp_path: Path, monkeypatch, owner: str, caplog
+) -> None:
+    """The ordinary 5s timeout is not the outcome of an already-finished command."""
+    db_path = _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="not-executed", cwd=str(tmp_path))
+    backend = store.sqlite_backend
+    expect = store._read_state(task)
+    task.last_exit_code = 7
+    parent = _escalation_run_payload(task, run_id="retry-parent")
+    parent.update(request_type="scheduled", status="running")
+    backend.enqueue_run(parent)
+    if owner == "definition":
+        operation = lambda: backend.upsert_scheduled_task(task.to_dict(), expect=expect, retry_busy=True)
+    elif owner == "outbox":
+        operation = lambda: backend.upsert_scheduled_task_with_queued_run(
+            task.to_dict(), expect=expect, run_payload=_escalation_run_payload(task, run_id="retry-escalation")
+        )
+    else:
+        operation = lambda: backend.settle_run_terminal(
+            "retry-parent", terminal_status="succeeded", exit_code=7, stdout="preserve", retry_busy=True
+        )
+    from sqlalchemy import event
+    from storage.db import _is_sqlite_busy
+
+    first_write, first_busy = threading.Event(), threading.Event()
+    statements: list[tuple[float, str]] = []
+
+    def before_statement(_conn, _cursor, statement, _parameters, _context, _many):
+        statements.append((time.monotonic(), statement))
+        if statement.lstrip().upper().startswith(("BEGIN IMMEDIATE", "UPDATE", "INSERT")):
+            first_write.set()
+
+    def on_error(error):
+        if _is_sqlite_busy(error.original_exception):
+            first_busy.set()
+
+    event.listen(backend.engine, "before_cursor_execute", before_statement)
+    event.listen(backend.engine, "handle_error", on_error)
+    locked, release = threading.Event(), threading.Event()
+
+    def holder():
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            locked.set()
+            assert release.wait(20), "test never released its independent writer"
+            conn.rollback()
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert locked.wait(5)
+    beats: list[float] = []
+
+    async def run():
+        async def heartbeat():
+            while not release.is_set():
+                beats.append(time.monotonic())
+                await asyncio.sleep(0.02)
+
+        pulse = asyncio.create_task(heartbeat())
+        work = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            assert await asyncio.to_thread(first_write.wait, 5), statements
+            # Keep the independent writer until SQLite actually returns BUSY:
+            # its 5000ms handler budget need not expire at exactly 5s wall time.
+            assert await asyncio.to_thread(first_busy.wait, 12), statements
+            release.set()
+            assert await work
+        finally:
+            release.set()
+            await pulse
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+        thread.join(5)
+        event.remove(backend.engine, "before_cursor_execute", before_statement)
+        event.remove(backend.engine, "handle_error", on_error)
+    assert len(beats) > 100
+    assert "SQLite writer busy; retrying" in caplog.text, statements
+    if owner == "terminal":
+        row = backend.get_run("retry-parent")
+        assert row["status"] == "succeeded" and row["stdout"] == "preserve"
+    else:
+        assert backend.get_scheduled_task(task.id)["last_exit_code"] == 7
+        if owner == "outbox":
+            assert len([row for row in backend.list_runs() if row["id"] == "retry-escalation"]) == 1
+
+
+@pytest.mark.parametrize("failures", [2, 3])
+def test_task_outbox_retry_rolls_back_whole_attempt_and_publishes_only_commit(
+    tmp_path: Path, monkeypatch, failures: int
+) -> None:
+    """A BUSY after enqueue must not publish or retain either half of the stamp."""
+    import storage.background as background
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="not-executed", cwd=str(tmp_path))
+    backend = store.sqlite_backend
+    expect = store._read_state(task)
+    task.last_exit_code = 7
+    original_enqueue = background.enqueue_run_in_connection
+    attempts: list[int] = []
+    publications: list[dict] = []
+
+    def enqueue(conn, values):
+        original_enqueue(conn, values)
+        attempts.append(1)
+        if len(attempts) <= failures:
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(background, "enqueue_run_in_connection", enqueue)
+    monkeypatch.setattr(background, "_publish_run_rows_updated", lambda rows: publications.extend(rows))
+
+    def write():
+        return backend.upsert_scheduled_task_with_queued_run(
+            task.to_dict(), expect=expect, run_payload=_escalation_run_payload(task, run_id="stable-escalation")
+        )
+
+    if failures == 3:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            write()
+        assert backend.get_scheduled_task(task.id)["last_exit_code"] is None
+        assert backend.get_run("stable-escalation") is None
+        assert publications == []
+    else:
+        assert write()
+        assert backend.get_scheduled_task(task.id)["last_exit_code"] == 7
+        assert [row["id"] for row in publications] == ["stable-escalation"]
+    assert len(attempts) == 3
+
+
+@pytest.mark.parametrize("cancel_before_retry", [False, True])
+def test_failed_command_stamp_retains_exact_outbox_without_replaying_committed_stage(
+    tmp_path: Path, monkeypatch, cancel_before_retry: bool
+) -> None:
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="retry-escalation")
+    task = _escalation_command_task(store, tmp_path, shell_command="test-only", session_id=session_id)
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    stamp = store.mark_task_result
+    settle = service.request_store.sqlite_backend.settle_run_terminal
+    fail_stamp, fail_terminal = True, True
+    stamps: list[str] = []
+    spawns: list[str] = []
+
+    def stamped(*args, **kwargs):
+        stamps.append("stamp")
+        if fail_stamp:
+            raise sqlite3.OperationalError("database is locked")
+        return stamp(*args, **kwargs)
+
+    def terminal(*args, **kwargs):
+        if fail_terminal:
+            raise sqlite3.OperationalError("database is locked")
+        return settle(*args, **kwargs)
+
+    async def command(**kwargs):
+        spawns.append("spawn")
+        return SimpleNamespace(exit_code=7, stdout="kept output", stderr="failure", timed_out=False)
+
+    monkeypatch.setattr(store, "mark_task_result", stamped)
+    monkeypatch.setattr(service.request_store.sqlite_backend, "settle_run_terminal", terminal)
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", command)
+    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    async def run():
+        nonlocal fail_stamp, fail_terminal
+        service._spawn_execution(claimed, f"task:{task.id}")
+        await service._inflight_executions[claimed.id]
+        await asyncio.sleep(0)
+        intent = service._pending_terminal_writes[claimed.id]
+        assert intent.definition_stamp["queued_run"]["parent_run_id"] == claimed.id
+        assert not _escalation_runs(store)
+        if cancel_before_retry:
+            assert service.request_store.cancel_run(claimed.id)
+        fail_stamp = False
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            await service._process_pending_terminal_write(intent)
+        landed = service._pending_terminal_writes[claimed.id]
+        assert landed.definition_stamp is None
+        assert stamps == ["stamp", "stamp"]
+        assert len(_escalation_runs(store)) == (0 if cancel_before_retry else 1)
+        fail_terminal = False
+        assert await service._process_pending_terminal_write(landed)
+        assert await service._process_pending_terminal_write(intent)  # stale work is inert
+        row = service.request_store.get_run(claimed.id)
+        assert row["status"] == ("canceled" if cancel_before_retry else "failed")
+        assert row["stdout"] == "kept output" and row["exit_code"] == 7
+        if not cancel_before_retry:
+            assert row["metadata"]["escalation_run_id"] == _escalation_runs(store)[0]["id"]
+            assert store.sqlite_backend.owed_failure_notice(claimed.id) is None
+        assert not service._pending_terminal_writes
+
+    asyncio.run(run())
+    assert spawns == ["spawn"]
+    assert len(stamps) == (3 if cancel_before_retry else 2)  # Stop also projects its canonical verdict
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+@pytest.mark.parametrize("cancel_during_completion", [False, True])
+def test_nonbusy_command_projection_preserves_outcome_without_retaining_claim(
+    tmp_path: Path, monkeypatch, exit_code, cancel_during_completion,
+):
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = _add_command_task(store, shell_command="not-executed", cwd=str(tmp_path))
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    monkeypatch.setattr(store, "mark_task_result", Mock(side_effect=ValueError("invalid projection")))
+    async def command(**kwargs):
+        if cancel_during_completion:
+            service.request_store.cancel_run(claimed.id)
+        return SimpleNamespace(exit_code=exit_code, stdout="actual output", stderr="", timed_out=False)
+
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", command)
+    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = service.request_store.claim(queued.id)
+
+    async def run():
+        service._spawn_execution(claimed, f"task:{task.id}")
+        await service._inflight_executions[claimed.id]
+        await asyncio.sleep(0)
+        assert not service._pending_terminal_writes
+        assert claimed.id not in service._live_claimed_run_ids
+        assert f"task:{task.id}" not in service._inflight_sessions
+
+    asyncio.run(run())
+    row = service.request_store.get_run(claimed.id)
+    # Existing settlement policy lets a natural success win a mere Stop flag;
+    # the failed/canceled projection branch is exercised by the nonzero case.
+    expected_status = "canceled" if cancel_during_completion and exit_code != 0 else ("succeeded" if exit_code == 0 else "failed")
+    assert row["status"] == expected_status
+    assert row["exit_code"] == exit_code and row["stdout"] == "actual output"
+    assert "invalid projection" in row["metadata"]["definition_projection_error"]
+
+
+def test_postcommit_escalation_reload_error_never_requeues_committed_turn(tmp_path: Path, monkeypatch):
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="committed-escalation")
+    task = _escalation_command_task(
+        store, tmp_path, shell_command="not-executed", schedule_type="at", session_id=session_id, agent_name="codex",
+    )
+    assert store.sqlite_backend.retire_missed_one_shot(
+        task.id, expected_run_at=str(task.run_at), expected_timezone=task.timezone,
+        expected_updated_at=task.updated_at, retired_at="2026-07-28T09:00:01+00:00",
+    )
+    store.load()
+    requests = TaskExecutionStore()
+    manual = requests.enqueue_task_run(task.id, source_kind="cli", task=store.get_task(task.id))
+    claimed = requests.claim(manual.id)
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    original_enqueue = store.sqlite_backend.enqueue_task_escalation_without_definition_write
+    original_load = store.load
+    armed = False
+    writes: list[bool] = []
+
+    def enqueue(*args, **kwargs):
+        nonlocal armed
+        result = original_enqueue(*args, **kwargs)
+        writes.append(result)
+        armed = True
+        return result
+
+    def load():
+        nonlocal armed
+        if armed:
+            armed = False
+            raise sqlite3.OperationalError("database is locked")
+        return original_load()
+
+    monkeypatch.setattr(store.sqlite_backend, "enqueue_task_escalation_without_definition_write", enqueue)
+    monkeypatch.setattr(store, "load", load)
+    monkeypatch.setattr(scheduled_tasks, "run_supervised_command", AsyncMock(
+        return_value=SimpleNamespace(exit_code=7, stdout="completed", stderr="failure", timed_out=False)
+    ))
+
+    async def run():
+        service._spawn_execution(claimed, service._execution_lock_key(claimed))
+        await service._inflight_executions[claimed.id]
+        await asyncio.sleep(0)
+        assert not service._pending_terminal_writes
+        escalations = _escalation_runs(store)
+        assert len(escalations) == 1
+        escalation = escalations[0]
+        store.sqlite_backend.update_run_status(escalation["id"], status="succeeded", updated_at=scheduled_tasks._utc_now_iso())
+        handler = scheduled_tasks._ScheduledRuntimeWorkHandler(service, RuntimeWorkLane.REQUESTS)
+        items, _ = handler.scan(limit=32, occupied=frozenset(), cursor=None)
+        assert not any(item.observation[0] == "terminal" for item in items)
+        assert requests.get_run(escalation["id"])["status"] == "succeeded"
+        assert requests.get_run(claimed.id)["metadata"]["escalation_run_id"] == escalation["id"]
+
+    asyncio.run(run())
+    assert writes == [True]
+
+
+@pytest.mark.parametrize("kind", ["message_task", "agent_run"])
+def test_retained_terminal_runs_delivery_and_queue_followups_after_commit(tmp_path: Path, monkeypatch, kind):
+    if kind == "agent_run":
+        service, requests, claimed = _sqlite_claimed_agent_run(tmp_path, monkeypatch)
+        service._execute_agent_run = AsyncMock(return_value=scheduled_tasks.AgentRunExecutionResult(
+            error="failed", complete_on_return=True,
+        ))
+    else:
+        _command_task_env(tmp_path, monkeypatch)
+        store = ScheduledTaskStore()
+        task = store.add_task(
+            session_key="slack::channel::C123", prompt="message", schedule_type="cron",
+            cron="0 * * * *", timezone_name="UTC",
+        )
+        service = _scheduled_service_with_ledger(tmp_path, store, [])
+        requests = service.request_store
+        queued = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+        claimed = requests.claim(queued.id)
+        service._execute_task = AsyncMock(return_value=scheduled_tasks.TaskExecutionResult(
+            error="refused stamp", session_key=task.session_key, session_id="ses-delivery",
+            reconcile_delivery_on_return=True,
+        ))
+    fail = True
+    original = requests.sqlite_backend.settle_run_terminal
+
+    def complete(*args, **kwargs):
+        if fail:
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    async def after_commit(*args, **kwargs):
+        assert requests.get_run(claimed.id)["status"] == "failed"
+
+    reconcile, recover = AsyncMock(side_effect=after_commit), AsyncMock(side_effect=after_commit)
+    service.controller.session_turns = SimpleNamespace(
+        reconcile_terminal_run_delivery=reconcile, recover_persisted_agent_run_queue=recover,
+    )
+    service._drain_callbacks = AsyncMock(side_effect=after_commit)
+    monkeypatch.setattr(requests.sqlite_backend, "settle_run_terminal", complete)
+
+    async def run():
+        nonlocal fail
+        service._spawn_execution(claimed, None)
+        await service._inflight_executions[claimed.id]
+        await asyncio.sleep(0)
+        assert service._drain_callbacks.await_count == 0
+        assert reconcile.await_count == recover.await_count == 0
+        pending = service._pending_terminal_writes[claimed.id]
+        fail = False
+        assert await service._process_pending_terminal_write(pending)
+        assert await service._process_pending_terminal_write(pending)
+        service._drain_callbacks.assert_awaited_once()
+        assert reconcile.await_count == (1 if kind == "message_task" else 0)
+        assert recover.await_count == (1 if kind == "agent_run" else 0)
+
+    asyncio.run(run())

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DBAPIError
 
 from config import paths
 from core.reply_enhancer import _file_uri_to_local_path, _parse_file_uri, _replace_file_links
@@ -401,6 +402,9 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
                 local_path=safe_path,
                 file_name=os.path.basename(safe_path),
             )
+        except DBAPIError:
+            # The caller owns the entire media + message transaction's retry.
+            raise
         except Exception:
             logger.exception("workbench_media: failed to register media for %s", safe_path)
             return source_url
@@ -414,6 +418,8 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
                 w, h = (row or {}).get("width_px"), (row or {}).get("height_px")
                 if w and h:
                     url = f"{url}?w={w}&h={h}"
+            except DBAPIError:
+                raise
             except Exception:
                 logger.debug("workbench_media: no dimensions for %s", safe_path, exc_info=True)
         return url

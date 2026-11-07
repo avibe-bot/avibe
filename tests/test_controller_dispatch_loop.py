@@ -599,7 +599,7 @@ def test_im_show_checkpoint_lifecycle_spans_real_start_to_terminal_result(monkey
     controller.session_turns = SessionTurnManager(controller)
     monkeypatch.setattr(
         "core.message_mirror.link_inbound_message_session",
-        lambda **kwargs: linked_messages.append(kwargs),
+        lambda **kwargs: linked_messages.append(kwargs) or True,
     )
     context = MessageContext(
         user_id="U",
@@ -680,7 +680,7 @@ def test_first_im_show_turn_adopts_on_terminal_after_backend_binds_session(monke
     controller.session_turns = SessionTurnManager(controller)
     monkeypatch.setattr(
         "core.message_mirror.link_inbound_message_session",
-        lambda **kwargs: linked_messages.append(kwargs),
+        lambda **kwargs: linked_messages.append(kwargs) or True,
     )
     context = MessageContext(
         user_id="U",

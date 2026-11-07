@@ -8,6 +8,7 @@ import logging
 import os
 import threading
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import partial, wraps
@@ -77,7 +78,7 @@ from storage.agent_session_rows import (
     reserve_write_lock,
     session_is_runtime_owned,
 )
-from storage.db import create_sqlite_engine, get_cached_sqlite_engine
+from storage.db import _is_sqlite_busy, create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
 from core.caller_context import background_command_env
@@ -570,6 +571,30 @@ class TaskExecutionResult:
     #: transitions the run also records that its failure has a REPORT, which is what
     #: suppresses the owed failure notice for the same failure.
     escalation_run_id: Optional[str] = None
+    # Persistence failed after the command finished, not a command failure. The
+    # terminal ledger keeps the outcome and reconciliation retries its projection.
+    definition_projection_error: Optional[str] = None
+    pending_definition_stamp: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class _PendingClaimedTerminal:
+    request: TaskExecutionRequest
+    outcome: dict[str, Any]
+    project_definition: bool
+    lock_key: Optional[str]
+    projected_status: Optional[str] = None
+    definition_stamp: Optional[dict[str, Any]] = None
+    reconcile_delivery: bool = False
+    recover_queue: bool = False
+
+
+class _TerminalDefinitionProjectionError(RuntimeError):
+    """The Run committed under this owner, but its definition projection did not."""
+
+    def __init__(self, status: str):
+        super().__init__(f"Definition projection failed after Run committed {status}")
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -1553,6 +1578,7 @@ class ScheduledTaskStore:
         expected_reference_agent_id: Optional[str] = None,
         expected_schedule_generation: Optional[dict[str, str]] = None,
         expected_terminal_run_id: Optional[str] = None,
+        retry_busy: bool = False,
     ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
 
@@ -1593,6 +1619,7 @@ class ScheduledTaskStore:
                     expected_reference_agent_id=expected_reference_agent_id,
                     expected_schedule_generation=expected_schedule_generation,
                     expected_terminal_run_id=expected_terminal_run_id,
+                    retry_busy=retry_busy,
                 )
             else:
                 # No agent-guard kwargs: the only caller that passes a queued run is
@@ -2055,6 +2082,7 @@ class ScheduledTaskStore:
         expected_non_owner_retired_one_shot: Optional[
             DefinitionWriteExpectation
         ] = None,
+        retry_busy: bool = False,
     ) -> bool:
         """Stamp a fire's outcome; ``False`` means the store refused the write.
 
@@ -2120,7 +2148,15 @@ class ScheduledTaskStore:
             finally:
                 # A replacement may have committed after maybe_reload() above. The
                 # caller reconciles physical jobs immediately after this result.
-                self.load()
+                try:
+                    self.load()
+                except Exception:
+                    # The outbox may already be committed. A mirror refresh is
+                    # not transaction failure and must never authorize replay.
+                    self._unpublish(task.id)
+                    self._signature = None
+                    self._reload_required = True
+                    logger.exception("Failed to reload task %s after escalation stamp", task.id)
             return landed
         if expected_binding is not None and (
             task.session_id,
@@ -2200,6 +2236,7 @@ class ScheduledTaskStore:
             expected_uncanceled_run_id=expected_uncanceled_run_id,
             expected_schedule_generation=expected_schedule_generation,
             expected_terminal_run_id=expected_terminal_run_id,
+            retry_busy=retry_busy,
         )
 
     @_serialize_task_mirror
@@ -3601,6 +3638,7 @@ class TaskExecutionStore:
         stderr: Optional[str] = None,
         timed_out: Optional[bool] = None,
         escalation_run_id: Optional[str] = None,
+        definition_projection_error: Optional[str] = None,
     ) -> Optional[str]:
         """Settle one claimed request.
 
@@ -3643,6 +3681,8 @@ class TaskExecutionStore:
             extra_metadata[COMMAND_TIMED_OUT_METADATA_KEY] = bool(timed_out)
         if escalation_run_id:
             extra_metadata["escalation_run_id"] = escalation_run_id
+        if definition_projection_error:
+            extra_metadata["definition_projection_error"] = definition_projection_error
         if self._sqlite is not None:
             # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
             # predicate, so an ordinary completion rewrote a status another actor had
@@ -3662,6 +3702,7 @@ class TaskExecutionStore:
                 exit_code=exit_code,
                 stdout=stdout,
                 stderr=stderr,
+                retry_busy=True,
             )
         processing_path = self._request_path(request.id, state="processing")
         completed_path = self._request_path(request.id, state="completed")
@@ -3707,6 +3748,11 @@ class TaskExecutionStore:
                     else {}
                 ),
                 **({"escalation_run_id": escalation_run_id} if escalation_run_id else {}),
+            }
+        if definition_projection_error:
+            payload["metadata"] = {
+                **(payload.get("metadata") or {}),
+                "definition_projection_error": definition_projection_error,
             }
         write_atomic(completed_path, json.dumps(payload, indent=2))
         processing_path.unlink(missing_ok=True)
@@ -3914,15 +3960,31 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
         cursor: str | None,
     ) -> tuple[list[RuntimeWorkItem], bool]:
         items: list[RuntimeWorkItem] = []
+        if cursor is None or cursor.startswith("!"):
+            after_pending = cursor[1:] if cursor else ""
+            pending = [
+                intent for intent in self.service._pending_terminal_snapshot
+                if intent.request.id > after_pending
+            ]
+            items.extend(
+                RuntimeWorkItem(
+                    intent.lock_key or f"run:{intent.request.id}",
+                    ("terminal", intent),
+                    cursor_key=f"!{intent.request.id}",
+                )
+                for intent in pending[:limit]
+            )
+            if len(items) >= limit:
+                return items, True
         fallback_has_more = False
         if self._fallback is not None:
             fallback_cursor = None
-            scan_fallback = cursor is None or cursor.startswith("0\x1f")
-            if cursor and scan_fallback:
+            scan_fallback = cursor is None or cursor.startswith(("!", "0\x1f"))
+            if cursor and cursor.startswith("0\x1f"):
                 fallback_cursor = cursor.split("\x1f", 1)[1]
             recovered, fallback_has_more = (
                 self._fallback.scan(
-                    limit=limit,
+                    limit=limit - len(items),
                     occupied=occupied,
                     cursor=fallback_cursor,
                 )
@@ -4090,6 +4152,8 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             return True
         if self.lane is RuntimeWorkLane.REQUESTS:
             kind, observation = item.observation
+            if kind == "terminal":
+                return await self.service._process_pending_terminal_write(observation)
             if kind == "fallback":
                 assert self._fallback is not None
                 return await self.service._run_runtime_sync(
@@ -4185,6 +4249,11 @@ class ScheduledTaskService:
         # until its settlement has landed.
         self._cancel_settlements: set["asyncio.Task[None]"] = set()
         self._settling_claim_ids: set[str] = set()
+        # Exact results from executions this process already completed. Recovery
+        # retries persistence only, never the command or its delivery. The loop
+        # publishes an immutable snapshot for the runtime-work scanner.
+        self._pending_terminal_writes: dict[str, _PendingClaimedTerminal] = {}
+        self._pending_terminal_snapshot: tuple[_PendingClaimedTerminal, ...] = ()
         # The store and mirror generation ``reconcile_jobs`` last applied.
         self._job_reconcile_applied: tuple[Any, int] = (None, 0)
         self._one_shot_job_identities: Dict[str, tuple[str, str, str, str]] = {}
@@ -5582,7 +5651,7 @@ class ScheduledTaskService:
             if candidate_run_ids is not None
             else None
         )
-        owned = set(self._inflight_executions)
+        owned = set(self._inflight_executions) | set(self._pending_terminal_writes)
         if candidates is not None:
             owned &= candidates
         session_turns = getattr(self.controller, "session_turns", None)
@@ -5643,6 +5712,7 @@ class ScheduledTaskService:
             lock_key: run_id
             for lock_key, run_id in self._session_lock_owners.items()
             if run_id not in self._inflight_executions
+            and run_id not in self._pending_terminal_writes
         }
         for lock_key, run_id in leaked.items():
             self._session_lock_owners.pop(lock_key, None)
@@ -8276,21 +8346,25 @@ class ScheduledTaskService:
         )
 
     def _refresh_live_claims(self) -> None:
-        self._live_claimed_run_ids = frozenset(self._inflight_executions) | frozenset(self._settling_claim_ids)
+        self._live_claimed_run_ids = (
+            frozenset(self._inflight_executions)
+            | frozenset(self._settling_claim_ids)
+            | frozenset(self._pending_terminal_writes)
+        )
 
     def _on_execution_done(
         self, request_id: str, lock_key: Optional[str], task: "asyncio.Task[Any]"
     ) -> None:
         self._inflight_executions.pop(request_id, None)
         request = self._inflight_requests.pop(request_id, None)
-        if task.cancelled() and request is not None:
+        if task.cancelled() and request is not None and request_id not in self._pending_terminal_writes:
             self._settling_claim_ids.add(request_id)
         self._refresh_live_claims()
         interruption = self._inflight_cancellation_causes.pop(
             request_id,
             SETTLED_BY_INTERRUPTED,
         )
-        if lock_key is not None:
+        if lock_key is not None and request_id not in self._pending_terminal_writes:
             self._inflight_sessions.discard(lock_key)
             # Only if it is still OURS: a later execution may already have taken the
             # same key, and stealing its owner entry would make the sweep read that
@@ -8308,7 +8382,7 @@ class ScheduledTaskService:
         # task settles it, on the door rather than in this synchronous callback on the
         # loop, and ``stop`` waits for it.
         if task.cancelled():
-            if request is not None:
+            if request is not None and request_id not in self._pending_terminal_writes:
                 settlement = asyncio.get_running_loop().create_task(
                     self._settle_cancelled_claim(request, interruption),
                     name=f"scheduled-claim-cancel-settlement:{request_id}",
@@ -8663,6 +8737,8 @@ class ScheduledTaskService:
         #: fire queued, or ``None``. Recorded on THIS run's metadata by ``complete()``,
         #: which is what stops the same failure being reported twice.
         escalation_run_id: Optional[str] = None
+        definition_projection_error: Optional[str] = None
+        pending_definition_stamp: Optional[dict[str, Any]] = None
         try:
             from storage.resource_access_service import (
                 HARNESS_ACCESS_FORBIDDEN_CODE,
@@ -8722,6 +8798,8 @@ class ScheduledTaskService:
                 stderr = result.stderr
                 timed_out = result.timed_out
                 escalation_run_id = result.escalation_run_id
+                definition_projection_error = result.definition_projection_error
+                pending_definition_stamp = result.pending_definition_stamp
             elif request.request_type in {
                 "hook_send",
                 "watch",
@@ -8889,9 +8967,7 @@ class ScheduledTaskService:
             if should_complete:
                 # The settlement's store steps run on the door, in their own order, so
                 # none of them commits on the loop; the scheduler jobs follow on the loop.
-                _written_status, projected, retired = await self._store_step(
-                    self._settle_claimed_request,
-                    request,
+                outcome = dict(
                     ok=not error,
                     error=error,
                     task_id=task_id,
@@ -8904,62 +8980,86 @@ class ScheduledTaskService:
                     stderr=stderr,
                     timed_out=timed_out,
                     escalation_run_id=escalation_run_id,
-                    project_on_cancel=project_terminal_definition_on_cancel,
+                    definition_projection_error=definition_projection_error,
                 )
-                if retired is not None:
-                    self._retire_one_shot_job(retired)
-                if projected:
-                    await self._reconcile_jobs_off_loop()
-            if reconcile_delivery_on_return and session_id:
-                manager = getattr(self.controller, "session_turns", None)
-                reconcile_delivery = getattr(
-                    manager,
-                    "reconcile_terminal_run_delivery",
-                    None,
-                )
-                if callable(reconcile_delivery):
+                if pending_definition_stamp is not None:
+                    # Keep the original atomic stamp/outbox intent, not a new
+                    # projection which would lose --on-failure agent escalation.
+                    logger.error("Terminal persistence pending for Run %s; retaining outcome for reconciliation", request.id)
+                    self._retain_terminal_write(
+                        request, outcome, project_definition=project_terminal_definition_on_cancel,
+                        definition_stamp=pending_definition_stamp,
+                        reconcile_delivery=reconcile_delivery_on_return,
+                        recover_queue=request.request_type == "agent_run" and interrupt_reason is None,
+                    )
+                else:
                     try:
-                        await reconcile_delivery(request.id, session_id=session_id)
-                    except Exception:
+                        _written_status, projected, retired = await self._store_step(
+                            self._settle_claimed_request,
+                            request,
+                            **outcome,
+                            project_on_cancel=project_terminal_definition_on_cancel,
+                        )
+                    except Exception as exc:
+                        cause = exc.__cause__ if isinstance(exc, _TerminalDefinitionProjectionError) else exc
+                        if not _is_sqlite_busy(cause):
+                            raise
                         logger.exception(
-                            "Failed to reconcile terminal task Delivery: run=%s session=%s",
+                            "Terminal persistence exhausted for Run %s; retaining outcome for reconciliation",
                             request.id,
-                            session_id,
                         )
-            if should_complete or settled_out_of_band:
-                # An out-of-band settlement still made this run terminal, so it owes
-                # the same callback follow-through as ``complete()``.
-                await self._drain_callbacks()
-            if (
-                request.request_type == "agent_run"
-                and session_id
-                and (
-                    should_complete
-                    or settled_out_of_band
-                    or recover_queue_on_return
-                )
-                and interrupt_reason is None
-            ):
-                manager = getattr(self.controller, "session_turns", None)
-                recover_queue = getattr(
-                    manager,
-                    "recover_persisted_agent_run_queue",
-                    None,
-                )
-                if callable(recover_queue):
-                    try:
-                        await recover_queue(session_id)
-                    except Exception:
-                        logger.exception(
-                            "Failed to recover persisted Agent Run queue for session=%s",
-                            session_id,
+                        self._retain_terminal_write(
+                            request, outcome, project_definition=project_terminal_definition_on_cancel,
+                            projected_status=exc.status if isinstance(exc, _TerminalDefinitionProjectionError) else None,
+                            reconcile_delivery=reconcile_delivery_on_return,
+                            recover_queue=request.request_type == "agent_run" and interrupt_reason is None,
                         )
+                    else:
+                        if retired is not None:
+                            self._retire_one_shot_job(retired)
+                        if projected:
+                            await self._reconcile_jobs_off_loop()
+            if request.id not in self._pending_terminal_writes:
+                await self._complete_claimed_followups(
+                    request.id, session_id=session_id,
+                    reconcile_delivery=reconcile_delivery_on_return,
+                    drain_callbacks=should_complete or settled_out_of_band,
+                    recover_queue=(
+                        request.request_type == "agent_run"
+                        and (should_complete or settled_out_of_band or recover_queue_on_return)
+                        and interrupt_reason is None
+                    ),
+                )
+
+    async def _complete_claimed_followups(
+        self, request_id: str, *, session_id: Optional[str], reconcile_delivery: bool,
+        drain_callbacks: bool, recover_queue: bool,
+    ) -> None:
+        """Post-terminal work runs after the original or reconciled commit, never before."""
+        manager = getattr(self.controller, "session_turns", None)
+        if reconcile_delivery and session_id:
+            reconcile = getattr(manager, "reconcile_terminal_run_delivery", None)
+            if callable(reconcile):
+                try:
+                    await reconcile(request_id, session_id=session_id)
+                except Exception:
+                    logger.exception("Failed to reconcile terminal task Delivery: run=%s session=%s", request_id, session_id)
+        if drain_callbacks:
+            await self._drain_callbacks()
+        if recover_queue and session_id:
+            recover = getattr(manager, "recover_persisted_agent_run_queue", None)
+            if callable(recover):
+                try:
+                    await recover(session_id)
+                except Exception:
+                    logger.exception("Failed to recover persisted Agent Run queue for session=%s", session_id)
 
     def _settle_claimed_request(
         self,
         request: TaskExecutionRequest,
         *,
         project_on_cancel: bool,
+        projected_status: Optional[str] = None,
         **outcome: Any,
     ) -> tuple[Optional[str], bool, Optional[str]]:
         """A claimed execution's terminal store writes, in order, on the runtime-work
@@ -8968,7 +9068,15 @@ class ScheduledTaskService:
         one-shot definition it retired: the caller retires that job and reconciles the
         scheduler jobs on the loop, which owns them."""
 
-        written_status = self.request_store.complete(request, **outcome)
+        written_status = None
+        if projected_status is None:
+            written_status = self.request_store.complete(request, **outcome)
+        else:
+            # Only an exact transition this owner previously committed may be
+            # re-projected. A lost terminal CAS is not projection authority.
+            current = self.request_store.get_run(request.id)
+            if current and current.get("status") == projected_status:
+                written_status = projected_status
         # A STOP THAT NEVER BECAME A ``CancelledError``. ``cancel_run`` can
         # commit its flag after the work returned, so ``complete`` normalizes
         # this run to ``canceled`` while the coroutine ran to the end without
@@ -8993,13 +9101,130 @@ class ScheduledTaskService:
             or fire_was_stopped
         ):
             return written_status, False, None
-        retired = self._project_terminal_definition_result(
-            self.request_store.get_run(request.id),
-            execution_id=request.id,
-            expected_status=written_status,
-            retire_job=False,
-        )
+        try:
+            retired = self._project_terminal_definition_result(
+                self.request_store.get_run(request.id),
+                execution_id=request.id,
+                expected_status=written_status,
+                retire_job=False,
+                raise_on_error=True,
+                retry_busy=True,
+            )
+        except Exception as exc:
+            raise _TerminalDefinitionProjectionError(written_status) from exc
         return written_status, True, retired
+
+    def _retain_terminal_write(
+        self, request: TaskExecutionRequest, outcome: dict[str, Any], *, project_definition: bool,
+        projected_status: Optional[str] = None,
+        definition_stamp: Optional[dict[str, Any]] = None,
+        reconcile_delivery: Optional[bool] = None,
+        recover_queue: Optional[bool] = None,
+    ) -> None:
+        prior = self._pending_terminal_writes.get(request.id)
+        lock_key = next(
+            (key for key, owner in self._session_lock_owners.items() if owner == request.id), None
+        )
+        self._pending_terminal_writes[request.id] = _PendingClaimedTerminal(
+            request, dict(outcome), project_definition, lock_key, projected_status, definition_stamp,
+            reconcile_delivery=bool(prior and prior.reconcile_delivery) if reconcile_delivery is None else reconcile_delivery,
+            recover_queue=bool(prior and prior.recover_queue) if recover_queue is None else recover_queue,
+        )
+        self._pending_terminal_snapshot = tuple(
+            self._pending_terminal_writes[key] for key in sorted(self._pending_terminal_writes)
+        )
+        self._refresh_live_claims()
+        self._wake_runtime_work(RuntimeWorkLane.REQUESTS, reset_cursor=True)
+
+    async def _process_pending_terminal_write(self, intent: _PendingClaimedTerminal) -> bool:
+        request_id = intent.request.id
+        if self._pending_terminal_writes.get(request_id) is not intent:
+            return True
+        if request_id in self._inflight_executions:
+            return False
+        # Errors propagate to the existing lane's visible failure/backoff path.
+        # Only store work is repeated: no command, transport, or callback send.
+        if intent.definition_stamp is not None:
+            try:
+                stamped = await self._store_step(
+                    self.store.mark_task_result, intent.request.task_id,
+                    retry_busy=True, **intent.definition_stamp,
+                )
+            except Exception as exc:
+                if _is_sqlite_busy(exc):
+                    raise
+                logger.exception("Pending command stamp is not retryable for Run %s", request_id)
+                stamped = None
+                outcome = {**intent.outcome, "definition_projection_error": f"{type(exc).__name__}: {exc}"}
+            else:
+                outcome = dict(intent.outcome)
+            queued_run = intent.definition_stamp.get("queued_run")
+            if stamped and queued_run:
+                outcome["escalation_run_id"] = queued_run["id"]
+            elif stamped is False and not outcome.get("error"):
+                outcome.update(ok=False, error=self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY))
+            # Land this stage on-loop before another cancellable store step. A
+            # later terminal failure never replays this committed publication.
+            self._retain_terminal_write(
+                intent.request, outcome, project_definition=intent.project_definition,
+                projected_status=intent.projected_status,
+            )
+            intent = self._pending_terminal_writes[request_id]
+        try:
+            _status, projected, retired = await self._store_step(
+                self._settle_claimed_request,
+                intent.request,
+                **intent.outcome,
+                project_on_cancel=intent.project_definition,
+                projected_status=intent.projected_status,
+            )
+        except _TerminalDefinitionProjectionError as exc:
+            if not _is_sqlite_busy(exc.__cause__):
+                self._release_pending_terminal_write(intent)
+                raise
+            self._retain_terminal_write(
+                intent.request, intent.outcome, project_definition=intent.project_definition,
+                projected_status=exc.status,
+            )
+            raise
+        except Exception as exc:
+            if not _is_sqlite_busy(exc):
+                self._release_pending_terminal_write(intent)
+            raise
+        if retired is not None:
+            self._retire_one_shot_job(retired)
+        if projected:
+            try:
+                await self._reconcile_jobs_off_loop()
+            except Exception:
+                logger.exception("Job reconciliation failed after terminal Run %s committed", request_id)
+        try:
+            await self._complete_claimed_followups(
+                request_id, session_id=intent.outcome.get("session_id"),
+                reconcile_delivery=intent.reconcile_delivery, drain_callbacks=True,
+                recover_queue=intent.recover_queue,
+            )
+        finally:
+            # Match the inline execution: session exclusion lasts through its
+            # queue handoff, but a follow-up error cannot make persistence replay.
+            self._release_pending_terminal_write(intent)
+        return True
+
+    def _release_pending_terminal_write(self, intent: _PendingClaimedTerminal) -> None:
+        request_id = intent.request.id
+        if self._pending_terminal_writes.get(request_id) is not intent:
+            return
+        self._pending_terminal_writes.pop(request_id, None)
+        self._pending_terminal_snapshot = tuple(
+            self._pending_terminal_writes[key] for key in sorted(self._pending_terminal_writes)
+        )
+        if intent.lock_key is not None and self._session_lock_owners.get(intent.lock_key) == request_id:
+            self._session_lock_owners.pop(intent.lock_key, None)
+            self._inflight_sessions.discard(intent.lock_key)
+        self._refresh_live_claims()
+        self._wake_runtime_work(
+            RuntimeWorkLane.REQUESTS, RuntimeWorkLane.RUN_CALLBACKS, RuntimeWorkLane.FAILURE_NOTICES
+        )
 
     def _load_claimed_task(self, task_id: str, *, consumed_one_shot: bool) -> Optional[ScheduledTask]:
         """The definition a claimed task fire runs, read fresh: a scheduled one-shot is
@@ -9080,6 +9305,15 @@ class ScheduledTaskService:
         if not row:
             return None
         return str(row.get("workdir") or "").strip() or None
+
+    def _mark_command_result(self, task_id: str, **kwargs: Any) -> tuple[Optional[bool], Optional[str], bool]:
+        """Keep actual command facts; only BUSY exhaustion owns a replayable stamp."""
+
+        try:
+            return self.store.mark_task_result(task_id, retry_busy=True, **kwargs), None, False
+        except Exception as exc:
+            logger.exception("Command result projection failed for task %s; retaining its outcome", task_id)
+            return None, f"{type(exc).__name__}: {exc}", _is_sqlite_busy(exc)
 
     async def _execute_command_task(
         self,
@@ -9286,9 +9520,7 @@ class ScheduledTaskService:
                 parent_run_id=execution_id,
                 metadata=dict(task.metadata or {}),
             )
-        stamped = await self._store_step(
-            self.store.mark_task_result,
-            task.id,
+        stamp_kwargs = dict(
             error=error,
             disable_one_shot=disable_one_shot,
             exit_code=exit_code,
@@ -9331,13 +9563,17 @@ class ScheduledTaskService:
             ),
             expected_non_owner_retired_one_shot=non_owner_retired_expectation,
         )
+        stamped, projection_error, retry_stamp = await self._store_step(
+            self._mark_command_result, task.id, **stamp_kwargs
+        )
+        pending_definition_stamp = deepcopy(stamp_kwargs) if retry_stamp else None
         # ONLY when the stamp landed. A refusal rolled the escalation row back with it,
         # so claiming an escalation id here would suppress the failure notice in favour
         # of a turn that does not exist -- and the failure would be silent.
         escalation_run_id = (
             escalation_request.id if escalation_request is not None and stamped else None
         )
-        if not stamped:
+        if stamped is False:
             # Same refusal as the message path (HFR-261/HFR-264): the definition was
             # reclaimed, repointed or removed while this fire was running, so nothing
             # was stored. A would-be success must not be reported as one.
@@ -9349,7 +9585,11 @@ class ScheduledTaskService:
             if not error:
                 error = self._t(_TASK_RESULT_NOT_RECORDED_I18N_KEY)
         # An ``at`` command task just disabled itself; the APScheduler job must drop.
-        await self._reconcile_jobs_off_loop()
+        try:
+            await self._reconcile_jobs_off_loop()
+        except Exception as exc:
+            logger.exception("Failed to reconcile jobs after command %s; retaining its outcome", execution_id)
+            projection_error = projection_error or f"{type(exc).__name__}: {exc}"
         return TaskExecutionResult(
             error=error,
             session_key=task.session_key or "",
@@ -9361,6 +9601,8 @@ class ScheduledTaskService:
             stderr=stderr_value,
             timed_out=timed_out,
             escalation_run_id=escalation_run_id,
+            definition_projection_error=projection_error,
+            pending_definition_stamp=pending_definition_stamp,
         )
 
     def _escalation_prompt(
@@ -10103,6 +10345,8 @@ class ScheduledTaskService:
         execution_id: str,
         expected_status: str,
         retire_job: bool = True,
+        raise_on_error: bool = False,
+        retry_busy: bool = False,
     ) -> Optional[str]:
         """Project only the exact terminal transition the caller actually won.
 
@@ -10202,6 +10446,8 @@ class ScheduledTaskService:
                 disable_one_shot=retire_one_shot,
                 exit_code=int(raw_exit_code) if raw_exit_code is not None else None,
                 records_command_outcome=records_command_outcome,
+                timed_out=bool(isinstance(metadata, dict) and metadata.get(COMMAND_TIMED_OUT_METADATA_KEY)),
+                retry_busy=retry_busy,
                 result_status=status,
                 expected_binding=(
                     task.session_id,
@@ -10213,12 +10459,14 @@ class ScheduledTaskService:
                     execution_id if schedule_generation is not None else None
                 ),
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to project terminal Run %s to definition %s",
                 execution_id,
                 definition_id,
             )
+            if raise_on_error and _is_sqlite_busy(exc):
+                raise
             return None
         if not recorded:
             logger.warning(

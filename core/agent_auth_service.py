@@ -1251,9 +1251,9 @@ class AgentAuthService:
         target_platform = str(delivery_context.platform or "").strip()
         if target_platform == "avibe" or delivery.delivered_id is not None:
             try:
-                from core.message_mirror import persist_agent_message
+                from core.message_mirror import persist_agent_message_async
 
-                delivery.persisted_row = persist_agent_message(
+                delivery.persisted_row = await persist_agent_message_async(
                     delivery_context,
                     "notify",
                     durable_text,

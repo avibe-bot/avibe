@@ -333,7 +333,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             handled = await service.maybe_emit_auth_recovery_message(
                 context,
                 "codex",
@@ -364,7 +364,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 
-        with patch("core.message_mirror.persist_agent_message"):
+        with patch("core.message_mirror.persist_agent_message_async"):
             handled = await service.maybe_emit_auth_recovery_message(
                 context,
                 "claude",
@@ -384,7 +384,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 
-        with patch("core.message_mirror.persist_agent_message"):
+        with patch("core.message_mirror.persist_agent_message_async"):
             handled = await service.maybe_emit_auth_recovery_message(
                 context, "codex", "❌ Codex error: 401 Unauthorized"
             )
@@ -414,7 +414,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
 
         with patch(
-            "core.message_mirror.persist_agent_message",
+            "core.message_mirror.persist_agent_message_async",
             return_value={"id": "message-auth"},
         ):
             handled = await service.maybe_emit_auth_recovery_message(
@@ -449,7 +449,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
 
         with patch(
-            "core.message_mirror.persist_agent_message",
+            "core.message_mirror.persist_agent_message_async",
             return_value={"id": "message-auth-undelivered"},
         ) as persist:
             handled = await service.maybe_emit_auth_recovery_message(
@@ -485,7 +485,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
 
         with patch(
-            "core.message_mirror.persist_agent_message",
+            "core.message_mirror.persist_agent_message_async",
             return_value={"id": "message-auth-local"},
         ) as persist:
             handled = await service.maybe_emit_auth_recovery_message(
@@ -531,7 +531,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
 
         with patch(
-            "core.message_mirror.persist_agent_message",
+            "core.message_mirror.persist_agent_message_async",
             return_value={"id": "message-auth-routed"},
         ) as persist:
             handled = await service.maybe_emit_auth_recovery_message(
@@ -575,7 +575,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             handled = await service.maybe_emit_auth_recovery_message(
                 context,
                 "codex",

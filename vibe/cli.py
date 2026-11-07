@@ -8010,10 +8010,17 @@ def cmd_data_retention(args):
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
 
+    maintenance = contextlib.ExitStack()
     try:
+        if bool(getattr(args, "compact", False)):
+            from vibe import runtime
+
+            maintenance.enter_context(runtime.offline_maintenance())
         ensure_sqlite_state()
         should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
         engine = create_sqlite_engine(read_only=not should_run)
+        # LIFO cleanup closes SQLite before the offline boundary admits starts.
+        maintenance.callback(engine.dispose)
         days_override = getattr(args, "days", None)
         # The configured window is the default; --days overrides for this call.
         # A recovered/unreadable config must not silently run with substituted
@@ -8084,6 +8091,8 @@ def cmd_data_retention(args):
     except Exception as exc:  # noqa: BLE001
         print(f"Trace retention command failed: {str(exc)}", file=sys.stderr)
         return 1
+    finally:
+        maintenance.close()
 
 
 _COMPACTION_REASONS = {
@@ -19210,7 +19219,7 @@ def build_parser():
     data_parser = subparsers.add_parser(
         "data",
         help="Inspect Avibe data, and run explicit trace-retention maintenance",
-        description="Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
+        description="Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, `retention --run` deletes old internal trace events online, and `retention --compact` requires the service and Web UI to be stopped.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
@@ -19302,7 +19311,7 @@ def build_parser():
     data_retention_parser.add_argument(
         "--compact",
         action="store_true",
-        help="Also physically compact the database (VACUUM) when safe; implies --run. Off by default: VACUUM holds the database's sole writer lock and can stall the running service's writes; run it during a maintenance window or with the service stopped.",
+        help="Also physically compact the database (VACUUM); implies --run. Requires both the service and Web UI to be stopped and excludes startup until maintenance finishes. Never stops them automatically; omit --compact for online retention.",
     )
     _add_json_flag(data_retention_parser)
 

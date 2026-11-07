@@ -825,7 +825,7 @@ class ClaudeAgent(BaseAgent):
                     # keep the failure visible.
                     if contained is not True:
                         try:
-                            from core.message_mirror import persist_agent_message
+                            from core.message_mirror import persist_agent_message_async
 
                             notification = backend_failure_notification_output(
                                 context,
@@ -833,7 +833,7 @@ class ClaudeAgent(BaseAgent):
                                 request=request,
                                 output=terminal_output_for(request),
                             )
-                            persist_agent_message(
+                            await persist_agent_message_async(
                                 context,
                                 "notify",
                                 error_notify,
@@ -3395,7 +3395,7 @@ class ClaudeAgent(BaseAgent):
                     # for the web Chat to render.
                     if not contained:
                         try:
-                            from core.message_mirror import persist_agent_message
+                            from core.message_mirror import persist_agent_message_async
 
                             notification = backend_failure_notification_output(
                                 context,
@@ -3403,7 +3403,7 @@ class ClaudeAgent(BaseAgent):
                                 request=pending_request,
                                 output=terminal_output_for(pending_request),
                             )
-                            persist_agent_message(
+                            await persist_agent_message_async(
                                 context,
                                 "notify",
                                 error_notify,
@@ -3675,7 +3675,7 @@ class ClaudeAgent(BaseAgent):
                 # message and no durable failure row on any surface.
                 if contained is not True:
                     try:
-                        from core.message_mirror import persist_agent_message
+                        from core.message_mirror import persist_agent_message_async
 
                         notification = backend_failure_notification_output(
                             context,
@@ -3683,7 +3683,7 @@ class ClaudeAgent(BaseAgent):
                             request=pending_request,
                             output=terminal_output_for(pending_request),
                         )
-                        persist_agent_message(
+                        await persist_agent_message_async(
                             context,
                             "notify",
                             error_notify,

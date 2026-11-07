@@ -753,6 +753,9 @@ class ShowGitCheckpointService:
         self._worker = OrderedWorker("show-git-checkpoints")
         # Each Session's latest PRE_TURN job, until its dispatch has waited for it.
         self._pre_turn_jobs: dict[str, Future[None]] = {}
+        # The same worker orders inbound linking before checkpoint reads. Its
+        # outcome is retained for the dispatch waiter, even without a Show page.
+        self._message_link_jobs: dict[str, Future[None]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -783,6 +786,7 @@ class ShowGitCheckpointService:
         self._active_turns.clear()
         self._open_bus_turns.clear()
         self._pre_turn_jobs.clear()
+        self._message_link_jobs.clear()
         _record_checkpoint_service_state(False)
         _checkpoint_service_active = None
 
@@ -814,24 +818,29 @@ class ShowGitCheckpointService:
         context.platform_specific = updated
         return session_id
 
-    @staticmethod
-    def _link_message(context: Any, session_id: str) -> bool:
+    def _queue_message_link(self, context: Any, session_id: str) -> bool:
         platform = str(getattr(context, "platform", None) or "").strip()
         message_id = str(getattr(context, "message_id", None) or "").strip()
         if not platform or platform == "avibe" or not message_id:
             return False
-        try:
-            from core.message_mirror import link_inbound_message_session
+        # Capture scalar inputs on the owning loop. The worker never receives or
+        # mutates the live context, and never publishes bus lifecycle events.
+        self._message_link_jobs[session_id] = self._worker.submit(
+            self._link_message, platform, message_id, session_id
+        )
+        return True
 
-            link_inbound_message_session(
-                platform=platform,
-                native_message_id=message_id,
-                session_id=session_id,
-            )
-            return True
-        except Exception:
-            logger.debug("Show checkpoint message link failed", exc_info=True)
-            return False
+    @staticmethod
+    def _link_message(platform: str, message_id: str, session_id: str) -> None:
+        from core.message_mirror import link_inbound_message_session
+
+        if not link_inbound_message_session(
+            platform=platform, native_message_id=message_id, session_id=session_id
+        ):
+            # Terminal-only hooks may have no dispatch waiter. Log here as well
+            # as keeping the failure on the Future consumed by turn-start waits.
+            logger.error("Show checkpoint inbound message link failed for session=%s", session_id)
+            raise RuntimeError("Show checkpoint inbound message link failed")
 
     def begin_turn(self, controller: Any, context: Any) -> None:
         """Publish checkpoint start from the shared backend execution boundary."""
@@ -852,13 +861,16 @@ class ShowGitCheckpointService:
             # Keep the state on the context so terminal delivery can lazily adopt
             # a workspace created during that turn.
             return
+        # Our lifecycle queues the link before PRE_TURN. A path-owned start may
+        # already be queued, but those durable Turns read their Delivery snapshot
+        # in load_turn_checkpoint_context, independent of legacy IM backfill.
         owns_bus_lifecycle = session_id not in self._open_bus_turns
         state = {
             **state,
             "start_observed": True,
             "start_session_id": session_id,
             "owns_bus_lifecycle": owns_bus_lifecycle,
-            "message_linked": self._link_message(context, session_id),
+            "message_link_scheduled": self._queue_message_link(context, session_id),
         }
         payload = dict(context.platform_specific or {})
         payload[_TURN_STATE_KEY] = state
@@ -880,10 +892,13 @@ class ShowGitCheckpointService:
             return
         payload = dict(getattr(context, "platform_specific", None) or {})
         session_id = str(payload.get("agent_session_id") or state.get("start_session_id") or "").strip()
-        message_linked = bool(state.get("message_linked"))
-        if session_id and not message_linked:
-            message_linked = self._link_message(context, session_id)
-        payload[_TURN_STATE_KEY] = {**state, "ended": True, "message_linked": message_linked}
+        message_link_scheduled = bool(state.get("message_link_scheduled"))
+        if session_id and not message_link_scheduled:
+            message_link_scheduled = self._queue_message_link(context, session_id)
+        payload[_TURN_STATE_KEY] = {**state, "ended": True, "message_link_scheduled": message_link_scheduled}
+        # A terminal-only link is still ordered ahead of the POST_TURN read and
+        # logs exhausted failure on the worker even when no start waiter exists.
+        self._message_link_jobs.pop(session_id, None)
         context.platform_specific = payload
         if session_id and (not state.get("start_observed") or state.get("owns_bus_lifecycle")):
             turn_id = str(payload.get("turn_token") or "").strip()
@@ -892,19 +907,38 @@ class ShowGitCheckpointService:
                 event["turn_id"] = turn_id
             self._bus.publish("turn.end", event)
 
-    async def wait_for_turn_start(self, session_id: str) -> None:
-        """Wait, without holding the loop, for this Session's PRE_TURN snapshot."""
+    async def wait_for_turn_start(self, session_id: str) -> bool:
+        """Wait for this Session's link and PRE_TURN snapshot off the loop.
 
+        False reports an exhausted link; legacy inbound remains best-effort and
+        must not prevent backend dispatch. Stop lands the link write, but keeps
+        the existing cancellable wait for git (whose worker continues in order).
+        """
+        from core.runtime_work import answer_caught_cancellation, land_step
+
+        link = self._message_link_jobs.get(session_id)
         job = self._pre_turn_jobs.get(session_id)
-        if job is None:
-            return
+        linked = True
         try:
-            # Shielded: a Stop that cancels the dispatch must not cancel the
-            # snapshot the Turn's POST_TURN checkpoint is compared against.
-            await asyncio.shield(asyncio.wrap_future(job))
+            if link is not None:
+                step, cancelled = await land_step(asyncio.wrap_future(link))
+                if cancelled:
+                    answer_caught_cancellation(step)
+                if step.exception() is not None:
+                    logger.error(
+                        "Show checkpoint turn-start work failed for session=%s", session_id, exc_info=step.exception()
+                    )
+                    linked = False
+            if job is not None:
+                # Stop may leave git running, but must not cancel the snapshot
+                # against which the ordered POST_TURN checkpoint is compared.
+                await asyncio.shield(asyncio.wrap_future(job))
+            return linked
         finally:
-            if self._pre_turn_jobs.get(session_id) is job:
+            if job is not None and self._pre_turn_jobs.get(session_id) is job:
                 del self._pre_turn_jobs[session_id]
+            if link is not None and self._message_link_jobs.get(session_id) is link:
+                del self._message_link_jobs[session_id]
 
     def _handle_event(self, event_type: str, data: Any) -> None:
         if event_type not in {"turn.start", "turn.end"} or not isinstance(data, dict):
