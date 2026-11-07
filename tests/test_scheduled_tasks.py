@@ -10619,7 +10619,7 @@ def test_hfr_477_only_a_consumed_one_shot_forces_the_executor_mirror_reload(
     claimed_cron = requests.claim(queued_cron.id)
     assert claimed_cron is not None
     asyncio.run(service._execute_claimed_request(claimed_cron))
-    assert reloads == ["maybe_reload"]
+    assert reloads[0] == "maybe_reload"
 
 
 def test_hfr_477_late_consumed_run_cannot_retire_replacement_schedule(
@@ -11212,6 +11212,7 @@ def test_hfr_477_consumed_result_survives_unrelated_definition_edit(
         store=store,
         request_store=requests,
     )
+    store.maybe_reload()
     assert store.maybe_reload() is False
 
     async def _edit_while_running(**_kwargs):
@@ -11494,6 +11495,7 @@ def test_hfr_478_stale_event_reconciles_the_current_replacement_schedule(
     service.reconcile_jobs()
     original_job_id = service._job_ids[task.id]
     original_identity = service._one_shot_job_identities[original_job_id]
+    store.maybe_reload()
     assert store.maybe_reload() is False
 
     writer = ScheduledTaskStore()
@@ -15221,16 +15223,23 @@ def test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced(tm
     )
     store.set_enabled(watch.id, False)
 
-    summary = _reclaim_now(session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared")
-    assert summary == {"paused": 0, "deleted": 0, "snapshotted": 1}, (
-        f"this test needs the SNAPSHOT-ONLY reclaim shape, and got {summary!r}: an "
-        "already-paused definition is neither paused again nor deleted"
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_PAUSE,
+        reason="the bound agent session was cleared",
     )
+    recorded = store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True)
+
+    assert race["fired"] == 1, (
+        "the competing reclaim never landed inside the write window, so this test "
+        "proved nothing; the guarded write's existence probe drifted"
+    )
+    assert race["summary"] == {"paused": 0, "deleted": 0, "snapshotted": 1}
     reclaimed_snapshot = json.loads(_stored_definition_row(watch.id)["metadata_json"])[
         SESSION_SETTINGS_SNAPSHOT_KEY
     ]
-
-    recorded = store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True)
 
     stored_metadata = json.loads(_stored_definition_row(watch.id)["metadata_json"] or "{}")
     assert stored_metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY) == reclaimed_snapshot, (

@@ -3444,7 +3444,11 @@ class SQLiteBackgroundTaskStore:
         self.engine = (
             create_sqlite_engine(self.db_path, read_only=True) if read_only else create_sqlite_engine(self.db_path)
         )
-        self._probe = SqliteInvalidationProbe(self.engine)
+        try:
+            self._probe = SqliteInvalidationProbe(self.engine)
+        except BaseException:
+            self.engine.dispose()
+            raise
 
     def close(self) -> None:
         self._probe.close()

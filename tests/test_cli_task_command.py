@@ -3504,15 +3504,13 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         )
         assert summary == {"paused": 0 if retired else 1, "deleted": 0, "snapshotted": 1}
 
-    if not retired:
-        reclaim()
     read_task = store.get_task
     reclaimed = False
 
     def read_then_reclaim(task_id):
         nonlocal reclaimed
         row = read_task(task_id)
-        if retired and not reclaimed:
+        if not reclaimed:
             reclaimed = True
             reclaim()
         return row

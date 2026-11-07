@@ -6804,13 +6804,15 @@ def test_malformed_discovered_chats_structure_does_not_block_core_state_migratio
     assert report.counts["discovered_chats_skipped"] == 1
 
 
-def test_data_version_probe_detects_external_write(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prime_before_write", [False, True], ids=["cold", "warm"])
+def test_data_version_probe_detects_external_write(tmp_path: Path, prime_before_write: bool) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
     engine = create_sqlite_engine(db_path)
     try:
         with SqliteInvalidationProbe(engine) as probe:
-            assert probe.has_external_write() is False
+            if prime_before_write:
+                assert probe.has_external_write() is False
             with engine.begin() as conn:
                 conn.exec_driver_sql(
                     "insert into state_meta (key, value_json, updated_at) values ('probe', '1', 'now')"
@@ -6818,6 +6820,29 @@ def test_data_version_probe_detects_external_write(tmp_path: Path) -> None:
             assert probe.has_external_write() is True
             assert probe.has_external_write() is False
     finally:
+        engine.dispose()
+
+
+def test_data_version_probe_releases_connection_when_initial_read_fails(tmp_path: Path) -> None:
+    """A failed constructor must not leak the dedicated pool connection."""
+    from sqlalchemy import event
+
+    engine = create_sqlite_engine(tmp_path / "vibe.sqlite")
+    observed = []
+
+    def fail_initial_read(connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement == "PRAGMA data_version":
+            observed.append(connection)
+            raise RuntimeError("probe read unavailable")
+
+    event.listen(engine, "before_cursor_execute", fail_initial_read)
+    try:
+        with pytest.raises(RuntimeError, match="probe read unavailable"):
+            SqliteInvalidationProbe(engine)
+        assert len(observed) == 1
+        assert observed[0].closed
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_initial_read)
         engine.dispose()
 
 

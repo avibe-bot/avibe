@@ -1876,15 +1876,13 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
         )
         assert summary == {"paused": 0 if retired else 1, "deleted": 0, "snapshotted": 1}
 
-    if not retired:
-        reclaim()
     read_watch = store.get_watch
     reclaimed = False
 
     def read_then_reclaim(watch_id):
         nonlocal reclaimed
         row = read_watch(watch_id)
-        if retired and not reclaimed:
+        if not reclaimed:
             reclaimed = True
             reclaim()
         return row

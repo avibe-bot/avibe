@@ -754,7 +754,11 @@ class VibeAgentStore:
         )
         if not read_only:
             self.prefill_missing_models()
-        self._probe = SqliteInvalidationProbe(self.engine)
+        try:
+            self._probe = SqliteInvalidationProbe(self.engine)
+        except BaseException:
+            self.engine.dispose()
+            raise
 
     def close(self) -> None:
         self._probe.close()

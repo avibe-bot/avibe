@@ -630,6 +630,26 @@ def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
     assert sqlite.get_watch(watch.id)["command"] == ["python3", "wait.py"]
 
 
+def test_managed_watch_store_cold_probe_refreshes_after_external_remove(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    writer = ManagedWatchStore()
+    watch = writer.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    reader = ManagedWatchStore()
+    try:
+        assert reader.get_watch(watch.id) is not None
+        assert writer.remove_watch(watch.id)
+
+        assert reader.maybe_reload() is True
+        assert reader.get_watch(watch.id) is None
+    finally:
+        if writer._sqlite is not None:
+            writer._sqlite.close()
+        if reader._sqlite is not None:
+            reader._sqlite.close()
+
+
 def test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome(
     tmp_path: Path,
 ) -> None:

@@ -172,7 +172,13 @@ class SqliteInvalidationProbe:
 
     def __init__(self, engine: Engine):
         self._connection = engine.connect()
-        self._last_data_version: int | None = None
+        try:
+            self._last_data_version = int(
+                self._connection.exec_driver_sql("PRAGMA data_version").scalar_one()
+            )
+        except BaseException:
+            self._connection.close()
+            raise
         self._lock = RLock()
 
     def has_external_write(self) -> bool:
@@ -183,10 +189,7 @@ class SqliteInvalidationProbe:
             version = int(
                 self._connection.exec_driver_sql("PRAGMA data_version").scalar_one()
             )
-            changed = (
-                self._last_data_version is not None
-                and version != self._last_data_version
-            )
+            changed = version != self._last_data_version
             self._last_data_version = version
             return changed
 
