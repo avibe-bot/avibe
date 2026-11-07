@@ -529,7 +529,7 @@ class ManagedWatchStore:
         if watch is None and self._sqlite is not None and not self._reload_required:
             # History remains addressable, but never becomes resident again just
             # because a result writer or a CLI command reads it.
-            row = self._sqlite.get_watch(watch_id)
+            row = self._sqlite.get_definition_record("watch", watch_id)
             if row is not None and row.get("retired_at") is not None:
                 return ManagedWatch.from_dict(row)
         return watch
@@ -1018,6 +1018,7 @@ class ManagedWatchStore:
         self,
         watch_id: str,
         *,
+        expected_state: DefinitionWriteExpectation | None = None,
         name: Optional[str],
         session_key: str,
         session_id: Optional[str],
@@ -1051,9 +1052,9 @@ class ManagedWatchStore:
         with self._mirror_lock:
             # A private copy: the published entry changes only once the write lands.
             watch = replace(self._required_watch(watch_id))
-            # Captured before the first mutation: the state ``vibe watch update`` read and
-            # resolved its payload from.
-            expect = self._read_state(watch)
+            # A historical reread must not replace the expectation belonging to
+            # the caller's already-resolved update payload.
+            expect = expected_state or self._read_state(watch)
             if watch.job_target is not None:
                 # A job Watch is a read-only projection of its job: the hand-over fixed
                 # its Session, Agent, delivery, and waiter. Only what it says and how

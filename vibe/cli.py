@@ -4986,7 +4986,7 @@ def _merge_task_command_update(
     return shell_command, command, timeout_seconds
 
 
-def _task_update_pure_command(args, store, task, invocation: _ServiceInvocation) -> dict:
+def _task_update_pure_command(args, store, task, invocation: _ServiceInvocation, *, expected_state) -> dict:
     """Update a command task that has no Session, Agent, or delivery target.
 
     Kept off the main update path on purpose: that path resolves an Agent, defaults a
@@ -5060,6 +5060,7 @@ def _task_update_pure_command(args, store, task, invocation: _ServiceInvocation)
 
     updated = store.update_task(
         args.task_id,
+        expected_state=expected_state,
         name=name,
         session_key=task.session_key,
         session_id=task.session_id,
@@ -5098,6 +5099,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
         task = store.get_task(args.task_id)
         if task is None:
             raise _missing_definition_error("scheduled", args.task_id, action="update", reader=stores.definition_reader)
+        expected_state = store._read_state(task)
 
         # A definition is either a scheduled Agent message or a scheduled command, and
         # the two shapes are not convertible in place: switching would leave the other
@@ -5144,7 +5146,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
                 },
             )
         if task.has_command and task.on_failure == "none":
-            return _task_update_pure_command(args, store, task, invocation)
+            return _task_update_pure_command(args, store, task, invocation, expected_state=expected_state)
 
         if getattr(args, "reset_delivery", False) and (
             getattr(args, "scope_id", None) is not None
@@ -5526,6 +5528,7 @@ def _task_update(args, invocation: _ServiceInvocation) -> dict:
 
         updated = store.update_task(
             args.task_id,
+            expected_state=expected_state,
             name=name,
             session_key=session_key,
             session_id=session_id,
@@ -12205,6 +12208,7 @@ def _watch_update(args, invocation: _ServiceInvocation) -> dict:
         watch = store.get_watch(args.watch_id)
         if watch is None:
             raise _missing_definition_error("watch", args.watch_id, action="update", reader=stores.definition_reader)
+        expected_state = store._read_state(watch)
 
         if getattr(args, "reset_delivery", False) and (
             getattr(args, "scope_id", None) is not None
@@ -12537,6 +12541,7 @@ def _watch_update(args, invocation: _ServiceInvocation) -> dict:
         updated = store.update_watch(
             args.watch_id,
             **changes,
+            expected_state=expected_state,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
             user_context=caller_user_context,

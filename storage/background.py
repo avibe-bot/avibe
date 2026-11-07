@@ -3424,6 +3424,47 @@ class SQLiteBackgroundTaskStore:
     def maybe_reload(self) -> bool:
         return self._probe.has_external_write()
 
+    def get_definition_record(self, definition_type: str, definition_id: str) -> Optional[dict[str, Any]]:
+        """One definition and, for a consumed Task, its exact owning Run.
+
+        Historical misses in the runtime mirrors use this bounded primary-key
+        read, including on the controller loop. No lifecycle, health, session or
+        runtime enrichment runs here. Public responses use the enriched readers.
+        """
+        decode = {"scheduled": self._scheduled_task_from_row, "watch": self._watch_from_row}[definition_type]
+        stmt = select(run_definitions)
+        if definition_type == "scheduled":
+            # Preserve the core getter's terminal fields without a history scan
+            # or a second read: the consuming Run is named by its primary key.
+            stmt = stmt.add_columns(
+                agent_runs.c.completed_at.label("consumed_completed_at"),
+                agent_runs.c.exit_code.label("consumed_exit_code"),
+                agent_runs.c.error.label("consumed_error"),
+            ).select_from(run_definitions.outerjoin(agent_runs, and_(
+                agent_runs.c.id == run_definitions.c.last_run_id,
+                agent_runs.c.definition_id == run_definitions.c.id,
+                agent_runs.c.source_kind == "scheduler",
+                func.json_valid(agent_runs.c.metadata_json) == 1,
+                *task_schedule_generation_matches_definition(),
+            )))
+        stmt = (
+            stmt.where(run_definitions.c.id == definition_id)
+            .where(run_definitions.c.definition_type == definition_type)
+            .where(run_definitions.c.deleted_at.is_(None))
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return None
+            record = decode(row)
+            if definition_type == "scheduled" and record["retirement_reason"] == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+                record.update(
+                    last_run_at=row["consumed_completed_at"],
+                    last_exit_code=row["consumed_exit_code"],
+                    last_error=row["consumed_error"],
+                )
+            return record
+
     def list_scheduled_tasks(self, *, include_retired: bool = True) -> list[dict[str, Any]]:
         stmt = self._definitions_query("scheduled", include_retired=include_retired).order_by(
             run_definitions.c.created_at, run_definitions.c.id

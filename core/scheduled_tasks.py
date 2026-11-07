@@ -1461,7 +1461,7 @@ class ScheduledTaskStore:
         if task is None and self._sqlite is not None and not self._reload_required:
             # Retired definitions still own results, notices and user mutations.
             # Read them by primary key without growing the scheduling mirror.
-            row = self._sqlite.get_scheduled_task(task_id)
+            row = self._sqlite.get_definition_record("scheduled", task_id)
             if row is not None and row.get("retired_at") is not None:
                 return ScheduledTask.from_dict(row)
         return task
@@ -1834,6 +1834,7 @@ class ScheduledTaskStore:
         timeout_seconds: Optional[float] = None,
         update_command_fields: bool = False,
         metadata: Optional[dict[str, Any]] = None,
+        expected_state: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
         user_context: Any = None,
@@ -1847,10 +1848,9 @@ class ScheduledTaskStore:
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._required_working_copy(task_id)
-        # Captured before the first mutation: this is the state the CALLER read
-        # (``vibe task update`` resolved Agents and Sessions from this very object),
-        # and it is what the write below re-asserts.
-        expect = self._read_state(task)
+        # A retired definition is reread instead of cached. The resolved update
+        # payload still belongs to the caller's original read, not this newer row.
+        expect = expected_state or self._read_state(task)
         previous_schedule = (task.schedule_type, task.run_at, task.timezone)
         task.name = name
         task.session_key = session_key

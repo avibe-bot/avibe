@@ -43,7 +43,7 @@ def test_reload_excludes_retirement_history_without_changing_by_id_or_lists(kind
     statements = []
 
     def capture(_conn, _cursor, statement, parameters, _context, _executemany):
-        if statement.startswith("SELECT") and "FROM run_definitions" in statement:
+        if statement.startswith("SELECT"):
             statements.append((statement, parameters))
 
     event.listen(store.sqlite_backend.engine, "before_cursor_execute", capture)
@@ -67,7 +67,19 @@ def test_reload_excludes_retirement_history_without_changing_by_id_or_lists(kind
         historical = f"{kind}-0"
         before = get_projected(historical)
         assert before["lifecycle_state"] == "finished"
+        statements.clear()
         assert get(historical).retired_at == stamp
+        # Cache-only callers on the controller loop may miss on a retired row.
+        # Its fallback must stay one indexed record read, not UI/Run enrichment.
+        assert len(statements) == 1
+        statement, parameters = statements[0]
+        with db.engine.connect() as conn:
+            plan = "\n".join(row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters))
+        assert "SEARCH run_definitions USING INDEX sqlite_autoindex_run_definitions_1 (id=?)" in plan
+        if kind == "scheduled":
+            assert "SEARCH agent_runs USING INDEX sqlite_autoindex_agent_runs_1 (id=?) LEFT-JOIN" in plan
+        else:
+            assert "agent_runs" not in statement
         assert len(resident()) == total - retired
         assert len(list_all()) == total
         assert get_projected(historical) == before
