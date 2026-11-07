@@ -101,13 +101,15 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
         if (!event.defaultPrevented) onClick();
       }}
       aria-label={label}
-      className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1 px-1 pb-2 text-2xs"
+      className="flex min-w-0 flex-1 flex-col items-center justify-between gap-1 self-stretch px-1 pb-2 text-2xs"
     >
-      {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge.
+      {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge by
+          `--mobile-nav-center-rise` (past the bar's top padding and border), the room a sheet that
+          ends at the bar keeps for it. The name stays level with the other tabs' labels below.
           The avatar fills the button to its ring: one circle, the Bot's face in it. */}
       <span
         className={clsx(
-          'relative -mt-5 rounded-full bg-surface transition',
+          'relative -mt-[calc(var(--mobile-nav-center-rise)+0.5rem+1px)] rounded-full bg-surface transition',
           // At rest it is lit the way a selected Bot is (`.bot-avatar-selected`): a bright fine
           // edge and the theme's halo; the running dot says it is working.
           phase === 'idle' && 'bot-avatar-selected',
@@ -135,13 +137,17 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
   );
 };
 
+// The bar is exactly `--mobile-nav-height` tall, so whatever sits above it starts at its edge.
+// `data-mobile-tab-bar`: a sheet that ends at that edge draws the bar above itself (index.css).
+const BAR = 'fixed inset-x-0 bottom-0 h-(--mobile-nav-height) border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden';
+
 // Workbench mobile tabs flank a raised center: the main Bot for the Owner, a
 // new-session action for everyone else.
 export const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton; bot?: BotCenter }> = ({ items, center, bot }) => {
   // No center action means a plain even row of tabs.
   if (!center && !bot) {
     return (
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
+      <nav data-mobile-tab-bar className={clsx(BAR, 'z-40')}>
         <div className="flex items-end justify-between gap-1">
           {items.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
         </div>
@@ -154,7 +160,7 @@ export const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButt
   // While the main Bot is held the bar rises above the take's scrim, so the held avatar stays bright.
   const raised = bot?.phase !== undefined && bot.phase !== 'idle';
   return (
-    <nav className={clsx('fixed inset-x-0 bottom-0 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden', raised ? 'z-50' : 'z-40')}>
+    <nav data-mobile-tab-bar className={clsx(BAR, raised ? 'z-50' : 'z-40')}>
       <div className="flex items-end justify-between gap-1">
         {left.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
         {bot ? <MobileBotCenter {...bot} /> : center && <NewSessionCenter center={center} />}

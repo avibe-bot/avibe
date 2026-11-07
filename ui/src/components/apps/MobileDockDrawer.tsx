@@ -131,7 +131,9 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   };
 
   return (
-    <div className="md:hidden" role="dialog" aria-modal="true" aria-label={t('nav.apps')} inert={!open || undefined}>
+    // `data-tab-bar-sheet`: the drawer ends at the tab bar's edge, so the bar draws above it while
+    // it is on screen (index.css), and its raised center is never cut off.
+    <div className="md:hidden" role="dialog" aria-modal="true" aria-label={t('nav.apps')} inert={!open || undefined} data-tab-bar-sheet>
       {/* Scrim from the top of the screen down to the tab bar — the tab bar stays
           visible + tappable below it (tapping Apps again toggles the drawer shut). */}
       <button
@@ -139,17 +141,19 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
         aria-label={t('common.close')}
         onClick={onClose}
         data-state={state}
-        className="motion-scrim fixed inset-x-0 top-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-40 bg-background/70 backdrop-blur-sm"
+        className="motion-scrim fixed inset-x-0 top-0 bottom-(--mobile-nav-height) z-40 bg-background/70 backdrop-blur-sm"
       />
 
       {/* The drawer sheet: sits directly above the bottom tab bar, and moves inside a frame that ends
-          at the bar's edge, so it rises from behind the bar and sinks back behind it. */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 bottom-[calc(4.75rem+env(safe-area-inset-bottom))] z-50 overflow-hidden">
+          at the bar's edge, so it rises from behind the bar and sinks back behind it. Its foot keeps
+          the room the bar's raised center takes above that edge, plus the sheet's own 16px, so the
+          last row is never under the circle; the bar's top border is its bottom edge. */}
+      <div className="pointer-events-none fixed inset-x-0 top-0 bottom-(--mobile-nav-height) z-50 overflow-hidden">
       <div
         ref={setDrawer}
         data-state={state}
         onAnimationEnd={onDrawerAnimationEnd}
-        className="motion-sheet pointer-events-auto absolute inset-x-0 bottom-0 max-h-[72dvh] overflow-y-auto rounded-t-3xl border border-border bg-surface px-4 pb-4 pt-2 shadow-[0_-16px_40px_-12px_rgba(0,0,0,0.55)]"
+        className="motion-sheet pointer-events-auto absolute inset-x-0 bottom-0 max-h-[72dvh] overflow-y-auto rounded-t-3xl border-x border-t border-border bg-surface px-4 pb-[calc(var(--mobile-nav-center-rise)+1rem)] pt-2 shadow-[0_-16px_40px_-12px_rgba(0,0,0,0.55)]"
       >
         {/* Grabber. */}
         <div className="mx-auto mb-3 h-1 w-10 shrink-0 rounded-full bg-border" />
