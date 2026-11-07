@@ -369,7 +369,7 @@ class InstanceAuthorizationError(PermissionError):
 
 def _in_http_request() -> bool:
     try:
-        from vibe.ui_compat import has_request_context
+        from vibe.ui_request_context import has_request_context
 
         return bool(has_request_context())
     except Exception:

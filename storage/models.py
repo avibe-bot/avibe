@@ -375,6 +375,9 @@ agent_runs = Table(
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
+    # Every ownership arm must be indexed or a Session's OR filter scans history.
+    Index("ix_agent_runs_callback_session", "callback_session_id"),
+    Index("ix_agent_runs_source_actor", "source_kind", "source_actor"),
     Index(
         "uq_agent_runs_delivery",
         "delivery_id",

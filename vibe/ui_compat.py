@@ -17,10 +17,11 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.datastructures import Headers, QueryParams, URL
 
+from vibe.ui_request_context import _request_var, has_request_context
+
 
 TEST_REMOTE_ADDR_HEADER = "x-vibe-test-remote-addr"
 
-_request_var: ContextVar["CompatRequest"] = ContextVar("ui_request")
 _g_var: ContextVar[Any] = ContextVar("ui_g")
 
 
@@ -116,14 +117,6 @@ class CompatRequest:
 
 request = _LocalProxy(lambda: _request_var.get())
 g = _LocalProxy(lambda: _g_var.get())
-
-
-def has_request_context() -> bool:
-    try:
-        _request_var.get()
-    except LookupError:
-        return False
-    return True
 
 
 def jsonify(*args: Any, **kwargs: Any) -> JSONResponse:
