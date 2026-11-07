@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import sqlite3
 import logging
+import sys
 import threading
+from contextlib import closing
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,8 @@ from types import SimpleNamespace
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from alembic.script.revision import RevisionError
+from alembic.util import CommandError
 
 from config import paths
 from storage.backups import (
@@ -54,6 +58,10 @@ INITIAL_TABLES = {
 
 class UnsafeDefaultStateMigrationError(RuntimeError):
     """Raised when source-checkout code would migrate the user's default state."""
+
+
+class IncompatibleDatabaseRevisionError(RuntimeError):
+    """The stored revisions cannot move forward in this executable's graph."""
 
 
 HEAD_TABLES = INITIAL_TABLES | {
@@ -330,10 +338,11 @@ def _migration_backup_revisions(db_path: Path, cfg: Config, revision: str) -> tu
     if not db_path.exists() or db_path.stat().st_size == 0:
         return None
 
-    with sqlite3.connect(db_path) as conn:
+    # This is the preflight for BOTH backup and repair. Even a version-only
+    # database must be checked first. Use SQLite's ordinary reader so native
+    # hot-journal recovery still precedes our inspection of committed revisions.
+    with closing(sqlite3.connect(db_path)) as conn:
         tables = _table_names(conn)
-        if not tables - {"alembic_version"}:
-            return None
         current_revisions = (
             {str(row[0]) for row in conn.execute("select version_num from alembic_version")}
             if "alembic_version" in tables
@@ -341,8 +350,35 @@ def _migration_backup_revisions(db_path: Path, cfg: Config, revision: str) -> tu
         )
 
     script = ScriptDirectory.from_config(cfg)
-    target_revisions = {item.revision for item in script.get_revisions(revision)}
-    if current_revisions == target_revisions:
+    installed_heads = set(script.get_heads())
+    target_revisions: set[str] = set()
+    try:
+        target_revisions = {item.revision for item in script.get_revisions(revision)}
+        # An empty stamp retains the existing unversioned-schema repair path.
+        if current_revisions and current_revisions != {""}:
+            installed_revisions = {item.revision for item in script.walk_revisions()}
+            if not current_revisions.issubset(installed_revisions):
+                # Alembic resolves aliases/partial identifiers, but a persisted
+                # stamp must name an exact revision, not e.g. "head" or a prefix.
+                raise RevisionError("Stored revisions are not in the installed migration graph")
+            # Unlike command.upgrade (implicit_base=True), this rejects a
+            # requested ancestor or sibling instead of silently doing no work.
+            tuple(script.iterate_revisions(tuple(target_revisions), tuple(current_revisions)))
+    except (CommandError, RevisionError) as exc:
+        from vibe import __version__
+
+        raise IncompatibleDatabaseRevisionError(
+            f"Refusing SQLite migration for {db_path}: {exc}. "
+            f"Executable: {sys.executable}; Avibe version: {__version__}; "
+            f"migration code: {Path(__file__).resolve()}; "
+            f"stored revisions: {sorted(current_revisions)}; "
+            f"installed heads: {sorted(installed_heads)}; "
+            f"requested target: {revision!r} ({sorted(target_revisions)}).\n"
+            "Hint: a newer Avibe may have migrated this database; this executable may be older, "
+            "or the requested target is incompatible. Use the matching/newer Avibe executable "
+            "and its head revision; do not restamp or restore the database to force this open."
+        ) from exc
+    if not tables - {"alembic_version"} or current_revisions == target_revisions:
         return None
     return current_revisions, target_revisions
 
