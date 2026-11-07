@@ -454,7 +454,12 @@ def test_definition_to_run_public_projection_keeps_raw_execution_owner(capsys):
                 assert public["scheduled_provenance"]["platform_specific"]["message_metadata"] == {"visible": "retained"}
             reloaded = TaskExecutionStore().get_run(run.id)
             assert reloaded["metadata"]["delegated_memory_owner"] == owner
-            assert reloaded["metadata"]["resource_user_context"] == metadata["resource_user_context"]
+            if run is scheduled:
+                # Scheduled Task authorization reloads the live definition, so new
+                # rows intentionally omit its definition-owned authority snapshot.
+                assert "resource_user_context" not in reloaded["metadata"]
+            else:
+                assert reloaded["metadata"]["resource_user_context"] == metadata["resource_user_context"]
     finally:
         requests.sqlite_backend.close()
         store.close()
