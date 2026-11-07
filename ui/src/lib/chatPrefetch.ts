@@ -57,12 +57,21 @@ function connectionAllowsPrefetch(): boolean {
 
 const pageVisible = () => typeof document === 'undefined' || document.visibilityState === 'visible';
 
-/** Run when the browser is idle, or after a short delay where it cannot say (Safari). */
-export function whenIdle(run: () => void): void {
-  const idle = (globalThis as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number })
-    .requestIdleCallback;
-  if (typeof idle === 'function') idle(run, { timeout: IDLE_TIMEOUT_MS });
-  else setTimeout(run, IDLE_FALLBACK_MS);
+type IdleScope = {
+  requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+/** Run when the browser is idle, or after a short delay where it cannot say
+ *  (Safari). Returns the cancel, for a caller that can go away first. */
+export function whenIdle(run: () => void): () => void {
+  const scope = globalThis as IdleScope;
+  if (typeof scope.requestIdleCallback === 'function') {
+    const handle = scope.requestIdleCallback(run, { timeout: IDLE_TIMEOUT_MS });
+    return () => scope.cancelIdleCallback?.(handle);
+  }
+  const timer = setTimeout(run, IDLE_FALLBACK_MS);
+  return () => clearTimeout(timer);
 }
 
 const errorStatus = (error: unknown): number | null => {

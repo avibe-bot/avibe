@@ -1439,3 +1439,76 @@ it.each(['editor', 'viewer'])('mounts the version badge for a read-capable %s', 
   render(<MemoryRouter initialEntries={['/']}><Routes><Route element={<AppShell />}><Route index element={<div />} /></Route></Routes></MemoryRouter>);
   expect(await screen.findByTestId('version-badge')).toBeTruthy();
 });
+
+// Once the shell is up it fetches the other routed pages in idle time, one at a
+// time (src/routePages.ts). That chain belongs to the shell: when the shell
+// goes, a step still pending must not schedule another, or its timer fires into
+// a closed window, or into a test environment already torn down.
+describe('AppShell route prefetch', () => {
+  // Fresh modules, so the chain starts from its first page; jsdom has no
+  // requestIdleCallback, so each step waits on a timer.
+  const startShell = async () => {
+    vi.resetModules();
+    const [{ AppShell: Shell }, pages, { DeferredInboxPreview }] = await Promise.all([
+      import('./AppShell'),
+      import('../routePages'),
+      import('./workbench/InboxHoverPopover'),
+    ]);
+    let finishFirst!: () => void;
+    const firstStep = new Promise<void>((resolve) => { finishFirst = resolve; });
+    const first = vi.spyOn(pages.ChatPage, 'preload').mockReturnValue(firstStep as never);
+    const second = vi.spyOn(DeferredInboxPreview, 'preload').mockResolvedValue(undefined as never);
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<Shell />}>
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    // The first idle step starts the first page, which stays on its way.
+    await act(async () => { vi.advanceTimersByTime(5_000); });
+    expect(first).toHaveBeenCalledOnce();
+    return { view, finishFirst, second };
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('goes on to the next page while the shell stays', async () => {
+    const { finishFirst, second } = await startShell();
+
+    await act(async () => { finishFirst(); });
+    await act(async () => { vi.advanceTimersByTime(5_000); });
+
+    expect(second).toHaveBeenCalledOnce();
+  });
+
+  it('runs no later step once the shell unmounts while a page is on its way', async () => {
+    const { view, finishFirst, second } = await startShell();
+
+    view.unmount();
+    await act(async () => { finishFirst(); });
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it('leaves no step waiting once the shell unmounts between pages', async () => {
+    const { view, finishFirst, second } = await startShell();
+    await act(async () => { finishFirst(); });
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    view.unmount();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+    expect(second).not.toHaveBeenCalled();
+  });
+});

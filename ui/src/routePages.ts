@@ -101,27 +101,45 @@ const PREFETCH_ORDER = [
   SettingsLayout,
 ];
 
-let prefetchStarted = false;
+// What is left to fetch, kept across starts: a shell that mounts again (React's
+// development StrictMode mounts it twice) resumes rather than starting over.
+let remaining: { preload: () => Promise<unknown> }[] | null = null;
 
 /**
- * Once per document, after the shell is up: fetch the other pages in idle time,
- * one at a time, while the page is visible. This is code the app downloaded up
- * front before it was split, and a page that has it can still be opened after
- * the connection drops, as before.
+ * After the shell is up: fetch the other pages in idle time, one at a time,
+ * while the page is visible. This is code the app downloaded up front before it
+ * was split, and a page that has it can still be opened after the connection
+ * drops, as before.
+ *
+ * Returns the stop, for the shell's unmount: the pending idle step is cancelled
+ * and nothing is scheduled after it, so the chain never outlives its owner. A
+ * page already on its way finishes loading; the next one waits for a new start.
  */
-export function prefetchRoutePages(): void {
-  if (prefetchStarted) return;
-  prefetchStarted = true;
-  const queue = [...PREFETCH_ORDER];
-  const next = () => {
-    const page = queue.shift();
+export function prefetchRoutePages(): () => void {
+  const queue = (remaining ??= [...PREFETCH_ORDER]);
+  let stopped = false;
+  let cancelIdle: (() => void) | null = null;
+  const schedule = () => {
+    if (stopped) return;
+    cancelIdle = whenIdle(next);
+  };
+  function next() {
+    cancelIdle = null;
+    if (stopped) return;
+    const page = queue[0];
     if (!page) return;
     if (document.visibilityState !== 'visible') {
-      queue.unshift(page);
-      document.addEventListener('visibilitychange', () => whenIdle(next), { once: true });
+      document.addEventListener('visibilitychange', schedule, { once: true });
       return;
     }
-    page.preload().catch(ignore).finally(() => whenIdle(next));
+    queue.shift();
+    page.preload().catch(ignore).finally(schedule);
+  }
+  schedule();
+  return () => {
+    stopped = true;
+    cancelIdle?.();
+    cancelIdle = null;
+    document.removeEventListener('visibilitychange', schedule);
   };
-  whenIdle(next);
 }
