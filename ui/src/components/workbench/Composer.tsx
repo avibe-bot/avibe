@@ -41,7 +41,7 @@ import {
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
 import { createVoiceActivity, reportVoiceSilenceGate, type VoiceActivity } from '../../lib/voiceActivity';
-import { VoiceCaptureTrace } from '../../lib/voiceCaptureTrace';
+import { VoiceCaptureTrace, type VoiceCaptureClass } from '../../lib/voiceCaptureTrace';
 import { VoiceTakeKeeper } from '../../lib/voiceTakeKeeper';
 import {
   emitVoiceTelemetry,
@@ -182,6 +182,11 @@ type VoiceSegment = VoiceTranscriptionSegment & {
 type VoiceRecordingSession = {
   sessionId: string;
   dictationId: string;
+  /** What the take's microphone delivered (lib/voiceCaptureTrace), for an honest note. */
+  captureClass?: () => VoiceCaptureClass;
+  /** Part of the take was recorded in a form this browser could not decode: the silence gate cannot
+   *  speak for it. */
+  unjudgedAudio?: boolean;
   abortController: AbortController;
   /** Aborted when capture stops: segments sent while recording stop retrying on their own, and
    *  finalization takes them over within its bounded window. */
@@ -318,6 +323,15 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
   return session.finalization;
 };
 
+/** A take with nothing to transcribe: a microphone that delivered no sound, or one the system
+ *  held, is said so; only a take that heard silence is "no speech". */
+const emptyVoiceTranslationKey = (session: VoiceRecordingSession): TranslationKey => {
+  const delivered = session.captureClass?.();
+  if (delivered === 'no_frames') return 'chat.compose.voiceNoSound';
+  if (delivered === 'muted') return 'chat.compose.voiceMicBusy';
+  return 'chat.compose.voiceEmpty';
+};
+
 const voiceErrorTranslationKey = (session: VoiceRecordingSession): TranslationKey => {
   const { error } = session;
   if (voiceSessionVoicedEmpty(session)) return 'chat.compose.voiceEmptyKept';
@@ -325,7 +339,7 @@ const voiceErrorTranslationKey = (session: VoiceRecordingSession): TranslationKe
   if (error.code === 'too_large') return 'chat.compose.voiceTooLarge';
   if (error.code === 'timeout') return 'chat.compose.voiceTimedOut';
   if (error.code === 'unavailable') return 'chat.compose.voiceUnavailable';
-  if (error.code === 'empty') return 'chat.compose.voiceEmpty';
+  if (error.code === 'empty') return emptyVoiceTranslationKey(session);
   return 'chat.compose.voiceFailed';
 };
 
@@ -343,10 +357,15 @@ function voiceSessionHasAudio(session: VoiceRecordingSession): boolean {
 
 /** Whether the empty transcript of this session is a recognition that failed: the microphone
  *  heard sound loud enough for speech. */
+/** The take may hold speech: a moment loud enough for it, or audio whose sound was never judged. */
+const voiceSessionMayHoldSpeech = (session: VoiceRecordingSession): boolean => (
+  session.activity.voiced() || session.unjudgedAudio === true
+);
+
 const voiceSessionVoicedEmpty = (session: VoiceRecordingSession): boolean => (
   session.error instanceof VoiceTranscriptionError
   && session.error.code === 'empty'
-  && session.activity.voiced()
+  && voiceSessionMayHoldSpeech(session)
 );
 
 // A take keeps its audio and can be sent again unless there is nothing to send: no audio, or an
@@ -356,7 +375,7 @@ function canRetryVoiceSession(session: VoiceRecordingSession): boolean {
   return !(
     session.error instanceof VoiceTranscriptionError
     && session.error.code === 'empty'
-    && !session.activity.voiced()
+    && !voiceSessionMayHoldSpeech(session)
   );
 }
 
@@ -1255,6 +1274,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const session: VoiceRecordingSession = {
         sessionId: voiceKey,
         dictationId,
+        captureClass: () => trace.captureClass(),
         abortController,
         captureRetries,
         segments: [],
@@ -1305,13 +1325,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         trace,
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: asrMaxFileBytes,
-        onSegment: (blob, metadata) => queueVoiceSegment(
-          session,
-          blob,
-          metadata.durationMs,
-          metadata.overlapMs,
-          metadata.final,
-        ),
+        onSegment: (blob, metadata) => {
+          if (metadata.unjudged) session.unjudgedAudio = true;
+          queueVoiceSegment(session, blob, metadata.durationMs, metadata.overlapMs, metadata.final);
+        },
         onPcm: (samples) => {
           // What would be transcribed, its flushed tail included, is what the gate judges.
           session.activity.observePcm(samples);
@@ -1325,6 +1342,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           session.backlogAtStop = session.segments.filter(
             (segment) => !segment.final && !segment.receipt && !segment.error,
           ).length;
+        },
+        onCaptureState: (state) => {
+          // Recorded without Web Audio: no live PCM, so its words come over HTTP when it ends.
+          if (state !== 'live' && session.realtime && session.realtimeState !== 'failed') {
+            session.realtimeState = 'failed';
+            session.realtime.abort();
+            activateHttpFallback(session);
+          }
         },
         onError: (error) => {
           session.captureError = error;
@@ -1358,7 +1383,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           // Nothing recorded, or a take that neither showed live words nor got as loud as a
           // soft syllable (the silence gate, lib/voiceActivity): no speech, and recognition is
           // not asked, since on near-silence it can return its hotwords as text.
-          const silent = session.activity.silent() && !session.realtimeHeardWords;
+          const silent = session.activity.silent() && !session.realtimeHeardWords && !session.unjudgedAudio;
           if (silent) reportVoiceSilenceGate(session.activity, session.stoppedAt === undefined || session.startedAt === undefined ? undefined : session.stoppedAt - session.startedAt);
           if ((!session.segments.length && session.captureError === undefined) || silent) {
             session.keeper?.forget();
@@ -1367,7 +1392,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             restoreRealtimePreview(session);
             reportVoiceFinalization(session, 'empty');
             if (!unmountedRef.current && voiceKey === session.sessionId) {
-              showToast(t('chat.compose.voiceEmpty'), 'error');
+              showToast(t(emptyVoiceTranslationKey(session)), 'error');
             }
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;

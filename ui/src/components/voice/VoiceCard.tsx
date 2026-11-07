@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef, type ReactNode } from 'react';
-import { AlertTriangle, ChevronUp, CloudOff, MessagesSquare, RotateCcw, Send, X } from 'lucide-react';
+import { AlertTriangle, ChevronUp, CloudOff, MessagesSquare, MicOff, RotateCcw, Send, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
+import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { BotAvatar } from '../ui/bot-avatar';
 import { Button } from '../ui/button';
 import type { HoldInterruptReason } from './useHoldToTalk';
@@ -20,6 +21,20 @@ export type VoiceCardPhase = 'listening' | 'recording' | 'armed' | 'settling' | 
 /** Who the take goes to. `title` replaces "To {name}" (a Session's 发到「…」); with no avatar
  *  the card shows a neutral conversation icon. */
 export type VoiceTarget = { name: string; avatar?: BotAvatarSpec | null; title?: string };
+
+/** A microphone that gives the take no sound: its meter flat. */
+const NO_SOUND_LEVEL: VoiceLevelSource = { read: () => 0, still: Array.from({ length: 24 }, () => 0) };
+
+/** A take recorded without Web Audio has no level at all, so it shows no meter: a dot that breathes
+ *  (opacity only; still with reduced motion) beside a still line, the clock above counting. */
+function VoiceRecordingMark() {
+  return (
+    <div className="flex h-6 items-center gap-2" aria-hidden="true" data-voice-recording>
+      <span className="size-2 rounded-full bg-mint motion-safe:animate-pulse" />
+      <span className="h-px w-32 rounded-full bg-mint/30" />
+    </div>
+  );
+}
 
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
@@ -41,6 +56,7 @@ export function VoiceCard({
   actions,
   level,
   liveUnavailable = false,
+  captureState = 'live',
   onCancel,
 }: {
   to: VoiceTarget;
@@ -57,6 +73,9 @@ export function VoiceCard({
   /** Live recognition is not working for this take: the card says so, quietly, and that the
    *  take is still transcribed in full on release (`useHoldToTalk().liveUnavailable`). */
   liveUnavailable?: boolean;
+  /** Recorded without Web Audio (`recorder`: no level to draw, so the meter holds still), or so
+   *  and getting no sound from the microphone (`no_sound`: the card says so; the take goes on). */
+  captureState?: VoiceCaptureState;
   /** Settling: stop waiting for the take's words (`useHoldToTalk().cancelSettling`), the × at the
    *  end of the "Finishing…" line (ui/design: composer/hold-mobile/f-settling). */
   onCancel?: (() => void) | null;
@@ -156,13 +175,21 @@ export function VoiceCard({
             {actions && <div className="flex justify-end gap-2">{actions}</div>}
           </div>
         )}
-        {running && !armed && liveUnavailable && (
+        {running && !armed && captureState === 'no_sound' && (
+          <div className="flex items-center gap-1.5 text-xs text-gold-ink" role="status">
+            <MicOff className="size-3.5 shrink-0" />
+            {t('voice.noSoundNow')}
+          </div>
+        )}
+        {running && !armed && captureState !== 'no_sound' && liveUnavailable && (
           <div className="flex items-center gap-1.5 text-xs text-muted" role="status">
             <CloudOff className="size-3.5 shrink-0" />
             {t('voice.liveUnavailable')}
           </div>
         )}
-        {running && <VoiceMeter level={level} mode={armed ? 'armed' : 'live'} />}
+        {running && (captureState === 'recorder' && !armed
+          ? <VoiceRecordingMark />
+          : <VoiceMeter level={captureState === 'no_sound' ? NO_SOUND_LEVEL : level} mode={armed ? 'armed' : 'live'} />)}
       </div>
     </div>
   );

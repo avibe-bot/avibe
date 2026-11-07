@@ -42,3 +42,38 @@ describe('VoiceCard', () => {
     expect(screen.getByText(en.voice.interrupted.dropped)).toBeTruthy();
   });
 });
+
+describe('VoiceCard recording without Web Audio', () => {
+  const recording = (captureState: 'live' | 'recorder' | 'no_sound', liveUnavailable: boolean) => render(
+    <I18nextProvider i18n={i18n}>
+      <VoiceCard to={{ name: 'Vibey' }} phase="listening" text="" seconds={3} liveUnavailable={liveUnavailable} captureState={captureState} />
+    </I18nextProvider>,
+  );
+  const meterBars = () => Array.from(document.querySelectorAll('[data-voice-meter="live"] span')).map((bar) => (bar as HTMLElement).style.transform);
+  /** The live meter animates its bars; a still one does not. */
+  const animated = () => document.querySelectorAll('[data-voice-meter="live"] span.will-change-transform').length;
+
+  it('says the take is transcribed on release, and draws no meter it has no level for', () => {
+    recording('recorder', true);
+    expect(screen.getByRole('status').textContent).toBe(en.voice.liveUnavailable);
+    expect(document.querySelector('[data-voice-meter]')).toBeNull();
+    // A dot that breathes only where motion is allowed.
+    const mark = document.querySelector('[data-voice-recording]');
+    expect(mark?.querySelector('.motion-safe\\:animate-pulse')).toBeTruthy();
+  });
+
+  it('says when the microphone gives no sound, its meter flat, and the take goes on', () => {
+    recording('no_sound', true);
+    expect(screen.getByRole('status').textContent).toBe(en.voice.noSoundNow);
+    expect(screen.queryByText(en.voice.liveUnavailable)).toBeNull();
+    expect(animated()).toBe(0);
+    expect(new Set(meterBars()).size).toBe(1);
+  });
+
+  it('draws the live level otherwise', () => {
+    recording('live', false);
+    expect(screen.queryByText(en.voice.liveUnavailable)).toBeNull();
+    expect(screen.queryByText(en.voice.noSoundNow)).toBeNull();
+    expect(animated()).toBeGreaterThan(0);
+  });
+});

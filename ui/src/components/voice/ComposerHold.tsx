@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { Trans, useTranslation } from 'react-i18next';
 
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
+import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { Button } from '../ui/button';
 import type { HoldOutcome, useHoldToTalk } from './useHoldToTalk';
 import { PendingVoiceTakes } from './PendingVoiceTakes';
@@ -25,6 +26,8 @@ export type ComposerHoldView = Pick<
   level?: VoiceLevelSource | null;
   /** Live recognition is not working for this take. */
   liveUnavailable?: boolean;
+  /** How the take is recorded: through Web Audio, without it, or without it and getting no sound. */
+  captureState?: VoiceCaptureState;
 };
 
 /** What pressed: a mouse (the ring, leave-to-cancel, Esc) or a finger or pen (slide up). */
@@ -97,6 +100,7 @@ export function ComposerHoldCard({
             reason={hold.interruptReason ?? 'dropped'}
             level={hold.level}
             liveUnavailable={hold.liveUnavailable}
+            captureState={hold.captureState}
             onCancel={hold.cancelSettling}
             actions={
               <>
@@ -181,12 +185,15 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
       {note === 'asking' && <Mic className="mt-0.5 size-4 shrink-0 text-mint-ink" />}
       {(note === 'cancelled' || note === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'too-short' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
+      {(note === 'no-sound' || note === 'mic-busy') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
       {note === 'denied' && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
       {note === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
         {note === 'cancelled' && <span className="text-foreground">{t('voice.cancelled')}</span>}
         {note === 'kept' && <span className="text-foreground">{t('voice.composer.cancelledKept')}</span>}
         {note === 'too-short' && <span className="text-foreground">{t('voice.composer.tooShort')}</span>}
+        {note === 'no-sound' && <span className="text-foreground">{t('voice.composer.noSound')}</span>}
+        {note === 'mic-busy' && <span className="text-foreground">{t('voice.composer.micBusy')}</span>}
         {note === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
         {note === 'denied' && (
           <>
