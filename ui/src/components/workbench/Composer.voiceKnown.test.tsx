@@ -4,7 +4,7 @@ import 'fake-indexeddb/auto';
 import { createInstance } from 'i18next';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   Range.prototype.getBoundingClientRect = () => new DOMRect();
@@ -26,6 +26,7 @@ import en from '../../i18n/en.json';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 import { beginVoiceStatusRead } from '../../lib/voiceAvailability';
 import { Composer } from './Composer';
+import { DeferredMentionEditor } from './deferredMentionEditor';
 
 // The composer's voice control renders from the last known transcription status
 // for this reader, so it is in place from the first frame; the live read then
@@ -58,6 +59,11 @@ const answer = (status: Status) => {
   pending = [];
   for (const resolve of reads) resolve(status);
 };
+
+// The chat page loads its composer's editor before it mounts (routePages.ts).
+beforeAll(async () => {
+  await DeferredMentionEditor.preload();
+});
 
 beforeEach(() => {
   setLocalSnapshotPrincipal('local');

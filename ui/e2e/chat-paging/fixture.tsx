@@ -8,6 +8,7 @@ import { ToastContext } from '../../src/context/ToastContext';
 import { WindowManagerContext, type WindowManagerValue } from '../../src/context/WindowManagerContext';
 import '../../src/i18n';
 import '../../src/index.css';
+import { loadDeferredParts } from '../../src/components/deferredParts';
 
 const noop = () => {};
 const session = { id: 'paging-fixture', title: 'History', metadata: {} } as WorkbenchSession;
@@ -103,6 +104,8 @@ export function Fixture() {
   );
 }
 
+// The app loads these with the chat page and the first-screen prefetch.
+await loadDeferredParts();
 createRoot(document.getElementById('root')!).render(
   <MemoryRouter>
     <ToastContext.Provider value={{ showToast: noop }}>

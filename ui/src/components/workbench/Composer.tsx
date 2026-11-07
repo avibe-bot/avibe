@@ -1,6 +1,7 @@
 import type { TranslationKey } from '@/i18n/types';
 import {
   forwardRef,
+  Suspense,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -81,12 +82,12 @@ import { inForegroundSurface } from './chatShortcuts';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { useLatestRef } from '../../lib/useLatestRef';
 import { revealComposerAfterNativeKeyboardResize } from '../../lib/nativeKeyboard';
-import {
-  MentionEditor,
-  type MentionSearchResult,
-  type MentionEditorHandle,
-  type SessionSearchResult,
+import type {
+  MentionSearchResult,
+  MentionEditorHandle,
+  SessionSearchResult,
 } from './MentionEditor';
+import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
 
@@ -2176,7 +2177,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const inputControl = (
     <>
         {useMentions ? (
-          <MentionEditor
+          // Loaded with the chat page, so this does not suspend there; the
+          // boundary only keeps a late editor from blanking the page around it.
+          <Suspense fallback={null}>
+          <DeferredMentionEditor
             ref={mentionRef}
             className="flex-1"
             placeholder={busyControls ? busyPlaceholder ?? t('chat.compose.placeholderBusy') : idlePlaceholder}
@@ -2214,6 +2218,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             }}
             onSubmit={submit}
           />
+          </Suspense>
         ) : (
           <textarea
             ref={textareaRef}

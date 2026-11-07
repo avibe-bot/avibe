@@ -8,6 +8,7 @@ import type { WorkbenchMessage } from '../../src/context/ApiContext';
 import { ThemeProvider } from '../../src/context/ThemeProvider';
 import '../../src/i18n';
 import '../../src/index.css';
+import { loadDeferredParts } from '../../src/components/deferredParts';
 
 // The real queue strip with real attachment data, in a column the width of the
 // chat one. Nothing here reaches an Avibe service: every `/api/media/...` request
@@ -144,4 +145,6 @@ export function Fixture() {
   );
 }
 
+// The app loads these with the chat page and the first-screen prefetch.
+await loadDeferredParts();
 createRoot(document.getElementById('root')!).render(<Fixture />);

@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,7 +13,9 @@ const authorization = vi.hoisted(() => ({
 }));
 const i18n = vi.hoisted(() => ({
   language: 'en',
-  options: { resources: { en: {}, zh: {} } },
+  // The Web UI's instance holds only the language it loaded (src/i18n/app.ts).
+  options: { resources: { en: {} } },
+  loadLanguages: vi.fn(async () => undefined),
   changeLanguage: vi.fn(),
 }));
 
@@ -70,5 +72,32 @@ describe('LanguageSwitcher role-aware persistence', () => {
 
     expect(i18n.changeLanguage).toHaveBeenCalledWith('zh');
     expect(api.mutateConfig).toHaveBeenCalledOnce();
+  });
+});
+
+// The Web UI downloads one language's copy at a time and switches once it has
+// arrived (src/i18n/app.ts); until then the language on screen is the old one.
+describe('LanguageSwitcher with languages downloaded on demand', () => {
+  it('readies every language it offers when it appears', () => {
+    renderSwitcher();
+
+    expect(i18n.loadLanguages).toHaveBeenCalledWith(['en', 'zh']);
+  });
+
+  it('lets the reader go back while the language they picked is still on its way', async () => {
+    let arrive!: () => void;
+    i18n.changeLanguage.mockImplementationOnce(() => new Promise<void>((resolve) => { arrive = resolve; }));
+    const user = userEvent.setup();
+    renderSwitcher();
+
+    await user.click(screen.getByRole('button', { name: 'language.en' }));
+    await user.click(screen.getByRole('option', { name: 'language.zh' }));
+    await user.click(screen.getByRole('button', { name: 'language.en' }));
+    await user.click(screen.getByRole('option', { name: 'language.en' }));
+
+    expect(i18n.changeLanguage).toHaveBeenLastCalledWith('en');
+    await waitFor(() => expect(api.mutateConfig).toHaveBeenCalledTimes(2));
+    expect(api.mutateConfig).toHaveBeenLastCalledWith([{ kind: 'set', path: ['language'], value: 'en' }]);
+    arrive();
   });
 });

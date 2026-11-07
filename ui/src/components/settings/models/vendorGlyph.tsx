@@ -26,6 +26,8 @@ import {
   VENDOR_MARKS,
   type VendorMark,
 } from './vendorMarks';
+// Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
+import './modelHubSurface.css';
 
 const glyphClassName = (className?: string) => cn('model-hub-add-key-vendor-glyph', className);
 

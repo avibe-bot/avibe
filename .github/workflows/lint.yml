@@ -415,6 +415,11 @@ jobs:
           npm ci
           npm run build
 
+      # What a phone downloads before the first screen draws (docs/plans/web-ui-first-load.md).
+      - name: Check the first screen's download budget
+        working-directory: ui
+        run: npm run check:first-load
+
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"

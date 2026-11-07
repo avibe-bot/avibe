@@ -8,38 +8,42 @@ import {
   useLocation,
   useNavigate,
 } from 'react-router-dom';
-import { Wizard } from './components/Wizard';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ui/error-boundary';
 import { PetWindow } from './pet/PetWindow';
 import { Workbench } from './components/Workbench';
-import { InboxPage } from './components/workbench/InboxPage';
 import { SearchPage } from './components/workbench/SearchPage';
-import { AgentsPage } from './components/workbench/AgentsPage';
-import { SkillsPage } from './components/workbench/SkillsPage';
-import { HarnessPage } from './components/workbench/HarnessPage';
-import { VaultsPage } from './components/workbench/VaultsPage';
-import { ChatPage } from './components/workbench/ChatPage';
-import { ProjectsPage } from './components/workbench/ProjectsPage';
-import { ChannelList } from './components/steps/ChannelList';
-import { UserList } from './components/steps/UserList';
-import { RemoteAccessPage } from './components/RemoteAccessPage';
-import { SettingsDiagnosticsPage } from './components/settings/SettingsDiagnosticsPage';
-import { SettingsBackendsPage } from './components/settings/SettingsBackendsPage';
-import { SettingsDependenciesPage } from './components/settings/SettingsDependenciesPage';
-import { SettingsClaudeProviderPage } from './components/settings/SettingsClaudeProviderPage';
-import { SettingsCodexProviderPage } from './components/settings/SettingsCodexProviderPage';
-import { SettingsBackendPage } from './components/settings/SettingsBackendPage';
-import { SettingsOpencodeProviderPage } from './components/settings/SettingsOpencodeProviderPage';
-import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
-import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
-import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
-import { SettingsServicePage } from './components/settings/SettingsServicePage';
-import { SettingsGeneralPage } from './components/settings/SettingsGeneralPage';
-import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
-import { SettingsNotificationsPage } from './components/settings/SettingsNotificationsPage';
-import { SettingsComputerUsePage } from './components/settings/SettingsComputerUsePage';
-import { SettingsLayout } from './components/settings/SettingsLayout';
+import {
+  AgentsPage,
+  ChannelList,
+  ChatPage,
+  HarnessPage,
+  InboxPage,
+  PermissionsPage,
+  preloadInitialRoute,
+  ProjectsPage,
+  RemoteAccessPage,
+  SettingsBackendPage,
+  SettingsBackendsPage,
+  SettingsClaudeProviderPage,
+  SettingsCodexProviderPage,
+  SettingsComputerUsePage,
+  SettingsDependenciesPage,
+  SettingsDiagnosticsPage,
+  SettingsGeneralPage,
+  SettingsLayout,
+  SettingsLogsPage,
+  SettingsMessagingPage,
+  SettingsNotificationsPage,
+  SettingsOpencodeProviderPage,
+  SettingsPlatformsPage,
+  SettingsServicePage,
+  SettingsShortcutsPage,
+  SkillsPage,
+  UserList,
+  VaultsPage,
+  Wizard,
+} from './routePages';
 import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
@@ -126,7 +130,6 @@ import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
-import { PermissionsPage } from './features/permissions/PermissionsPage';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
 import { installNavigationMotion } from './lib/navigationMotion';
 
@@ -820,7 +823,11 @@ const WorkbenchRouteSurface = () => {
   // Keep mounting/focusing Search inside the tap so mobile keyboards can open.
   // This must use the data-route navigate: descendant <Routes> drop flushSync.
   const openSearch = () => { void navigate('/search', { flushSync: true }); };
-  return <SettingsOverlayRouteSurface
+  // Routed pages load on demand (routePages.ts). A navigation is a transition,
+  // so while a page's code is still on its way this boundary keeps the current
+  // screen up instead of a fallback; only the very first render, before any
+  // page has drawn, shows the empty fallback.
+  return <Suspense fallback={null}><SettingsOverlayRouteSurface
     fallbackElement={<Navigate to="/" replace />}
   >
     <Route path="/setup" element={<Wizard />} />
@@ -878,7 +885,7 @@ const WorkbenchRouteSurface = () => {
     {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
       <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
     ))}
-  </SettingsOverlayRouteSurface>;
+  </SettingsOverlayRouteSurface></Suspense>;
 };
 
 function RouterRoot() {
@@ -920,6 +927,8 @@ const router = createBrowserRouter(
 );
 // Phone push and pop, and the conversation cross-fade (docs/plans/web-ui-motion.md M5).
 installNavigationMotion(router);
+// The page the app opens on loads alongside the session check.
+preloadInitialRoute();
 
 function App() {
   return (

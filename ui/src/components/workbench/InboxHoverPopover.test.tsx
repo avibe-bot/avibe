@@ -1,12 +1,13 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { Popover } from '../ui/popover';
 import type { InboxSession } from '../../context/ApiContext';
 import { readInboxFilter } from '../../lib/inboxFilterMemory';
 import { InboxHoverPopover } from './WorkbenchSidebar';
+import { DeferredInboxPreview } from './InboxHoverPopover';
 import { BotsContext, type BotsState } from '../../context/BotsContext';
 import { BotRosterContext } from '../../context/BotRosterContext';
 import { NotificationPreferencesContext } from '../../context/NotificationPreferencesContext';
@@ -69,6 +70,11 @@ function mount(
     .filter((text) => text.includes('Session '))
     .map((text) => text.match(/Session \d+/)?.[0] ?? '');
 }
+
+// The first-screen prefetch (routePages.ts) loads the preview before a hover opens the peek.
+beforeAll(async () => {
+  await DeferredInboxPreview.preload();
+});
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW, toFake: ['Date'] });

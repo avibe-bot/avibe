@@ -51,6 +51,7 @@ import {
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 import { DesktopSettingsCommand } from './DesktopSettingsCommand';
+import { prefetchRoutePages } from '../routePages';
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
 const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
@@ -241,6 +242,10 @@ export const AppShell: React.FC = () => {
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
   }, [location.pathname]);
+  // The shell is up: fetch the other routed pages in idle time.
+  useEffect(() => {
+    prefetchRoutePages();
+  }, []);
   const [config, setConfig] = useState<any>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);

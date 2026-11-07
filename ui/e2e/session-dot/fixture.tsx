@@ -12,6 +12,7 @@ import { ProjectsPage } from '../../src/components/workbench/ProjectsPage';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
 import '../../src/i18n';
 import '../../src/index.css';
+import { loadDeferredParts } from '../../src/components/deferredParts';
 
 const noop = () => {};
 
@@ -135,6 +136,8 @@ export function Fixture() {
   </UnsavedChangesProvider></ApiProvider></ToastContext.Provider></InstanceAuthorizationContext.Provider>;
 }
 
+// The app loads these with the chat page and the first-screen prefetch.
+await loadDeferredParts();
 createRoot(document.getElementById('root')!).render(
   <RouterProvider router={createHashRouter([{ path: '*', element: <Fixture /> }])} />,
 );

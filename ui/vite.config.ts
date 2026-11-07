@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import { configDefaults, defineConfig } from 'vitest/config'
 
 import { emojiCatalog } from './scripts/emojiCatalog.ts'
+import { firstScreenPreload } from './scripts/firstScreenPreload.ts'
 
 // Point the dev proxy at any running Avibe instance — e.g. the Incus regression
 // environment — with VIBE_UI_BACKEND=http://127.0.0.1:15130 npm run dev, so UI
@@ -39,7 +40,37 @@ export default defineConfig({
   // Excluding the directory — rather than renaming the specs — keeps the trap
   // disarmed for every Playwright file added later.
   test: { exclude: [...configDefaults.exclude, 'e2e/**'] },
-  plugins: [react(), emojiCatalog()],
+  plugins: [react(), emojiCatalog(), firstScreenPreload()],
+  build: {
+    rolldownOptions: {
+      output: {
+        // A `lib` chunk is named after the pages that share it (`lib~ChatPage~…`);
+        // its file is named by content alone, in the characters the previous-build
+        // archive serves (vibe/ui_asset_archive.py).
+        chunkFileNames: (chunk) => (chunk.name.startsWith('lib~') ? 'assets/lib-[hash].js' : 'assets/[name]-[hash].js'),
+        assetFileNames: (asset) => (asset.names.some((name) => name.startsWith('lib~'))
+          ? 'assets/lib-[hash][extname]'
+          : 'assets/[name]-[hash][extname]'),
+        // docs/plans/web-ui-first-load.md section 3.
+        codeSplitting: {
+          groups: [
+            // What the first screen loads (`$initial`: the entry's static
+            // imports) is two files rather than a spray of shared fragments:
+            // the libraries, which change only with a dependency update and so
+            // stay cached across releases, and the app shell. Vite's preload
+            // helper rides with the libraries, so a lazy chunk that loads
+            // another does not import the shell for it.
+            { name: 'vendor', test: /[\\/]node_modules[\\/]|^\0vite\/preload-helper/, tags: ['$initial'], priority: 2 },
+            { name: 'shell', tags: ['$initial'], priority: 1 },
+            // Libraries only lazy pages use, grouped by the pages that use them.
+            // They import only other libraries, so a release that changes app
+            // code leaves them cached.
+            { name: 'lib', test: /[\\/]node_modules[\\/]/, entriesAware: true, priority: 0 },
+          ],
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

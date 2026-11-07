@@ -18,6 +18,7 @@ import { installFixedClock } from './shell/clock';
 import { apiResponses } from './shell/fixtures';
 import { designNetwork, installDesignNetwork } from './shell/network';
 import { setLocalSnapshotPrincipal } from '@/lib/localSnapshots';
+import { loadDeferredParts } from '@/components/deferredParts';
 
 installFixedClock();
 installDesignNetwork();
@@ -62,6 +63,8 @@ async function boot() {
     // Click selectors name copy by key (`{t:<key>}`); the page resolves it in the frame's language.
     t: (key: string) => (i18n.exists(key) ? copy(key) : `{missing copy ${key}}`),
   };
+  // Frames draw shared components outside the app's routes; the app loads these with the chat page.
+  await loadDeferredParts();
   document.body.dataset.designStage = 'render';
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
