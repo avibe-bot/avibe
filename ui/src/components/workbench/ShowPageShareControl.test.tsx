@@ -22,7 +22,10 @@ const platform = vi.hoisted(() => ({
   standalone: false,
 }));
 
-vi.mock('../../lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('../../lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/native')>()),
+  isNativeShell: () => native.shell,
+}));
 vi.mock('../../lib/platform', () => ({
   isIosDevice: () => platform.ios,
   isRealMobileSafari: () => platform.safari,

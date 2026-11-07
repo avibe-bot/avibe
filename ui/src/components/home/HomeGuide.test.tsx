@@ -34,7 +34,10 @@ vi.mock('../../lib/webPush', () => ({
   readWebPushDeviceState: (...args: unknown[]) => push.read(...args),
   enableWebPush: (...args: unknown[]) => push.enable(...args),
 }));
-vi.mock('../../lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('../../lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/native')>()),
+  isNativeShell: () => native.shell,
+}));
 vi.mock('../workbench/computerUseStatus', () => ({ readComputerUseStatus: () => computerUse.read() }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));

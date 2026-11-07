@@ -16,7 +16,10 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => authorization,
 }));
-vi.mock('@/lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('@/lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/native')>()),
+  isNativeShell: () => native.shell,
+}));
 vi.mock('../workbench/WebPushControl', () => ({
   WebPushControl: () => <div data-testid="web-push-control" />,
 }));
