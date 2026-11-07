@@ -13,7 +13,8 @@ const authorization = vi.hoisted(() => ({
 }));
 const i18n = vi.hoisted(() => ({
   language: 'en',
-  options: { resources: { en: {}, zh: {} } },
+  // The Web UI's instance holds only the language it loaded (src/i18n/app.ts).
+  options: { resources: { en: {} } },
   changeLanguage: vi.fn(),
 }));
 

@@ -4,6 +4,8 @@ import type React from 'react';
 import { KeyRound, Sparkles } from 'lucide-react';
 
 import type { Source } from './types';
+// Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
+import './modelHubSurface.css';
 
 export type Accent = 'mint' | 'gold' | 'cyan' | 'violet' | 'muted';
 

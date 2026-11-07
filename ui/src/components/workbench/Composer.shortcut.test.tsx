@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceContextSource } from '../../lib/voiceContext';
 
 type VoiceStopped = (
@@ -86,6 +86,7 @@ import {
   writeActionShortcuts,
 } from '../../lib/actionShortcuts';
 import { Composer, type ComposerHandle } from './Composer';
+import { DeferredMentionEditor } from './deferredMentionEditor';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -191,6 +192,11 @@ beforeEach(() => {
     ok: true,
     json: async () => ({ available: true, max_file_bytes: 10_000_000 }),
   });
+});
+
+// The chat page loads its composer's editor before it mounts (routePages.ts).
+beforeAll(async () => {
+  await DeferredMentionEditor.preload();
 });
 
 afterEach(cleanup);

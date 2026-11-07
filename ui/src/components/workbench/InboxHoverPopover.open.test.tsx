@@ -1,12 +1,12 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { Popover } from '../ui/popover';
 import type { InboxSession } from '../../context/ApiContext';
-import { InboxHoverPopover } from './InboxHoverPopover';
+import { DeferredInboxPreview, InboxHoverPopover } from './InboxHoverPopover';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../ui/markdown', () => ({ Markdown: ({ content }: { content: string }) => <p>{content}</p> }));
@@ -38,6 +38,11 @@ const mount = () => render(
   </MemoryRouter>,
 );
 const peekRow = (id: number) => document.querySelector<HTMLElement>(`[data-inbox-peek-id="session-${id}"]`)!;
+
+// The first-screen prefetch (routePages.ts) loads the preview before a hover opens the peek.
+beforeAll(async () => {
+  await DeferredInboxPreview.preload();
+});
 
 beforeEach(() => {
   onItemClick.mockClear();
