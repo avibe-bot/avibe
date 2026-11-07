@@ -293,6 +293,35 @@
       "switch": "切换实例",
       "choose": "选择实例"
     },
+    "twoFactor": {
+      "title": "确认是你本人。",
+      "onFor": "这个账号开启了两步验证",
+      "onThisAccount": "这个账号开启了两步验证。",
+      "setupTitle": "先开启两步验证。",
+      "requiredFor": "这个账号要求开启两步验证",
+      "usePasskey": "使用通行密钥",
+      "waitingForPasskey": "正在等待通行密钥…",
+      "passkeyHint": "用面容 ID、触控 ID 或设备密码确认。",
+      "totpLabel": "输入身份验证器里的 6 位验证码",
+      "totpHint": "打开身份验证器 App，输入 avibe.bot 的 6 位验证码",
+      "recoveryLabel": "恢复码",
+      "recoveryPlaceholder": "xxxxx-xxxxx",
+      "recoveryHint": "每个恢复码只能用一次。用掉之后，记得在 avibe.bot 重新生成一组。",
+      "verify": "验证",
+      "verifying": "验证中…",
+      "useTotp": "改用身份验证器验证码",
+      "usePasskeyInstead": "改用通行密钥",
+      "useRecovery": "使用恢复码",
+      "setupBody": "在 avibe.bot 网页的「账号安全」里添加通行密钥或身份验证器 App，完成后回到这里继续。",
+      "openSecurity": "打开 avibe.bot",
+      "setupDone": "我已开启，继续",
+      "differentAccount": "使用其他账号登录",
+      "passkeyFailed": "通行密钥验证没有完成。可以再试一次，或改用验证码。",
+      "codeInvalid": "验证码不正确。请输入 App 里最新的 6 位数字。",
+      "recoveryInvalid": "恢复码不正确，或已经用过。",
+      "rateLimited": "尝试次数过多，请 {{count}} 分钟后再试。",
+      "rateLimited_one": "尝试次数过多，请 {{count}} 分钟后再试。"
+    },
     "errors": {
       "network": "暂时连不上 avibe.bot。检查网络后重试。"
     }

@@ -5,10 +5,12 @@ import {
   Check,
   ChevronRight,
   ExternalLink,
+  KeyRound,
   Laptop,
   MonitorDown,
   Plus,
   RotateCw,
+  ShieldCheck,
   Sparkles,
   UserRound,
 } from 'lucide-react';
@@ -35,6 +37,7 @@ import type { TranslationKey } from '@/i18n/types';
 import { cn } from '@/lib/utils';
 
 import {
+  ACCOUNT_SECURITY_URL,
   bootstrapMobileSession,
   logoutMobileSession,
   normalizeMobileBridgeError,
@@ -46,6 +49,8 @@ import {
   type MobileInstance,
   type MobileSessionState,
   verifyMobileOtp,
+  verifyMobilePasskey,
+  verifyMobileSecondFactor,
 } from './bridge';
 
 type Screen =
@@ -54,24 +59,51 @@ type Screen =
   | 'welcome'
   | 'email'
   | 'code'
+  | 'secondFactor'
   | 'instances'
   | 'empty'
   | 'cli'
   | 'account';
 
-type BusyAction = 'boot' | 'send' | 'verify' | 'resend' | 'refresh' | 'select' | 'logout';
+type BusyAction =
+  | 'boot'
+  | 'send'
+  | 'verify'
+  | 'resend'
+  | 'passkey'
+  | 'refresh'
+  | 'select'
+  | 'logout';
 type CooldownSource = 'client' | 'provider' | null;
 type CooldownScope = 'send' | 'all' | null;
-type MobileOperation = 'bootstrap' | 'request' | 'verify' | 'refresh' | 'select' | 'logout';
+type MobileOperation =
+  | 'bootstrap'
+  | 'request'
+  | 'verify'
+  | 'totp'
+  | 'recovery'
+  | 'passkey'
+  | 'refresh'
+  | 'select'
+  | 'logout';
 type MobileErrorKey =
   | 'mobileApp.email.invalid'
   | 'mobileApp.code.invalid'
   | 'mobileApp.code.rateLimited'
+  | 'mobileApp.twoFactor.passkeyFailed'
+  | 'mobileApp.twoFactor.codeInvalid'
+  | 'mobileApp.twoFactor.recoveryInvalid'
+  | 'mobileApp.twoFactor.rateLimited'
   | 'mobileApp.errors.network';
+type SecondFactorSession = Extract<MobileSessionState, { status: 'twoFactorRequired' }>;
+type SecondFactorStep = 'passkey' | 'totp' | 'recovery' | 'setup';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DEFAULT_COOLDOWN_SECONDS = 60;
 const FAILED_COOLDOWN_SECONDS = 15;
+// avibe.bot counts second-factor attempts over this window.
+const SECOND_FACTOR_RETRY_MINUTES = 15;
+const PASSKEY_FAILURES = new Set(['passkey_cancelled', 'passkey_unavailable', 'invalid']);
 
 const providerCooldownSeconds = (error: MobileBridgeError): number => {
   if (typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0) {
@@ -133,8 +165,21 @@ const installGuideUrl = (language: string): string =>
 
 const screenForSession = (session: MobileSessionState): Screen => {
   if (session.status === 'signedOut') return 'welcome';
+  if (session.status === 'twoFactorRequired') return 'secondFactor';
   return session.instances.length === 0 ? 'empty' : 'instances';
 };
+
+/** Passkey first when the account has one; an account that must turn it on sets it up. */
+const firstSecondFactorStep = (session: SecondFactorSession): SecondFactorStep => {
+  if (session.gate === 'enroll') return 'setup';
+  if (session.methods.includes('passkey')) return 'passkey';
+  return session.methods.includes('totp') ? 'totp' : 'recovery';
+};
+
+const secondFactorRetryMinutes = (error: MobileBridgeError): number =>
+  typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0
+    ? Math.ceil(error.retry_after_seconds / 60)
+    : SECOND_FACTOR_RETRY_MINUTES;
 
 const pageErrorKey = (
   error: MobileBridgeError,
@@ -148,6 +193,17 @@ const pageErrorKey = (
   }
   if (error.code === 'invalid_or_expired' && operation === 'verify') {
     return 'mobileApp.code.invalid';
+  }
+  if (operation === 'totp' || operation === 'recovery' || operation === 'passkey') {
+    if (error.code === 'rate_limited') return 'mobileApp.twoFactor.rateLimited';
+    if (operation === 'passkey' && PASSKEY_FAILURES.has(error.code)) {
+      return 'mobileApp.twoFactor.passkeyFailed';
+    }
+    if (error.code === 'invalid') {
+      return operation === 'totp'
+        ? 'mobileApp.twoFactor.codeInvalid'
+        : 'mobileApp.twoFactor.recoveryInvalid';
+    }
   }
   if (error.code === 'rate_limited') {
     return 'mobileApp.code.rateLimited';
@@ -439,23 +495,24 @@ function EmailEntry({
 
 function OtpCells({
   code,
+  label,
   invalid,
   busy,
   onChange,
   onFocus,
 }: {
   code: string;
+  label: string;
   invalid: boolean;
   busy: boolean;
   onChange: (value: string) => void;
   onFocus: () => void;
 }) {
-  const { t } = useTranslation();
   const input = useRef<HTMLInputElement>(null);
   return (
     <div className="relative">
       <Label htmlFor="mobile-login-code" className="sr-only">
-        {t('mobileApp.code.label')}
+        {label}
       </Label>
       <Input
         ref={input}
@@ -493,6 +550,33 @@ function OtpCells({
   );
 }
 
+/** Keeps a code's actions above the software keyboard while its input has focus. */
+function useCodeActionReveal<Region extends HTMLElement>() {
+  const codeActionRegion = useRef<Region>(null);
+  const revealCodeActions = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const region = codeActionRegion.current;
+      if (typeof region?.scrollIntoView === 'function') {
+        region.scrollIntoView({ block: 'end' });
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const revealWhenFocused = () => {
+      if (document.activeElement?.id === 'mobile-login-code') revealCodeActions();
+    };
+    window.addEventListener('resize', revealWhenFocused);
+    window.visualViewport?.addEventListener('resize', revealWhenFocused);
+    return () => {
+      window.removeEventListener('resize', revealWhenFocused);
+      window.visualViewport?.removeEventListener('resize', revealWhenFocused);
+    };
+  }, [revealCodeActions]);
+
+  return { codeActionRegion, revealCodeActions };
+}
+
 function CodeEntry({
   email,
   code,
@@ -521,27 +605,7 @@ function CodeEntry({
   onResend: () => void;
 }) {
   const { t } = useTranslation();
-  const codeActionRegion = useRef<HTMLDivElement>(null);
-  const revealCodeActions = useCallback(() => {
-    window.requestAnimationFrame(() => {
-      const region = codeActionRegion.current;
-      if (typeof region?.scrollIntoView === 'function') {
-        region.scrollIntoView({ block: 'end' });
-      }
-    });
-  }, []);
-
-  useEffect(() => {
-    const revealWhenFocused = () => {
-      if (document.activeElement?.id === 'mobile-login-code') revealCodeActions();
-    };
-    window.addEventListener('resize', revealWhenFocused);
-    window.visualViewport?.addEventListener('resize', revealWhenFocused);
-    return () => {
-      window.removeEventListener('resize', revealWhenFocused);
-      window.visualViewport?.removeEventListener('resize', revealWhenFocused);
-    };
-  }, [revealCodeActions]);
+  const { codeActionRegion, revealCodeActions } = useCodeActionReveal<HTMLDivElement>();
 
   return (
     <CloudScreen>
@@ -569,6 +633,7 @@ function CodeEntry({
       <div ref={codeActionRegion} data-mobile-code-actions className="scroll-mb-4">
         <OtpCells
           code={code}
+          label={t('mobileApp.code.label')}
           invalid={errorKey === 'mobileApp.code.invalid'}
           busy={locked}
           onChange={onCodeChange}
@@ -622,6 +687,225 @@ function CodeEntry({
       <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">
         {t('mobileApp.code.footer')}
       </p>
+    </CloudScreen>
+  );
+}
+
+// ui/design: mobile-app/two-factor
+function SecondFactor({
+  session,
+  step,
+  code,
+  busy,
+  locked,
+  errorKey,
+  retryMinutes,
+  onStep,
+  onCodeChange,
+  onVerify,
+  onPasskey,
+  onOpenSecurity,
+  onSetupDone,
+  onDifferentAccount,
+}: {
+  session: SecondFactorSession;
+  step: SecondFactorStep;
+  code: string;
+  busy: BusyAction | null;
+  locked: boolean;
+  errorKey: MobileErrorKey | null;
+  retryMinutes: number;
+  onStep: (step: SecondFactorStep) => void;
+  onCodeChange: (value: string) => void;
+  onVerify: () => void;
+  onPasskey: () => void;
+  onOpenSecurity: () => void;
+  onSetupDone: () => void;
+  onDifferentAccount: () => void;
+}) {
+  const { t } = useTranslation();
+  const { codeActionRegion, revealCodeActions } = useCodeActionReveal<HTMLFormElement>();
+  const hasPasskey = session.methods.includes('passkey');
+  const hasTotp = session.methods.includes('totp');
+  const setup = step === 'setup';
+  const usePasskeyInstead = { step: 'passkey', label: t('mobileApp.twoFactor.usePasskeyInstead') } as const;
+  const useTotp = { step: 'totp', label: t('mobileApp.twoFactor.useTotp') } as const;
+  const useRecovery = { step: 'recovery', label: t('mobileApp.twoFactor.useRecovery') } as const;
+  const alternatives = step === 'passkey'
+    ? [...(hasTotp ? [useTotp] : []), useRecovery]
+    : step === 'totp'
+      ? [...(hasPasskey ? [usePasskeyInstead] : []), useRecovery]
+      : step === 'recovery'
+        ? hasPasskey ? [usePasskeyInstead] : hasTotp ? [useTotp] : []
+        : [];
+  const notice = errorKey === 'mobileApp.twoFactor.rateLimited'
+    ? t('mobileApp.twoFactor.rateLimited', { count: retryMinutes })
+    : errorKey
+      ? t(errorKey as TranslationKey)
+      : null;
+  const feedback = (
+    <div id="mobile-login-code-feedback" className="mt-3 min-h-6 text-center text-xs leading-6">
+      {notice ? <p role="alert" className="text-destructive-ink">{notice}</p> : null}
+    </div>
+  );
+  const verify = (ready: boolean) => (
+    <div className="mt-5" aria-busy={busy === 'verify'}>
+      <Primary type="submit" disabled={locked || !ready}>
+        {busy === 'verify' ? t('mobileApp.twoFactor.verifying') : t('mobileApp.twoFactor.verify')}
+      </Primary>
+    </div>
+  );
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    onVerify();
+  };
+
+  return (
+    <CloudScreen>
+      <Brand />
+      <div className="flex flex-col items-center pt-8 pb-6">
+        <span className="mb-5 grid size-16 place-items-center rounded-3xl border border-border bg-surface/80 shadow-mint-card-sm">
+          <ShieldCheck className="size-7 text-mint-ink" />
+        </span>
+        <h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">
+          {t(setup ? 'mobileApp.twoFactor.setupTitle' : 'mobileApp.twoFactor.title')}
+        </h1>
+      </div>
+      <div className="pb-7 text-center">
+        <p className="text-sm leading-7 text-muted">
+          {setup
+            ? t('mobileApp.twoFactor.requiredFor')
+            : t(session.email ? 'mobileApp.twoFactor.onFor' : 'mobileApp.twoFactor.onThisAccount')}
+        </p>
+        {session.email ? (
+          <p className="break-all text-sm font-medium leading-6">{session.email}</p>
+        ) : null}
+      </div>
+      {step === 'passkey' ? (
+        <>
+          <div aria-busy={busy === 'passkey'}>
+            <Primary disabled={locked} onClick={onPasskey}>
+              <KeyRound className="size-4" />
+              {busy === 'passkey'
+                ? t('mobileApp.twoFactor.waitingForPasskey')
+                : t('mobileApp.twoFactor.usePasskey')}
+            </Primary>
+          </div>
+          <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
+            {t('mobileApp.twoFactor.passkeyHint')}
+          </p>
+          {feedback}
+        </>
+      ) : null}
+      {step === 'totp' ? (
+        <form
+          ref={codeActionRegion}
+          data-mobile-code-actions
+          className="scroll-mb-4"
+          onSubmit={submit}
+        >
+          <OtpCells
+            code={code}
+            label={t('mobileApp.twoFactor.totpLabel')}
+            invalid={errorKey === 'mobileApp.twoFactor.codeInvalid'}
+            busy={locked}
+            onChange={onCodeChange}
+            onFocus={revealCodeActions}
+          />
+          <p id="mobile-login-code-hint" className="mt-5 text-center text-sm leading-6 text-muted">
+            {t('mobileApp.twoFactor.totpHint')}
+          </p>
+          {feedback}
+          {verify(code.length === 6)}
+        </form>
+      ) : null}
+      {step === 'recovery' ? (
+        <form onSubmit={submit}>
+          <div className={cn(raised, 'flex flex-col gap-3')}>
+            <Label htmlFor="mobile-recovery-code">{t('mobileApp.twoFactor.recoveryLabel')}</Label>
+            <Input
+              id="mobile-recovery-code"
+              type="text"
+              autoComplete="one-time-code"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={code}
+              placeholder={t('mobileApp.twoFactor.recoveryPlaceholder')}
+              disabled={locked}
+              aria-invalid={errorKey === 'mobileApp.twoFactor.recoveryInvalid' || undefined}
+              aria-describedby="mobile-login-code-hint mobile-login-code-feedback"
+              className="h-14 rounded-2xl bg-surface px-4 text-base tracking-wide shadow-sm"
+              onChange={(event) => onCodeChange(event.target.value)}
+            />
+            <p id="mobile-login-code-hint" className="text-xs leading-6 text-muted">
+              {t('mobileApp.twoFactor.recoveryHint')}
+            </p>
+          </div>
+          {feedback}
+          {verify(code.trim().length > 0)}
+        </form>
+      ) : null}
+      {setup ? (
+        <>
+          <div className={cn(raised, 'text-sm leading-7 text-muted')}>
+            {t('mobileApp.twoFactor.setupBody')}
+          </div>
+          <div className="mt-5 flex flex-col gap-3">
+            <Button
+              type="button"
+              variant="brand"
+              size="lg"
+              disabled={locked}
+              className="w-full gap-2 rounded-full shadow-mint-card-sm"
+              onClick={onOpenSecurity}
+            >
+              <ExternalLink className="size-4" />
+              {t('mobileApp.twoFactor.openSecurity')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              disabled={locked}
+              className="w-full gap-2 whitespace-normal rounded-full"
+              onClick={onSetupDone}
+            >
+              <RotateCw className={cn('size-4 shrink-0', busy === 'refresh' && 'animate-spin')} />
+              {t('mobileApp.twoFactor.setupDone')}
+            </Button>
+          </div>
+          {notice ? feedback : null}
+        </>
+      ) : null}
+      {alternatives.length > 0 ? (
+        <div className="mt-6 flex flex-col items-center gap-1">
+          {alternatives.map((alternative) => (
+            <Button
+              key={alternative.step}
+              type="button"
+              variant="link"
+              size="compact"
+              disabled={locked}
+              className="h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline"
+              onClick={() => onStep(alternative.step)}
+            >
+              {alternative.label}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-auto pt-7 pb-3 text-center">
+        <Button
+          type="button"
+          variant="link"
+          size="compact"
+          disabled={locked}
+          className="h-auto px-0 text-xs text-muted underline"
+          onClick={onDifferentAccount}
+        >
+          {t('mobileApp.twoFactor.differentAccount')}
+        </Button>
+      </div>
     </CloudScreen>
   );
 }
@@ -1045,6 +1329,9 @@ export function MobileOnboarding() {
   const [cooldownScope, setCooldownScope] = useState<CooldownScope>(null);
   const [resent, setResent] = useState(false);
   const [offlineSelection, setOfflineSelection] = useState<MobileInstance | null>(null);
+  const [factorStep, setFactorStep] = useState<SecondFactorStep>('passkey');
+  const [factorCode, setFactorCode] = useState('');
+  const [factorRetryMinutes, setFactorRetryMinutes] = useState(SECOND_FACTOR_RETRY_MINUTES);
   const {
     beginOperation,
     busy,
@@ -1055,11 +1342,19 @@ export function MobileOnboarding() {
   } = useOperationOwner();
 
   const signedIn = session.status === 'signedIn' ? session : null;
+  const owedSecondFactor = session.status === 'twoFactorRequired' ? session : null;
   const providerCooldownActive = cooldownScope === 'all' && cooldown > 0;
   const accountReturnScreen = useMemo(
     () => (signedIn?.instances.length ? 'instances' : 'empty') as Screen,
     [signedIn],
   );
+
+  // Setters only, so the bootstrap callback can use it without a dependency.
+  function showSecondFactorStart(next: MobileSessionState) {
+    if (next.status !== 'twoFactorRequired') return;
+    setFactorStep(firstSecondFactorStep(next));
+    setFactorCode('');
+  }
 
   const bootstrap = useCallback(async () => {
     const token = beginOperation('boot');
@@ -1069,6 +1364,7 @@ export function MobileOnboarding() {
     try {
       const next = await bootstrapMobileSession();
       if (!ownsOperation(token)) return;
+      showSecondFactorStart(next);
       setSession(next);
       setScreen(
         startsOnAccount.current && next.status === 'signedIn'
@@ -1109,6 +1405,7 @@ export function MobileOnboarding() {
       setErrorKey('mobileApp.errors.network');
       return;
     }
+    showSecondFactorStart(next);
     setSession(next);
     setScreen(screenForSession(next));
     setErrorKey(null);
@@ -1206,6 +1503,45 @@ export function MobileOnboarding() {
     }
   };
 
+  const verifySecondFactorCode = async () => {
+    if (factorStep !== 'totp' && factorStep !== 'recovery') return;
+    const method = factorStep;
+    if (method === 'totp' ? !/^\d{6}$/.test(factorCode) : factorCode.trim().length === 0) {
+      return;
+    }
+    const token = beginOperation('verify');
+    if (token === null) return;
+    setErrorKey(null);
+    try {
+      const next = await verifyMobileSecondFactor(method, factorCode);
+      applySession(token, next, true);
+    } catch (rawError) {
+      if (!ownsOperation(token)) return;
+      const error = normalizeMobileBridgeError(rawError);
+      setFactorRetryMinutes(secondFactorRetryMinutes(error));
+      setErrorKey(pageErrorKey(error, method));
+    } finally {
+      finishOperation(token);
+    }
+  };
+
+  const verifyPasskey = async () => {
+    const token = beginOperation('passkey');
+    if (token === null) return;
+    setErrorKey(null);
+    try {
+      const next = await verifyMobilePasskey();
+      applySession(token, next, true);
+    } catch (rawError) {
+      if (!ownsOperation(token)) return;
+      const error = normalizeMobileBridgeError(rawError);
+      setFactorRetryMinutes(secondFactorRetryMinutes(error));
+      setErrorKey(pageErrorKey(error, 'passkey'));
+    } finally {
+      finishOperation(token);
+    }
+  };
+
   const select = async (instance: MobileInstance) => {
     if (isOperationLocked()) return;
     setOfflineSelection(null);
@@ -1272,6 +1608,11 @@ export function MobileOnboarding() {
     void openMobileExternal(installGuideUrl(i18n.language));
   };
 
+  const openAccountSecurity = () => {
+    if (isOperationLocked()) return;
+    void openMobileExternal(ACCOUNT_SECURITY_URL);
+  };
+
   if (screen === 'boot') return <Boot />;
   if (screen === 'bootError') {
     return (
@@ -1325,6 +1666,35 @@ export function MobileOnboarding() {
         }}
         onVerify={() => void verifyOtp()}
         onResend={() => void requestOtp(true)}
+      />
+    );
+  }
+  if (screen === 'secondFactor' && owedSecondFactor) {
+    return (
+      <SecondFactor
+        session={owedSecondFactor}
+        step={factorStep}
+        code={factorCode}
+        busy={busy}
+        locked={locked}
+        errorKey={errorKey}
+        retryMinutes={factorRetryMinutes}
+        onStep={(step) => {
+          if (isOperationLocked()) return;
+          setFactorStep(step);
+          setFactorCode('');
+          setErrorKey(null);
+        }}
+        onCodeChange={(value) => {
+          if (isOperationLocked()) return;
+          setFactorCode(value);
+          setErrorKey(null);
+        }}
+        onVerify={() => void verifySecondFactorCode()}
+        onPasskey={() => void verifyPasskey()}
+        onOpenSecurity={openAccountSecurity}
+        onSetupDone={() => void refresh()}
+        onDifferentAccount={() => void logout()}
       />
     );
   }

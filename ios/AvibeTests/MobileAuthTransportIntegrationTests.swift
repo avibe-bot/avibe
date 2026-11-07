@@ -22,6 +22,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             .requestOTP: [.request],
             .verifyOTP: [.verify, .callback, .session],
             .fetchSession: [.session],
+            .passkeyChallenge: [.challenge],
+            .verifySecondFactor: [.secondFactor, .session],
             .logout: [.logout],
         ]
         XCTAssertEqual(
@@ -139,6 +141,43 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 expectedRetryAfter: nil
             ),
         ]
+        let secondFactorCases: [(
+            String,
+            MobileAuthTransportOperation,
+            MobileAuthTransportStage,
+            Int,
+            Int?,
+            String
+        )] = [
+            ("account without a passkey", .passkeyChallenge, .challenge, 404, nil, "passkey_unavailable"),
+            ("challenge signed out", .passkeyChallenge, .challenge, 401, nil, "signed_out"),
+            ("challenge untrusted origin", .passkeyChallenge, .challenge, 403, nil, "network"),
+            ("challenge server failure", .passkeyChallenge, .challenge, 500, nil, "network"),
+            ("rejected factor", .verifySecondFactor, .secondFactor, 400, nil, "invalid"),
+            ("factor throttle", .verifySecondFactor, .secondFactor, 429, 900, "rate_limited"),
+            ("factor signed out", .verifySecondFactor, .secondFactor, 401, nil, "signed_out"),
+            ("factor unavailable", .verifySecondFactor, .secondFactor, 503, nil, "network"),
+            ("factor untrusted origin", .verifySecondFactor, .secondFactor, 403, nil, "network"),
+            ("proved session signed out", .verifySecondFactor, .session, 401, nil, "signed_out"),
+            ("proved session failure", .verifySecondFactor, .session, 500, nil, "network"),
+            ("proved session throttle", .verifySecondFactor, .session, 429, 9, "network"),
+        ]
+        for (name, operation, stage, status, retryAfter, expectedCode) in secondFactorCases {
+            var response: [String: Any] = [
+                "stage": stage.rawValue,
+                "status": status,
+            ]
+            response["retryAfter"] = retryAfter
+            cases.append(
+                MappingCase(
+                    name: name,
+                    operation: operation,
+                    response: response,
+                    expectedCode: expectedCode,
+                    expectedRetryAfter: expectedCode == "rate_limited" ? retryAfter : nil
+                )
+            )
+        }
 
         for (operation, stages) in stagesByOperation {
             for stage in stages {
@@ -497,10 +536,13 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
         let cooldown = try await transport.requestOTP(email: "alex@example.com")
         XCTAssertEqual(cooldown, 7)
-        let snapshot = try await transport.verifyOTP(
+        let discovery = try await transport.verifyOTP(
             email: "alex@example.com",
             code: "123456"
         )
+        guard case .signedIn(let snapshot) = discovery else {
+            return XCTFail("Expected a signed-in session, got \(discovery)")
+        }
         XCTAssertEqual(snapshot.account.email, "alex@example.com")
 
         let cookies = await allCookies(in: dataStore.httpCookieStore)
@@ -527,6 +569,217 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertEqual(
             logoutRequest.headers["origin"],
             WebOrigin(url: baseURL, requiresHTTPS: false)?.serialized
+        )
+    }
+
+    func testSecondFactorIsReadAndPassedInsideTheAccountStore() async throws {
+        let state = HTTPFixtureState()
+        let sessionJSON = Self.sessionJSON
+        let owed = """
+        {
+          "error": "two_factor_required",
+          "email": "alex@example.com",
+          "gate": "challenge",
+          "methods": ["passkey", "security-key", "totp"]
+        }
+        """
+        let attempts = HTTPFixtureState()
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            let cookies = request.headers["cookie"] ?? ""
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json(
+                    """
+                    {
+                      "supabase_url": "\(state.baseURL!.absoluteString)",
+                      "supabase_anon_key": "fixture-anon"
+                    }
+                    """
+                )
+            case ("POST", "/auth/v1/verify"):
+                return .json(
+                    """
+                    {
+                      "access_token": "fixture-access",
+                      "refresh_token": "fixture-refresh"
+                    }
+                    """
+                )
+            case ("POST", "/auth/callback"):
+                return .json(
+                    "{}",
+                    headers: [
+                        ("Set-Cookie", "avibe_session=first-factor; Path=/; HttpOnly"),
+                    ]
+                )
+            case ("GET", "/api/mobile/session"):
+                guard cookies.contains("avibe_session=proved") else {
+                    return LocalHTTPResponse(
+                        status: 403,
+                        headers: [("Content-Type", "application/json")],
+                        body: Data(owed.utf8)
+                    )
+                }
+                return .json(sessionJSON)
+            case ("POST", "/api/two-factor/passkey-challenge"):
+                return .json(
+                    """
+                    {
+                      "token": "signed-challenge",
+                      "options": {
+                        "challenge": "AAEC_-8",
+                        "rpId": "avibe.bot",
+                        "userVerification": "required",
+                        "allowCredentials": [{"id": "Y3JlZC0x", "type": "public-key"}]
+                      }
+                    }
+                    """
+                )
+            case ("POST", "/api/two-factor/verify"):
+                attempts.record(request)
+                switch attempts.requests().count {
+                case 1:
+                    return LocalHTTPResponse(
+                        status: 429,
+                        headers: [
+                            ("Content-Type", "application/json"),
+                            ("Retry-After", "900"),
+                        ],
+                        body: Data(#"{"error":"rate_limited"}"#.utf8)
+                    )
+                case 2:
+                    return LocalHTTPResponse(
+                        status: 400,
+                        headers: [("Content-Type", "application/json")],
+                        body: Data(#"{"error":"invalid"}"#.utf8)
+                    )
+                default:
+                    return .json(
+                        #"{"ok":true}"#,
+                        headers: [
+                            ("Set-Cookie", "avibe_session=proved; Path=/; HttpOnly"),
+                        ]
+                    )
+                }
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let dataStore = WKWebsiteDataStore.nonPersistent()
+        let transport = MobileAuthTransport(
+            controlPlaneURL: baseURL,
+            websiteDataStore: dataStore
+        )
+        let expectedRequirement = MobileSecondFactorRequirement(
+            email: "alex@example.com",
+            gate: .challenge,
+            methods: [.passkey, .totp]
+        )
+
+        let afterOTP = try await transport.verifyOTP(
+            email: "alex@example.com",
+            code: "123456"
+        )
+        XCTAssertEqual(afterOTP, .secondFactorRequired(expectedRequirement))
+        let restored = try await transport.fetchSession()
+        XCTAssertEqual(restored, .secondFactorRequired(expectedRequirement))
+
+        do {
+            _ = try await transport.verifySecondFactor(.code(.totp, "287082"))
+            XCTFail("Expected the throttled attempt to fail")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, "rate_limited")
+            XCTAssertEqual(error.retryAfterSeconds, 900)
+        }
+        do {
+            _ = try await transport.verifySecondFactor(.code(.recovery, "k7m2p-9xq4r"))
+            XCTFail("Expected the rejected code to fail")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .secondFactorInvalid)
+        }
+
+        let challenge = try await transport.passkeyChallenge()
+        XCTAssertEqual(challenge.token, "signed-challenge")
+        XCTAssertEqual(challenge.request.challenge, Data([0, 1, 2, 255, 239]))
+        XCTAssertEqual(challenge.request.allowedCredentialIDs, [Data("cred-1".utf8)])
+        let assertion = MobilePasskeyAssertion(
+            credentialID: Data("cred-1".utf8),
+            clientDataJSON: Data(#"{"type":"webauthn.get"}"#.utf8),
+            authenticatorData: Data([1, 2, 3]),
+            signature: Data([4, 5, 6]),
+            userHandle: Data("user-alex".utf8)
+        )
+        let proved = try await transport.verifySecondFactor(
+            .passkey(
+                token: challenge.token,
+                response: assertion.authenticationResponseJSON
+            )
+        )
+        guard case .signedIn(let snapshot) = proved else {
+            return XCTFail("Expected the proved session, got \(proved)")
+        }
+        XCTAssertEqual(snapshot.account.email, "alex@example.com")
+
+        let verifyRequests = attempts.requests()
+        XCTAssertEqual(verifyRequests.count, 3)
+        let origin = WebOrigin(url: baseURL, requiresHTTPS: false)?.serialized
+        for request in verifyRequests {
+            XCTAssertEqual(request.headers["origin"], origin)
+            XCTAssertEqual(request.headers["content-type"], "application/json")
+            XCTAssertTrue(
+                (request.headers["cookie"] ?? "").contains("avibe_session=first-factor")
+            )
+        }
+        let bodies = try verifyRequests.map {
+            try XCTUnwrap(
+                JSONSerialization.jsonObject(with: $0.body) as? [String: Any]
+            )
+        }
+        XCTAssertEqual(bodies[0] as NSDictionary, ["method": "totp", "code": "287082"])
+        XCTAssertEqual(bodies[1] as NSDictionary, ["method": "recovery", "code": "k7m2p-9xq4r"])
+        XCTAssertEqual(
+            bodies[2] as NSDictionary,
+            [
+                "method": "passkey",
+                "token": "signed-challenge",
+                "response": [
+                    "id": "Y3JlZC0x",
+                    "rawId": "Y3JlZC0x",
+                    "type": "public-key",
+                    "authenticatorAttachment": "platform",
+                    "clientExtensionResults": [String: Any](),
+                    "response": [
+                        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0",
+                        "authenticatorData": "AQID",
+                        "signature": "BAUG",
+                        "userHandle": "dXNlci1hbGV4",
+                    ] as [String: Any],
+                ] as [String: Any],
+            ] as NSDictionary
+        )
+        let challengeRequest = try XCTUnwrap(
+            state.requests().last(where: {
+                $0.path == "/api/two-factor/passkey-challenge"
+            })
+        )
+        XCTAssertEqual(challengeRequest.method, "POST")
+        XCTAssertEqual(challengeRequest.headers["origin"], origin)
+
+        let cookies = await allCookies(in: dataStore.httpCookieStore)
+        XCTAssertEqual(cookie(named: "avibe_session", in: cookies)?.value, "proved")
+        let provedSessionRead = try XCTUnwrap(
+            state.requests().last(where: {
+                $0.method == "GET" && $0.path == "/api/mobile/session"
+            })
+        )
+        XCTAssertTrue(
+            (provedSessionRead.headers["cookie"] ?? "").contains("avibe_session=proved")
         )
     }
 

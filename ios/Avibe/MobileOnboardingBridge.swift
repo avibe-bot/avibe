@@ -118,6 +118,8 @@ enum MobileBridgeMethod: String, CaseIterable {
     case sessionBootstrap = "session.bootstrap"
     case authRequestOTP = "auth.requestOtp"
     case authVerifyOTP = "auth.verifyOtp"
+    case authVerifySecondFactor = "auth.verifySecondFactor"
+    case authVerifyPasskey = "auth.verifyPasskey"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
@@ -288,6 +290,27 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     let state = try await coordinator.verifyOTP(
                         email: email,
                         code: code
+                    )
+                    reply(replyHandler, result: state.jsonObject)
+                case .authVerifySecondFactor:
+                    guard
+                        let rawMethod = request.params["method"] as? String,
+                        let method = MobileSecondFactorCodeMethod(rawValue: rawMethod),
+                        let code = request.params["code"] as? String
+                    else {
+                        throw MobileAccountError.invalidRequest
+                    }
+                    let state = try await coordinator.verifySecondFactor(
+                        method: method,
+                        code: code
+                    )
+                    reply(replyHandler, result: state.jsonObject)
+                case .authVerifyPasskey:
+                    guard let window = trustedWebView?.window else {
+                        throw MobileAccountError.passkeyUnavailable
+                    }
+                    let state = try await coordinator.verifyPasskey(
+                        presentationAnchor: window
                     )
                     reply(replyHandler, result: state.jsonObject)
                 case .sessionRefresh:

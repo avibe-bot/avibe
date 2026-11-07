@@ -6,6 +6,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import shlex
 import subprocess
@@ -636,6 +637,27 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
         'shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 '
         '/bin/sh \\"$SRCROOT/scripts/verify_mobile_bundle.sh\\"'
     ) in project
+
+
+def test_ios_app_builds_carry_the_avibe_bot_webcredentials_domain() -> None:
+    """Native passkeys for avibe.bot need this entitlement on every app build.
+
+    Simulator CI builds without signing, so a configuration that loses it still
+    passes there while passkeys fail on a device. avibe-backend's
+    apple-app-site-association lists this app under the same domain.
+    """
+    entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
+    assert entitlements == {"com.apple.developer.associated-domains": ["webcredentials:avibe.bot"]}
+
+    project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+    app_configurations = [
+        block
+        for block in project.split("isa = XCBuildConfiguration;")[1:]
+        if "PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios;" in block.split("name = ", 1)[0]
+    ]
+    assert len(app_configurations) == 2
+    for block in app_configurations:
+        assert "CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;" in block.split("name = ", 1)[0]
 
 
 # The PR browser selection before parallelization: preserve these exact callers,
