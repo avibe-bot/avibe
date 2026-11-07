@@ -745,7 +745,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
     }
 
     func testNamedStoreLedgerNeverRemovesAnUnownedLiveIdentifier() async throws {
-        let before = await allNamedDataStoreIdentifiers()
+        let before = await fetchAllNamedDataStoreIdentifiers()
         let defaults = makeDefaults()
         let registry = RealNamedDataStoreRegistry()
         var accountStore: AccountWebsiteDataStore? = AccountWebsiteDataStore(
@@ -770,13 +770,13 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             ])!,
             in: try XCTUnwrap(unownedStore).httpCookieStore
         )
-        let registered = await allNamedDataStoreIdentifiers()
+        let registered = await fetchAllNamedDataStoreIdentifiers()
         XCTAssertTrue(registered.contains(unownedIdentifier))
 
         await accountStore?.rotate()
         await accountStore?.sweepOrphans()
 
-        let afterSweep = await allNamedDataStoreIdentifiers()
+        let afterSweep = await fetchAllNamedDataStoreIdentifiers()
         XCTAssertTrue(before.isSubset(of: afterSweep))
         XCTAssertTrue(afterSweep.contains(unownedIdentifier))
 
@@ -788,7 +788,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         let remaining = await registry.removeCreatedIdentifiers()
         XCTAssertTrue(remaining.isEmpty)
 
-        let afterCleanup = await allNamedDataStoreIdentifiers()
+        let afterCleanup = await fetchAllNamedDataStoreIdentifiers()
         XCTAssertTrue(before.isSubset(of: afterCleanup))
         XCTAssertTrue(
             afterCleanup.isDisjoint(
@@ -839,14 +839,6 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             defaults: defaults,
             operations: registry.operations
         )
-    }
-
-    private func allNamedDataStoreIdentifiers() async -> Set<UUID> {
-        await withCheckedContinuation { continuation in
-            WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                continuation.resume(returning: Set($0))
-            }
-        }
     }
 
     private func allCookies(
@@ -939,18 +931,15 @@ private final class RealNamedDataStoreRegistry {
 
     func removeCreatedIdentifiers() async -> Set<UUID> {
         for attempt in 0..<50 {
-            var remaining = Set<UUID>()
             for identifier in createdIdentifiers.sorted(by: {
                 $0.uuidString < $1.uuidString
             }) {
-                if await AccountWebsiteDataStoreOperations.live
-                    .removeIdentifier(identifier) != nil
-                {
-                    remaining.insert(identifier)
-                }
+                _ = await AccountWebsiteDataStoreOperations.live
+                    .removeIdentifier(identifier)
             }
-            createdIdentifiers = remaining
-            if remaining.isEmpty {
+            let registered = await fetchAllNamedDataStoreIdentifiers()
+            createdIdentifiers.formIntersection(registered)
+            if createdIdentifiers.isEmpty {
                 return []
             }
             if attempt < 49 {
@@ -958,6 +947,15 @@ private final class RealNamedDataStoreRegistry {
             }
         }
         return createdIdentifiers
+    }
+}
+
+@MainActor
+private func fetchAllNamedDataStoreIdentifiers() async -> Set<UUID> {
+    await withCheckedContinuation { continuation in
+        WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+            continuation.resume(returning: Set($0))
+        }
     }
 }
 
@@ -1006,17 +1004,23 @@ struct LocalHTTPResponse: Sendable {
     let headers: [(String, String)]
     let body: Data
     let sentEvent: FixtureEvent?
+    let headersSentEvent: FixtureEvent?
+    let bodyRelease: DispatchSemaphore?
 
     init(
         status: Int,
         headers: [(String, String)],
         body: Data,
-        sentEvent: FixtureEvent? = nil
+        sentEvent: FixtureEvent? = nil,
+        headersSentEvent: FixtureEvent? = nil,
+        bodyRelease: DispatchSemaphore? = nil
     ) {
         self.status = status
         self.headers = headers
         self.body = body
         self.sentEvent = sentEvent
+        self.headersSentEvent = headersSentEvent
+        self.bodyRelease = bodyRelease
     }
 
     static func json(
@@ -1221,11 +1225,41 @@ final class LocalHTTPServer: @unchecked Sendable {
             "Connection: close",
         ]
         lines.append(contentsOf: response.headers.map { "\($0.0): \($0.1)" })
-        var data = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
-        data.append(response.body)
-        connection.send(content: data, completion: .contentProcessed { _ in
-            response.sentEvent?.signal()
-            connection.cancel()
+        let headers = Data(
+            (lines.joined(separator: "\r\n") + "\r\n\r\n").utf8
+        )
+        guard let bodyRelease = response.bodyRelease else {
+            var data = headers
+            data.append(response.body)
+            connection.send(content: data, completion: .contentProcessed { _ in
+                response.sentEvent?.signal()
+                connection.cancel()
+            })
+            return
+        }
+
+        let prefixCount = min(65_536, response.body.count)
+        var prefix = headers
+        prefix.append(response.body.prefix(prefixCount))
+        let remainingBody = Data(response.body.dropFirst(prefixCount))
+        connection.send(content: prefix, completion: .contentProcessed { [weak self] error in
+            response.headersSentEvent?.signal()
+            guard error == nil, let self else {
+                connection.cancel()
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                bodyRelease.wait()
+                self.queue.async {
+                    connection.send(
+                        content: remainingBody,
+                        completion: .contentProcessed { _ in
+                            response.sentEvent?.signal()
+                            connection.cancel()
+                        }
+                    )
+                }
+            }
         })
     }
 

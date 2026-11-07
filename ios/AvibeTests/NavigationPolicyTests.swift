@@ -918,6 +918,354 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountBridgeTransitionDoesNotRecreateReleasedRuntimeWebView() async throws {
+        let accountShown = expectation(description: "account bridge requested")
+        var accountRequestCount = 0
+        var loadingStarted = 0
+        var loadingFinished = 0
+        var loadingFailed = 0
+        var controller: WebViewController!
+        controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            showAccount: {
+                accountRequestCount += 1
+                accountShown.fulfill()
+                _ = controller.invalidateForAccountTransition()
+            },
+            didStartLoading: {
+                loadingStarted += 1
+            },
+            didFinishLoading: {
+                loadingFinished += 1
+            },
+            didFailLoading: {
+                loadingFailed += 1
+            }
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
+              Account
+            </button>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        _ = try await webView.callAsyncJavaScript(
+            "document.querySelector('#account').click()",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        await fulfillment(of: [accountShown], timeout: 2)
+
+        let lateBridgeResult = try await webView.callAsyncJavaScript(
+            """
+            const result = {};
+            await window.avibeNative.call("app.showAccount");
+            try {
+              await window.avibeNative.call(
+                "app.setAccountActionAvailable",
+                {available: true}
+              );
+            } catch (error) {
+              result.registration = error.code;
+            }
+            try {
+              await window.avibeNative.call("navigation.historyChanged");
+            } catch (error) {
+              result.history = error.code;
+            }
+            return JSON.stringify(result);
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        let lateBridgePayload = try jsonObject(from: lateBridgeResult)
+        XCTAssertEqual(lateBridgePayload["registration"] as? String, "forbidden")
+        XCTAssertEqual(lateBridgePayload["history"] as? String, "forbidden")
+        XCTAssertEqual(accountRequestCount, 1)
+
+        let cancelled = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorCancelled
+        )
+        controller.webView(
+            webView,
+            didStartProvisionalNavigation: nil
+        )
+        controller.webView(
+            webView,
+            didCommit: nil
+        )
+        controller.webView(
+            webView,
+            didFinish: nil
+        )
+        controller.webView(
+            webView,
+            didFailProvisionalNavigation: nil,
+            withError: cancelled
+        )
+        controller.webView(
+            webView,
+            didFail: nil,
+            withError: cancelled
+        )
+        controller.webViewWebContentProcessDidTerminate(webView)
+        controller.webViewDidClose(webView)
+        XCTAssertEqual(loadingStarted, 0)
+        XCTAssertEqual(loadingFinished, 0)
+        XCTAssertEqual(loadingFailed, 0)
+    }
+
+    @MainActor
+    func testAccountBridgeUsesAppModelTransitionBeforeLateCallbacks() async throws {
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                return .json(
+                    """
+                    {
+                      "account": {
+                        "id": "account",
+                        "email": "max@example.com"
+                      },
+                      "instances": [
+                        {
+                          "id": "instance",
+                          "name": "Alice",
+                          "host": "alice-app.avibe.bot",
+                          "url": "https://alice-app.avibe.bot",
+                          "relationship": "owner",
+                          "owner_email": "max@example.com",
+                          "available": true
+                        }
+                      ]
+                    }
+                    """
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let storeCleanup = NamedDataStoreCleanup()
+        addTeardownBlock {
+            _ = await storeCleanup.remove()
+        }
+
+        storeCleanup.identifier = try await exerciseAppModelAccountTransition(
+            defaults: defaults,
+            controlPlaneURL: baseURL
+        )
+        let removalError = await storeCleanup.remove()
+        XCTAssertNil(removalError)
+    }
+
+    @MainActor
+    func testInvalidatedRuntimeCancelsAccountFallbackWork() async throws {
+        var visibility: [Bool] = []
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            accountFallbackVisibilityChanged: {
+                visibility.append($0)
+            },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            "<!doctype html><title>Workbench</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+
+        controller.webView(webView, didFinish: nil)
+        _ = controller.invalidateForAccountTransition()
+        try await Task.sleep(for: .milliseconds(500))
+
+        XCTAssertFalse(visibility.contains(true))
+    }
+
+    @MainActor
+    func testInvalidatedRuntimeIgnoresRealLateWebKitUIDelegateCallbacks() async throws {
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent(),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        _ = controller.invalidateForAccountTransition()
+
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        webView.uiDelegate = controller
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="callbacks" onclick="runCallbacks()">Run</button>
+            <script>
+              function runCallbacks() {
+                alert("late");
+                confirm("late");
+                prompt("late", "default");
+                window.open("about:blank", "_blank");
+              }
+            </script>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        _ = try await webView.callAsyncJavaScript(
+            "document.querySelector('#callbacks').click()",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+    }
+
+    @MainActor
+    func testInvalidatedRuntimeCancelsDownloadsAndRemovesTemporaryDestinations() async throws {
+        let headersSent = FixtureEvent(
+            description: "download response prefix sent"
+        )
+        let releaseBody = DispatchSemaphore(value: 0)
+        let server = try LocalHTTPServer { request in
+            if request.path != "/account-export.txt" {
+                return .html(
+                    "<!doctype html><title>Download fixture</title>"
+                )
+            }
+            return LocalHTTPResponse(
+                status: 200,
+                headers: [
+                    ("Content-Type", "application/octet-stream"),
+                    (
+                        "Content-Disposition",
+                        "attachment; filename=\"account-export.txt\""
+                    ),
+                ],
+                body: Data(repeating: 0x41, count: 1_048_576),
+                headersSentEvent: headersSent,
+                bodyRelease: releaseBody
+            )
+        }
+        let baseURL = try await server.start()
+        defer {
+            releaseBody.signal()
+            server.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: baseURL, requiresHTTPS: false)
+        )
+        let controller = makeRuntimeController(instanceOrigin: instanceOrigin)
+        let window = host(controller)
+        defer {
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let responseProbe = NavigationResponseProbe()
+        webView.navigationDelegate = responseProbe
+        webView.load(URLRequest(url: baseURL))
+        await fulfillment(
+            of: [responseProbe.finishedExpectation],
+            timeout: 30
+        )
+        let navigationResponse = try XCTUnwrap(
+            responseProbe.navigationResponse
+        )
+        webView.navigationDelegate = controller
+        let directoriesBeforeDownload = temporaryDownloadDirectories()
+        let download = await withCheckedContinuation { continuation in
+            webView.startDownload(
+                using: URLRequest(
+                    url: baseURL.appending(path: "account-export.txt")
+                )
+            ) {
+                continuation.resume(returning: $0)
+            }
+        }
+        controller.webView(
+            webView,
+            navigationResponse: navigationResponse,
+            didBecome: download
+        )
+        await fulfillment(
+            of: [headersSent.expectation],
+            timeout: 30
+        )
+        var createdDirectories: Set<URL> = []
+        try await waitUntil(timeout: .seconds(30)) {
+            createdDirectories =
+                self.temporaryDownloadDirectories().subtracting(
+                    directoriesBeforeDownload
+                )
+            return !createdDirectories.isEmpty
+        }
+
+        _ = controller.invalidateForAccountTransition()
+        releaseBody.signal()
+        try await waitUntil(timeout: .seconds(30)) {
+            createdDirectories.allSatisfy {
+                !FileManager.default.fileExists(atPath: $0.path)
+            }
+        }
+        controller.downloadDidFinish(download)
+        controller.download(
+            download,
+            didFailWithError: URLError(.cancelled),
+            resumeData: nil
+        )
+        XCTAssertNil(controller.presentedViewController)
+    }
+
+    @MainActor
     func testAccountFallbackTracksRegistrationAndPrimaryNavigationLifecycle() async throws {
         var visibility: [Bool] = []
         let controller = WebViewController(
@@ -1129,6 +1477,148 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    private func temporaryDownloadDirectories() -> Set<URL> {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+        let contents = (
+            try? FileManager.default.contentsOfDirectory(
+                at: temporaryDirectory,
+                includingPropertiesForKeys: nil
+            )
+        ) ?? []
+        return Set(
+            contents.filter {
+                $0.lastPathComponent.hasPrefix("Avibe-")
+            }
+        )
+    }
+
+    @MainActor
+    private func exerciseAppModelAccountTransition(
+        defaults: UserDefaults,
+        controlPlaneURL: URL
+    ) async throws -> UUID {
+        var appModel: AppModel? = AppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: controlPlaneURL
+            )
+        )
+        let storeIdentifier = try XCTUnwrap(
+            appModel?.websiteDataStore.identifier
+        )
+        try await exerciseRuntimeAccountTransition(
+            appModel: try XCTUnwrap(appModel)
+        )
+        appModel = nil
+        try? await Task.sleep(for: .milliseconds(100))
+        return storeIdentifier
+    }
+
+    @MainActor
+    private func exerciseRuntimeAccountTransition(
+        appModel: AppModel
+    ) async throws {
+        try await waitUntil {
+            if case .onboarding(.instances) = appModel.route {
+                return true
+            }
+            return false
+        }
+        _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance")
+
+        let runtime: MobileRuntimeContext
+        guard case .browser(let selectedRuntime) = appModel.route else {
+            XCTFail("Selecting an instance did not open the runtime.")
+            return
+        }
+        runtime = selectedRuntime
+
+        let controller = WebViewController(
+            instanceOrigin: instance,
+            websiteDataStore: appModel.runtimeWebsiteDataStore,
+            showAccount: appModel.showAccount,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        appModel.registerRuntimeController(controller, for: runtime)
+        let window = host(controller)
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
+              Account
+            </button>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        _ = try await webView.callAsyncJavaScript(
+            "document.querySelector('#account').click()",
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        try await waitUntil {
+            if case .onboarding(.account) = appModel.route {
+                return true
+            }
+            return false
+        }
+        XCTAssertNil(webView.superview)
+
+        let lateBridgeResult = try await webView.callAsyncJavaScript(
+            """
+            const result = {};
+            await window.avibeNative.call("app.showAccount");
+            try {
+              await window.avibeNative.call(
+                "app.setAccountActionAvailable",
+                {available: true}
+              );
+            } catch (error) {
+              result.registration = error.code;
+            }
+            try {
+              await window.avibeNative.call("navigation.historyChanged");
+            } catch (error) {
+              result.history = error.code;
+            }
+            return JSON.stringify(result);
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        let lateBridgePayload = try jsonObject(from: lateBridgeResult)
+        XCTAssertEqual(lateBridgePayload["registration"] as? String, "forbidden")
+        XCTAssertEqual(lateBridgePayload["history"] as? String, "forbidden")
+
+        controller.webView(
+            webView,
+            didStartProvisionalNavigation: nil
+        )
+        controller.webView(
+            webView,
+            didCommit: nil
+        )
+        controller.webView(
+            webView,
+            didFinish: nil
+        )
+        controller.webViewWebContentProcessDidTerminate(webView)
+        controller.webViewDidClose(webView)
+        appModel.mobileSessionCoordinator.deactivateAccountSurface()
+        window.rootViewController = nil
+        window.isHidden = true
+    }
+
     private func assertForbiddenReply(
         _ value: Any?,
         file: StaticString = #filePath,
@@ -1235,6 +1725,62 @@ final class NavigationPolicyTests: XCTestCase {
 
 private enum TestWaitError: Error {
     case timedOut
+}
+
+@MainActor
+private final class NamedDataStoreCleanup {
+    var identifier: UUID?
+
+    func remove() async -> Error? {
+        guard let identifier else {
+            return nil
+        }
+        var lastError: Error?
+        for attempt in 0..<50 {
+            lastError = await AccountWebsiteDataStoreOperations.live
+                .removeIdentifier(identifier)
+            let registered = await withCheckedContinuation { continuation in
+                WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                    continuation.resume(returning: Set($0))
+                }
+            }
+            if !registered.contains(identifier) {
+                self.identifier = nil
+                return nil
+            }
+            if attempt < 49 {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return lastError ?? NamedDataStoreCleanupError.stillRegistered(identifier)
+    }
+}
+
+private enum NamedDataStoreCleanupError: Error {
+    case stillRegistered(UUID)
+}
+
+private final class NavigationResponseProbe: NSObject, WKNavigationDelegate {
+    let finishedExpectation = XCTestExpectation(
+        description: "fixture navigation finished"
+    )
+    private(set) var navigationResponse: WKNavigationResponse?
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        self.navigationResponse = navigationResponse
+        decisionHandler(.allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFinish navigation: WKNavigation?
+    ) {
+        finishedExpectation.fulfill()
+    }
 }
 
 private struct LegacyRuntimeToolbarScreenshotFixture: View {
