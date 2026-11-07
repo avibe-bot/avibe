@@ -1,5 +1,8 @@
-import { VOICE_LEVEL_INTERVAL_MS } from './voiceRecording';
 import { emitVoiceTelemetry, type VoiceTelemetryEvent } from './voiceTelemetry';
+
+// The microphone's loudness reaches the page this often, apart from the PCM: a meter draws it
+// as it is spoken, not a quarter second late. (lib/voiceRecording re-exports it.)
+export const VOICE_LEVEL_INTERVAL_MS = 32;
 
 /**
  * Whether a take held sound loud enough to be speech, from the loudness the recorder reports

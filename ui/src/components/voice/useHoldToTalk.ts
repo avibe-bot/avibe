@@ -15,6 +15,7 @@ import type { VoiceTakeKeep } from '../../lib/voiceTakeKeeper';
 import { createVoiceLevel } from '../../lib/voiceLevel';
 import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
 import { isVoiceCaptureActive, prewarmVoiceCapture } from '../../lib/voiceRecording';
+import { emitVoiceTelemetry, type VoiceTelemetryEvent, type VoiceTelemetryOutcome } from '../../lib/voiceTelemetry';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 
 // Press and hold to talk (ui/design: mobile/main-bot-voice/*, composer/hold-*): one gesture
@@ -132,6 +133,42 @@ type Take = {
   /** The permission answer before opening: a release before the pipeline starts is a prompt then. */
   granted: boolean;
   heard: { text: string; stash: string };
+  /** How many endings this take has logged (a take retried after an interruption ends again). */
+  reports: number;
+};
+
+/** A hold's outcome as the reliability log names it. */
+const TELEMETRY_OUTCOME: Record<HoldOutcome, VoiceTelemetryOutcome> = {
+  sent: 'sent',
+  cancelled: 'cancelled',
+  kept: 'kept',
+  'too-short': 'too_short',
+  asking: 'asking',
+  denied: 'denied',
+  unavailable: 'unavailable',
+};
+
+/** How a hold ended, for the reliability log (`dictation_finalized`, entry `hold`), with what its
+ *  microphone delivered; a press that never became a take logs its outcome alone. */
+const reportHold = (
+  outcome: VoiceTelemetryOutcome,
+  current: Take | null,
+  extra: Pick<VoiceTelemetryEvent, 'interruptReason'> = {},
+): void => {
+  try {
+    const event: VoiceTelemetryEvent = { event: 'dictation_finalized', outcome, entry: 'hold', providerStage: 'finalization', ...extra };
+    if (current) {
+      current.reports += 1;
+      event.dictationId = current.dictation.id;
+      event.captureClass = current.dictation.captureClass();
+      event.attemptCount = current.reports;
+      event.retry = current.reports > 1;
+      if (current.started) event.totalDurationMs = Math.max(0, Date.now() - current.startedAt);
+    }
+    emitVoiceTelemetry(event);
+  } catch {
+    // Instrumentation cannot change how the hold ended.
+  }
 };
 
 /** Why a take that could not be transcribed stopped, for the card: the network or the service
@@ -298,8 +335,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setLiveUnavailable(false);
   }, [level, setFinalizing, stopClock]);
 
-  /** The press is over with nothing to keep: back to rest, saying how it ended. */
-  const end = useCallback((how: HoldOutcome | null) => {
+  /** The press is over with nothing to keep: back to rest, saying how it ended. `logged`: the
+   *  outcome the reliability log gets, when it says more than `how` (a take the microphone gave
+   *  nothing is not a silent one). */
+  const end = useCallback((how: HoldOutcome | null, logged?: VoiceTelemetryOutcome) => {
+    if (how) reportHold(logged ?? TELEMETRY_OUTCOME[how], take.current);
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
     take.current = null;
@@ -311,6 +351,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   /** The take ended without a send: keep what was heard until the user decides. */
   const interrupt = useCallback((reason: HoldInterruptReason, heard: string) => {
+    reportHold('interrupted', take.current, { interruptReason: reason });
     stopClock();
     level.reset();
     releasePointer();
@@ -331,7 +372,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     toPhase('settling');
     const ok = await latest.current.send(words, VOICE_MESSAGE_METADATA).catch(() => false);
     // The words landed: the kept copy goes, whether or not this surface is still here.
-    if (ok) current?.dictation.landed();
+    if (ok) {
+      current?.dictation.landed();
+      reportHold('sent', current);
+    }
     if (!mounted.current) return;
     if (ok) {
       if (take.current === current) take.current = null;
@@ -375,7 +419,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Nothing recognized in a take the microphone heard as silence: nothing to keep. One that
     // held sound loud enough for speech is a recognition that failed, and keeps its recording.
     if (error instanceof VoiceTranscriptionError && error.code === 'empty' && !current.dictation.voiced()) {
-      end('too-short');
+      // The log tells a microphone that gave nothing (no frames, or held by the system) apart.
+      const delivered = current.dictation.captureClass();
+      end('too-short', delivered === 'no_frames' || delivered === 'muted' ? delivered : undefined);
       return;
     }
     const heard = `${current.heard.text}${current.heard.stash}`.trim();
@@ -385,6 +431,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const startTake = useCallback((granted: boolean) => {
     const keep = latest.current.keep?.();
     const dictation = new ShowPageVoiceDictation({
+      entry: 'hold',
       before: '',
       after: '',
       context: latest.current.context?.(),
@@ -405,7 +452,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         if (phaseRef.current === 'listening' && `${preview.text}${preview.stash}`.trim()) toPhase('recording');
       },
     });
-    const current: Take = { dictation, startedAt: Date.now(), started: false, ending: 'none', granted, heard: { text: '', stash: '' } };
+    const current: Take = { dictation, startedAt: Date.now(), started: false, ending: 'none', granted, heard: { text: '', stash: '' }, reports: 0 };
     take.current = current;
     // The last take's words (kept for its toast) are not this one's.
     setText('');
@@ -523,6 +570,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Said once the take is judged (at once, or when its last audio is in), unless a new press
     // has begun meanwhile.
     void current.dictation.setAside().then((kept) => {
+      reportHold(kept ? 'kept' : 'cancelled', current);
       if (mounted.current && !take.current && phaseRef.current === 'idle') setOutcome(kept ? 'kept' : 'cancelled');
     });
   }, [end]);

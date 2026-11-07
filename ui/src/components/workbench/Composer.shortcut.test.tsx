@@ -22,6 +22,7 @@ const voiceMocks = vi.hoisted(() => ({
   onStopped: undefined as VoiceStopped | undefined,
   onError: undefined as ((error: unknown) => void) | undefined,
   onPcm: undefined as ((samples: Int16Array) => void) | undefined,
+  trace: undefined as { entry: string; dictationId?: string } | undefined,
   pipelineStart: vi.fn(),
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
@@ -53,7 +54,9 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
       onSegment: VoiceSegment;
       onError?: (error: unknown) => void;
       onPcm?: (samples: Int16Array) => void;
+      trace?: { entry: string; dictationId?: string };
     }) {
+      voiceMocks.trace = options.trace;
       voiceMocks.onSegment = options.onSegment;
       voiceMocks.onStopped = options.onStopped;
       voiceMocks.onError = options.onError;
@@ -196,6 +199,33 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Composer voice shortcut', () => {
+  /** What the composer told the reliability log. */
+  const telemetrySent = () => apiFetch.mock.calls
+    .filter(([path]) => path === '/api/asr/telemetry')
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string) as Record<string, unknown>);
+
+  it('traces a tap take from its microphone request, and logs a microphone that never opened', async () => {
+    renderComposer();
+    const textbox = await screen.findByRole('textbox');
+    await act(async () => undefined);
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+    expect(voiceMocks.trace).toMatchObject({ entry: 'tap', dictationId: expect.any(String) });
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+
+    voiceMocks.getUserMedia.mockRejectedValueOnce(new DOMException('Permission denied', 'NotAllowedError'));
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(telemetrySent()).toContainEqual(expect.objectContaining({ event: 'capture_trace' })));
+    expect(telemetrySent().filter((event) => event.event === 'capture_trace')).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      entry: 'tap',
+      captureClass: 'no_microphone',
+      mic: 'NotAllowedError',
+      dictationId: expect.any(String),
+    })]);
+  });
+
   it('starts and finishes voice input with the configured chord and advertises it on hover', async () => {
     renderComposer();
     const mic = await screen.findByRole('button', { name: en.chat.compose.voice });
