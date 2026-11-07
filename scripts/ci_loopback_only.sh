@@ -21,6 +21,13 @@ if [ "${1:-}" = "--inside" ]; then
   uid="$2"
   gid="$3"
   shift 3
+  # A command that lost the caller's environment reads root's HOME and fails
+  # in ways that look like test bugs, so a sudo that dropped it stops here.
+  if [ "$HOME" != "${CI_LOOPBACK_ONLY_HOME:-}" ]; then
+    echo "sudo did not keep the caller's environment (HOME is $HOME); refusing to run the command." >&2
+    exit 1
+  fi
+  unset CI_LOOPBACK_ONLY_HOME
   ip link set lo up
   # An address literal, so the probe tests the route, not only name resolution.
   if probe=$(curl -sS --max-time 5 -o /dev/null https://1.1.1.1 2>&1); then
@@ -36,6 +43,12 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-# sudo resets PATH; the command needs the caller's toolchain on it.
-exec sudo --preserve-env env "PATH=$PATH" unshare --net -- \
+# sudo resets the environment, and the command needs all of the caller's. A
+# bare --preserve-env is ignored by sudo-rs (Ubuntu 26.04's sudo), so every
+# exported variable is named: both sudo implementations keep a named list, and
+# the runner's NOPASSWD: ALL rule permits it. Only names reach argv; values,
+# tokens included, stay in the environment. sudo still resets PATH
+# (secure_path), so the caller's toolchain PATH is set again explicitly.
+export CI_LOOPBACK_ONLY_HOME="$HOME"
+exec sudo --preserve-env="$(compgen -e | paste -sd, -)" env "PATH=$PATH" unshare --net -- \
   bash "$0" --inside "$(id -u)" "$(id -g)" "$@"
