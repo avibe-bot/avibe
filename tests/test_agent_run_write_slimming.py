@@ -46,6 +46,18 @@ def test_queued_run_payload_keeps_prompt_and_drops_duplicate_message() -> None:
     assert TaskExecutionStore.queued_run_payload(distinct)["message"] == "display message"
 
 
+def test_file_backend_derives_claimed_status_from_processing_path(tmp_path) -> None:
+    store = TaskExecutionStore(tmp_path / "task_requests")
+    request = store.enqueue_hook_send(
+        session_key="slack::channel::C123",
+        prompt="run this instruction",
+    )
+
+    assert store.get_run(request.id)["status"] == "queued"
+    assert store.claim(request.id) is not None
+    assert store.get_run(request.id)["status"] == "running"
+
+
 def test_new_run_persists_prompt_only_and_readers_restore_message(
     tmp_path, sqlite_db_factory
 ) -> None:

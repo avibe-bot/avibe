@@ -2591,7 +2591,13 @@ class TaskExecutionStore:
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
-        write_atomic(path, json.dumps(self.queued_run_payload(request), indent=2))
+        payload = self.queued_run_payload(request)
+        # The file backend derives queued/running from the directory containing the
+        # request. An explicit queued status would survive the pending-to-processing
+        # rename and hide the claimed run from readers as still queued.
+        payload.pop("status", None)
+        payload.pop("updated_at", None)
+        write_atomic(path, json.dumps(payload, indent=2))
         return request
 
     def _enqueue_identified_run(
