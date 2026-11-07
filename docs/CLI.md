@@ -542,8 +542,10 @@ connection. The calling process reads `--data-file`, validates/writes `--output`
 and prints the upstream body. Non-2xx responses still print their body and exit 1.
 Existing host policies, protected approvals, one-shot grants and audits apply.
 
-A missing or older service returns `service_unavailable` with
-`execution: not_executed`. Start/update it explicitly; there is no offline
+A missing service or one without the control endpoint returns `service_unavailable`;
+a service with that endpoint but without Vault fetch support returns
+`unsupported_operation`. Both carry `execution: not_executed`.
+Start/update it explicitly; there is no offline
 fallback or automatic start. A lost or malformed post-send response is
 `execution_unknown`, never a reason to retry automatically. Approval waits use
 the existing callback arbitration; an approval-completion response lost before
