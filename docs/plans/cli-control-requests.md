@@ -1,6 +1,7 @@
-# Warm CLI control requests: Agent Run and Vault fetch
+# Warm CLI control requests: Agent Run, Harness mutations and Vault fetch
 
-Implementation of Phase 4's first slice of the CLI runtime-path plan (PR #3283).
+Implementation of the CLI runtime-path plan (PR #3283), including Agent Run,
+Task/Watch/Session/Run mutations, and Vault fetch.
 Performance only; the invocation context is not a security boundary.
 
 ## Contract
@@ -29,7 +30,7 @@ Performance only; the invocation context is not a security boundary.
   after submission, stale response or malformed response is `execution_unknown`,
   never evidence that enqueue did not happen. There is no automatic retry.
 - No schema, operation-id ledger, identity model, Vault custody or deployment
-  change. Task/Watch/Session mutations remain a separate follow-up.
+  change. Task/Watch/Session/Run mutations use the separate contract below.
 
 ## Vault fetch change contract (PR B)
 

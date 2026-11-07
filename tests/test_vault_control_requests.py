@@ -434,7 +434,7 @@ async def test_payload_codec_and_concurrent_authorities_stay_inside_workers(monk
     steps = []
     decode = base64.b64decode
     loads = json.loads
-    render = __import__("starlette.responses", fromlist=["JSONResponse"]).JSONResponse.render
+    dumps = json.dumps
     get_meta = vault_service.get_secret_record_meta
 
     def decode_body(value, *args, **kwargs):
@@ -449,11 +449,11 @@ async def test_payload_codec_and_concurrent_authorities_stay_inside_workers(monk
             assert threading.get_ident() != loop_thread
         return loads(value, *args, **kwargs)
 
-    def encode(self, value):
+    def encode(value, *args, **kwargs):
         if isinstance(value, dict) and value.get("payload", {}).get("kind") == "vault_fetch":
             steps.append("json-out")
             assert threading.get_ident() != loop_thread
-        return render(self, value)
+        return dumps(value, *args, **kwargs)
 
     def meta(conn, name, *args, **kwargs):
         steps.append("authority")
@@ -467,7 +467,7 @@ async def test_payload_codec_and_concurrent_authorities_stay_inside_workers(monk
 
     monkeypatch.setattr(base64, "b64decode", decode_body)
     monkeypatch.setattr(json, "loads", parse)
-    monkeypatch.setattr(__import__("starlette.responses", fromlist=["JSONResponse"]).JSONResponse, "render", encode)
+    monkeypatch.setattr(json, "dumps", encode)
     monkeypatch.setattr(vault_service, "get_secret_record_meta", meta)
     monkeypatch.setattr(api, "avault_deliver_fetch", deliver)
     # Use the actual production executor, which unlike to_thread drops ContextVars.
