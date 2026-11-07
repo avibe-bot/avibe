@@ -3347,7 +3347,13 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
     existing_backend = str((existing or {}).get("agent_backend") or "").strip()
     values["agent_backend"] = existing_backend or _capture_run_backend(conn, values)
     if existing:
-        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
+        # Existing rows may still carry the legacy duplicate. New-write
+        # normalization uses NULL for ``message``, but an upsert must not rewrite
+        # that historical value while settling or refreshing the row.
+        update_values = dict(values)
+        if update_values.get("message") is None:
+            update_values.pop("message", None)
+        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**update_values))
     else:
         conn.execute(insert(agent_runs).values(**values))
     _defer_run_ids_updated_from_connection(conn, [values["id"]])
@@ -4413,6 +4419,7 @@ class SQLiteBackgroundTaskStore:
                     metadata[COMMAND_SNAPSHOT_METADATA_KEY] = snapshot
                 else:
                     metadata.pop(COMMAND_SNAPSHOT_METADATA_KEY, None)
+                run_prompt = definition["prompt"] or message
                 values.update(
                     agent_name=identity["name"] if identity else current_name,
                     agent_id=identity["id"] if identity else None,
@@ -4422,8 +4429,11 @@ class SQLiteBackgroundTaskStore:
                     legacy_session_key=definition["legacy_session_key"],
                     post_to=definition["post_to"],
                     deliver_key=definition["deliver_key"],
-                    prompt=definition["prompt"] or message,
-                    message=message,
+                    prompt=run_prompt,
+                    # ``prompt`` is canonical when both fields carry the same text.
+                    # Keep a distinct message snapshot for definitions that
+                    # intentionally use different values.
+                    message=None if message == run_prompt else message,
                     message_payload_json=definition["message_payload_json"],
                     metadata_json=_json_dumps(metadata),
                 )
@@ -9160,6 +9170,8 @@ class SQLiteBackgroundTaskStore:
         message = payload.get("message") or payload.get("prompt")
         raw_metadata = payload.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        prompt = payload.get("prompt") or message
+        stored_message = None if message == prompt else message
         return {
             "id": payload["id"],
             "definition_id": payload.get("definition_id") or payload.get("task_id"),
@@ -9178,8 +9190,10 @@ class SQLiteBackgroundTaskStore:
             "legacy_session_key": payload.get("session_key") or payload.get("legacy_session_key"),
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
-            "prompt": payload.get("prompt") or message,
-            "message": message,
+            "prompt": prompt,
+            # New rows do not repeat identical prompt/message text. Distinct
+            # values remain separate so old readers see the same projection.
+            "message": stored_message,
             "message_payload_json": self._message_payload_json(payload),
             "result_text": payload.get("result_text"),
             "result_payload_json": self._payload_json(payload, "result_payload", "result_payload_json"),

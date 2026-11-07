@@ -2560,6 +2560,12 @@ class TaskExecutionStore:
         """
 
         payload = request.to_dict()
+        # Only drop the legacy value when it is byte-for-byte the same text. A
+        # definition can legally carry distinct prompt/message values; preserving
+        # that pair is required for readers that display ``message`` while execution
+        # consumes ``prompt``.
+        if payload.get("message") == payload.get("prompt"):
+            payload["message"] = None
         payload["status"] = "queued"
         payload["updated_at"] = request.created_at
         return payload
@@ -2585,7 +2591,13 @@ class TaskExecutionStore:
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
-        write_atomic(path, json.dumps(request.to_dict(), indent=2))
+        payload = self.queued_run_payload(request)
+        # The file backend derives queued/running from the directory containing the
+        # request. An explicit queued status would survive the pending-to-processing
+        # rename and hide the claimed run from readers as still queued.
+        payload.pop("status", None)
+        payload.pop("updated_at", None)
+        write_atomic(path, json.dumps(payload, indent=2))
         return request
 
     def _enqueue_identified_run(
@@ -2754,7 +2766,12 @@ class TaskExecutionStore:
             "message_payload",
             "metadata",
         ):
-            setattr(request, field_name, snapshot.get(field_name))
+            value = snapshot.get(field_name)
+            if field_name == "message":
+                # The stored legacy duplicate is NULL for new rows, but the
+                # in-memory request still exposes the same authoritative text.
+                value = snapshot.get("message") or snapshot.get("prompt")
+            setattr(request, field_name, value)
         return request
 
     def enqueue_hook_send(
