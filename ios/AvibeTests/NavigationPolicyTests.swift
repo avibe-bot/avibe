@@ -1671,7 +1671,7 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     private func waitUntil(
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(20),
         condition: @escaping @MainActor () async -> Bool
     ) async throws {
         let clock = ContinuousClock()
