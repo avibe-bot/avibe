@@ -92,7 +92,8 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
   prewarmVoiceCapture: vi.fn(async () => undefined),
   isVoiceCaptureActive: () => pipeline.captureActive,
 }));
-vi.mock('../../lib/native', () => ({
+vi.mock('../../lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/native')>()),
   nativeHapticImpact: native.impact,
   nativeHapticNotify: native.notify,
   nativeHapticSelection: native.selection,

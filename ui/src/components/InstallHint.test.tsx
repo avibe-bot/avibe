@@ -4,7 +4,10 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({ shell: false }));
-vi.mock('@/lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('@/lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/native')>()),
+  isNativeShell: () => native.shell,
+}));
 vi.mock('@/lib/platform', () => ({
   isRealMobileSafari: () => true,
   isStandalonePwa: () => false,

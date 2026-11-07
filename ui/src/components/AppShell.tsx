@@ -35,6 +35,7 @@ import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '..
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { useNativeOuterScrollLock } from '../lib/useNativeOuterScrollLock';
 import { useNativeAccountActionRegistration } from '../lib/useNativeAccountActionRegistration';
+import { useNativeKeyboardOpen } from '../lib/nativeKeyboard';
 import { hasNativeCapability } from '../lib/native';
 import { onPageReactivated } from '../lib/pageActivity';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
@@ -252,6 +253,7 @@ export const AppShell: React.FC = () => {
   // chat (iPad / phone-landscape — desktop layout, so it can't use the mobile
   // body-lock) sizes to it, keeping its composer above the soft keyboard.
   useViewportHeightVar();
+  const nativeKeyboardOpen = useNativeKeyboardOpen();
 
   useEffect(() => {
     if (!capabilities.can_manage_instance) return;
@@ -415,6 +417,7 @@ export const AppShell: React.FC = () => {
   const isWorkbenchHome = surfaceLocation.pathname === '/';
 
   const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
+  const bottomNavVisible = showBottomNav && !nativeKeyboardOpen;
   // The open tab names the page for assistive tech in the phone's brand header.
   const activeTab = workbenchTabs.find((item) => item.to
     && (item.match ? item.match(location.pathname) : location.pathname === item.to));
@@ -584,7 +587,7 @@ export const AppShell: React.FC = () => {
             : isFullScreenMobile
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : 'flex-1 min-h-0 overflow-y-auto md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
-          !chromeless && (showBottomNav ? 'pb-[var(--mobile-nav-clearance)]' : 'pb-0'),
+          !chromeless && (bottomNavVisible ? 'pb-[var(--mobile-nav-clearance)]' : 'pb-0'),
           // The Workbench home draws on flat $--background. The console
           // aurora stays with the rest of its page family (Agents, Skills,
           // Harness, Vaults, Inbox, chat), so this is scoped to `/` alone and
@@ -622,7 +625,7 @@ export const AppShell: React.FC = () => {
         </div>
       </main>
 
-      {showBottomNav && (
+      {bottomNavVisible && (
         <WorkbenchMobileTabBar
           items={workbenchTabs}
           onNewSession={capabilities.can_chat ? () => setNewSessionOpen(true) : undefined}

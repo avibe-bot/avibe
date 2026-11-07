@@ -76,7 +76,14 @@ and Web resizing cannot both run.
   teardown, `pagehide`, or that WebView's next main-frame navigation commit,
   and reacquired on `pageshow` when WebKit restores the Workbench from its page
   cache. The Web UI disables `useIosKeyboardInset` only when the bridge
-  declares `keyboardResizesViewport: 1`.
+  declares `keyboardResizesViewport: 1`. On a phone, that same capability lets
+  the Workbench hide its fixed bottom tab bar and matching clearance only while
+  a focused editor has caused a software-keyboard-sized viewport contraction.
+  Home quick tasks reveal the complete shared composer after the native
+  viewport settles. Hardware-keyboard focus and phone rotations rebase the
+  keyboard-free geometry without hiding chrome; a known software keyboard stays
+  active across rotation until the resized viewport recovers. Safari and
+  installed Web apps keep their existing chrome behavior.
 - `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
   upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
   replaced when a native 1024-pixel source is delivered.

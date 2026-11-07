@@ -43,7 +43,7 @@ if (typeof window !== 'undefined' && window.visualViewport) {
 
 // ~250–300px keyboard vs ~60–100px address-bar variation → a 150px floor cleanly
 // separates "keyboard up" from address-bar collapse/expand.
-const KEYBOARD_MIN_DELTA = 150;
+export const SOFT_KEYBOARD_MIN_DELTA = 150;
 
 // Only touch-capable devices have an on-screen keyboard. Gating on this keeps
 // isSoftKeyboardOpen() false on desktop regardless of window resizes (so Enter
@@ -62,7 +62,7 @@ export function isSoftKeyboardOpen(): boolean {
   // under the fixed threshold while the keyboard is genuinely open (e.g. iPad: zoom,
   // then focus a field). Multiply the delta back up by scale to compare in unzoomed
   // CSS px; at scale 1 this is a no-op, so non-zoomed behavior is unchanged.
-  return (restingHeight - vv.height) * vv.scale > KEYBOARD_MIN_DELTA;
+  return (restingHeight - vv.height) * vv.scale > SOFT_KEYBOARD_MIN_DELTA;
 }
 
 /** Close the on-screen keyboard once typing is done (a message was sent): the

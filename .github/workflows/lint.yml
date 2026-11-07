@@ -265,7 +265,7 @@ jobs:
             suites: |
               npm run test:vault-integrity
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
-              npm run test:workbench-general -- geometry.spec.ts
+              npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts
               npm run test:badge-triggers
               npm run test:chat-selection
               npm run test:voice-shortcut

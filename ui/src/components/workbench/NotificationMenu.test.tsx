@@ -5,7 +5,10 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({ shell: false }));
-vi.mock('../../lib/native', () => ({ isNativeShell: () => native.shell }));
+vi.mock('../../lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/native')>()),
+  isNativeShell: () => native.shell,
+}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));

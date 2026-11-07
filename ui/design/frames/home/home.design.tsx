@@ -1,9 +1,10 @@
 // Home v4 (owner, 2026-11-03; shipped): the home inside the shipped AppShell, brand-new, partly set
 // up, everything set up, and a member without Bots, on the desktop app at three window sizes (the
-// centering depends on the height) and on two phones, plus a phone with the keyboard up. What each
-// state shows comes from the facts the home reads (the main Bot's backend, this device's push, the
-// desktop app's Computer Use, the config's chat apps, Avibe Cloud pairing) and the account's home
-// preferences, served by the fixtures below. The layout's rules are in `HomeLayout`.
+// centering depends on the height) and on two phones, plus browser and native-shell phones with the
+// keyboard up. What each state shows comes from the facts the home reads (the main Bot's backend,
+// this device's push, the desktop app's Computer Use, the config's chat apps, Avibe Cloud pairing)
+// and the account's home preferences, served by the fixtures below. The layout's rules are in
+// `HomeLayout`.
 import { MobileBrandHeader } from '@/components/MobileChrome';
 import { Workbench } from '@/components/Workbench';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
@@ -68,6 +69,16 @@ const fixturesOf = (state: State, desktopApp: boolean): WorkbenchFixtures =>
 
 const home = phoneShell('/', <Workbench />);
 
+const nativeFixtures = workbenchFixtures({
+  ...agentsApi,
+  ...homeFactsApi(STATES[2].facts),
+  '/api/session': {
+    remote: true,
+    authenticated: true,
+    email: 'max@example.com',
+  },
+}, STATES[2].base);
+
 const nativeHome = () => (
   <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
     <MobileBrandHeader nativeAccountAction />
@@ -78,17 +89,23 @@ const nativeHome = () => (
 );
 
 /**
- * The keyboard up on a phone (rule 8 in `HomeLayout`): the group does not re-center, and the
- * composer rests on the keyboard, which covers the tab bar. Drawn without a script: above the
- * keyboard, the page as it was before the keyboard came up, aligned to the bottom, with the free
- * space below the composer (behind the keyboard on a device) left out.
+ * The keyboard-up phone states (rule 8 in `HomeLayout`) are drawn without a script: above the
+ * keyboard, the page stays at its keyboard-free height and aligns to the bottom. A browser keeps
+ * the tab-bar clearance because its keyboard overlays the bar; the native shell removes both the
+ * bar and its clearance before revealing the composer in the resized WebView.
  */
-const keyboardUp = () => (
+const keyboardUp = (nativeShell: boolean) => () => (
   <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
     <div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden">
       <div className="flex shrink-0 flex-col">
-        <MobileBrandHeader />
-        <div className="flex h-[calc(100dvh-3.5rem-var(--mobile-nav-clearance))] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden">
+        <MobileBrandHeader nativeAccountAction={nativeShell} />
+        <div
+          className={
+            nativeShell
+              ? 'flex h-[calc(100dvh-3.5rem)] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
+              : 'flex h-[calc(100dvh-3.5rem-var(--mobile-nav-clearance))] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
+          }
+        >
           <Workbench />
         </div>
       </div>
@@ -129,26 +146,28 @@ const designFrames = frames([
     height: 844,
     status: 'shipped',
     route: '/',
-    fixtures: workbenchFixtures({
-      ...agentsApi,
-      ...homeFactsApi(STATES[2].facts),
-      '/api/session': {
-        remote: true,
-        authenticated: true,
-        email: 'max@example.com',
-      },
-    }, STATES[2].base),
+    fixtures: nativeFixtures,
     render: nativeHome,
   },
   {
-    name: 'z-keyboard-phone',
-    title: '首页 · 手机键盘弹起：整组不重新居中，页面整体上移，底栏被键盘盖住',
+    name: 'y-browser-keyboard-phone',
+    title: '首页 · Safari/PWA 手机键盘弹起：整组不重新居中，底栏被键盘盖住',
     width: 390,
     height: 844,
     status: 'shipped',
     route: '/',
     fixtures: fixturesOf(STATES[2], false),
-    render: keyboardUp,
+    render: keyboardUp(false),
+  },
+  {
+    name: 'z-keyboard-phone',
+    title: '首页 · iOS App 键盘弹起：整组不重新居中，底栏与占位隐藏，输入框完整可见',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/',
+    fixtures: nativeFixtures,
+    render: keyboardUp(true),
   },
 ]);
 

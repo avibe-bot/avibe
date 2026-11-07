@@ -22,8 +22,10 @@ import { isTouchCapableDevice } from '../../lib/softKeyboard';
 // 7. A phone: no face in the greeting (the tab bar's center is the main Bot); Getting started shows
 //    one item. A member: the project chips sit right above the composer, 8 apart, one block with it.
 // 8. The phone keyboard: the group does not re-center in the shorter visible area. The page keeps
-//    its keyboard-free height and moves up whole, so the composer rests on the keyboard; the header
-//    and the blocks above move off screen, and the keyboard covers the tab bar.
+//    its keyboard-free height and moves up whole, so the composer rests on the keyboard and the
+//    header and blocks above may move off screen. Safari/PWA lets the keyboard cover the tab bar;
+//    the native shell removes the tab bar and its clearance, then reveals the complete composer in
+//    UIKit's resized WebView.
 
 /** The page column the shell gives the home: it fills the space beside the sidebar (on a phone,
  *  between the header and the tab bar) and lays the group out in it. */
@@ -54,8 +56,9 @@ const isEditable = (target: EventTarget | null): boolean =>
  * the locked shell and never resizes it, but Android's `resizes-content` (index.html) shrinks the
  * shell, and the group would re-center in the shorter area. So while a field on the page has focus
  * on a touch device, the page keeps the height it had when the field was focused, before the
- * keyboard came up: the shell scrolls instead, and the browser brings the focused composer up
- * onto the keyboard, the page moving up whole.
+ * keyboard came up: the shell scrolls instead, and the focused composer can move onto the
+ * keyboard, the page moving up whole. In the native shell, AppShell separately removes its phone
+ * tab bar and the Composer reveals its full action row after UIKit's viewport resize settles.
  */
 function useKeyboardFreeHeight(pageRef: RefObject<HTMLElement | null>): number | null {
   const [held, setHeld] = useState<number | null>(null);

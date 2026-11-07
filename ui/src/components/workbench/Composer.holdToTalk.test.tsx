@@ -24,7 +24,10 @@ vi.hoisted(() => {
 const apiFetch = vi.hoisted(() => vi.fn());
 const nativeHapticImpact = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/apiFetch', () => ({ apiFetch }));
-vi.mock('../../lib/native', () => ({ nativeHapticImpact }));
+vi.mock('../../lib/native', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/native')>()),
+  nativeHapticImpact,
+}));
 vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/avibeFetch')>(),
   primeCloudToken: vi.fn(),
