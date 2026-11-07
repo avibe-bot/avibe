@@ -138,7 +138,7 @@ interface AvibeNative {
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
 | `composer` | `composer.attach({surface, sessionId, draft, placeholder, busy, disabled, actions})`, `composer.update({...})`, `composer.detach()`, `composer.insertMention({trigger, value, data})`, `composer.setText({text})`, `composer.focus()`, `composer.voicePreview({text})`, `composer.voiceCommit({text})`, `composer.voiceRestore()` | `composer.change({text, references})`, `composer.submit({text, references, files})`, `composer.stop`, `composer.trigger({trigger, query, active})`, `composer.voice({phase})`, `composer.files({files})`, `composer.action({id})`, `composer.layout({height})` |
-| [`push`](ios-push-relay-contract.md) | `push.status()`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` | `push.opened({url})` |
+| [`push`](ios-push-relay-contract.md) | `push.status()` → `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` | `push.opened({url})` |
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |

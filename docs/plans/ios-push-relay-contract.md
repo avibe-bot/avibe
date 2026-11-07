@@ -98,7 +98,8 @@ An installation has exactly one current account owner. Binding the same
 `installation_id` to a new account through the bind route atomically:
 
 1. changes the installation owner;
-2. revokes every registration currently owned through that installation;
+2. revokes every concrete `registration_id` currently owned through that
+   installation;
 3. commits the owner change and revocations in one transaction.
 
 The bind route is the sole management route that may perform this
@@ -153,14 +154,52 @@ token.
 | `created_at` | UTC timestamp | Relay writes it once. |
 | `revoked_at` | Nullable UTC timestamp | Relay sets it once when the registration is revoked. A non-null value makes delivery return `410`. |
 
-The active uniqueness invariant is one row for each
+There is at most one active row for each
 `(installation_id, vapid_key_sha256)`. A revoked row is retained for audit
 and continues to return `410`; a later subscription creates a new random
-`registration_id`.
+`registration_id` rather than updating or reusing the revoked row.
 
 The relay MUST have indexes for `installation_id`, active
 `(installation_id, vapid_key_sha256)`, and `revoked_at`. It MUST NOT store an
 instance plaintext origin in this table as an authorization substitute.
+
+### 3.3 Registration lifecycle invariants
+
+These invariants apply to the relay, native coordinator, instance
+subscription handoff, and every retry path:
+
+- A `registration_id` is allocated exactly once from 32 random bytes. Its
+  43-character base64url value is immutable, is never reused, and remains
+  retained as a revoked row for the audit lifetime.
+- A registration has only two states: `active` when `revoked_at` is null and
+  `revoked` when `revoked_at` is set. The only transition is
+  `active -> revoked`; `revoked_at` is write-once and a revoked row is never
+  resurrected.
+- Every `push.subscribe` creates a new P-256 key, auth secret, and
+  `registration_id`. In one relay transaction, the relay locks the
+  `(installation_id, vapid_key_sha256)` scope, revokes its previous active
+  registration by that concrete ID if one exists, and inserts the new row.
+  The transaction commits with at most one active row for that scope.
+- Every delayed operation carries the exact `registration_id` it intends to
+  revoke or deliver to. Pending revocation is a set of concrete IDs, not an
+  installation/origin lookup. Retrying an old ID is idempotent and cannot
+  revoke a later registration.
+- Bulk installation revocation and cross-account rebind snapshot the concrete
+  registration IDs they revoke inside their transaction. A later retry of
+  that snapshot cannot affect registrations created after the snapshot.
+- An APNs device-token update changes only the installation row. It never
+  changes, recreates, or reactivates a registration.
+- `push.status()` and token recovery return and re-post an existing public
+  subscription. They never call `push.subscribe`, create a registration, or
+  rotate a key.
+- After any interleaving of subscribe, unsubscribe, pending-revoke retry,
+  account rebind, and APNs token rotation has settled, each
+  `(installation_id, vapid_key_sha256)` scope is either revoked or contains
+  exactly the registration created by its latest successful subscribe. A
+  VAPID replacement may temporarily keep its older, explicitly retiring
+  registration active under a different hash until that concrete revoke
+  settles; no delayed operation can remove a newer registration by identity
+  or by a mutable lookup.
 
 ## 4. Native bridge contract
 
@@ -171,7 +210,7 @@ The shell advertises `capabilities.push >= 1` and implements:
 
 | Direction | Method or event | Exact shape |
 | --- | --- | --- |
-| Web -> native | `push.status()` | Returns `{state: "unavailable" \| "off" \| "on", endpoint?: string}`. `endpoint` is present only for `on`. |
+| Web -> native | `push.status()` | Returns `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}`. For `state: "on"`, `endpoint` and `keys` are present and describe the existing public subscription; for other states they are absent. |
 | Web -> native | `push.subscribe({vapidPublicKey})` | Returns `{endpoint: string, keys: {p256dh: string, auth: string}}`. Both key values are base64url without padding. |
 | Web -> native | `push.unsubscribe()` | Returns `{revoked: boolean}` after local key removal and a best-effort relay revoke. `revoked: true` means the relay confirmed the registration is revoked or already revoked; `false` means the local key was removed and a pending revoke was queued because the relay could not be confirmed. |
 | Native -> Web | `push.opened({url})` | Delivers a same-origin path such as `/chat/ses_123?from=notification`. |
@@ -186,11 +225,12 @@ Inside the native app, the Web UI does not call `PushManager`, register a
 service worker for push, or use browser Web Push APIs. Browser and installed
 PWA behavior outside the native app keeps its existing `PushManager` path.
 
-The private P-256 key never crosses the bridge. `push.subscribe` exposes only
-the public `p256dh` and the 16-byte `auth` secret required by the existing
-instance subscription record. The native side supplies the logged-in
-Supabase access token to the relay; the Web UI never receives that token for
-push registration.
+The private P-256 key never crosses the bridge. `push.status()` exposes the
+existing public subscription without changing its registration. Each
+`push.subscribe` instead creates and returns a fresh public `p256dh`, `auth`,
+and endpoint; it never reuses an active or revoked registration. The native
+side supplies the logged-in Supabase access token to the relay; the Web UI
+never receives that token for push registration.
 
 The bridge remains available only to an instance-origin main frame, under the
 origin checks in `ios/README.md` and `docs/plans/ios-app.md` section 7.
@@ -288,7 +328,7 @@ The route returns:
 | `429` | `rate_limited` | The account management limit was exceeded. |
 | `502` | `auth_unavailable` | The backend could not validate the account token against its configured auth provider. |
 
-### 5.3 Create or reuse a registration
+### 5.3 Create a new registration
 
 ```http
 POST /api/push/apns/registrations
@@ -306,11 +346,14 @@ Request:
 ```
 
 The relay verifies that the installation belongs to the bearer-token account.
-An active row for the same installation and VAPID hash is idempotently
-returned. A revoked row is never resurrected.
+Every request creates a new registration, even when an active row already
+exists for the same installation and VAPID hash. In one transaction it locks
+that scope, sets `revoked_at` on the previous active registration by its
+concrete `registration_id` if present, and inserts the new random row. A
+revoked row is never resurrected, and the old endpoint returns `410` after
+the transaction commits.
 
-Success is `201` for a new registration and `200` when an active registration
-is reused:
+Success is always `201`:
 
 ```json
 {
@@ -324,6 +367,7 @@ is reused:
 
 The sample registration ID is illustrative. Implementations MUST generate a
 random 32-byte value and MUST NOT use a sequential or account-derived ID.
+There is no `200` reuse response.
 
 The route returns:
 
@@ -382,6 +426,9 @@ This is the logout and account-switch operation. It is idempotent. The route
 returns `404` with `installation_not_found` for an installation not owned by
 the current account, `401` with `unauthenticated` for an invalid bearer token,
 and `429` with `rate_limited` when the account management bucket is exhausted.
+The transaction snapshots the installation's concrete active
+`registration_id` values and sets `revoked_at` on those rows. It does not
+create a wildcard revoke that could match a registration created later.
 
 ### 5.6 Deliver encrypted Web Push to APNs
 
@@ -423,7 +470,7 @@ Success is `201` after APNs accepts the request:
 ```json
 {
   "ok": true,
-  "registration_id": "0123456789abcdefghijklmnopqrstuvwxYZ0123456789a",
+  "registration_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "apns_status": 200
 }
 ```
@@ -611,7 +658,8 @@ keep the existing browser/PWA label behavior.
 
 ### 7.1 Key records
 
-For each `(account_id, instance_origin)` pair, the app creates:
+For each new `push.subscribe` call for an `(account_id, instance_origin)` pair,
+the app creates:
 
 - one P-256 ECDH key pair;
 - one cryptographically random 16-byte Web Push authentication secret;
@@ -651,17 +699,19 @@ account access token never enter Web content.
 At most one key record per `(account_id, instance_origin)` is `active` and
 visible to the bridge, and at most one older record may be `retiring` while
 its already-accepted APNs notifications can still arrive.
+`push.status()` reads the current active record and returns its existing
+endpoint and public keys without creating a registration.
 
 If the instance VAPID public key changes, the native coordinator performs a
 serialized replacement:
 
-1. create the new P-256 key, auth secret, relay registration, and native
+1. create the new P-256 key, auth secret, new relay registration, and native
    `pending` candidate;
 2. post the new subscription to the instance and wait for the instance to
    store it;
 3. make the new record the active bridge record;
-4. delete the old instance subscription and revoke the old relay
-   registration;
+4. delete the old instance subscription and explicitly revoke the old relay
+   registration by its recorded `registration_id`;
 5. mark the old key record `retiring` with
    `retire_after = revoked_at + 86400 seconds` from the relay's successful
    revoke response, then delete it after that time.
@@ -671,11 +721,12 @@ does not leave the instance without a subscription. The old key remains
 available through the maximum accepted Web Push TTL window for notifications
 that APNs accepted before the old registration was closed. If the old revoke
 is offline, the retiring key remains available with a null `retire_after`
-while the pending revoke is retried; the instance's old subscription deletion
-stops ordinary sends. A second VAPID replacement for the same instance waits
-until the prior retiring record has been deleted, so there is never more than
-one retiring record. A failed new registration is revoked and its candidate
-key is deleted, leaving the old record active.
+while a pending revoke carrying that exact old `registration_id` is retried;
+the instance's old subscription deletion stops ordinary sends. A second VAPID
+replacement for the same instance waits until the prior retiring record has
+been deleted, so there is never more than one retiring record. A failed new
+registration is revoked by its own ID and its candidate key is deleted,
+leaving the old record active.
 
 ### 7.2 NSE processing
 
@@ -761,10 +812,11 @@ that every field has an independent signature.
    device token.
 4. Native binds or updates `installation_id` with the current account token,
    device token, environment, and `bot.avibe.ios` topic.
-5. Native computes `vapid_key_sha256`, creates or reuses the
-   `(installation_id, vapid_key_sha256)` key record, and calls the relay
-   registration route.
-6. The relay returns a new or existing `registration_id` and endpoint.
+5. Native creates a fresh P-256 key and auth secret, computes
+   `vapid_key_sha256`, and calls the relay registration route.
+6. The relay atomically revokes the previous active registration for that
+   installation/VAPID hash by its concrete ID, creates a new
+   `registration_id`, and returns that new endpoint.
 7. Native stores `kid`, instance origin, account ID, private key, and auth
    secret in the shared App Group and Keychain Sharing access group.
 8. The bridge returns `{endpoint, keys:{p256dh,auth}}`.
@@ -775,8 +827,10 @@ that every field has an independent signature.
 
 The registration is usable only when both the relay row and the instance
 subscription row exist. A failure after relay registration but before the
-instance POST is recoverable by calling `push.subscribe` again; the relay
-registration call is idempotent for the same installation and VAPID hash.
+instance POST is recoverable by calling `push.subscribe` again; that call
+creates another registration and revokes the first one. It never reuses the
+first ID. If a pending revoke exists from an earlier unsubscribe, it remains
+queued for that explicit old ID and cannot affect the new registration.
 
 ### 9.3 Delivery
 
@@ -816,9 +870,10 @@ instance-origin primary frame is ready.
    the endpoint it had posted.
 4. The instance disables that subscription row.
 
-If the relay revoke is offline, native removes the local key immediately,
-stores a bounded pending revoke for the next authenticated opportunity, and
-still attempts to delete the instance subscription. This does not guarantee
+If the relay revoke is offline, native captures the current record's exact
+`registration_id`, removes the local key immediately, stores that ID in a
+bounded pending-revoke set for the next authenticated opportunity, and still
+attempts to delete the instance subscription. This does not guarantee
 that no visible alert will appear: a notification already accepted by APNs,
 or accepted before the relay observes the pending revoke, may still be
 delivered. Because the NSE fallback behavior is part of this contract, a
@@ -828,7 +883,9 @@ URL, or instance origin, but the outer `sound: "default"` may still make the
 alert audible. The successful instance deletion stops future ordinary sends
 from that subscription. The pending revoke MUST be retried at the next
 authenticated opportunity; after the relay confirms it, new delivery
-requests return `410`.
+requests for that revoked ID return `410`. A later `push.subscribe` always
+creates a different ID; retrying this pending revoke cannot select or revoke
+the later registration.
 
 ### 9.6 Logout and account switch
 
@@ -836,18 +893,21 @@ Logout and account switching enter the existing single native account
 authority and WebKit store-rotation lifecycle:
 
 1. native attempts `DELETE /api/push/apns/installations/<installation_id>/registrations`
-   with the current account token;
+   with the current account token; the relay transaction snapshots and
+   revokes the concrete IDs currently owned by the installation;
 2. native deletes all key records for the old account;
 3. the native coordinator revokes the old account snapshot and rotates the
    named WebKit store as already specified by the iOS plan;
 4. if the request failed offline, the local deletion and store rotation still
-   complete. The same pending-revocation rule as section 9.5 applies: queued
+   complete. The same pending-revocation rule as section 9.5 applies: the
+   queued set contains the old concrete registration IDs, and queued
    notifications may still show the localized fallback until the relay
    observes the revoke, but old encrypted content remains unavailable because
    the key record was deleted;
 5. the next login binds the same `installation_id` to the new account, and
-   the relay transaction revokes any registrations still associated with the
-   old account before a new registration is created.
+   the relay transaction revokes any concrete registrations still associated
+   with the old account before a new registration is created. No previous
+   registration ID is used by the new account.
 
 No old account token or old key record may be used by a delayed request after
 the account generation changes.
@@ -862,12 +922,13 @@ next delivery uses the new token.
 If a delivery using the old token already returned relay `410`, the instance
 may already have disabled that subscription row through its existing failure
 path. After the installation `PUT` succeeds, the next authenticated instance
-session MUST repeat `push.subscribe({vapidPublicKey})` for each active native
-record and POST the unchanged `{endpoint, keys}` object to the instance.
-The instance upsert re-enables that row; native does not create a new
-registration or key for an APNs token rotation. If the recovery POST cannot
-complete, the native/Web coordinator retries it on the next authenticated
-instance session.
+session MUST call `push.status()` for each active native record and POST the
+unchanged `{endpoint, keys}` object returned by the status call to the
+instance. The instance upsert re-enables that row. Native does not call
+`push.subscribe`, create a new registration, or rotate a key for an APNs token
+rotation. If the recovery POST cannot complete, the native/Web coordinator
+retries the status-and-POST operation on the next authenticated instance
+session.
 
 ### 9.8 App uninstall
 
@@ -892,6 +953,7 @@ encrypted bytes and therefore needs the same review gate.
 | Open relay abuse | Every delivery resolves a random stateful registration, validates RFC 8292 VAPID against the bound key hash, enforces the 2903-byte body limit, and consumes registration, installation, and account rate buckets before APNs. No delivery route accepts an arbitrary APNs token or arbitrary topic. |
 | Cross-account registration or revocation | Management routes derive `account_id` from the Supabase token. Only the bind route accepts the random `installation_id` as a rebind proof and atomically revokes all registrations before changing ownership; registration and revoke routes remain owner-only and return `404` for other-account rows. |
 | Cross-instance delivery | The relay binds each registration to `vapid_key_sha256`; the delivery VAPID `k` must hash to it. The endpoint ID is random and never derived from account or origin. |
+| Registration lifecycle race | Registration IDs are single-use, state is monotonic `active -> revoked`, each subscribe transaction revokes the prior active concrete ID before inserting a new one, and every delayed or bulk revoke operates on a captured concrete ID set. |
 | Exact request replay | The relay keeps an expiring deduplication record keyed by `(registration_id, SHA-256(ciphertext))`, never the ciphertext itself. An already accepted exact body returns the prior result during the VAPID validity window without sending a second APNs request. Fresh `pywebpush` sends use fresh RFC 8291 salt and ephemeral sender keys, so a legitimate resend has a different ciphertext hash. |
 | VAPID token reuse | `aud` is exact, `exp` is future and at most 24 hours ahead, and the delivery deduplication cache limits an identical body to one APNs submission per registration. |
 | APNs token leakage | The device token is encrypted at rest, excluded from logs and user-visible responses, and represented in diagnostics only by SHA-256. APNs requests are made over HTTP/2 TLS. |
@@ -1074,6 +1136,11 @@ property below holds:
 - the bind route accepts a new authenticated account only with the random
   `installation_id` possession proof, creates the first installation, and
   returns `201`; registration and revoke routes remain owner-only;
+- every subscribe creates a new 43-character registration ID and never
+  resurrects or reuses an old row;
+- the registration lifecycle invariant suite proves that interleaved
+  subscribe, unsubscribe, pending-revoke retry, account-switch, and token
+  rotation operations cannot revoke a newer registration;
 - a device-token rotation preserves active registrations;
 - token recovery re-posts each active subscription so an instance row
   disabled by an APNs `410` is enabled again;
