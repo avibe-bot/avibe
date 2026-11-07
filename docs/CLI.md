@@ -457,6 +457,24 @@ expiry, and reprice all known writes at the candidate lifetime's rate (Claude's
 static tools/system prefix stays at one hour). Requests with unknown TTL writes or
 an unreported aggregate write count are excluded from what-ifs, not reassigned.
 
+### `vibe data retention`
+
+```bash
+vibe data retention --json          # Inspect the trace-retention plan
+vibe data retention --run           # Delete eligible traces in bounded batches, online
+# From a separate terminal, when you intend to take Avibe offline:
+vibe stop
+vibe data retention --compact       # Also reclaim disk space with VACUUM
+vibe start
+```
+
+`--compact` implies `--run` and refuses before retention changes anything if the
+service or Web UI is running or starting. It never stops either automatically.
+Keep both stopped for the operation: service/UI startup is excluded through the
+rewrite, final checkpoint, and database cleanup. Disk-space and checkpoint safety
+checks still apply, so compaction can be skipped or deferred. Without `--compact`,
+manual and automatic retention remain online; they do not run `VACUUM`.
+
 ### `vibe data skill-usage`
 
 Instance Owner-only local maintenance; these commands return JSON diagnostics,

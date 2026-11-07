@@ -18660,7 +18660,11 @@ def run_ui_server(host: str, port: int) -> None:
     global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn
+    from vibe import runtime
 
+    # Direct/container entry and reload must pass the same admission boundary
+    # as start_ui, before config reconciliation or any serving/background work.
+    runtime.register_ui_start()
     paths.ensure_data_dirs()
     config = None
     config_load_error = None

@@ -342,6 +342,23 @@ TTL 写入桶、按 tier 的提示词新鲜度，以及支持指定 lifetime 的
 并让所有已知写入按候选 lifetime 重新计费（Claude 的 tools/system 静态前缀保持 1 小时）。
 TTL 未知或供应商未报告 aggregate 写入总量的请求从 what-if 排除，不会被重新分配 lifetime。
 
+### `vibe data retention`
+
+```bash
+vibe data retention --json          # 查看追踪事件保留计划
+vibe data retention --run           # 在线分批删除符合条件的追踪事件
+# 确定需要让 Avibe 离线时，在另一个终端中执行：
+vibe stop
+vibe data retention --compact       # 同时用 VACUUM 回收磁盘空间
+vibe start
+```
+
+`--compact` 隐含 `--run`。如果服务或 Web UI 正在运行或启动，命令会在保留清理
+发生变更前拒绝执行，绝不会自动停止它们。整个操作期间都需要保持两者停止；数据库
+重写、最终 checkpoint 和连接清理完成前，服务和 UI 的启动会被阻止。磁盘空间和
+checkpoint 安全检查仍然有效，因此压缩可能被跳过或推迟。不加 `--compact` 时，
+手动和自动保留清理都可以在线执行，不会运行 `VACUUM`。
+
 ### `vibe data skill-usage`
 
 仅限实例所有者使用的本地维护命令，返回 JSON 诊断信息，不是 Skill 热度排名。

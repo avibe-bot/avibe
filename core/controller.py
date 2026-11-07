@@ -2356,7 +2356,7 @@ class Controller:
         Full ``VACUUM`` holds SQLite's sole write lock for the entire rewrite;
         on a large live database that can exceed every writer's busy timeout.
         The automatic path therefore deletes rows only and reports compaction
-        as not attempted — ``vibe data retention --run`` owns compaction.
+        as not attempted — offline ``vibe data retention --compact`` owns compaction.
         """
         from storage import agent_events_retention
         from storage.db import get_cached_sqlite_engine
