@@ -1181,6 +1181,135 @@ def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_befo
         agent_store.close()
 
 
+@pytest.mark.parametrize("backend", ["sqlite", "file"])
+@pytest.mark.parametrize("keep_run_snapshot", [False, True], ids=["slim", "legacy-snapshot"])
+@pytest.mark.parametrize("change", ["unchanged", "edited", "agent-revoked", "removed"])
+def test_scheduled_claim_uses_definition_authority_after_restart(
+    monkeypatch, tmp_path, backend, keep_run_snapshot, change
+) -> None:
+    """The Run snapshot is not the scheduled execution principal.
+
+    Exercise the real claim/recovery/dispatch and Agent ACL, not just a serializer
+    or a mocked authority resolver. A queued run must use an edited definition's
+    caller, and must not become local Owner when its own snapshot is absent.
+    """
+    from core.caller_context import caller_context_from_platform_payload
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agent_store, agents = _seed_agents_with_policies()
+    task_path = tmp_path / "tasks.json" if backend == "file" else None
+    request_path = tmp_path / "task_requests" if backend == "file" else None
+    definitions = ScheduledTaskStore(task_path)
+    requests = TaskExecutionStore(request_path)
+    reloaded_definitions = None
+    reloaded_requests = None
+    observed = []
+
+    async def submit_scheduled(_session_id, context, _prompt):
+        observed.append(
+            caller_context_from_platform_payload(context.platform_specific, message=context)
+        )
+
+    try:
+        with agent_store.engine.begin() as connection:
+            scope_id = upsert_scope(
+                connection, platform="avibe", scope_type="project", native_id="authority-fixture",
+                now="2026-11-07T00:00:00Z",
+            )
+            session = workbench_sessions_service.create_session(
+                connection, scope_id=scope_id, agent_backend="codex",
+                agent_name=agents["public"].name, agent_id=agents["public"].id,
+            )
+        task = definitions.add_task(
+            session_key="", session_id=session["id"], prompt="run task",
+            schedule_type="cron", cron="0 * * * *", timezone_name="UTC",
+            agent_name=agents["public"].name, user_context=_organization_context("creator-a"),
+        )
+        if keep_run_snapshot:
+            # The generic writer keeps the released row shape as a control.
+            run = requests.enqueue_definition_run(
+                definition_id=task.id, run_type="scheduled", source_kind="scheduler",
+                session_key=task.session_key, session_id=task.session_id,
+                post_to=task.post_to, deliver_key=task.deliver_key, prompt=task.prompt,
+                agent_name=task.agent_name, session_policy=task.session_policy,
+                metadata=task.metadata,
+            )
+        else:
+            run = requests.enqueue_task_run(task.id, task=task, source_kind="scheduler")
+        assert run is not None
+        assert run.callback_session_id is None
+        key = resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY
+        assert (key in requests.get_run(run.id)["metadata"]) is keep_run_snapshot
+        assert requests.claim(run.id) is not None
+
+        # A fresh store/service owns a pre-execution claim after restart. Its
+        # initial definition mirror predates the edit below, so the executor
+        # must refresh it rather than merely consulting a stale in-memory task.
+        reloaded_definitions = ScheduledTaskStore(task_path)
+        reloaded_requests = TaskExecutionStore(request_path)
+        service = ScheduledTaskService(
+            controller=SimpleNamespace(
+                platform_settings_managers={}, im_clients={"avibe": object()},
+                session_turn_gate=SimpleNamespace(submit_scheduled=submit_scheduled),
+            ),
+            store=reloaded_definitions, request_store=reloaded_requests,
+        )
+        # Establish the polling probe before an external edit, as the running
+        # scheduler does. Its first data_version read only sets a baseline.
+        reloaded_definitions.maybe_reload()
+        reloaded_requests.recover_processing()
+        assert reloaded_requests.get_run(run.id)["status"] == "queued"
+
+        if change == "edited":
+            definitions.update_task(
+                task.id, name=task.name, session_key="", session_id=session["id"], prompt="edited task",
+                schedule_type="cron", cron="0 * * * *", timezone_name="UTC", run_at=None,
+                post_to=task.post_to, deliver_key=task.deliver_key,
+                agent_name=task.agent_name, user_context=_organization_context("editor-b"),
+            )
+        elif change == "agent-revoked":
+            with agent_store.engine.begin() as connection:
+                connection.execute(
+                    resource_access_policies.update().where(
+                        resource_access_policies.c.resource_kind == "agent",
+                        resource_access_policies.c.resource_id == agents["public"].id,
+                    ).values(access_level="private")
+                )
+        elif change == "removed":
+            assert definitions.remove_task(task.id)
+
+        claimed = reloaded_requests.claim(run.id)
+        assert claimed is not None
+        asyncio.run(service._execute_claimed_request(claimed))
+        completed = reloaded_requests.get_run(run.id)
+        if change in {"agent-revoked", "removed"}:
+            assert observed == []
+            assert completed["status"] == "failed"
+            expected_error = (
+                "Agent access is not permitted." if change == "agent-revoked"
+                else f"task '{task.id}' not found"
+            )
+            assert completed["error"] == expected_error
+        else:
+            assert completed["status"] == "succeeded", completed["error"]
+            assert len(observed) == 1
+            caller = observed[0]
+            assert caller is not None and caller.is_remote
+            assert caller.resource_user_context["sub"] == (
+                "editor-b" if change == "edited" else "creator-a"
+            )
+            assert caller.resource_user_context["vibe_instance_role"] == "editor"
+        assert (key in completed["metadata"]) is keep_run_snapshot
+        if keep_run_snapshot:
+            assert completed["metadata"][key]["sub"] == "creator-a"
+    finally:
+        for store in (definitions, requests, reloaded_definitions, reloaded_requests):
+            sqlite_store = getattr(store, "_sqlite", None)
+            if sqlite_store is not None:
+                sqlite_store.close()
+        agent_store.close()
+
+
 def test_project_runtime_uses_acls_while_harness_remains_editor_wide(monkeypatch, tmp_path) -> None:
     """Project-bound runtime and global Harness follow their distinct contracts.
 
