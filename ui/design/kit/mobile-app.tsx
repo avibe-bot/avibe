@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Globe, Laptop, MonitorDown, Plus, RotateCw, Sparkles, UserRound } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Globe, KeyRound, Laptop, MonitorDown, Plus, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -22,6 +22,16 @@ export interface MobileLoginFixture {
   error?: 'email-invalid' | 'code-invalid' | 'code-expired' | 'rate-limited' | 'network' | 'resend-failed';
   cooldown?: 60 | 15;
   resent?: boolean;
+  compact?: boolean;
+}
+/** The second step after the email code, for an account with two-step verification. */
+export interface MobileSecondFactorFixture {
+  email: string;
+  methods: ('passkey' | 'totp')[];
+  step: 'passkey' | 'totp' | 'recovery' | 'setup';
+  code?: string;
+  busy?: 'passkey' | 'verifying';
+  error?: 'passkey-failed' | 'code-invalid' | 'rate-limited' | 'network';
   compact?: boolean;
 }
 export type PickerState = 'own' | 'mixed' | 'current' | 'offline' | 'offline-tapped' | 'loading' | 'error' | 'pulling' | 'refreshing';
@@ -67,9 +77,9 @@ export function WelcomePage() {
 }
 
 /** One accessible input; six equally spaced cells are a decorative fixture display. */
-function CodeInput({ code, invalid, busy }: { code: string; invalid: boolean; busy: boolean }) {
+function CodeInput({ code, invalid, busy, label }: { code: string; invalid: boolean; busy: boolean; label?: string }) {
   const t = useCopy();
-  return <div className="relative"><Label htmlFor="mobile-login-code" className="sr-only">{t('输入邮件里的 6 位验证码', 'Enter the 6-digit code from your email')}</Label>
+  return <div className="relative"><Label htmlFor="mobile-login-code" className="sr-only">{label ?? t('输入邮件里的 6 位验证码', 'Enter the 6-digit code from your email')}</Label>
     <Input id="mobile-login-code" className="sr-only" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} defaultValue={code} disabled={busy} aria-invalid={invalid || undefined} aria-describedby="mobile-login-hint mobile-login-feedback" />
     <div aria-hidden="true" className="grid grid-cols-6 gap-2">{Array.from({ length: 6 }, (_, index) => <span key={index} className={cn('grid aspect-square min-w-0 place-items-center rounded-2xl border bg-surface text-2xl font-medium tabular-nums shadow-mint-card-sm', invalid ? 'border-destructive text-destructive-ink' : 'border-border', !invalid && !busy && index === code.length && 'border-mint ring-2 ring-mint/30')}>{code[index] || (!busy && index === code.length ? <span className="h-6 w-px bg-mint-ink" /> : null)}</span>)}</div>
   </div>;
@@ -134,4 +144,35 @@ export function NativeInstanceError({ instance }: { instance: MobileInstance }) 
 export function NativeWindowTopBar() {
   const t = useCopy();
   return <CloudScreen header={<MobileAppHeader title="docs.avibe.bot" icon={Globe} actions={<><Button variant="ghost" size="compact">{t('完成', 'Done')}</Button><Button variant="ghost" size="compact">{t('在 Safari 中打开', 'Open in Safari')}</Button></>} />}><div className="pt-8"><Globe className="size-8 text-mint-ink" /></div><PageTitle title={t('开始使用', 'Get started')} subtitle="Avibe" /><p className="text-sm leading-7 text-muted">{t('在电脑上运行 Avibe，连接你的 AI 伙伴。', 'Run Avibe on your computer and connect to your AI partner.')}</p></CloudScreen>;
+}
+
+/**
+ * Second step of sign-in. Passkey first when the account has one; the
+ * authenticator code and a recovery code are the alternatives. An account
+ * that must turn it on (platform administrators) sets it up on avibe.bot.
+ */
+export function SecondFactorPage({ fixture }: { fixture: MobileSecondFactorFixture }) {
+  const t = useCopy();
+  const { email, methods, step, code = '', busy, error, compact = false } = fixture;
+  const hasPasskey = methods.includes('passkey');
+  const hasTotp = methods.includes('totp');
+  const setup = step === 'setup';
+  const notice = error === 'passkey-failed' ? t('通行密钥验证没有完成。可以再试一次，或改用验证码。', 'The passkey check didn’t finish. Try again, or use a code instead.')
+    : error === 'code-invalid' ? (step === 'recovery' ? t('恢复码不正确，或已经用过。', 'That recovery code is wrong or already used.') : t('验证码不正确。请输入 App 里最新的 6 位数字。', 'That code isn’t right. Enter the latest 6 digits from your app.'))
+      : error === 'rate-limited' ? t('尝试次数过多，请 15 分钟后再试。', 'Too many attempts. Try again in 15 minutes.')
+        : error === 'network' ? t('暂时连不上 avibe.bot。检查网络后重试。', 'Could not reach avibe.bot. Check your connection and retry.') : null;
+  const feedback = <div id="mobile-login-feedback" className="mt-3 min-h-6 text-center text-xs leading-6">{notice && <p role="alert" className="text-destructive-ink">{notice}</p>}</div>;
+  const verify = (ready: boolean) => <div className="mt-5" aria-busy={busy === 'verifying'}><Primary disabled={Boolean(busy) || !ready}>{busy === 'verifying' ? t('验证中…', 'Verifying…') : t('验证', 'Verify')}</Primary></div>;
+  const alternatives = step === 'passkey' ? [hasTotp && t('改用身份验证器验证码', 'Use an authenticator code instead'), t('使用恢复码', 'Use a recovery code')]
+    : step === 'totp' ? [hasPasskey && t('改用通行密钥', 'Use your passkey instead'), t('使用恢复码', 'Use a recovery code')]
+      : step === 'recovery' ? [hasPasskey ? t('改用通行密钥', 'Use your passkey instead') : t('改用身份验证器验证码', 'Use an authenticator code instead')] : [];
+  return <CloudScreen><Brand /><div className={cn('flex flex-col items-center', compact ? 'pt-4 pb-4' : 'pt-8 pb-6')}><span className={cn('grid place-items-center rounded-3xl border border-border bg-surface/80 shadow-mint-card-sm', compact ? 'mb-3 size-14' : 'mb-5 size-16')}><ShieldCheck className="size-7 text-mint-ink" /></span><h1 className={cn('text-center font-semibold leading-tight tracking-tight', compact ? 'text-2xl' : 'text-3xl')}>{setup ? t('先开启两步验证。', 'Turn on two-step verification first.') : t('确认是你本人。', 'Confirm it’s you.')}</h1></div>
+    <div className={cn('text-center', compact ? 'pb-5' : 'pb-7')}><p className="text-sm leading-7 text-muted">{setup ? t('这个账号要求开启两步验证', 'This account requires two-step verification') : t('这个账号开启了两步验证', 'Two-step verification is on for')}</p><p className="break-all text-sm font-medium leading-6">{email}</p></div>
+    {step === 'passkey' && <><div aria-busy={busy === 'passkey'}><Primary disabled={Boolean(busy)}><KeyRound className="size-4" />{busy === 'passkey' ? t('正在等待通行密钥…', 'Waiting for your passkey…') : t('使用通行密钥', 'Use your passkey')}</Primary></div><p id="mobile-login-hint" className="mt-5 text-center text-sm leading-6 text-muted">{t('用面容 ID、触控 ID 或设备密码确认。', 'Confirm with Face ID, Touch ID, or your device passcode.')}</p>{feedback}</>}
+    {step === 'totp' && <><CodeInput code={code} invalid={error === 'code-invalid'} busy={Boolean(busy)} label={t('输入身份验证器里的 6 位验证码', 'Enter the 6-digit code from your authenticator app')} /><p id="mobile-login-hint" className="mt-5 text-center text-sm leading-6 text-muted">{t('打开身份验证器 App，输入 avibe.bot 的 6 位验证码', 'Open your authenticator app and enter the 6-digit code for avibe.bot')}</p>{feedback}{verify(code.length === 6)}</>}
+    {step === 'recovery' && <><div className={cn(raised, 'flex flex-col gap-3')}><Label htmlFor="mobile-recovery-code">{t('恢复码', 'Recovery code')}</Label><Input id="mobile-recovery-code" type="text" autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} defaultValue={code} placeholder="xxxxx-xxxxx" disabled={Boolean(busy)} aria-invalid={error === 'code-invalid' || undefined} aria-describedby="mobile-login-hint mobile-login-feedback" className="h-14 rounded-2xl bg-surface px-4 text-base tracking-wide shadow-sm" /><p id="mobile-login-hint" className="text-xs leading-6 text-muted">{t('每个恢复码只能用一次。用掉之后，记得在 avibe.bot 重新生成一组。', 'Each recovery code works once. After using one, make a new set on avibe.bot.')}</p></div>{feedback}{verify(code.length > 0)}</>}
+    {setup && <><div className={cn(raised, 'text-sm leading-7 text-muted')}>{t('在 avibe.bot 网页的「账号安全」里添加通行密钥或身份验证器 App，完成后回到这里继续。', 'On avibe.bot, open Account security and add a passkey or an authenticator app. Then come back here to continue.')}</div><div className="mt-5 flex flex-col gap-3"><Button variant="brand" size="lg" className="w-full gap-2 rounded-full shadow-mint-card-sm"><ExternalLink className="size-4" />{t('打开 avibe.bot', 'Open avibe.bot')}</Button><Button variant="outline" size="lg" className="w-full gap-2 whitespace-normal rounded-full"><RotateCw className="size-4 shrink-0" />{t('我已开启，继续', 'I’ve turned it on · Continue')}</Button></div></>}
+    {alternatives.some(Boolean) && <div className="mt-6 flex flex-col items-center gap-1">{alternatives.filter(Boolean).map(label => <Button key={label as string} variant="link" size="compact" disabled={Boolean(busy)} className="h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline">{label}</Button>)}</div>}
+    <div className="mt-auto pt-7 pb-3 text-center"><Button variant="link" size="compact" disabled={Boolean(busy)} className="h-auto px-0 text-xs text-muted underline">{t('使用其他账号登录', 'Sign in with a different account')}</Button></div>
+  </CloudScreen>;
 }
