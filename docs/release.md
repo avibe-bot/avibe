@@ -55,6 +55,45 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
 
+## Local install and runtime cutover
+
+Treat package activation and runtime cutover as one release transaction. A
+successful wheel install only changes the selected launcher; the running
+service can still be executing the previous generation. Do not leave that
+split state open while using the CLI.
+
+Complete every restart-preflight check **before** installing the wheel:
+
+1. Inspect the live service/runtime state and record the old service and UI PIDs
+   and generation.
+2. Check every potentially interrupted business lane, its owner, checkpoint,
+   and active run state. Confirm that no protected external write is in flight.
+3. Notify the release coordinator that the restart may interrupt active lanes,
+   and prepare the post-restart acceptance command and evidence paths.
+
+Only after those checks are complete, install the exact verified official wheel.
+Immediately after the installer succeeds, record the activated generation and
+schedule exactly one delayed restart:
+
+```bash
+vibe restart --delay-seconds 60
+```
+
+Do not perform service-backed Harness, control, or routing operations between
+installation and that restart. The new CLI may target the newly installed code
+while the old service still rejects its control protocol (`not_executed`), and
+an installer may already have migrated the state database to revisions that the
+old CLI cannot read. Do not work around this by invoking the old launcher or by
+repeating control requests. If a restart is already scheduled or another lane
+has cut over the service, reconcile the live restart receipt and never schedule
+a second restart.
+
+After the service returns, verify the actual running generation—not only
+`vibe version`—along with CLI/API version, service/UI PID lineage, internal
+health, served UI bytes against the official wheel, Show Runtime, remote
+access, and macOS `login_session_state=healthy`. Preserve user state, pairing,
+credentials, and remote-access configuration throughout.
+
 ## Release E2E
 
 Pull-request CI does not run the hermetic Model Hub E2E (`-m e2e_model_hub`).
