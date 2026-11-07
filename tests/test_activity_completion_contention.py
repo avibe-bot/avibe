@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import event
@@ -64,6 +65,72 @@ def _no_wait(store):
         conn.execute("PRAGMA busy_timeout = 0")
 
 
+@pytest.mark.parametrize("grace", [0, 60])
+async def test_failed_native_completion_becomes_recoverable_output_without_another_event(
+    activity_store, monkeypatch, tmp_path, grace,
+):
+    from core.runtime_work import RuntimeWorkLane
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore, _ScheduledRuntimeWorkHandler
+    from tests.test_claude_agent_initiated_turn import _build_agent
+
+    agent, service = _build_agent()
+    registry = service.activities = SessionActivityRegistry(activity_store)
+    _start(registry)
+    agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = grace
+    supervisor = SimpleNamespace(notify=Mock(), run_sync=None)
+    agent.controller.runtime_work_supervisor = supervisor
+    original = activity_store.commit_activity_completion
+    failed = True
+
+    def commit(**kwargs):
+        if failed:
+            raise OperationalError("test completion", {}, sqlite3.OperationalError("database is locked"))
+        return original(**kwargs)
+
+    monkeypatch.setattr(activity_store, "commit_activity_completion", commit)
+    with pytest.raises(OperationalError):
+        await agent._handle_activity_message(
+            SimpleNamespace(subtype="task_notification", task_id="task", status="completed", data={"summary": "finished"}),
+            "runtime", MessageContext(user_id="user", channel_id="channel", platform="discord"),
+        )
+    supervisor.notify.assert_any_call(RuntimeWorkLane.ACTIVITY_OUTPUTS, reset_cursor=True)
+    failed = False
+    sched = ScheduledTaskService(
+        controller=SimpleNamespace(agent_service=service),
+        store=ScheduledTaskStore(tmp_path / "tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "requests"),
+    )
+    deliveries = []
+
+    async def deliver(activity):
+        deliveries.append(activity)
+        registry.ack_completed_output(activity)
+
+    monkeypatch.setattr(sched, "_deliver_recovered_activity_output", deliver)
+    monkeypatch.setattr(sched, "_schedule_runtime_work_wake", Mock())
+    handler = _ScheduledRuntimeWorkHandler(sched, RuntimeWorkLane.ACTIVITY_OUTPUTS)
+    items, _ = handler.scan(limit=4, occupied=frozenset(), cursor=None)
+    assert [item.observation for item in items if not item.cursor_only] == [("claude", "runtime")]
+    assert await handler.process(items[0])
+    if grace:
+        assert deliveries == []
+        assert registry.has_recovered_output("claude", "runtime")
+        sched._schedule_runtime_work_wake.assert_called()
+        agent.ACTIVITY_OUTPUT_FLUSH_GRACE_SECONDS = 0
+        due, _ = handler.scan(limit=4, occupied=frozenset(), cursor=None)
+        output = next(item for item in due if not item.cursor_only)
+        assert await handler.process(output)
+    assert len(deliveries) == 1
+    assert deliveries[0].id == "task"
+    assert deliveries[0].status == "completed"
+    # SDK completion receipts are not assistant text, even after recovery.
+    assert "summary" not in deliveries[0].metadata
+    assert not registry.has_completed_output("claude", "runtime")
+    assert not registry.completion_persistence_recovery("claude", "runtime")
+    assert await handler.process(items[0])
+    assert len(deliveries) == 1
+
+
 async def test_completion_survives_more_than_five_seconds_of_contention_without_stalling_loop(activity_store, monkeypatch):
     """The old live completion blocks for five seconds, then loses its event."""
     from tests.test_claude_agent_initiated_turn import _build_agent
@@ -93,6 +160,7 @@ async def test_completion_survives_more_than_five_seconds_of_contention_without_
     loop_thread = threading.get_ident()
     write_threads = []
     busy = []
+    busy_seen = threading.Event()
 
     @event.listens_for(activity_store.engine, "before_cursor_execute")
     def write_thread(_conn, _cursor, statement, *_):
@@ -103,10 +171,9 @@ async def test_completion_survives_more_than_five_seconds_of_contention_without_
     def contended(context):
         if str(context.original_exception) == "database is locked":
             busy.append(context.statement)
+            busy_seen.set()
 
     holder = _holder()
-    release = threading.Timer(5.6, holder.execute, ("COMMIT",))
-    release.start()
     ticks = []
 
     async def heartbeat():
@@ -121,7 +188,9 @@ async def test_completion_survives_more_than_five_seconds_of_contention_without_
         assert registry.has_active("claude", "runtime")
         assert not registry.has_completed_output("claude", "runtime")
         assert not handled.is_set(), "completion must not abandon the event at the first busy timeout"
-        await asyncio.wait_for(handled.wait(), 12)
+        assert await asyncio.to_thread(busy_seen.wait, 12)
+        await asyncio.to_thread(holder.execute, "COMMIT")
+        await asyncio.wait_for(handled.wait(), 5)
         await ticker
         assert len(busy) == 1, "the first full 5-second writer wait must actually exhaust"
         assert len(write_threads) == 2 and all(thread != loop_thread for thread in write_threads)
@@ -131,8 +200,8 @@ async def test_completion_survives_more_than_five_seconds_of_contention_without_
         assert registry.session_state("session")["pending_activity_output_count"] == 1
         assert activity_store.list_activities()[0]["phase"] == "awaiting_output"
     finally:
-        release.cancel()
-        release.join()
+        if holder.in_transaction:
+            holder.rollback()
         holder.close()
         handled.set()
         receiver.cancel()

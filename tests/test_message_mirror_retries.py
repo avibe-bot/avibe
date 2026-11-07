@@ -21,7 +21,7 @@ from core.citations import CitationSource, body_digest, register_citations
 from modules.im import MessageContext
 from storage import agent_events_service, media_service, messages_service, settings_service
 from storage.agent_session_rows import create_agent_session_row
-from storage.db import get_cached_sqlite_engine
+from storage.db import _is_sqlite_busy, get_cached_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, media_objects, messages, scopes
 
@@ -103,7 +103,8 @@ async def test_real_writer_over_busy_timeout_keeps_loop_live_and_publishes_once(
     bus = inbox_events.InboxEventBus()
     monkeypatch.setattr(inbox_events, "bus", bus)
     publications, subscribers, writes, ticks = [], [], [], []
-    write_entered = threading.Event()
+    write_entered, busy_returned = threading.Event(), threading.Event()
+    timeouts, busy_times = [], []
     original_publish = bus.publish
 
     def publish(topic, row):
@@ -115,10 +116,18 @@ async def test_real_writer_over_busy_timeout_keeps_loop_live_and_publishes_once(
 
     def before_write(_conn, _cursor, statement, _parameters, _ctx, _many):
         if statement.startswith("INSERT INTO messages "):
+            timeouts.append(_conn.exec_driver_sql("PRAGMA busy_timeout").scalar())
             writes.append(threading.get_ident())
             write_entered.set()
 
+    def handle_error(error):
+        original = error.original_exception
+        if _is_sqlite_busy(original):
+            busy_times.append(time.monotonic())
+            busy_returned.set()
+
     event.listen(state, "before_cursor_execute", before_write)
+    event.listen(state, "handle_error", handle_error)
     held, release = threading.Event(), threading.Event()
 
     def hold_writer():
@@ -126,7 +135,7 @@ async def test_real_writer_over_busy_timeout_keeps_loop_live_and_publishes_once(
         try:
             writer.execute("BEGIN IMMEDIATE")
             held.set()
-            release.wait(15)
+            release.wait(20)
             writer.commit()
         finally:
             writer.close()
@@ -146,7 +155,9 @@ async def test_real_writer_over_busy_timeout_keeps_loop_live_and_publishes_once(
     try:
         persist = asyncio.create_task(mirror.persist_agent_message_async(context(), "result", "answer"))
         assert await asyncio.to_thread(write_entered.wait, 3)
-        await asyncio.sleep(5.3)
+        # busy_timeout counts SQLite handler sleeps, not a strict wall-clock
+        # deadline. Keep the writer until this connection actually exhausts it.
+        assert await asyncio.to_thread(busy_returned.wait, 12), (sqlite3.sqlite_version, timeouts)
         release.set()
         row = await asyncio.wait_for(persist, 10)
         assert row and row["text"] == "answer"
@@ -156,6 +167,9 @@ async def test_real_writer_over_busy_timeout_keeps_loop_live_and_publishes_once(
         running = False
         await heartbeat_task
         event.remove(state, "before_cursor_execute", before_write)
+        event.remove(state, "handle_error", handle_error)
+    assert timeouts == [5000, 5000]
+    assert len(busy_times) == 1
     assert len(ticks) > 100
     assert max(right - left for left, right in zip(ticks, ticks[1:])) < 1.0
     assert len(writes) == 2 and all(thread != loop_thread for thread in writes)

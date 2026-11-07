@@ -2638,6 +2638,29 @@ def run_update_event_transaction(engine: Any):
         _publish_queue_updated(session_id)
 
 
+def _retry_run_update_write(engine: Any, write: Any, *, retry_busy: bool = True) -> Any:
+    """Retry a pure outbox transaction; publish its committed snapshots once."""
+
+    def attempt():
+        with engine.begin() as conn:
+            try:
+                result = write(conn)
+                rows = pop_deferred_run_event_rows_from_connection(conn)
+                sessions = _pop_deferred_queue_updated_session_ids_from_connection(conn)
+            finally:
+                # Connection.info survives pool reuse. A failed attempt must not
+                # leak events from a transaction that rolled back into its retry.
+                conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, None)
+                conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, None)
+        return result, rows, sessions
+
+    result, rows, sessions = retry_sqlite_write(attempt) if retry_busy else attempt()
+    _publish_run_rows_updated(rows)
+    for session_id in sessions:
+        _publish_queue_updated(session_id)
+    return result
+
+
 def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
     normalized_ids: list[str] = []
     seen: set[str] = set()
@@ -3355,7 +3378,7 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
 
 
 def _runs_blocked_by_live_activities(
-    conn: Any, run_ids: Sequence[str], session_ids: Iterable[str]
+    conn: Any, run_ids: Sequence[str], session_ids: Iterable[str], *, include_pending_output: bool = False,
 ) -> set[str]:
     """The Runs among ``run_ids`` that a durable, still-active, attached Activity owns.
 
@@ -3387,7 +3410,11 @@ def _runs_blocked_by_live_activities(
             if not isinstance(payload, dict):
                 continue
             activity = payload.get("activity")
-            if payload.get("phase") != "active" or not isinstance(activity, dict) or activity.get("detached_from_run"):
+            phase = payload.get("phase")
+            blocks = phase == "active" and not (isinstance(activity, dict) and activity.get("detached_from_run"))
+            if include_pending_output and phase == "awaiting_output":
+                blocks = True
+            if not blocks or not isinstance(activity, dict):
                 continue
             owners = {str(activity.get("run_id") or "").strip()}
             metadata = activity.get("metadata")
@@ -3550,6 +3577,7 @@ class SQLiteBackgroundTaskStore:
         expected_reference_agent_id: Optional[str] = None,
         expected_schedule_generation: Optional[dict[str, str]] = None,
         expected_terminal_run_id: Optional[str] = None,
+        retry_busy: bool = False,
     ) -> bool:
         """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
 
@@ -3559,21 +3587,26 @@ class SQLiteBackgroundTaskStore:
         cannot be silently reverted.
         """
 
-        return self._upsert_definition(
-            self._scheduled_task_values(payload),
-            expect=expect,
-            definition_type="scheduled task",
-            expected_enabled_agent_id=expected_enabled_agent_id,
-            expected_reference_agent_id=expected_reference_agent_id,
-            extra_predicates=(
-                task_schedule_owner_unchanged(
-                    expected_schedule_generation, expected_terminal_run_id
-                )
-                if expected_schedule_generation is not None
-                and expected_terminal_run_id is not None
-                else ()
-            ),
-        )
+        def write():
+            return self._upsert_definition(
+                self._scheduled_task_values(payload),
+                expect=expect,
+                definition_type="scheduled task",
+                expected_enabled_agent_id=expected_enabled_agent_id,
+                expected_reference_agent_id=expected_reference_agent_id,
+                extra_predicates=(
+                    task_schedule_owner_unchanged(
+                        expected_schedule_generation, expected_terminal_run_id
+                    )
+                    if expected_schedule_generation is not None
+                    and expected_terminal_run_id is not None
+                    else ()
+                ),
+            )
+
+        # Only worker-owned terminal projections opt in. Creation/edit and
+        # synchronous lifecycle callers keep their existing single attempt.
+        return retry_sqlite_write(write) if retry_busy else write()
 
     def upsert_scheduled_task_with_binding_notice(
         self,
@@ -4082,9 +4115,9 @@ class SQLiteBackgroundTaskStore:
         to the terminal projection lane, which is where a canceled fire belongs.
         """
 
-        values = self._scheduled_task_values(payload)
-        run_values = self._run_values(run_payload)
-        with run_update_event_transaction(self.engine) as conn:
+        def write(conn: Any) -> bool:
+            values = self._scheduled_task_values(payload)
+            run_values = self._run_values(run_payload)
             reserve_write_lock(conn)
             if expected_uncanceled_run_id and agent_run_cancellation_won_in_connection(
                 conn, expected_uncanceled_run_id
@@ -4112,7 +4145,9 @@ class SQLiteBackgroundTaskStore:
                 conn, run_values, agent_name=values.get("agent_name")
             )
             enqueue_run_in_connection(conn, run_values)
-        return True
+            return True
+
+        return _retry_run_update_write(self.engine, write)
 
     def enqueue_task_escalation_without_definition_write(
         self,
@@ -4134,8 +4169,9 @@ class SQLiteBackgroundTaskStore:
         parent_run_id = str(expected_uncanceled_run_id or "").strip()
         if not parent_run_id:
             return False
-        run_values = self._run_values(run_payload)
-        with run_update_event_transaction(self.engine) as conn:
+
+        def write(conn: Any) -> bool:
+            run_values = self._run_values(run_payload)
             reserve_write_lock(conn)
             parent = conn.execute(
                 select(agent_runs.c.status, agent_runs.c.cancel_requested)
@@ -4183,7 +4219,9 @@ class SQLiteBackgroundTaskStore:
                 run_values["agent_id"] = identity["id"]
                 run_values["agent_name"] = identity["name"]
             enqueue_run_in_connection(conn, run_values)
-        return True
+            return True
+
+        return _retry_run_update_write(self.engine, write)
 
     def enqueue_run(
         self,
@@ -6863,6 +6901,7 @@ class SQLiteBackgroundTaskStore:
         exit_code: Optional[int] = None,
         stdout: Optional[str] = None,
         stderr: Optional[str] = None,
+        retry_busy: bool = False,
     ) -> Optional[str]:
         """Terminalize a non-terminal run in one guarded write.
 
@@ -6897,9 +6936,9 @@ class SQLiteBackgroundTaskStore:
         """
 
         now = updated_at or _utc_now_iso()
-        row_to_publish = None
-        written_status: Optional[str] = None
-        with self.engine.begin() as conn:
+
+        def write(conn: Any) -> Optional[str]:
+            written_status: Optional[str] = None
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -6968,11 +7007,7 @@ class SQLiteBackgroundTaskStore:
                 )
                 if transition.rowcount:
                     written_status = status
-                    row_to_publish = dict(
-                        conn.execute(
-                            select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
-                        ).mappings().one()
-                    )
+                    _defer_run_ids_updated_from_connection(conn, [run_id])
                     break
                 if final_attempt:
                     break
@@ -6981,8 +7016,9 @@ class SQLiteBackgroundTaskStore:
                     .mappings()
                     .first()
                 )
-        _publish_run_rows_updated([row_to_publish])
-        return written_status
+            return written_status
+
+        return _retry_run_update_write(self.engine, write, retry_busy=retry_busy)
 
     def defer_run_terminal(
         self,
@@ -7080,6 +7116,7 @@ class SQLiteBackgroundTaskStore:
         interrupt_reason: Optional[str] = None,
         cancellation_error: Optional[str] = None,
         updated_at: Optional[str] = None,
+        activity_session_id: Optional[str] = None,
     ) -> bool:
         """Apply one stored terminal intent after owned Activities become terminal.
 
@@ -7104,6 +7141,13 @@ class SQLiteBackgroundTaskStore:
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
             if not row:
+                return False
+            if activity_session_id is not None and _runs_blocked_by_live_activities(
+                conn, [run_id], [activity_session_id, str(row.get("session_id") or "")],
+                include_pending_output=True,
+            ):
+                # A live async completion yielded after its registry check. A
+                # sibling admitted meanwhile must still block the terminal CAS.
                 return False
             # A deferred failure is still subordinate to Stop. Re-decide once when
             # the cancellation CAS loses so a running row becomes canceled instead

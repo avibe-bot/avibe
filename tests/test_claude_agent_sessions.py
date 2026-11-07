@@ -2275,7 +2275,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent._pending_requests[runtime_key] = [queued_request]
         agent._pending_reactions[runtime_key] = [("m2", ":eyes:")]
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent.handle_message(request)
 
         self.assertEqual(mark_idle_calls, [])
@@ -2776,7 +2776,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         controller.receiver_tasks[composite_key] = asyncio.current_task()
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent._handle_receiver_eof(composite_key, pending_request.context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
@@ -2826,7 +2826,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         controller.receiver_tasks[composite_key] = asyncio.current_task()
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent._handle_receiver_eof(composite_key, pending_request.context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
@@ -2964,7 +2964,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         key = "session-eof-real:/tmp/work"
         controller, agent, request = self._eof_agent(key, contained=False, returncode=-6)
 
-        with patch("core.message_mirror.persist_agent_message"):
+        with patch("core.message_mirror.persist_agent_message_async"):
             await agent._handle_receiver_eof(key, request.context)
 
         self.assert_uncontained_settlement(controller.emit_agent_message, "-6")
@@ -3051,7 +3051,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         key = "session-exc-real:/tmp/work"
         controller, agent, request = self._receiver_exception_agent(key, contained=False)
 
-        with patch("core.message_mirror.persist_agent_message"):
+        with patch("core.message_mirror.persist_agent_message_async"):
             await agent._handle_receiver_exception(
                 key, request.context, RuntimeError("boom")
             )
@@ -3149,7 +3149,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             files=None,
         )
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent.handle_message(request)
 
         agent.record_model_hub_native_failure.assert_not_awaited()
@@ -3234,7 +3234,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._activity_registry = lambda: registry
 
-        with patch("core.message_mirror.persist_agent_message"):
+        with patch("core.message_mirror.persist_agent_message_async"):
             await agent.handle_message(request)
 
         registry.requeue_completed_outputs.assert_called_once_with([activity])
@@ -3338,7 +3338,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
@@ -3391,7 +3391,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        with patch("core.message_mirror.persist_agent_message") as persist:
+        with patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent._receive_messages(_FailingClient(), "session-1", "/tmp/work", context)
 
         agent.session_handler.handle_session_error.assert_awaited_once()
@@ -5119,7 +5119,7 @@ class ClaudeRuntimeFailureAuthClassificationTests(unittest.IsolatedAsyncioTestCa
         with patch(
             "core.handlers.session_handler.observe_agent_resource_pressure",
             lambda _controller: None,
-        ), patch("core.message_mirror.persist_agent_message") as persist:
+        ), patch("core.message_mirror.persist_agent_message_async") as persist:
             await agent._receive_messages(client, "slack_C1", "/tmp/work", context)
         return [call.args[2] for call in persist.call_args_list if call.args[1] == "notify"]
 

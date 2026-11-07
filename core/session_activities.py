@@ -1042,7 +1042,7 @@ class SessionActivityRegistry:
             completed: list[SessionActivity] = []
             for item in pending:
                 try:
-                    activity = await self._run_pending_completion(item, run_sync=run_sync)
+                    activity = await self._run_pending_completion(item, run_sync=run_sync, recover_output=True)
                 except Exception:
                     continue  # The exact intent and diagnostic remain registered.
                 if activity is not None:
@@ -1072,6 +1072,7 @@ class SessionActivityRegistry:
         pending: _PendingActivityCompletion,
         *,
         run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
+        recover_output: bool = False,
     ) -> SessionActivity | None:
         with self._lock:
             if self._pending_completions.get(pending.token) is not pending or pending.inflight:
@@ -1079,7 +1080,9 @@ class SessionActivityRegistry:
             pending.inflight = True
         # Land the store result AND its short loop-owned tail before answering
         # cancellation. No network or native event replay is inside this unit.
-        step, cancelled = await land_step(self._finish_pending_completion(pending, run_sync))
+        step, cancelled = await land_step(
+            self._finish_pending_completion(pending, run_sync, recover_output=recover_output)
+        )
         try:
             if cancelled and (step.cancelled() or step.exception() is not None):
                 answer_caught_cancellation(step)
@@ -1132,6 +1135,8 @@ class SessionActivityRegistry:
         self,
         pending: _PendingActivityCompletion,
         run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
+        *,
+        recover_output: bool = False,
     ) -> SessionActivity | None:
         try:
             if pending.written is not None:
@@ -1177,6 +1182,11 @@ class SessionActivityRegistry:
                         retain_terminal_snapshot=pending.retain_terminal_snapshot,
                         activation_identity=pending.activation_identity,
                     )
+                    if recover_output and pending.expects_output:
+                        # The native event already failed, so its receiver never
+                        # scheduled the ordinary flush. The existing output lane
+                        # must own this receipt if no later native event claims it.
+                        self._add_recovered_output_id(pending.key, completed)
                     pending.finished = True
                     return True
 
