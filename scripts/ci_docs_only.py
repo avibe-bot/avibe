@@ -29,12 +29,21 @@ CONTRACT_DOCS = frozenset({"docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md"
 # listings zero those identities, so that path must run on the real Windows job.
 # CLI mutations served by the control channel resolve caller paths and the
 # Windows descriptor endpoint, which only a Windows runner exercises.
+# Vault's adopted waiter locks and Show's private endpoint snapshot also need
+# real Windows handles/DACLs; POSIX tests cannot establish those contracts.
 WINDOWS_CONTROL_IPC_PATHS = frozenset({
     "core/managed_skills.py",
     "tests/test_managed_skills.py",
     "core/control_requests.py",
     "core/handlers/cli_requests.py",
     "tests/test_cli_mutation_control_requests.py",
+    "core/handlers/vault_requests.py",
+    "core/show_vault.py",
+    "core/show_runtime.py",
+    "vibe/internal_client.py",
+    "vibe/show_server/vault.mjs",
+    "tests/test_show_vault.py",
+    "tests/test_vault_control_requests.py",
 })
 
 RUN, SKIP = "run", "skip"

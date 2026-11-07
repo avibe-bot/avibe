@@ -565,10 +565,17 @@ def test_cli_writes_literal_routes_for_a_pull_request_and_full_for_its_push(
     ("core/managed_skills.py", True),
     ("tests/test_managed_skills.py", True),
     ("core/handlers/cli_requests.py", True),
+    ("core/handlers/vault_requests.py", True),
+    ("core/show_vault.py", True),
+    ("core/show_runtime.py", True),
+    ("vibe/internal_client.py", True),
+    ("vibe/show_server/vault.mjs", True),
+    ("tests/test_show_vault.py", True),
+    ("tests/test_vault_control_requests.py", True),
     ("core/controller.py", False),
     ("tests/test_control_ipc.py", False),
 ])
-def test_windows_control_ipc_selects_builtin_skill_publication_paths(
+def test_windows_control_ipc_selects_platform_sensitive_consumers(
     repo: Path, tmp_path: Path, path: str, selected: bool,
 ) -> None:
     before = git(repo, "rev-parse", "HEAD")

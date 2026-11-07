@@ -492,18 +492,28 @@ async def mcp_request(
     return body
 
 
+def resolve_control_endpoint(
+    socket_path: Optional[Path] = None,
+) -> control_ipc.ControlIpcClientEndpoint:
+    """Resolve and verify the Controller endpoint for a private server-side client."""
+    return _resolve_endpoint(socket_path)
+
+
 def resolve_computer_script_endpoint(
     socket_path: Optional[Path] = None,
 ) -> control_ipc.ControlIpcClientEndpoint:
     """Resolve and verify the Controller endpoint before launching Node."""
+    return resolve_control_endpoint(socket_path)
 
-    return _resolve_endpoint(socket_path)
+
+def computer_script_endpoint_payload(endpoint: control_ipc.ControlIpcClientEndpoint) -> dict[str, Any]:
+    return control_endpoint_payload(endpoint)
 
 
-def computer_script_endpoint_payload(
+def control_endpoint_payload(
     endpoint: control_ipc.ControlIpcClientEndpoint,
 ) -> dict[str, Any]:
-    """Serialize one already-verified endpoint for the shipped Node runner."""
+    """Serialize one already-verified endpoint for a shipped Node client."""
 
     if endpoint.transport == "unix":
         if endpoint.socket_path is None:

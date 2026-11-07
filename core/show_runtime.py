@@ -884,6 +884,7 @@ class ShowRuntimeManager:
         self._availability = ShowRuntimeAvailability()
         self._process: subprocess.Popen[str] | None = None
         self._base_url: str | None = None
+        self._vault_snapshot = None
         self._lock = asyncio.Lock()
         self._capability_lock = asyncio.Lock()
         # Cross-process in-flight install guard for the archive cache: held for
@@ -1033,6 +1034,16 @@ class ShowRuntimeManager:
                     # prior avibe instance that died without reaping it (SIGKILL / crash). Run it
                     # off the event loop: the psutil scan + terminate/kill can block for seconds.
                     await asyncio.to_thread(self._sweep_orphan_runtime_servers)
+                    from core.runtime_work import answer_caught_cancellation, land_step, step_failed
+                    from core.show_vault import ShowVaultSnapshot
+
+                    prepared, cancelled = await land_step(asyncio.to_thread(ShowVaultSnapshot, self.runtime_dir))
+                    if cancelled and step_failed(prepared):
+                        answer_caught_cancellation(prepared)
+                    self._vault_snapshot = prepared.result()
+                    if cancelled:
+                        raise asyncio.CancelledError
+                    child_env = {**os.environ, **self._vault_snapshot.environment()}
                     with (
                         self.stdout_path.open(
                             "w",
@@ -1059,6 +1070,7 @@ class ShowRuntimeManager:
                             stdout=stdout,
                             stderr=stderr,
                             text=True,
+                            env=child_env,
                             **isolated_subprocess_kwargs(),
                         )
                     start_phase = "readiness"
@@ -1111,7 +1123,7 @@ class ShowRuntimeManager:
         except BaseException as exc:
             pending_exception = exc
         finally:
-            if pending_exception is not None and self._process is not None:
+            if pending_exception is not None and (self._process is not None or self._vault_snapshot is not None):
                 try:
                     self.stop()
                 except OSError:
@@ -1185,6 +1197,20 @@ class ShowRuntimeManager:
                 raise ValueError("Show Runtime render target must be an absolute path")
             request_headers[SHOW_RUNTIME_TARGET_HEADER] = render_target
         phase_timeout_seconds = SHOW_RUNTIME_REQUEST_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        snapshot = self._vault_snapshot
+        if snapshot is not None and re.match(r"^/sessions/[^/]+/app/api(?:/|$)", path.split("?", 1)[0]):
+            refresh_started = time.monotonic()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(snapshot.refresh), timeout=phase_timeout_seconds)
+            except (OSError, asyncio.TimeoutError):
+                # No stale endpoint fallback, no Runtime invalidation/restart,
+                # and no exception text or private transport data in the response.
+                return httpx.Response(503, json={"error": "show_server_unavailable"})
+            if snapshot is not self._vault_snapshot or process is not self._process:
+                return httpx.Response(503, json={"error": "show_server_unavailable"})
+            if timeout_seconds is not None:
+                timeout_seconds = max(0.001, timeout_seconds - (time.monotonic() - refresh_started))
+                phase_timeout_seconds = timeout_seconds
         return await self._request_runtime_transport(
             method,
             base_url,
@@ -1622,6 +1648,12 @@ class ShowRuntimeManager:
     def stop(self) -> None:
         process = self._process
         self._process = None
+        snapshot, self._vault_snapshot = self._vault_snapshot, None
+        if snapshot is not None:
+            try:
+                snapshot.close()
+            except OSError:
+                logger.warning("Show server transport cleanup failed")
         self._base_url = None
         self._clear_capability_state()
         if not process or process.poll() is not None:

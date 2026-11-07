@@ -1,6 +1,7 @@
-# Warm CLI control requests: Agent Run
+# Warm CLI control requests: Agent Run, Harness mutations and Vault fetch
 
-Implementation of Phase 4's first slice of the CLI runtime-path plan (PR #3283).
+Implementation of the CLI runtime-path plan (PR #3283), including Agent Run,
+Task/Watch/Session/Run mutations, and Vault fetch.
 Performance only; the invocation context is not a security boundary.
 
 ## Contract
@@ -29,7 +30,69 @@ Performance only; the invocation context is not a security boundary.
   after submission, stale response or malformed response is `execution_unknown`,
   never evidence that enqueue did not happen. There is no automatic retry.
 - No schema, operation-id ledger, identity model, Vault custody or deployment
-  change. Task/Watch/Session and Vault delivery remain separate follow-ups.
+  change. Task/Watch/Session/Run mutations use the separate contract below.
+
+## Vault fetch change contract (PR B)
+
+The hot path is one `vault.fetch` request on the same private control channel.
+The invoking process remains the owner of input files, output files and standard
+streams; it materializes request bytes, not filenames, before IPC. Admission
+still precedes reporting a prepared local input error. The controller uses its
+cached engine and existing policy/grant/delivery helpers. It forwards only the
+sealed envelope to avault and returns only the HTTP result, never credentials.
+The caller's raw invocation environment and PID supply the same context and
+audit metadata as the preceding CLI implementation; globals are never swapped.
+
+Approval is the cold path. Only a resolver-originated `approval_required`
+response with an explicit `not_executed` approval envelope permits
+`vault.fetch.await`, which owns the existing approval waiter lock and
+continuation transitions. It sleeps asynchronously and runs bounded store steps
+off-loop. A disconnected, still-active waiter releases its lock without handing
+off a fetch, so the existing callback can resume the Session. Once an approval
+is consumed, the caller rechecks its output file and submits fetch once, using
+the original materialized body and canonical secret record. Host/auth policy is
+read again. This uses the existing approval request ID, not a new operation ID,
+registry, schema or retry protocol. An uncertain fetch result is never replayed.
+A disconnect observed before queued completion obtains its write reservation
+leaves the active waiter recoverable by the callback. If completion has already
+committed and its reply is lost, however, neither an automatic fetch nor callback
+follows; the client must not reopen that decision. This extends the preceding
+CLI's completion-to-handoff crash window across IPC and client output checks.
+A service restart also ends its waiters; a surviving CLI does not reconnect or
+retry. The approval notice now appears before the owning await RPC, rather than
+after its arm. `vault run` retains its existing in-process wait path.
+
+Request/response JSON codecs and body decoding run off-loop as well as database
+and egress work. Ordinary one-shot cleanup reuses the cached service engine;
+exceptional resident-agent reset recovery retains its existing lifecycle.
+
+The Show adapter is server-only and calls this same request contract without a
+CLI subprocess. It has no browser endpoint and does not expose private IPC
+credentials, caller context, sealed material or grant state to page JavaScript.
+Existing Show admission/authentication and avault custody remain unchanged.
+Its wheel-shipped module is injected only into the server process. Python
+refreshes a per-child, owner-private endpoint snapshot before each admitted
+API proxy request, including warm requests. Node rereads it for each operation,
+checks the Windows instance response, and never refreshes-and-replays. Failed
+verification publishes unavailable; failed publication refuses the dispatch
+without restarting or invalidating Show. Retirement fences late refresh workers
+from affecting a successor. Recovery is guaranteed at the next independent
+proxied API request, not for detached server timers. Existing pages must adopt
+the adapter explicitly; this PR does not modify live workspaces. Explicit Node
+signal cancellation closes the actual IPC request. The pinned upstream Runtime
+does not connect proxy disconnects to handler `request.signal`; that pre-existing
+limitation is not changed or counted as end-to-end cancellation evidence here.
+
+Acceptance covers standard/protected and field-ref delivery, approval ownership
+and disconnect races, pre/post-handoff one-shot handling, audit metadata, raw
+HTTP body/exit status, caller-owned file paths, policy edits during approval,
+service-down refusal without SQLite/auto-start, and concurrent context isolation.
+Measure before/after in one reserved window with small alternating ABBA batches
+(200 calls per side, 20-way), plus the Show pattern of about 30 fetches/minute.
+Report CPU-seconds/minute and call latency with load recorded as a covariate;
+gate only competing test/build processes, not a load threshold between sides.
+No live owner-state writes, service restart, deployment or `vault run` changes
+are part of this slice.
 
 ## Validation boundaries
 

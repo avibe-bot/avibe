@@ -17,6 +17,25 @@ from storage import vault_service
 from storage.vault_crypto import Sealed
 from vibe import cli
 
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
+
+
+def test_fetch_keeps_stale_login_recovery_hint_after_uncertain_handoff(monkeypatch, capfd):
+    from vibe import api
+
+    _create_standard_secret("STALE_KEY", allow_host=["api.example.com"])
+
+    def fail(*args):
+        raise api.AvaultStaleLoginSessionError("synthetic stale login")
+
+    monkeypatch.setattr(api, "avault_deliver_fetch", fail)
+    assert cli.cmd_vault_fetch(_ns(auth="STALE_KEY", url="https://api.example.com")) == 1
+    error = json.loads(capfd.readouterr().err)
+    assert error["code"] == "stale_login_session"
+    assert error["execution"] == "execution_unknown"
+    assert "restart" in error["hint"].lower()
+    assert "desktop" in error["hint"].lower()
+
 
 def _ns(**kw):
     base = dict(
@@ -339,8 +358,8 @@ def test_fetch_revalidates_policy_after_approval_wait(capfd, monkeypatch):
             policy={"allowed_hosts": ["api.github.com"]},
         )
 
-    def approve_and_change_policy(args, exc, *, timeout, help_command, operation):
-        request_id = exc.details["request_id"]
+    def approve_and_change_policy(args, approval):
+        request_id = approval["request_id"]
         with cli._open_vault_engine().begin() as conn:
             request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
             _grant_from_request(conn, request, session_id="ses_cli")
@@ -349,9 +368,11 @@ def test_fetch_revalidates_policy_after_approval_wait(capfd, monkeypatch):
                 .where(vault_service.vault_secrets.c.name == "GH_PAT")
                 .values(policy=json.dumps({"allowed_hosts": ["api.example.com"]}))
             )
+        from core.control_requests import result
+        return result({"ok": True, "kind": "vault_fetch_approved"}, execution="not_executed")
 
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
-    monkeypatch.setattr(cli, "_wait_for_vault_delivery_approval", approve_and_change_policy)
+    monkeypatch.setattr(cli, "_wait_for_vault_fetch_approval", approve_and_change_policy)
     monkeypatch.setattr(api, "avault_agent_deliver_fetch", fetch)
     monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
 
@@ -380,15 +401,17 @@ def test_fetch_revalidates_output_after_approval_wait(tmp_path, capfd, monkeypat
             policy={"allowed_hosts": ["api.github.com"]},
         )
 
-    def approve_and_block_output(args, exc, *, timeout, help_command, operation):
-        request_id = exc.details["request_id"]
+    def approve_and_block_output(args, approval):
+        request_id = approval["request_id"]
         with cli._open_vault_engine().begin() as conn:
             request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
             _grant_from_request(conn, request, session_id="ses_cli")
         out.mkdir()
+        from core.control_requests import result
+        return result({"ok": True, "kind": "vault_fetch_approved"}, execution="not_executed")
 
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
-    monkeypatch.setattr(cli, "_wait_for_vault_delivery_approval", approve_and_block_output)
+    monkeypatch.setattr(cli, "_wait_for_vault_fetch_approval", approve_and_block_output)
     monkeypatch.setattr(api, "avault_agent_deliver_fetch", fetch)
     monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
 

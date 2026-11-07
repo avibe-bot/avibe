@@ -8789,11 +8789,11 @@ def _vault_caller_metadata() -> dict[str, str]:
     return context.to_metadata() if context is not None else {}
 
 
-def _vault_cli_session_id(args) -> str | None:
+def _vault_cli_session_id(args, *, caller_env=None) -> str | None:
     session_id = (getattr(args, "session_id", None) or "").strip()
     if session_id:
         return session_id
-    context = caller_context_from_env()
+    context = caller_context_from_env(caller_env)
     return _default_session_id_from_caller(context)
 
 
@@ -9985,11 +9985,12 @@ def _preflight_cli_output_path(path: str, *, help_command: str) -> None:
         raise TaskCliError(f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command) from exc
 
 
-def _consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
+def _consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str, engine=None) -> None:
     from vibe import api
 
     try:
-        api.consume_one_shot_grants(grants, reason=reason)
+        kwargs = {"engine": engine} if engine is not None else {}
+        api.consume_one_shot_grants(grants, reason=reason, **kwargs)
     except Exception:
         logger.debug("failed to consume one-shot vault grants after delivery", exc_info=True)
 
@@ -10045,9 +10046,9 @@ def _raise_after_releasing_one_shot_reservations(engine, grants, exc):
     raise exc
 
 
-def _consume_after_possible_use(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
+def _consume_after_possible_use(grants: list[dict] | tuple[dict, ...] | None, *, reason: str, engine=None) -> None:
     """Fail closed for one-shot grants after handoff to avault/resident agent."""
-    _consume_one_shot_grants(_unique_one_shot_grants(grants), reason=reason)
+    _consume_one_shot_grants(_unique_one_shot_grants(grants), reason=reason, engine=engine)
 
 
 def _finish_one_shot_after_avault_error(
@@ -10062,7 +10063,7 @@ def _finish_one_shot_after_avault_error(
     if isinstance(exc, api.AvaultPreHandoffError):
         _release_one_shot_reservations(engine, grants)
     else:
-        _consume_after_possible_use(grants, reason=reason)
+        _consume_after_possible_use(grants, reason=reason, engine=engine)
 
 
 def _capture_vault_delivery_identities(engine, names: list[str], grants):
@@ -10747,12 +10748,12 @@ def _vault_approval_wait_seconds(args, *, help_command: str) -> float:
     return float(wait_value)
 
 
-def _approval_wait_callback_expected(args) -> bool:
-    return not _vault_callback_disabled(args) and bool(_vault_cli_session_id(args))
+def _approval_wait_callback_expected(args, *, caller_env=None) -> bool:
+    return not _vault_callback_disabled(args) and bool(_vault_cli_session_id(args, caller_env=caller_env))
 
 
-def _approval_wait_timeout_hint(args, request_id: str) -> str:
-    if _approval_wait_callback_expected(args):
+def _approval_wait_timeout_hint(args, request_id: str, *, caller_env=None) -> str:
+    if _approval_wait_callback_expected(args, caller_env=caller_env):
         return (
             "Avibe will resume this Session when the user approves or denies the request. "
             "After approval, retry the original vault run/fetch command."
@@ -10796,13 +10797,13 @@ def _vault_terminal_request_error(request: dict, *, help_command: str) -> TaskCl
     return None
 
 
-def _vault_approval_handed_off_error(args, request_id: str, *, help_command: str) -> TaskCliError:
+def _vault_approval_handed_off_error(args, request_id: str, *, help_command: str, caller_env=None) -> TaskCliError:
     return TaskCliError(
         f"Vault request '{request_id}' continues through its Session callback; this command did not run",
         code="approval_handed_off",
-        hint=_approval_wait_timeout_hint(args, request_id),
+        hint=_approval_wait_timeout_hint(args, request_id, caller_env=caller_env),
         help_command=help_command,
-        details={"request_id": request_id, "callback_expected": _approval_wait_callback_expected(args)},
+        details={"request_id": request_id, "callback_expected": _approval_wait_callback_expected(args, caller_env=caller_env)},
     )
 
 
@@ -11401,208 +11402,116 @@ def _build_vault_fetch_request(
     }
 
 
-def cmd_vault_fetch(args):
+def _vault_fetch_method(value: str | None) -> str:
+    method = (value or "GET").upper()
+    if method in {"TRACE", "TRACK", "CONNECT"}:
+        raise TaskCliError(
+            f"method {method} is not allowed for vault fetch (it can echo the credential into the response)",
+            code="method_not_allowed", help_command="vibe vault fetch --help",
+        )
+    return method
+
+
+def _vault_fetch_host(url: str) -> str:
     from urllib.parse import urlsplit
 
-    from storage import vault_service
-    from vibe import api
+    host = urlsplit(url).hostname
+    if not host:
+        raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command="vibe vault fetch --help")
+    scheme = (urlsplit(url).scheme or "").lower()
+    if scheme != "https" and host not in {"localhost", "127.0.0.1", "::1"}:
+        raise TaskCliError(
+            f"refusing to attach a credential over plaintext {scheme or 'http'}:// to {host!r}; use https (loopback exempt)",
+            code="insecure_transport", help_command="vibe vault fetch --help",
+        )
+    return host
+
+
+def _vault_control_request(operation: str, arguments: dict, *, timeout: float) -> dict:
+    from core.control_requests import failure, new_request, validate_vault_result
+    from vibe import internal_client
+
+    try:
+        response = internal_client.control_request_sync(new_request(operation, arguments).to_payload(), timeout=timeout)
+        return validate_vault_result(response, operation)
+    except internal_client.InternalServerUnavailable:
+        return failure("service_unavailable", "Avibe service unavailable; Vault fetch not executed")
+    except (internal_client.InternalServerTimeout, ValueError):
+        return failure("execution_unknown", "Vault request result could not be confirmed; do not replay it", execution="execution_unknown")
+
+
+def _wait_for_vault_fetch_approval(args, approval: dict) -> dict:
+    from core.control_requests import ADMISSION_SECONDS
+
+    _print_vault_approval_wait_notice(approval["request_id"], timeout=approval["timeout"], operation="vault fetch")
+    return _vault_control_request(
+        "vault.fetch.await",
+        {"request_id": approval["request_id"], "timeout": approval["timeout"],
+         "session_id": getattr(args, "session_id", None)},
+        timeout=ADMISSION_SECONDS + approval["timeout"] + 35.0,
+    )
+
+
+def cmd_vault_fetch(args):
+    """DB-free caller: own files/stdio, never replay an uncertain handoff."""
+    import base64
+
+    from core.control_requests import failure
 
     help_command = "vibe vault fetch --help"
-    engine = None
-    grant = None
-    one_shot_grant = None
-    handoff_started = False
-    name = getattr(args, "auth", "")
-    host = ""
-    method = "GET"
-    try:
-        url = args.url
-        method = (getattr(args, "method", None) or "GET").upper()
-        headers = _parse_headers(getattr(args, "header", None))
-        body = _read_request_body(args)
-        if method in {"TRACE", "TRACK", "CONNECT"}:
-            # These echo the request (incl. the attached Authorization / custom-auth header) back
-            # in the response body, which fetch writes to stdout — leaking the secret value into
-            # stdout/transcripts. Reject before decrypting or sending.
-            raise TaskCliError(
-                f"method {method} is not allowed for vault fetch (it can echo the credential into the response)",
-                code="method_not_allowed",
-                help_command=help_command,
-            )
-        # Preflight --output BEFORE sending: a side-effecting request (POST/PATCH) must not run
-        # and then fail on a local write, or the agent will retry and duplicate the action. Check
-        # the target itself (an existing dir, or an existing file we can't write), not just the
-        # parent.
-        output = getattr(args, "output", None)
-        _validate_vault_fetch_output(output, help_command=help_command)
-        host = urlsplit(url).hostname
-        if not host:
-            raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
-        # Never attach a credential over plaintext: a real host must be HTTPS so domain
-        # binding can't be used to downgrade transport. Loopback is exempt for local dev.
-        is_loopback = host in {"localhost", "127.0.0.1", "::1"}
-        scheme = (urlsplit(url).scheme or "").lower()
-        if scheme != "https" and not is_loopback:
-            raise TaskCliError(
-                f"refusing to attach a credential over plaintext {scheme or 'http'}:// to {host!r}; use https (loopback exempt)",
-                code="insecure_transport",
-                help_command=help_command,
-            )
-
-        engine = _open_vault_engine()
-        with engine.connect() as conn:
-            record_meta = vault_service.get_secret_record_meta(conn, name)
-        name = str(record_meta["record_name"])
-        request = _build_vault_fetch_request(
-            engine,
-            name=name,
-            url=url,
-            host=host,
-            method=method,
-            headers=headers,
-            body=body,
-            help_command=help_command,
-        )
-        requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="fetch", host=host, method=method)
-        approval_wait = _vault_approval_wait_seconds(args, help_command=help_command)
-        waited_for_approval = False
-        while True:
-            try:
-                grant, one_shot_grant, sealed = _resolve_single_vault_delivery(
-                    engine,
-                    name,
-                    requester=requester,
-                    delivery=delivery,
-                    purpose="fetch",
-                )
-                break
-            except TaskCliError as exc:
-                if exc.code == "approval_required" and approval_wait > 0 and not waited_for_approval:
-                    _wait_for_vault_delivery_approval(
-                        args,
-                        exc,
-                        timeout=approval_wait,
-                        help_command=help_command,
-                        operation="vault fetch",
-                    )
-                    waited_for_approval = True
-                    continue
-                raise
-        if waited_for_approval:
-            _validate_vault_fetch_output(output, help_command=help_command)
-            request = _build_vault_fetch_request(
-                engine,
-                name=name,
-                url=url,
-                host=host,
-                method=method,
-                headers=headers,
-                body=body,
-                help_command=help_command,
-            )
-        audit_identity = _capture_vault_delivery_identities(engine, [name], [one_shot_grant] if one_shot_grant else [])[0]
-        handoff_started = True
-        if grant is not None:
-            result = api.avault_agent_deliver_fetch(
-                grant_id=grant["id"],
-                name=name,
-                sealed=sealed,
-                request=request,
-                context={"session_id": grant.get("session_id"), "purpose": "fetch"},
-            )
-        else:
-            result = api.avault_deliver_fetch(name, sealed, request)
-        _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
-        status = int(result.get("status") or 0)
-        resp_body = result.get("body") or ""
-
-        try:
-            with engine.begin() as conn:
-                vault_service.record_proxy_use(
-                    conn,
-                    audit_identity,
-                    requester={"source": "cli", "pid": os.getpid()},
-                    delivery={"host": host, "method": method, "status": status},
-                )
-        except Exception:
-            # The upstream request already happened (possibly a side-effecting POST/PATCH). A
-            # bookkeeping failure must not make the agent see a failure and retry — duplicating
-            # the upstream action. Contain it and still return the real response below.
-            pass
-    except vault_service.SecretNotFoundError:
-        _print_task_error(TaskCliError(f"secret '{args.auth}' not found", code="secret_not_found", help_command=help_command))
-        return 1
-    except vault_service.KeypairNotValueDeliverableError as exc:
-        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
-        return 1
-    except vault_service.InvalidFieldNameError as exc:
-        _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
-        return 1
-    except vault_service.FieldsCorruptError as exc:
-        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
-        return 1
-    except vault_service.FieldNotFoundError as exc:
-        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
-        return 1
-    except vault_service.FieldsNotSupportedError as exc:
-        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
-        return 1
-    except vault_service.UnsupportedProtectionError as exc:
-        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
-        return 1
-    except TaskCliError as exc:
-        if handoff_started:
-            _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
-        else:
-            _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
-        _print_task_error(exc)
-        return 1
-    except api.AvaultError as exc:
-        _finish_one_shot_after_avault_error(
-            engine,
-            [one_shot_grant] if one_shot_grant is not None else [],
-            exc,
-            reason="vault-fetch-one-shot",
-        )
-        if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
-            grant_id = grant.get("id")
-            if grant_id:
-                _expire_agent_grant_after_missing(
-                    engine,
-                    grant_id,
-                    [name],
-                    requester=requester,
-                    delivery=delivery,
-                    purpose="fetch",
-                )
-                _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
-                return 1
-        _print_task_error(_avault_cli_error(exc, f"request failed: {exc}", code="request_failed", help_command=help_command))
-        return 1
-    except Exception as exc:
-        if handoff_started:
-            _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
-        else:
-            _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
-        _print_task_error(exc, help_command=help_command)
-        return 1
-
-    # The response body is the upstream API's response (not a secret) — pass it through. avault
-    # returns it as UTF-8 text (binary responses are rejected upstream by avault).
+    arguments = {key: getattr(args, key, None) for key in (
+        "auth", "url", "method", "header", "session_id", "approval_wait",
+    )}
+    arguments.update(caller_pid=os.getpid(), no_approval_wait=bool(getattr(args, "no_approval_wait", False)))
     output = getattr(args, "output", None)
-    body_bytes = resp_body.encode("utf-8")
+    try:
+        # Materialize process-local descriptors before IPC, but carry failures
+        # until the service has applied the existing invocation admission.
+        _parse_headers(arguments["header"])
+        body = _read_request_body(args)
+        _vault_fetch_method(arguments["method"])
+        _validate_vault_fetch_output(output, help_command=help_command)
+        _vault_fetch_host(arguments["url"])
+        arguments["body_b64"] = base64.b64encode(body).decode("ascii") if body is not None else None
+    except Exception as exc:
+        arguments["input_error"] = _task_error_payload(exc, help_command=help_command)
+    response = _vault_control_request("vault.fetch", arguments, timeout=125.0)
+    approval = response.get("approval")
+    if approval is not None and response["execution"] == "not_executed" and response["payload"].get("code") == "approval_required":
+        response = _wait_for_vault_fetch_approval(args, approval)
+        if response["execution"] == "not_executed" and response["payload"].get("kind") == "vault_fetch_approved" and response["exit_code"] == 0:
+            try:
+                _validate_vault_fetch_output(output, help_command=help_command)
+            except Exception as exc:
+                _print_task_error(exc, help_command=help_command)
+                return 1
+            # The previous fetch proved no handoff. Continue once, with the same
+            # bytes and canonical record; never reopen a pipe or wait twice.
+            arguments.update(auth=approval["auth"], no_approval_wait=True, approval_wait=None)
+            response = _vault_control_request("vault.fetch", arguments, timeout=125.0)
+    payload = response["payload"]
+    if payload.get("kind") != "vault_fetch":
+        print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
+        return response["exit_code"]
+    if not isinstance(payload.get("body"), str) or type(payload.get("status")) is not int:
+        response = failure("execution_unknown", "Malformed Vault response; do not replay the request", execution="execution_unknown")
+        print(_json_text(response["payload"], stream=sys.stderr), file=sys.stderr)
+        return 1
+    # avault returns UTF-8 upstream response bytes, never the credential.
+    body_bytes = payload["body"].encode("utf-8")
     if output:
         try:
             Path(output).write_bytes(body_bytes)
         except OSError as exc:
-            # The secret-bearing request already completed; a bad --output path should still
-            # yield a structured error (missing parent / permission denied), not a traceback.
-            _print_task_error(TaskCliError(f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command))
+            _print_task_error(TaskCliError(
+                f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command,
+                hint="The upstream request already completed. Do not replay it to recover the output file.",
+            ))
             return 1
     else:
         sys.stdout.buffer.write(body_bytes)
         sys.stdout.flush()
-    return 0 if 200 <= status <= 299 else 1
+    return response["exit_code"]
 
 
 def cmd_vault_export(args):
@@ -20446,6 +20355,8 @@ def main():
             # The service resolves and checks a named mutation's authority. Doing
             # it here would open SQLite in every otherwise thin CLI process.
             _dispatch_parsed_command(parser, args)
+        if args.command == "vault" and args.vault_command == "fetch":
+            sys.exit(cmd_vault_fetch(args))
 
     from vibe.authorization import invocation_authority
 

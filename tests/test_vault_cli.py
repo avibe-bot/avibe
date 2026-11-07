@@ -25,6 +25,8 @@ from storage.models import agent_sessions, vault_audit, vault_grants, vault_requ
 from storage.vault_crypto import Sealed
 from vibe import cli
 
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
+
 
 def _ns(**kw):
     base = dict(
@@ -1598,16 +1600,19 @@ def test_waiter_that_loses_the_approval_to_its_callback_does_not_deliver(tmp_pat
 
         monkeypatch.setattr(vault_service, "arm_request_waiter", arm_after_claim)
     else:
-        # A wrong death verdict lets the callback take over a waiter that is about to complete.
-        real_complete = vault_service.complete_request_waiter
+        # Take over after the ready poll but before completion reserves SQLite's
+        # writer. A second writer inside complete_request_waiter is now impossible.
+        real_ready = cli._vault_access_delivery_ready
 
-        def complete_after_takeover(conn, request_id, **kwargs):
-            with monkeypatch.context() as misjudged:
-                misjudged.setattr(vault_service, "_waiter_lock_state", lambda *_: "free")
-                callback_claims(request_id)
-            return real_complete(conn, request_id, **kwargs)
+        def ready_after_takeover(request, result):
+            ready = real_ready(request, result)
+            if ready:
+                with monkeypatch.context() as misjudged:
+                    misjudged.setattr(vault_service, "_waiter_lock_state", lambda *_: "free")
+                    callback_claims(request["id"])
+            return ready
 
-        monkeypatch.setattr(vault_service, "complete_request_waiter", complete_after_takeover)
+        monkeypatch.setattr(cli, "_vault_access_delivery_ready", ready_after_takeover)
         approver = threading.Thread(target=_approve_next_pending_access_request, kwargs={"session_id": "ses_cli", "purpose": operation})
         approver.start()
     deliver = Mock(return_value={"exit_code": 0, "status": 200, "headers": {}, "body": "{}"})

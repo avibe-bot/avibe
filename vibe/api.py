@@ -4612,7 +4612,7 @@ def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
     release_vault_agent_scopes(_grant_release_payload(grant), reason=reason)
 
 
-def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
+def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str, engine=None) -> None:
     """Expire one-shot grants after the caller has committed value delivery."""
     from storage import vault_service
 
@@ -4621,7 +4621,7 @@ def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, rea
     seen: set[str] = set()
     release_scopes: list[dict[str, str]] = []
     consumed_grants: list[dict[str, str | None]] = []
-    engine = _vault_engine()
+    engine = engine if engine is not None else _vault_engine()
     with engine.begin() as conn:
         for grant in grants:
             if not isinstance(grant, dict) or grant.get("one_shot") is not True:
