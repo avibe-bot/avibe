@@ -33,8 +33,13 @@
    the bar. */
 :root {
   --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
-  /* The tab bar's own height with the inset: a sheet or control above the bar starts here. */
-  --mobile-nav-height: calc(4.75rem + env(safe-area-inset-bottom));
+  /* The tab bar's own height with the inset: the bar is drawn this tall, and a sheet or control
+     above the bar starts here. */
+  --mobile-nav-height: calc(5rem + env(safe-area-inset-bottom));
+  /* How far the circle in the middle of the tab bar (the main Bot) rises above the bar's top
+     edge. The bar lifts the circle by it, and a sheet that ends at the bar pads its foot by it
+     plus its own spacing, so the sheet's last row never sits under the circle. */
+  --mobile-nav-center-rise: 11px;
   /* The home-indicator inset alone, for padding a bottom edge clear of it. */
   --safe-area-bottom: env(safe-area-inset-bottom);
   /* How far the hold-to-talk card's halo reaches past its edge (`.voice-card-halo`): a phone's
@@ -49,6 +54,16 @@
     --voice-card-halo: 56px;
     --voice-overlay-halo: 24px;
   }
+}
+
+/* A sheet that ends at the phone tab bar's edge (`[data-tab-bar-sheet]`, the Apps drawer, z-[45])
+   draws the bar just above itself for as long as it is on screen, rising and sinking included, so
+   the circle the bar lifts above its edge is never cut off. The sheet keeps that circle's room at
+   its foot (`--mobile-nav-center-rise`). The pair stays below the modal layer (z-50 and up: a
+   dialog such as the new-session sheet, the main Bot's take, the sheets stacked over the drawer),
+   so anything opened over the drawer covers the bar as well. */
+body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
+  z-index: 46;
 }
 
 /* Height of the desktop shell's overlay title bar. On macOS the shell draws the

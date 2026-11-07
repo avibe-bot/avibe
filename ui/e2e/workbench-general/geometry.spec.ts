@@ -352,6 +352,114 @@ test.describe('workbench home geometry', () => {
   }
 });
 
+/**
+ * The phone's Apps drawer ends at the tab bar's top edge, and the main Bot's circle in
+ * the middle of the bar rises above that edge by `--mobile-nav-center-rise`. With the
+ * drawer open, the circle has to be what a finger lands on at its top, not the drawer
+ * cutting it off, and the drawer's last row has to sit that rise plus 16px above the
+ * bar, clear of the circle. Checked under the shipped rise and under another one: a bar
+ * or a drawer that kept its own number instead of reading the shared one fails there.
+ */
+test.describe('phone tab bar under the Apps drawer', () => {
+  test('draws the main Bot above the open drawer and keeps the drawer clear of it', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: false } }));
+    await page.route('**/api/dock', (route) => route.fulfill({ json: {
+      dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
+    } }));
+    await page.setViewportSize(NARROW);
+    await open(page, '/');
+
+    const nav = page.locator(MOBILE_NAV);
+    const center = nav.getByRole('button', { name: /^Vibey: / });
+    await expect(center).toBeVisible();
+    await nav.getByRole('button', { name: 'Apps', exact: true }).click();
+    const drawer = page.getByRole('dialog', { name: 'Apps' });
+    const sheet = drawer.locator('.motion-sheet');
+    await expect(sheet).toBeVisible();
+    await sheet.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+
+    const measure = () => page.evaluate((barSelector) => {
+      const bar = document.querySelector(barSelector)!;
+      const button = bar.querySelector('button[aria-label^="Vibey: "]')!;
+      const circle = button.firstElementChild!.getBoundingClientRect();
+      const drawer = document.querySelector('[role="dialog"][aria-label="Apps"] .motion-sheet')!;
+      const x = circle.left + circle.width / 2;
+      return {
+        rise: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--mobile-nav-center-rise')),
+        barTop: bar.getBoundingClientRect().top,
+        drawerBottom: drawer.parentElement!.getBoundingClientRect().bottom,
+        circleTop: circle.top,
+        lastRowBottom: drawer.lastElementChild!.getBoundingClientRect().bottom,
+        // What a tap 2px inside the circle's top edge lands on.
+        topmost: document.elementFromPoint(x, circle.top + 2)?.closest('button') === button,
+      };
+    }, MOBILE_NAV);
+
+    for (const rise of [null, '24px']) {
+      if (rise) {
+        await page.evaluate((value) => document.documentElement.style.setProperty('--mobile-nav-center-rise', value), rise);
+      }
+      const geometry = await measure();
+      if (rise) expect(geometry.rise).toBe(Number.parseFloat(rise));
+      expect(Math.abs(geometry.drawerBottom - geometry.barTop), 'the drawer ends at the bar').toBeLessThanOrEqual(0.5);
+      expect(Math.abs(geometry.barTop - geometry.circleTop - geometry.rise), 'the circle rises by the shared rise').toBeLessThanOrEqual(0.5);
+      expect(geometry.topmost, 'the circle draws above the drawer').toBe(true);
+      expect(Math.abs(geometry.circleTop - geometry.lastRowBottom - 16), 'the last row keeps 16px above the circle').toBeLessThanOrEqual(0.5);
+    }
+    await page.evaluate(() => document.documentElement.style.removeProperty('--mobile-nav-center-rise'));
+
+    // A tap on the part of the circle the drawer used to cover opens the main Bot's
+    // conversation, and leaving the page closes the drawer, as a tap anywhere on it did.
+    const { circleTop } = await measure();
+    const box = (await center.boundingBox())!;
+    await page.mouse.click(box.x + box.width / 2, circleTop + 4);
+    await expect(page).toHaveURL(/\/chat\/ses_main$/);
+    await expect(drawer).toHaveCount(0);
+    expect(denied).toEqual([]);
+  });
+
+  // The bar is raised only above the drawer, not above what opens over it: a member's
+  // center ＋ opens the new-session sheet with the drawer still up, and that sheet has to
+  // cover the bar, or the bar would sit on the sheet's own controls.
+  test('lets a sheet opened over the drawer cover the bar', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.route('**/api/session', (route) => route.fulfill({ json: {
+      ...MODEL_HUB_SESSION,
+      remote: true,
+      email: 'member@example.com',
+      instance_role: 'member',
+      capabilities: { ...MODEL_HUB_SESSION.capabilities, is_instance_owner: false, can_manage_instance: false },
+    } }));
+    await page.setViewportSize(NARROW);
+    await open(page, '/inbox');
+
+    const nav = page.locator(MOBILE_NAV);
+    await nav.getByRole('button', { name: 'Apps', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: 'Apps' }).locator('.motion-sheet')).toBeVisible();
+    await nav.getByRole('button', { name: 'New', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'New session' });
+    await expect(sheet).toBeVisible();
+    await sheet.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+    // Still mounted under the sheet (the sheet hides the page from assistive tech, so by selector).
+    await expect(page.locator('[role="dialog"][aria-label="Apps"] .motion-sheet')).toHaveCount(1);
+
+    const barBox = (await nav.boundingBox())!;
+    // What is painted on top there. The open sheet turns pointer events off for the page
+    // behind it, which would hide the bar from a hit test whatever its layer, so the probe
+    // makes the bar hit-testable again for the moment it asks.
+    const covered = await page.evaluate(([x, y]) => {
+      const bar = document.querySelector('nav.fixed.bottom-0') as HTMLElement;
+      bar.style.pointerEvents = 'auto';
+      const node = document.elementFromPoint(x, y);
+      bar.style.pointerEvents = '';
+      return { inBar: Boolean(node?.closest('nav')), inSheet: Boolean(node?.closest('[role="dialog"]:not([aria-label="Apps"])')) };
+    }, [barBox.x + 24, barBox.y + barBox.height / 2]);
+    expect(covered).toEqual({ inBar: false, inSheet: true });
+    expect(denied).toEqual([]);
+  });
+});
+
 test.describe('settings overlay geometry', () => {
   test('opens as a standalone zero-offset surface and gives the home back its draft on close', async ({ page }) => {
     const denied = await serveProduct(page);
