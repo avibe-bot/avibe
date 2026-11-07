@@ -4337,6 +4337,7 @@ class SQLiteBackgroundTaskStore:
         expected_updated_at: Optional[str] = None,
         expected_job_id: Optional[str] = None,
         terminal_error: Optional[str] = None,
+        drop_definition_resource_context: bool = False,
     ) -> Optional[dict[str, Any]]:
         """Enqueue one internally consistent snapshot of a live definition."""
 
@@ -4438,6 +4439,17 @@ class SQLiteBackgroundTaskStore:
                 metadata = _json_loads(definition["metadata_json"], {})
                 if not isinstance(metadata, dict):
                     metadata = {}
+                if (
+                    drop_definition_resource_context
+                    and values.get("run_type") == "scheduled"
+                    and definition["definition_type"] == "scheduled"
+                ):
+                    # Scheduled Task execution reloads the definition and authorizes from
+                    # its current metadata. Watch rows keep their per-run authority
+                    # snapshot because their hook request executes from the Run itself.
+                    from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+                    metadata.pop(RESOURCE_USER_CONTEXT_METADATA_KEY, None)
                 # Internal Run provenance: a definition's free-form metadata
                 # cannot claim that this enqueue owned the lifecycle transition.
                 metadata.pop(TASK_SCHEDULE_CONSUMED_METADATA_KEY, None)

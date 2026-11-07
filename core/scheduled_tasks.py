@@ -2719,6 +2719,7 @@ class TaskExecutionStore:
             agent_name=task.agent_name,
             session_policy=task.session_policy,
             metadata=metadata,
+            drop_definition_resource_context=True,
             suppress_scheduler_successor=suppress_scheduler_successor,
             expected_run_at=expected_run_at,
             expected_timezone=expected_timezone,
@@ -2747,6 +2748,7 @@ class TaskExecutionStore:
         source_actor: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
+        drop_definition_resource_context: bool = False,
         suppress_scheduler_successor: bool = False,
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
@@ -2754,6 +2756,11 @@ class TaskExecutionStore:
         expected_job_id: Optional[str] = None,
         terminal_error: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
+        run_metadata = dict(metadata or {})
+        if drop_definition_resource_context:
+            from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+            run_metadata.pop(RESOURCE_USER_CONTEXT_METADATA_KEY, None)
         request = TaskExecutionRequest(
             id=uuid4().hex[:12],
             request_type=run_type,
@@ -2769,7 +2776,7 @@ class TaskExecutionStore:
             parent_run_id=parent_run_id,
             agent_name=agent_name,
             session_policy=session_policy,
-            metadata=dict(metadata or {}),
+            metadata=run_metadata,
         )
         if self._sqlite is None:
             with self._file_enqueue_lock:
@@ -2787,6 +2794,7 @@ class TaskExecutionStore:
             expected_updated_at=expected_updated_at,
             expected_job_id=expected_job_id,
             terminal_error=terminal_error,
+            drop_definition_resource_context=drop_definition_resource_context,
         )
         if snapshot is None:
             return None
