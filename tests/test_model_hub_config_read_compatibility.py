@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
+from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock
 
 import pytest
@@ -394,11 +395,14 @@ def test_the_store_parses_the_config_once_until_the_file_changes(monkeypatch):
 
     first = store.load()
     for _ in range(5):
-        store.load()
+        assert store.load() is first
     assert len(parses) == 1
 
-    # What a caller loads is its own: changing it never reaches the snapshot.
-    first.sources.clear()
+    # Readers share a deeply read-only snapshot, including the first cold read.
+    with pytest.raises(FrozenInstanceError):
+        first.sources.clear()
+    with pytest.raises(FrozenInstanceError):
+        first.sources[0].models[0].id = "changed"
     assert [source.id for source in store.load().sources] == ["src_snapshot1"]
 
     # Another writer replaces the file: the next load reads it.
@@ -407,17 +411,21 @@ def test_the_store_parses_the_config_once_until_the_file_changes(monkeypatch):
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     assert store.load().sources[0].display_name == "另一个进程改的名字"
     assert len(parses) == 2
+    assert first.sources[0].display_name == "src_snapshot1"
 
     # A write through the store keeps what it committed, without reading the file back, and the reads after it parse
     # nothing.
-    edited = store.load()
+    edited = ModelHubConfig.from_payload(store.load().to_payload())
     edited.sources[0].display_name = "保存后的名字"
     with monkeypatch.context() as patched:
         patched.setattr(store, "_read", lambda _path: pytest.fail("a write read the file back"))
         store.save(edited)
         store.mutate(lambda hub: setattr(hub.sources[0], "display_name", "改过两次的名字") or True)
+    edited.sources[0].display_name = "not saved"
     after_writes = len(parses)
     assert store.load().sources[0].display_name == "改过两次的名字"
+    with pytest.raises(FrozenInstanceError):
+        store.load().sources[0].state.status = "active"
     assert store.load().sources[0].display_name == "改过两次的名字"
     assert len(parses) == after_writes
     assert V2ModelHubConfigStore().load().sources[0].display_name == "改过两次的名字"

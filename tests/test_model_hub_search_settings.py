@@ -215,8 +215,9 @@ def test_retargeted_source_keeps_its_opt_out_until_search_capability_returns(tmp
     assert hosted_tools.search_service_settings(loaded.hosted_tools["web_search"], loaded.sources[-1]) is None
     assert loaded.hosted_tools["web_search"].services[DEEPSEEK].enabled is False
     assert _web(service)["services"] == {}
-    loaded.sources[-1].base_url = None
-    service.store.save(loaded)
+    edited = ModelHubConfig.from_payload(loaded.to_payload())
+    edited.sources[-1].base_url = None
+    service.store.save(edited)
     restored = V2ModelHubConfigStore().load()
     assert hosted_tools.search_service_settings(restored.hosted_tools["web_search"], restored.sources[-1])["enabled"] is False
     assert _web(service)["services"] == {DEEPSEEK: {"enabled": False}}
@@ -458,7 +459,7 @@ async def test_active_service_read_validates_without_paid_calls(tmp_path):
     visible = _web(service)
     assert visible["prefer_native"] is True
     assert {row["kind"] for row in visible["executor_candidates"]} == {"service", "model"}
-    config = service.store.load()
+    config = ModelHubConfig.from_payload(service.store.load().to_payload())
     config.sources[-1].billing = "monthly"  # Model billing does not make the separate search API included.
     config.sources[2].state = ModelHubSourceStateConfig(
         status="needs_action", detail_key="models.source.needs_action.balance_exhausted")

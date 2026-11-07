@@ -7761,8 +7761,11 @@ def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
         assert [model.id for model in persisted.models] == ["claude-opus-4-6"]
         assert on_irreversible_start is not None
         on_irreversible_start()
-        assert persisted.state.status == "needs_action"
-        assert persisted.models == []
+        # The old reader stays stable; re-read to observe the committed edit.
+        assert persisted.state.status == "standby"
+        committed = store.load().sources[0]
+        assert committed.state.status == "needs_action"
+        assert committed.models == []
         return await original_start_reauth(source_id, vendor)
 
     adapter.start_reauth = assert_source_unavailable_before_logout

@@ -27,6 +27,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
 from config.atomic_io import write_atomic
+from config.model_hub_snapshot import ModelHubSnapshotNode
 from config.platform_registry import (
     WORKBENCH_PLATFORM_ID,
     get_platform_descriptor,
@@ -2153,7 +2154,7 @@ def _collapse_settled_duplicates(
 
 
 @dataclass
-class ModelHubModelConfig:
+class ModelHubModelConfig(ModelHubSnapshotNode):
     id: str
     provenance: Literal["discovered", "manual"]
     reasoning_efforts: list[str] = field(default_factory=list)
@@ -2268,7 +2269,7 @@ class ModelHubModelConfig:
 
 
 @dataclass
-class ModelHubSourceStateConfig:
+class ModelHubSourceStateConfig(ModelHubSnapshotNode):
     status: Literal["active", "standby", "cooldown", "needs_action", "error"] = "standby"
     retry_at: Optional[str] = None
     detail_key: Optional[str] = None
@@ -2327,7 +2328,7 @@ class ModelHubSourceStateConfig:
 
 
 @dataclass
-class ModelHubSourceUsageConfig:
+class ModelHubSourceUsageConfig(ModelHubSnapshotNode):
     cycle_used_pct: Optional[float] = None
     month_spend_cents: Optional[int] = None
     currency: Optional[str] = None
@@ -2380,7 +2381,7 @@ class ModelHubSourceUsageConfig:
 
 
 @dataclass
-class ModelHubSourceConfig:
+class ModelHubSourceConfig(ModelHubSnapshotNode):
     id: str
     kind: Literal["subscription", "api_key"]
     vendor: str
@@ -2616,7 +2617,7 @@ class ModelHubRouteHopConfig:
 
 
 @dataclass
-class ModelHubRouteConfig:
+class ModelHubRouteConfig(ModelHubSnapshotNode):
     hops: tuple[ModelHubRouteHopConfig, ...] = ()
     cache_ttl: Optional[Literal["5m", "30m", "1h", "12h"]] = None
 
@@ -2660,7 +2661,7 @@ def normalized_model_hub_override(route: ModelHubRouteConfig | None) -> ModelHub
 
 
 @dataclass
-class ModelHubMenuConfig:
+class ModelHubMenuConfig(ModelHubSnapshotNode):
     view: Literal["featured", "full"] = "featured"
     checked: list[str] = field(default_factory=list)
 
@@ -2695,7 +2696,7 @@ _BACKEND_MODEL_OUTPUT_MODALITIES = frozenset(
 
 
 @dataclass
-class ModelHubBackendModelConfig:
+class ModelHubBackendModelConfig(ModelHubSnapshotNode):
     id: str
     origin: Literal["builtin", "provider", "models_dev", "manual"] = "manual"
     display_name: Optional[str] = None
@@ -2901,7 +2902,7 @@ def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
 
 
 @dataclass
-class ModelHubAgentSourcesConfig:
+class ModelHubAgentSourcesConfig(ModelHubSnapshotNode):
     order: list[str] = field(default_factory=list)
 
     @classmethod
@@ -2922,7 +2923,7 @@ class ModelHubAgentSourcesConfig:
 
 
 @dataclass
-class ModelHubAgentSupplyConfig:
+class ModelHubAgentSupplyConfig(ModelHubSnapshotNode):
     backend: AgentBackend
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
@@ -3557,7 +3558,7 @@ def hosted_tool_setting(config: "ModelHubConfig", tool: str) -> ModelHubHostedTo
 
 
 @dataclass
-class ModelHubConfig:
+class ModelHubConfig(ModelHubSnapshotNode):
     # New installations enable the runtime. Disk loading promotes pre-marker
     # installations once; a later explicit stop remains a deliberate opt-out.
     enabled: bool = True
