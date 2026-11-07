@@ -69,7 +69,9 @@ orphan settlement, and a new global writer system or disk recovery journal.
   same lock and respects the existing output grace. New pending work rewinds the
   lane cursor. The AgentService idle sweep retains failed Run-notification/ack
   operations. Deferred settlement rechecks durable sibling Activity blockers
-  under its writer reservation.
+  under its writer reservation. Terminal-ack compensation retains its exact
+  committed restoration payload until replacement or cleanup commits; retry
+  cannot repeat the insert or abandon cleanup when the loop snapshot changes.
 - Message mirrors freeze original inputs, retry the complete scope/message/media
   transaction, then publish once on the caller loop. Show backfill uses its
   existing ordered worker, without making synchronous Turn lifecycle hooks async.
@@ -116,5 +118,11 @@ suite passed 714 tests; the integrated Activity/registry/Claude/activation/dispa
 suite passed 436 tests and 35 subtests (Python 3.12.16, SQLite 3.53.1).
 Recovery coverage includes a failed native completion delivered exactly once
 without another native event, both with immediate pickup and with output grace.
-Changed-file Ruff and `git diff --check` passed. All checks use isolated state;
+Changed-file Ruff and `git diff --check` passed. Five additional terminal-ack
+stage cases cover replacement after a committed restore, cleanup of both tagged
+and normalized payloads, preserving a durable successor, and a provenance retry
+that replaces the tag with the same loop snapshot. The first four fail on the
+pre-fix implementation; the fifth fails on a guard-only repair that does not
+invalidate ownership after a refused CAS. Their Activity/service/Claude/dispatcher
+consumer suite passed 457 tests and 20 subtests. All checks use isolated state;
 PR CI and exact-head Codex review remain delivery gates.

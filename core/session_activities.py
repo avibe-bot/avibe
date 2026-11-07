@@ -2663,15 +2663,16 @@ class SessionActivityRegistry:
 
         key = self._activity_key(activity)
         with self._lock:
-            current = self._terminal_snapshots.get(key[:2], {}).get(key[2])
-            if current is None or current.metadata.get("provenance_pending"):
-                return False
             pending = self._pending_terminal_acks.get(key)
-            if pending is None or (
-                not pending.deleted and pending.expected is not current
-            ):
-                pending = _PendingRecoveredTerminalAck(key=key, expected=current)
-                self._pending_terminal_acks[key] = pending
+            if pending is None or not pending.deleted:
+                current = self._terminal_snapshots.get(key[:2], {}).get(key[2])
+                if current is None or current.metadata.get("provenance_pending"):
+                    return False
+                if pending is None or pending.expected is not current:
+                    pending = _PendingRecoveredTerminalAck(key=key, expected=current)
+                    self._pending_terminal_acks[key] = pending
+            # A committed deletion/restore still owns compensation after the
+            # loop snapshot changes or disappears.
         return await self._run_pending_terminal_ack(pending, run_sync=run_sync)
 
     async def _run_pending_terminal_ack(
@@ -2720,32 +2721,35 @@ class SessionActivityRegistry:
                     raise RuntimeError("Recovered terminal snapshot changed or disappeared")
                 pending.deleted = True
 
-            with self._lock:
-                current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
-                if current is pending.expected or current is None:
-                    self._remove_recovered_terminal_locked(pending.key)
-                    self._pending_terminal_acks.pop(pending.key, None)
-                    return True
-                pending.replacement = current
-                pending.restored = replace(
-                    current,
-                    metadata={
-                        **deepcopy(current.metadata),
-                        "_terminal_ack_restore_id": pending.token,
-                    },
-                )
+            if not pending.restored_inserted:
+                with self._lock:
+                    current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
+                    if current is pending.expected or current is None:
+                        self._remove_recovered_terminal_locked(pending.key)
+                        self._pending_terminal_acks.pop(pending.key, None)
+                        return True
+                    pending.replacement = current
+                    pending.restored = replace(
+                        current,
+                        metadata={
+                            **deepcopy(current.metadata),
+                            "_terminal_ack_restore_id": pending.token,
+                        },
+                    )
 
-            pending.restored_inserted = await self._restore_terminal_store_step(
-                pending.restored,
-                TERMINAL_SNAPSHOT_PHASE,
-                run_sync,
-            )
+                pending.restored_inserted = await self._restore_terminal_store_step(
+                    pending.restored,
+                    TERMINAL_SNAPSHOT_PHASE,
+                    run_sync,
+                )
+            # Keep the exact last committed payload across a later BUSY. Repeating
+            # insert-if-missing would return False and discard our restoration.
 
             with self._lock:
                 current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
                 replacement = pending.replacement
             if current is replacement:
-                if pending.restored_inserted:
+                if pending.restored_inserted and pending.restored is not replacement:
                     updated = await self._completion_store_step(
                         pending.restored,
                         TERMINAL_SNAPSHOT_PHASE,
@@ -2754,6 +2758,10 @@ class SessionActivityRegistry:
                         run_sync,
                     )
                     if not updated:
+                        # A successful CAS refusal (unlike BUSY exhaustion) means
+                        # another writer replaced our tagged row. Recheck insert
+                        # ownership next pass without overwriting that winner.
+                        pending.restored_inserted = False
                         raise RuntimeError("Terminal snapshot compensation lost its owner")
                     pending.restored = replacement
                     pending.restored_inserted = True

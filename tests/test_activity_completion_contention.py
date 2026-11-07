@@ -12,6 +12,7 @@ import asyncio
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -258,6 +259,111 @@ async def test_terminal_ack_offloads_delete_and_keeps_loop_responsive(activity_s
         release.join()
         holder.close()
         await asyncio.gather(task, ticker, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    ("blocked_stage", "next_owner"),
+    [("replacement", "same"), ("tagged_cleanup", "gone"),
+     ("untagged_cleanup", "gone"), ("replacement", "successor"),
+     ("replacement", "provenance_retry")],
+)
+async def test_terminal_ack_resumes_committed_compensation_without_reinserting(
+    activity_store, monkeypatch, blocked_stage, next_owner,
+):
+    """A later BUSY must not erase the receipt for an earlier committed stage.
+
+    Ordinary ack tests never replace the loop snapshot during deletion or fail
+    the CAS after restoration. Exercise every committed compensation payload,
+    then prove another acknowledgement can still remove the exact durable row.
+    """
+    _no_wait(activity_store)
+    registry = SessionActivityRegistry(activity_store)
+    _start(registry)
+    completed = registry.complete(
+        backend="claude", runtime_key="runtime", activity_id="task",
+        status="failed", retain_terminal_snapshot=True,
+    )
+    replacement = replace(completed, metadata={"classification": "new"})
+    restore = activity_store.restore_activity_if_missing
+    restorations = []
+
+    def record_restore(**kwargs):
+        result = restore(**kwargs)
+        restorations.append(result)
+        return result
+
+    monkeypatch.setattr(activity_store, "restore_activity_if_missing", record_restore)
+    busy = []
+
+    @event.listens_for(activity_store.engine, "handle_error")
+    def contended(context):
+        if str(context.original_exception) == "database is locked":
+            busy.append(context.statement)
+
+    holder = None
+    steps = 0
+
+    async def run_sync(operation):
+        nonlocal holder, steps
+        result = await asyncio.to_thread(operation)
+        steps += 1
+        if steps == 1:
+            # Inject only the loop-owned snapshot change while deletion lands.
+            # Persistence/restore/replacement/cleanup still use the real store.
+            with registry._lock:
+                registry._terminal_snapshots[("claude", "runtime")]["task"] = replacement
+        if (steps == 2 and blocked_stage != "untagged_cleanup") or (
+            steps == 3 and blocked_stage == "untagged_cleanup"
+        ):
+            if blocked_stage != "replacement":
+                with registry._lock:
+                    registry._remove_recovered_terminal_locked(("claude", "runtime", "task"))
+            holder = _holder()
+        return result
+
+    try:
+        with pytest.raises(OperationalError):
+            await registry.ack_recovered_terminal_async(completed, run_sync=run_sync)
+        assert len(busy) == 3
+        assert restorations == [True]
+        [landed] = activity_store.list_activities()
+        assert ("_terminal_ack_restore_id" in landed["activity"]["metadata"]) == (
+            blocked_stage != "untagged_cleanup"
+        )
+    finally:
+        if holder is not None:
+            holder.close()
+
+    if next_owner == "successor":
+        replacement = replace(replacement, metadata={"classification": "successor"})
+        with registry._lock:
+            registry._terminal_snapshots[("claude", "runtime")]["task"] = replacement
+        activity_store.upsert_activity(replacement.to_dict(), phase="terminal")
+    elif next_owner == "provenance_retry":
+        with registry._lock:
+            registry._record_provenance_persistence_recovery(
+                replacement, phase="terminal", error=RuntimeError("classification write failed"),
+            )
+        # This public scan retries provenance and overwrites our tag with the
+        # same loop snapshot. A refused CAS means lost ownership, not BUSY.
+        assert registry.terminal_snapshots_for_runtime("claude", "runtime") == [replacement]
+        with pytest.raises(RuntimeError, match="compensation lost its owner"):
+            await registry.ack_recovered_terminal_async(completed)
+
+    assert await registry.ack_recovered_terminal_async(completed) is False
+    if next_owner == "provenance_retry":
+        assert restorations == [True, False], "lost ownership must be rechecked without overwriting the winner"
+    else:
+        assert restorations == [True], "a committed insert is not a replayable stage"
+    assert registry._pending_terminal_acks == {}
+    if next_owner == "gone":
+        assert activity_store.list_activities() == []
+    else:
+        [durable] = activity_store.list_activities()
+        assert durable["activity"] == replacement.to_dict()
+        assert await registry.ack_recovered_terminal_async(replacement) is True
+        assert activity_store.list_activities() == []
+    assert registry.terminal_snapshots_for_runtime("claude", "runtime") == []
 
 
 async def test_exhausted_completion_reconciles_its_frozen_intent_and_sends_only_once(activity_store, monkeypatch):
