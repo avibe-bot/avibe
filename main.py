@@ -20,6 +20,7 @@ from vibe.service_logging import (
     shutdown_service_logging,
 )
 from vibe.macos_session_diagnostics import start_macos_session_diagnostics
+from vibe.process_limits import raise_open_file_limit
 from vibe.runtime import (
     ServiceAlreadyRunningError,
     acquire_service_instance_lock,
@@ -177,6 +178,8 @@ def main():
     controller = None
     shutdown_intent = None
     try:
+        # Before anything opens files, and inherited by every Agent and worker.
+        raise_open_file_limit()
         acquire_service_instance_lock()
         lock_acquired = True
 

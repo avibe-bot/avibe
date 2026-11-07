@@ -18665,6 +18665,10 @@ def run_ui_server(host: str, port: int) -> None:
     # Direct/container entry and reload must pass the same admission boundary
     # as start_ui, before config reconciliation or any serving/background work.
     runtime.register_ui_start()
+    # A page that embeds many frames opens hundreds of files at once.
+    from vibe.process_limits import raise_open_file_limit
+
+    raise_open_file_limit()
     paths.ensure_data_dirs()
     config = None
     config_load_error = None
