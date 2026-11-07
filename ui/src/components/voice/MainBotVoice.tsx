@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
+import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { BotAvatar } from '../ui/bot-avatar';
 import type { useHoldToTalk } from './useHoldToTalk';
 import { VoiceCancelTarget, VoiceCard, VoiceInterruptedActions, VoiceClose } from './VoiceCard';
@@ -25,6 +26,8 @@ export type HoldView = Pick<
   level?: VoiceLevelSource | null;
   /** Live recognition is not working for this take. */
   liveUnavailable?: boolean;
+  /** How the take is recorded: through Web Audio, without it, or without it and getting no sound. */
+  captureState?: VoiceCaptureState;
 };
 type Hold = HoldView;
 type MainBot = { name: string; avatar: BotAvatarSpec | null };
@@ -50,6 +53,7 @@ export function MainBotHoldOverlay({ hold, bot }: { hold: Hold; bot: MainBot }) 
           reason={hold.interruptReason ?? 'dropped'}
           level={hold.level}
           liveUnavailable={hold.liveUnavailable}
+          captureState={hold.captureState}
           onCancel={hold.cancelSettling}
           actions={
             <VoiceInterruptedActions
@@ -97,6 +101,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
         {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
         {(outcome === 'cancelled' || outcome === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'too-short' || outcome === 'asking') && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
+        {(outcome === 'no-sound' || outcome === 'mic-busy') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
         {(outcome === 'denied' || failed) && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
         {outcome === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
@@ -119,6 +124,8 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
               {outcome === 'cancelled' && <span className="text-foreground">{t('voice.cancelled')}</span>}
               {outcome === 'kept' && <span className="text-foreground">{t('voice.cancelledKept', { name: bot.name })}</span>}
               {outcome === 'too-short' && <span className="text-foreground">{t('voice.tooShort')}</span>}
+              {outcome === 'no-sound' && <span className="text-foreground">{t('voice.noSound')}</span>}
+              {outcome === 'mic-busy' && <span className="text-foreground">{t('voice.micBusy')}</span>}
               {outcome === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
               {outcome === 'denied' && (
                 <>

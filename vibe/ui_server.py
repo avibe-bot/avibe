@@ -12849,14 +12849,16 @@ _VOICE_CONTEXT_STATES = {"running", "suspended", "interrupted", "closed", "other
 _VOICE_TRACK_STATES = {"none", "ended", "live", "live_muted", "live_disabled", "live_muted_disabled"}
 _VOICE_AUDIO_SESSION_STATES = {"active", "interrupted", "inactive"}
 _VOICE_CAPTURE_ATTEMPT_ENUMS = {
-    "kind": {"initial", "start_rebuild", "context", "microphone"},
+    # "microphone": a fresh microphone, which earlier releases tried.
+    "kind": {"initial", "start_rebuild", "context", "microphone", "recorder"},
     "mic": _VOICE_MIC_RESULTS,
     "contextState": _VOICE_CONTEXT_STATES,
     "resumedState": _VOICE_CONTEXT_STATES,
     "module": {"prewarmed", "ok", "failed"},
     "trackStart": _VOICE_TRACK_STATES,
     "trackEnd": _VOICE_TRACK_STATES,
-    "end": {"rendered", "no_frames", "not_running", "stopped", "error"},
+    "end": {"rendered", "no_frames", "stalled", "not_running", "stopped", "error"},
+    "engine": {"healthy", "stalled", "unknown"},
 }
 _VOICE_CAPTURE_ATTEMPT_INTS = {
     "atMs",
@@ -12872,7 +12874,8 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     "emptyInputs",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
-_VOICE_CAPTURE_MAX_ATTEMPTS = 6
+_VOICE_CAPTURE_MAX_ATTEMPTS = 8
+_VOICE_CAPTURE_MAX_STALLED_RATES = 4
 _VOICE_CAPTURE_MAX_TRACK_EVENTS = 24
 
 
@@ -12931,6 +12934,15 @@ def _sanitize_voice_capture_lists(payload: dict[str, Any]) -> tuple[dict[str, An
         ):
             return {}, "recorderTypes"
         sanitized["recorderTypes"] = list(types)
+    if "stalledRates" in payload:
+        rates = payload["stalledRates"]
+        if (
+            not isinstance(rates, list)
+            or len(rates) > _VOICE_CAPTURE_MAX_STALLED_RATES
+            or not all(_voice_count(rate) and 1 <= rate <= 1_000_000 for rate in rates)
+        ):
+            return {}, "stalledRates"
+        sanitized["stalledRates"] = list(rates)
     return sanitized, None
 
 
@@ -12980,13 +12992,16 @@ def asr_telemetry():
         "providerStage": {"token", "upload", "refresh", "response", "finalization"},
         "browserFamily": {"chrome", "firefox", "edge", "safari", "other", "unknown"},
         "entry": {"tap", "hold", "show_page"},
-        "captureClass": {"no_microphone", "no_frames", "muted", "silence", "sound"},
+        "captureClass": {"no_microphone", "no_frames", "muted", "silence", "sound", "recorded"},
         "interruptReason": {"dropped", "failed", "system", "send-failed"},
         "surface": {"app_shell", "standalone", "mobile_browser", "desktop_browser"},
         "stop": {"finish", "hidden", "abort", "error"},
         "mic": _VOICE_MIC_RESULTS,
         "prewarm": {"reused", "none"},
-        "prewarmDrop": {"hidden", "state", "constructor", "module_failed"},
+        "prewarmDrop": {"hidden", "state", "constructor", "module_failed", "stalled", "rate"},
+        "fallback": {"recorder"},
+        "fallbackLevel": {"L1", "L0", "L4"},
+        "recorderType": _VOICE_RECORDER_TYPES,
         "audioSession": {"auto", "playback", "transient", "transient-solo", "ambient", "play-and-record"},
         "audioSessionState": _VOICE_AUDIO_SESSION_STATES,
         "audioSessionStateEnd": _VOICE_AUDIO_SESSION_STATES,
@@ -13049,6 +13064,12 @@ def asr_telemetry():
         "prewarmAgeMs",
         "chunks",
         "levels",
+        "preferredRate",
+        "contextSampleRate",
+        "recorderChunks",
+        "recorderBytes",
+        "decodedSegments",
+        "fileSegments",
     }
     for key in integer_fields:
         if key not in payload:
@@ -13087,6 +13108,11 @@ def asr_telemetry():
         if not isinstance(payload["realtime"], bool):
             return jsonify({"error": "invalid_field", "field": "realtime"}), 400
         sanitized["realtime"] = payload["realtime"]
+
+    if "pageStalled" in payload:
+        if not isinstance(payload["pageStalled"], bool):
+            return jsonify({"error": "invalid_field", "field": "pageStalled"}), 400
+        sanitized["pageStalled"] = payload["pageStalled"]
 
     capture_lists, invalid = _sanitize_voice_capture_lists(payload)
     if invalid:

@@ -1,6 +1,7 @@
 import { isNativeShell } from './native';
 import { isStandalonePwa } from './platform';
 import { createVoiceActivity } from './voiceActivity';
+import { preferredVoiceSampleRate } from './voiceEngine';
 import { emitVoiceTelemetry, type VoiceTelemetryOutcome } from './voiceTelemetry';
 
 // One take's capture, from the press to the end of the microphone, for the reliability log
@@ -18,20 +19,21 @@ export type VoiceCaptureSurface = 'app_shell' | 'standalone' | 'mobile_browser' 
  * What the microphone delivered. `no_frames`: the audio graph never rendered, so the take holds
  * no sound at all. `muted`: the system held the microphone back (a call, another app, Siri).
  * `silence`: sound arrived and none of it was speech. `sound`: it may hold speech.
+ * `recorded`: recorded without Web Audio in a form this browser could not decode, so not judged.
  * `no_microphone`: the microphone was never opened.
  */
-export type VoiceCaptureClass = 'no_microphone' | 'no_frames' | 'muted' | 'silence' | 'sound';
+export type VoiceCaptureClass = 'no_microphone' | 'no_frames' | 'muted' | 'silence' | 'sound' | 'recorded';
 
-/** How one audio graph was tried: the take's own, its rebuild when it did not start, then the
- *  two in-take recoveries from a graph that delivered nothing (a fresh context, then a fresh
- *  microphone too). */
-export type VoiceCaptureAttemptKind = 'initial' | 'start_rebuild' | 'context' | 'microphone';
+/** How the take was recorded: the take's own audio graph, its rebuild when it did not start, a
+ *  fresh context (when a graph rendered nothing, or a prewarmed one stalled), or a MediaRecorder
+ *  without Web Audio (lib/voiceRecorderFallback). */
+export type VoiceCaptureAttemptKind = 'initial' | 'start_rebuild' | 'context' | 'recorder';
 
 /** A microphone track as the take saw it. */
 export type VoiceTrackState = 'none' | 'ended' | 'live' | 'live_muted' | 'live_disabled' | 'live_muted_disabled';
 
 /** Why a prewarmed audio context was not used for this take. */
-export type VoicePrewarmDrop = 'hidden' | 'state' | 'constructor' | 'module_failed';
+export type VoicePrewarmDrop = 'hidden' | 'state' | 'constructor' | 'module_failed' | 'stalled' | 'rate';
 
 const MIC_ERRORS = new Set([
   'NotAllowedError',
@@ -142,11 +144,14 @@ export type VoiceCaptureAttempt = {
   clockAdvanceMs?: number;
   renderCalls?: number;
   emptyInputs?: number;
+  /** The engine check on this graph's context (lib/voiceEngine): its clock moved, stood still
+   *  while it ran, or it never ran to be judged. */
+  engine?: 'healthy' | 'stalled' | 'unknown';
   trackStart: VoiceTrackState;
   trackEnd?: VoiceTrackState;
-  /** How it ended: frames came, none came in the render window, the context never rendered,
-   *  the take stopped first, or it failed. */
-  end?: 'rendered' | 'no_frames' | 'not_running' | 'stopped' | 'error';
+  /** How it ended: frames came, none came in the render window, its clock stood still, the
+   *  context never rendered, the take stopped first, or it failed. */
+  end?: 'rendered' | 'no_frames' | 'stalled' | 'not_running' | 'stopped' | 'error';
 };
 
 export type VoiceCaptureTraceEvent = {
@@ -172,6 +177,26 @@ export type VoiceCaptureTraceEvent = {
   audioSessionStateEnd?: string;
   /** The audio formats this device's MediaRecorder can record; empty without one. */
   recorderTypes: string[];
+  /** The page's real-time audio was known to stand still when the take started: it was recorded
+   *  without Web Audio from its first moment. */
+  pageStalled?: boolean;
+  /** The sample rate the page had found rendering where the default stalled, when the take began. */
+  preferredRate?: number;
+  /** What carried the take after its context stalled: `L1` a fresh context at the same rate (the
+   *  stalled one was stale), `L0` a context at another rate, `L4` a recording without Web Audio. */
+  fallbackLevel?: 'L1' | 'L0' | 'L4';
+  /** The rates whose contexts ran with their clocks standing still in this take. */
+  stalledRates?: number[];
+  /** The rate of the context whose graph carried the take's sound. */
+  contextSampleRate?: number;
+  /** Recorded without Web Audio: in what format, how many data events and bytes came, and how many
+   *  segments were decoded to PCM or kept as files. */
+  fallback?: 'recorder';
+  recorderType?: string;
+  recorderChunks?: number;
+  recorderBytes?: number;
+  decodedSegments?: number;
+  fileSegments?: number;
   chunks: number;
   levels: number;
   peakDbfs?: number;
@@ -201,6 +226,11 @@ export class VoiceCaptureTrace {
   private chunks = 0;
   private levels = 0;
   private mutedEver = false;
+  private stalledAtStart = false;
+  private readonly preferredRate = preferredVoiceSampleRate();
+  private fallbackLevel: VoiceCaptureTraceEvent['fallbackLevel'];
+  private readonly stalledRates = new Set<number>();
+  private recorder: { type?: string; chunks: number; bytes: number; decoded: number; files: number } | null = null;
   private stopKind: VoiceCaptureTraceEvent['stop'];
   private emitted = false;
 
@@ -245,10 +275,10 @@ export class VoiceCaptureTrace {
     return this.startedAt + attempt.atMs;
   }
 
+  /** A chunk of frames from `attempt`'s graph (or its recording). */
   frames(attempt: VoiceCaptureAttempt): void {
     if (attempt.chunks === 0) attempt.firstFrameMs = ms(now() - this.attemptStart(attempt));
     attempt.chunks += 1;
-    this.chunks += 1;
   }
 
   level(attempt: VoiceCaptureAttempt): void {
@@ -256,8 +286,10 @@ export class VoiceCaptureTrace {
     this.levels += 1;
   }
 
-  /** The take's PCM, judged by the silence gate like the take's own (lib/voiceActivity). */
+  /** A chunk of the take's PCM, as the pipeline took it in: counted, and judged by the silence
+   *  gate like the take's own (lib/voiceActivity). */
   observePcm(samples: Int16Array): void {
+    this.chunks += 1;
     this.activity.observePcm(samples);
   }
 
@@ -265,6 +297,39 @@ export class VoiceCaptureTrace {
     if (attempt.end) return;
     attempt.end = end;
     attempt.trackEnd = voiceTrackState(stream);
+  }
+
+  /** The take started on a page whose real-time audio was known to stand still. */
+  pageStalled(): void {
+    this.stalledAtStart = true;
+  }
+
+  rescued(level: NonNullable<VoiceCaptureTraceEvent['fallbackLevel']>): void {
+    this.fallbackLevel = level;
+  }
+
+  /** A context at `sampleRate` ran with its clock standing still. */
+  stalledRate(sampleRate: number): void {
+    if (Number.isFinite(sampleRate) && sampleRate > 0) this.stalledRates.add(sampleRate);
+  }
+
+  /** The take is now recorded without Web Audio, as `type` (the browser's default without one). */
+  recorderStarted(type: string | undefined): void {
+    this.micResult ??= 'ok';
+    this.recorder ??= { chunks: 0, bytes: 0, decoded: 0, files: 0 };
+    if (type && RECORDER_TYPES.includes(type as (typeof RECORDER_TYPES)[number])) this.recorder.type = type;
+  }
+
+  recorderData(bytes: number): void {
+    if (!this.recorder) return;
+    this.recorder.chunks += 1;
+    this.recorder.bytes += Math.max(0, Math.round(bytes));
+  }
+
+  recorderSegment(decoded: boolean): void {
+    if (!this.recorder) return;
+    if (decoded) this.recorder.decoded += 1;
+    else this.recorder.files += 1;
   }
 
   stoppedBy(stop: NonNullable<VoiceCaptureTraceEvent['stop']>): void {
@@ -290,6 +355,8 @@ export class VoiceCaptureTrace {
     const sound = !this.activity.silent() && this.activity.peak() > 0;
     if (sound) return 'sound';
     if (this.mutedEver) return 'muted';
+    // Audio this browser could not decode was not judged: it is transcribed as it is.
+    if (this.recorder && this.recorder.files > 0) return 'recorded';
     return this.chunks === 0 ? 'no_frames' : 'silence';
   }
 
@@ -321,6 +388,24 @@ export class VoiceCaptureTrace {
       ...(this.audioSessionStateStart ? { audioSessionState: this.audioSessionStateStart } : {}),
       ...(stateEnd ? { audioSessionStateEnd: stateEnd } : {}),
       recorderTypes: this.recorderTypes.slice(),
+      ...(this.stalledAtStart ? { pageStalled: true } : {}),
+      ...(this.preferredRate !== undefined ? { preferredRate: this.preferredRate } : {}),
+      ...(this.fallbackLevel ? { fallbackLevel: this.fallbackLevel } : {}),
+      ...(this.stalledRates.size ? { stalledRates: [...this.stalledRates].sort((a, b) => a - b) } : {}),
+      ...(() => {
+        const carried = [...this.attempts].reverse().find((attempt) => attempt.kind !== 'recorder' && attempt.chunks > 0);
+        return carried?.sampleRate ? { contextSampleRate: carried.sampleRate } : {};
+      })(),
+      ...(this.recorder
+        ? {
+            fallback: 'recorder' as const,
+            ...(this.recorder.type ? { recorderType: this.recorder.type } : {}),
+            recorderChunks: this.recorder.chunks,
+            recorderBytes: this.recorder.bytes,
+            decodedSegments: this.recorder.decoded,
+            fileSegments: this.recorder.files,
+          }
+        : {}),
       chunks: this.chunks,
       levels: this.levels,
       ...(this.chunks > 0 ? { peakDbfs: peak > 0 ? Math.max(-200, Math.min(0, Math.round(20 * Math.log10(peak)))) : -200 } : {}),

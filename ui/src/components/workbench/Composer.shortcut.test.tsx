@@ -12,7 +12,7 @@ type VoiceStopped = (
   reason: 'finish' | 'abort' | 'error',
   metadata: { pendingSegmentCount: number },
 ) => void;
-type VoiceSegment = (blob: Blob, metadata: { durationMs: number; final: boolean }) => void;
+type VoiceSegment = (blob: Blob, metadata: { durationMs: number; final: boolean; unjudged?: boolean }) => void;
 
 const voiceMocks = vi.hoisted(() => ({
   abort: vi.fn(),
@@ -22,7 +22,8 @@ const voiceMocks = vi.hoisted(() => ({
   onStopped: undefined as VoiceStopped | undefined,
   onError: undefined as ((error: unknown) => void) | undefined,
   onPcm: undefined as ((samples: Int16Array) => void) | undefined,
-  trace: undefined as { entry: string; dictationId?: string } | undefined,
+  trace: undefined as { entry: string; dictationId?: string; observePcm: (samples: Int16Array) => void } | undefined,
+  onCaptureState: undefined as ((state: 'live' | 'recorder' | 'no_sound') => void) | undefined,
   pipelineStart: vi.fn(),
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
@@ -54,13 +55,19 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
       onSegment: VoiceSegment;
       onError?: (error: unknown) => void;
       onPcm?: (samples: Int16Array) => void;
-      trace?: { entry: string; dictationId?: string };
+      trace?: { entry: string; dictationId?: string; observePcm: (samples: Int16Array) => void };
+      onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
     }) {
       voiceMocks.trace = options.trace;
+      voiceMocks.onCaptureState = options.onCaptureState;
       voiceMocks.onSegment = options.onSegment;
       voiceMocks.onStopped = options.onStopped;
       voiceMocks.onError = options.onError;
-      voiceMocks.onPcm = options.onPcm;
+      // As the pipeline does: what it takes in goes into the take's trace, then to the take.
+      voiceMocks.onPcm = (samples) => {
+        options.trace?.observePcm(samples);
+        options.onPcm?.(samples);
+      };
     }
 
     start = voiceMocks.pipelineStart;
@@ -563,6 +570,70 @@ describe('Composer voice shortcut', () => {
         .find((event) => event.event === 'dictation_gated');
       expect(gate).toMatchObject({ outcome: 'empty', voicedReadings: 0, peakDbfs: -50 });
       expect(Object.keys(gate)).not.toContain('text');
+    });
+
+    it('leaves live recognition for a take recorded without Web Audio: its words come when it ends', async () => {
+      renderComposer('recorder-session');
+      await screen.findByRole('button', { name: en.chat.compose.voice });
+      const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+      await act(async () => undefined);
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+
+      act(() => voiceMocks.onCaptureState?.('recorder'));
+      expect(voiceMocks.realtimeAbort).toHaveBeenCalledOnce();
+      act(() => voiceMocks.onCaptureState?.('no_sound'));
+      expect(voiceMocks.realtimeAbort).toHaveBeenCalledOnce();
+    });
+
+    it('says a microphone that delivered no sound did so, not that nothing was said', async () => {
+      renderComposer('soundless-session');
+      await screen.findByRole('button', { name: en.chat.compose.voice });
+      const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+      await act(async () => undefined);
+
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      // Not one frame reached the take, and nothing was recorded without Web Audio either.
+      act(() => {
+        voiceMocks.onStopped?.('finish', { pendingSegmentCount: 0 });
+      });
+
+      expect(await screen.findByText(en.chat.compose.voiceNoSound)).toBeTruthy();
+      expect(screen.queryByText(en.chat.compose.voiceEmpty)).toBeNull();
+      const finalized = apiFetch.mock.calls
+        .filter(([path]) => path === '/api/asr/telemetry')
+        .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+        .find((event) => event.event === 'dictation_finalized');
+      expect(finalized).toMatchObject({ outcome: 'empty', segmentCount: 0 });
+    });
+
+    it('does not judge audio this browser could not decode as silent', async () => {
+      let answer = () => Response.json({ error: 'transcription_empty' }, { status: 422 });
+      relayAnswers(() => answer());
+      renderComposer('undecodable-session');
+      await screen.findByRole('button', { name: en.chat.compose.voice });
+      const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+      await act(async () => undefined);
+
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      act(() => {
+        voiceMocks.onCaptureState?.('recorder');
+        // What decoded was a quiet room; the rest could not be decoded, so its sound is unknown.
+        voiceMocks.onPcm?.(pcm(0.003, 2_000));
+        voiceMocks.onSegment?.(new Blob(['undecodable minute']), { durationMs: 60_000, final: true, unjudged: true });
+        voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
+      });
+
+      // Recognition is asked, and an empty answer keeps the take for another try.
+      const retry = await screen.findByRole('button', { name: en.chat.compose.voiceRetry });
+      expect(apiFetch.mock.calls.map(([path]) => path)).toContain('/api/asr/transcribe');
+      expect(screen.queryByText(en.chat.compose.voiceEmpty)).toBeNull();
+      expect(await screen.findByText(en.chat.compose.voiceEmptyKept)).toBeTruthy();
+      answer = () => Response.json({ text: 'said in the second minute', cleanup: 'success' });
+      fireEvent.click(retry);
+      await waitFor(() => expect(textbox.value).toBe('said in the second minute'));
     });
 
     it('keeps a take that held speech when nothing was recognized, and transcribes it again on retry', async () => {

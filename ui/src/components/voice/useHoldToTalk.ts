@@ -14,7 +14,7 @@ import type { VoiceContextSource } from '../../lib/voiceContext';
 import type { VoiceTakeKeep } from '../../lib/voiceTakeKeeper';
 import { createVoiceLevel } from '../../lib/voiceLevel';
 import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
-import { isVoiceCaptureActive, prewarmVoiceCapture } from '../../lib/voiceRecording';
+import { isVoiceCaptureActive, prewarmVoiceCapture, type VoiceCaptureState } from '../../lib/voiceRecording';
 import { emitVoiceTelemetry, type VoiceTelemetryEvent, type VoiceTelemetryOutcome } from '../../lib/voiceTelemetry';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 
@@ -38,8 +38,10 @@ export type HoldPhase = 'idle' | 'pressing' | 'listening' | 'recording' | 'armed
 export type HoldInterruptReason = 'dropped' | 'failed' | 'system' | 'send-failed';
 
 /** How the last press ended, for the surface's toast or note. `kept`: cancelled while its words
- *  were finalized, and its recording kept on the device for the pending voice items. */
-export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'asking' | 'denied' | 'unavailable';
+ *  were finalized, and its recording kept on the device for the pending voice items. `too-short`:
+ *  nothing said (a slip, or silence). `no-sound`: the microphone delivered no sound at all.
+ *  `mic-busy`: the system, or another app, held the microphone. */
+export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'no-sound' | 'mic-busy' | 'asking' | 'denied' | 'unavailable';
 
 export type HoldGesture = {
   /** How long a press is held before the microphone opens. */
@@ -143,6 +145,8 @@ const TELEMETRY_OUTCOME: Record<HoldOutcome, VoiceTelemetryOutcome> = {
   cancelled: 'cancelled',
   kept: 'kept',
   'too-short': 'too_short',
+  'no-sound': 'no_frames',
+  'mic-busy': 'muted',
   asking: 'asking',
   denied: 'denied',
   unavailable: 'unavailable',
@@ -246,6 +250,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   // Live recognition stopped working during this take (lib/showPageVoiceDictation onLiveChange):
   // the card says so, and that the take is still being kept.
   const [liveUnavailable, setLiveUnavailable] = useState(false);
+  // How this take is recorded (lib/voiceRecording): through Web Audio, without it (no live words,
+  // no level), or without it and getting no sound from the microphone.
+  const [captureState, setCaptureState] = useState<VoiceCaptureState>('live');
   // The microphone's loudness for the card's meter: written as the take records, read each frame.
   const [level] = useState(createVoiceLevel);
   const maxFileBytes = useRef<number | null>(null);
@@ -333,13 +340,12 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     setInterruptReason(null);
     setCanRetry(false);
     setLiveUnavailable(false);
+    setCaptureState('live');
   }, [level, setFinalizing, stopClock]);
 
-  /** The press is over with nothing to keep: back to rest, saying how it ended. `logged`: the
-   *  outcome the reliability log gets, when it says more than `how` (a take the microphone gave
-   *  nothing is not a silent one). */
-  const end = useCallback((how: HoldOutcome | null, logged?: VoiceTelemetryOutcome) => {
-    if (how) reportHold(logged ?? TELEMETRY_OUTCOME[how], take.current);
+  /** The press is over with nothing to keep: back to rest, saying how it ended. */
+  const end = useCallback((how: HoldOutcome | null) => {
+    if (how) reportHold(TELEMETRY_OUTCOME[how], take.current);
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
     take.current = null;
@@ -419,9 +425,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Nothing recognized in a take the microphone heard as silence: nothing to keep. One that
     // held sound loud enough for speech is a recognition that failed, and keeps its recording.
     if (error instanceof VoiceTranscriptionError && error.code === 'empty' && !current.dictation.voiced()) {
-      // The log tells a microphone that gave nothing (no frames, or held by the system) apart.
+      // A microphone that delivered no sound at all, or one the system held, is not a silence.
       const delivered = current.dictation.captureClass();
-      end('too-short', delivered === 'no_frames' || delivered === 'muted' ? delivered : undefined);
+      end(delivered === 'no_frames' ? 'no-sound' : delivered === 'muted' ? 'mic-busy' : 'too-short');
       return;
     }
     const heard = `${current.heard.text}${current.heard.stash}`.trim();
@@ -439,6 +445,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       ...(keep ? { keep: { ...keep, intent: 'send' as const } } : {}),
       onLiveChange: (live) => {
         if (take.current === current && mounted.current) setLiveUnavailable(!live);
+      },
+      onCaptureState: (state) => {
+        if (take.current === current && mounted.current) setCaptureState(state);
       },
       onLevel: (rms) => {
         if (take.current === current) level.set(rms);
@@ -815,6 +824,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     holdable,
     canRetry,
     liveUnavailable,
+    /** How the take is recorded: through Web Audio, without it (no live words, no level), or
+     *  without it and getting no sound from the microphone (lib/voiceRecording). */
+    captureState,
     level,
     /** Settling, while the take's words are still being transcribed: stops waiting for them (the
      *  card's ×). Null otherwise, and once the words are on their way as a message. */

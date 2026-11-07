@@ -15,7 +15,7 @@ import {
   VoiceRecordingPipeline,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
-import { VoiceCaptureTrace } from './voiceCaptureTrace';
+import { VOICE_RECORDER_SILENT_MS } from './voiceRecorderFallback';
 
 // The reliability log: every take's capture trace goes through here.
 const telemetry = vi.hoisted(() => ({ emit: vi.fn() }));
@@ -654,10 +654,20 @@ describe('voice capture audio context', () => {
   type Resume = 'starts' | 'hangs';
   const contexts: FakeAudioContext[] = [];
   let nextResume: Resume[] = [];
+  /** Rates whose contexts run and render nothing, as 48 kHz did on the owner's iPhone. */
+  let stalledRates = new Set<number>();
   class FakeAudioContext {
     state: string = 'suspended';
-    /** The context clock, in seconds: it moves only while the context renders. */
-    currentTime = 0;
+    readonly sampleRate: number;
+    /** This context runs and renders nothing (a stale one, or a stalled engine). */
+    stalled: boolean;
+    private runningSince: number | null = null;
+    /** The context clock, in seconds: it moves while the context renders, and not while it stalls. */
+    get currentTime(): number {
+      if (this.state !== 'running' || this.stalled) return 0;
+      this.runningSince ??= Date.now();
+      return (Date.now() - this.runningSince) / 1000;
+    }
     readonly resumeBehavior: Resume;
     readonly audioWorklet = { addModule: vi.fn(async () => undefined) };
     readonly destination = {};
@@ -672,7 +682,9 @@ describe('voice capture audio context', () => {
     });
     readonly createMediaStreamSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }));
 
-    constructor() {
+    constructor(options?: { sampleRate?: number }) {
+      this.sampleRate = options?.sampleRate ?? 48_000;
+      this.stalled = stalledRates.has(this.sampleRate);
       this.resumeBehavior = nextResume.shift() ?? 'starts';
       contexts.push(this);
     }
@@ -695,6 +707,44 @@ describe('voice capture audio context', () => {
       this.port.onmessage?.({ data: { type: 'samples', samples: Int16Array.from(samples).buffer } });
     }
   }
+  /** A MediaRecorder on the microphone, as an iPhone's records it (audio/mp4). */
+  const recorders: FakeMediaRecorder[] = [];
+  class FakeMediaRecorder {
+    static isTypeSupported = (type: string) => type === 'audio/mp4';
+    state: 'inactive' | 'recording' = 'inactive';
+    readonly mimeType: string;
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onstop: (() => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    constructor(readonly stream: MediaStream, options?: { mimeType?: string }) {
+      this.mimeType = options?.mimeType ?? 'audio/mp4';
+      recorders.push(this);
+    }
+    start(): void {
+      this.state = 'recording';
+    }
+    stop(): void {
+      if (this.state === 'inactive') return;
+      this.state = 'inactive';
+      queueMicrotask(() => this.onstop?.());
+    }
+    /** The microphone giving the recorder a chunk of its recording. */
+    data(bytes = 100): void {
+      this.ondataavailable?.({ data: new Blob([new Uint8Array(bytes)], { type: this.mimeType }) });
+    }
+  }
+  /** What decoding a recording gives: speech, silence, or a format this browser cannot read. */
+  let decodes: 'speech' | 'silence' | 'fails' = 'speech';
+  class FakeOfflineAudioContext {
+    constructor(readonly channels: number, readonly length: number, readonly sampleRate: number) {}
+    async decodeAudioData(): Promise<{ numberOfChannels: number; length: number; getChannelData: () => Float32Array }> {
+      if (decodes === 'fails') throw new DOMException('Unable to decode audio data', 'EncodingError');
+      // Half a second at the context's rate, resampled as the spec requires.
+      const length = this.sampleRate / 2;
+      return { numberOfChannels: 1, length, getChannelData: () => new Float32Array(length).fill(decodes === 'speech' ? 0.25 : 0) };
+    }
+  }
+
   const microphone = () => {
     const track = Object.assign(new EventTarget(), { readyState: 'live', muted: false, enabled: true, stop: vi.fn() });
     return { track, stream: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream };
@@ -717,6 +767,12 @@ describe('voice capture audio context', () => {
     nodes.length = 0;
     pipelines.length = 0;
     nextResume = [];
+    stalledRates = new Set();
+    telemetry.emit.mockReset();
+    recorders.length = 0;
+    decodes = 'speech';
+    vi.stubGlobal('MediaRecorder', FakeMediaRecorder);
+    vi.stubGlobal('OfflineAudioContext', FakeOfflineAudioContext);
     vi.stubGlobal('AudioContext', FakeAudioContext);
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:voice-worklet');
@@ -760,8 +816,25 @@ describe('voice capture audio context', () => {
     expect(contexts[1].createMediaStreamSource).toHaveBeenCalledWith(stream);
   });
 
-  it('fails a take whose audio never starts instead of recording silence', async () => {
+  it('records a take whose audio never starts without Web Audio, instead of failing it', async () => {
     vi.useFakeTimers();
+    nextResume = ['hangs', 'hangs'];
+    await prewarmVoiceCapture();
+    const { track, stream } = microphone();
+    const onCaptureState = vi.fn();
+    const starting = pipelineOn(stream, { onCaptureState }).start();
+    await vi.advanceTimersByTimeAsync(2 * VOICE_AUDIO_START_TIMEOUT_MS);
+
+    await expect(starting).resolves.toBe(true);
+    expect(recorders).toHaveLength(1);
+    expect(onCaptureState).toHaveBeenCalledWith('recorder');
+    expect(track.stop).not.toHaveBeenCalled();
+    expect(contexts.every((context) => context.state === 'closed')).toBe(true);
+  });
+
+  it('fails a take whose audio never starts where nothing else can record it', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('MediaRecorder', undefined);
     nextResume = ['hangs', 'hangs'];
     await prewarmVoiceCapture();
     const { track, stream } = microphone();
@@ -822,45 +895,41 @@ describe('voice capture audio context', () => {
     expect(onPcm).toHaveBeenCalledOnce();
   });
 
-  it('then opens a fresh microphone, and fails visibly when that delivers nothing too', async () => {
-    vi.useFakeTimers();
-    const fresh = microphone();
-    const getUserMedia = vi.fn(async () => fresh.stream);
-    vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
-    const { stream, track } = microphone();
-    const onError = vi.fn();
-    const onStopped = vi.fn();
-    await pipelineOn(stream, { onError, onStopped }).start();
-
-    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // rebuilt on the same microphone
-    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // then a fresh one
-    expect(getUserMedia).toHaveBeenCalledWith({ audio: true });
-    expect(track.stop).toHaveBeenCalled();
-    expect(nodes).toHaveLength(3);
-    expect(nodes[2].context.createMediaStreamSource).toHaveBeenCalledWith(fresh.stream);
-
-    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS);
-    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ name: 'VoiceTranscriptionError', code: 'empty' }));
-    expect(fresh.track.stop).toHaveBeenCalled();
-    nodes[2].port.onmessage?.({ data: { type: 'stopped' } });
-    expect(onStopped).toHaveBeenCalledWith('error', expect.anything());
-  });
-
-  it('opens no microphone for a take released while it is being rebuilt', async () => {
+  it('then records it without Web Audio, on the same microphone, when the rebuild delivers nothing too', async () => {
     vi.useFakeTimers();
     const getUserMedia = vi.fn(async () => microphone().stream);
     vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } });
+    const { stream, track } = microphone();
+    const onCaptureState = vi.fn();
+    const onStopped = vi.fn();
+    await pipelineOn(stream, { onCaptureState, onStopped }).start();
+
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // rebuilt on the same microphone
+    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // then recorded without Web Audio
+
+    expect(recorders).toHaveLength(1);
+    expect(recorders[0].stream).toBe(stream);
+    expect(recorders[0].state).toBe('recording');
+    expect(onCaptureState).toHaveBeenCalledWith('recorder');
+    // Never a second microphone, and never a take ended for want of frames.
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(track.stop).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10 * VOICE_RENDER_WINDOW_MS);
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it('finishes a take released while it is being rebuilt', async () => {
+    vi.useFakeTimers();
     const { stream } = microphone();
     const onStopped = vi.fn();
     const pipeline = pipelineOn(stream, { onStopped });
     await pipeline.start();
-    await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS); // rebuilt on the same microphone
 
-    vi.advanceTimersByTime(VOICE_RENDER_WINDOW_MS); // the second rebuild starts...
-    pipeline.finish(); // ...and the hold is released before it asks for a microphone
+    vi.advanceTimersByTime(VOICE_RENDER_WINDOW_MS); // the rebuild starts...
+    pipeline.finish(); // ...and the hold is released before it has a graph
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(recorders).toHaveLength(0);
     expect(onStopped).toHaveBeenCalledWith('finish', expect.anything());
   });
 
@@ -873,10 +942,168 @@ describe('voice capture audio context', () => {
     expect(nodes).toHaveLength(1);
   });
 
+  /** The owner's iPhone. */
+  const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1';
+
+  /** The capture traces the takes logged. */
+  const traces = () => telemetry.emit.mock.calls
+    .map(([event]) => event as Record<string, unknown>)
+    .filter((event) => event.event === 'capture_trace');
+
+  describe('when real-time audio stalls', () => {
+    /** A fresh module: what the page found about its engine is the page's (lib/voiceEngine). */
+    const freshVoice = async () => {
+      vi.resetModules();
+      return import('./voiceRecording');
+    };
+    beforeEach(() => {
+      vi.stubGlobal('navigator', { userAgent: IPHONE, mediaDevices: { getUserMedia: vi.fn() } });
+    });
+    const takeOn = (voice: typeof import('./voiceRecording'), options: Partial<VoiceRecordingPipelineOptions> = {}) => {
+      const pipeline = new voice.VoiceRecordingPipeline({ stream: microphone().stream, segmentMs: 1000, onSegment: vi.fn(), onStopped: vi.fn(), ...options });
+      pipelines.push(pipeline);
+      return pipeline;
+    };
+
+    it('goes on in a fresh context, live words kept, when only the prewarmed one stood still', async () => {
+      vi.useFakeTimers();
+      const voice = await freshVoice();
+      await voice.prewarmVoiceCapture();
+      contexts[0].stalled = true; // stale, not the engine
+      const onCaptureState = vi.fn();
+      const onPcm = vi.fn();
+      await takeOn(voice, { onCaptureState, onPcm }).start();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const live = nodes.at(-1)!;
+      expect(live.context).not.toBe(contexts[0]);
+      expect(live.context.sampleRate).toBe(48_000);
+      live.deliver(1, 2, 3);
+      expect(onPcm).toHaveBeenCalledOnce();
+      expect(onCaptureState).not.toHaveBeenCalled();
+      expect(contexts[0].close).toHaveBeenCalled();
+      live.port.onmessage?.({ data: { type: 'stopped' } });
+    });
+
+    it('goes on at 44.1 kHz where 16 kHz stalls too', async () => {
+      vi.useFakeTimers();
+      stalledRates = new Set([48_000, 16_000]);
+      const voice = await freshVoice();
+      const onCaptureState = vi.fn();
+      await takeOn(voice, { onCaptureState }).start();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(nodes.at(-1)!.context.sampleRate).toBe(44_100);
+      expect(onCaptureState).not.toHaveBeenCalled();
+    });
+
+    it('tries no other rate where the browser cannot connect a microphone at one (Firefox)', async () => {
+      vi.useFakeTimers();
+      vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15.6; rv:146.0) Gecko/20100101 Firefox/146.0', mediaDevices: { getUserMedia: vi.fn() } });
+      stalledRates = new Set([48_000]);
+      const voice = await freshVoice();
+      const onCaptureState = vi.fn();
+      await takeOn(voice, { onCaptureState }).start();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(contexts.every((context) => context.sampleRate === 48_000)).toBe(true);
+      expect(onCaptureState).toHaveBeenCalledWith('recorder');
+    });
+
+    it('records the take without Web Audio when no rate renders, and transcribes what it recorded', async () => {
+      vi.useFakeTimers();
+      stalledRates = new Set([48_000, 16_000, 44_100]);
+      const voice = await freshVoice();
+      await voice.prewarmVoiceCapture();
+      const onCaptureState = vi.fn();
+      const onPcm = vi.fn();
+      const onSegment = vi.fn();
+      const onStopped = vi.fn();
+      const pipeline = takeOn(voice, { onCaptureState, onPcm, onSegment, onStopped });
+      await pipeline.start();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(onCaptureState).toHaveBeenCalledWith('recorder');
+      const [recorder] = recorders;
+      expect(recorder.state).toBe('recording');
+      recorder.data(4_000);
+      pipeline.finish();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Its recording, decoded to the pipeline's 16 kHz PCM, is segmented like any take's.
+      expect(onPcm).toHaveBeenCalled();
+      expect(onPcm.mock.calls.reduce((total, [samples]) => total + (samples as Int16Array).length, 0)).toBe(8_000);
+      expect(onSegment).toHaveBeenLastCalledWith(expect.any(Blob), expect.objectContaining({ final: true }));
+      expect(onStopped).toHaveBeenCalledWith('finish', expect.anything());
+      expect(traces().at(-1)).toMatchObject({ fallbackLevel: 'L4', stalledRates: [16_000, 44_100, 48_000], captureClass: 'sound', decodedSegments: 1, fileSegments: 0, recorderChunks: 1, recorderBytes: 4_000 });
+
+      // The page remembers: the next take is recorded without Web Audio from its first moment.
+      const nodesBefore = nodes.length;
+      const next = takeOn(voice, { onCaptureState });
+      await next.start();
+      expect(recorders).toHaveLength(2);
+      expect(nodes).toHaveLength(nodesBefore);
+      next.abort();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(traces().at(-1)).toMatchObject({ pageStalled: true, outcome: 'cancelled' });
+    });
+
+    it('transcribes a recording this browser cannot decode as it is, unjudged', async () => {
+      vi.useFakeTimers();
+      stalledRates = new Set([48_000, 16_000, 44_100]);
+      decodes = 'fails';
+      const voice = await freshVoice();
+      const onPcm = vi.fn();
+      const onSegment = vi.fn();
+      const pipeline = takeOn(voice, { onPcm, onSegment });
+      await pipeline.start();
+      await vi.advanceTimersByTimeAsync(1_000);
+      recorders[0].data(4_000);
+      pipeline.finish();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(onPcm).not.toHaveBeenCalled();
+      // Its sound was never judged: the take's silence gate must not speak for it.
+      expect(onSegment).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: 'audio/mp4', size: 4_000 }),
+        expect.objectContaining({ final: true, unjudged: true }),
+      );
+      expect(traces().at(-1)).toMatchObject({ fallbackLevel: 'L4', captureClass: 'recorded', decodedSegments: 0, fileSegments: 1 });
+    });
+
+    it('says so while the microphone gives the recording nothing, and again once it does', async () => {
+      vi.useFakeTimers();
+      stalledRates = new Set([48_000, 16_000, 44_100]);
+      const voice = await freshVoice();
+      const onCaptureState = vi.fn();
+      await takeOn(voice, { onCaptureState, segmentMs: 60_000 }).start();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(onCaptureState.mock.calls).toEqual([['recorder']]);
+
+      await vi.advanceTimersByTimeAsync(VOICE_RECORDER_SILENT_MS);
+      expect(onCaptureState).toHaveBeenLastCalledWith('no_sound');
+      recorders[0].data();
+      expect(onCaptureState).toHaveBeenLastCalledWith('recorder');
+    });
+
+    it('keeps what was recorded of a take released while a rendering context is looked for', async () => {
+      vi.useFakeTimers();
+      stalledRates = new Set([48_000, 16_000, 44_100]);
+      const voice = await freshVoice();
+      const onPcm = vi.fn();
+      const onStopped = vi.fn();
+      const pipeline = takeOn(voice, { onPcm, onStopped });
+      await pipeline.start();
+      await vi.advanceTimersByTimeAsync(450); // stalled; the search is under way
+      recorders[0].data(2_000);
+      pipeline.finish();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(onPcm).toHaveBeenCalled();
+      expect(onStopped).toHaveBeenCalledWith('finish', expect.anything());
+      expect(nodes.every((node) => node.context.state === 'closed')).toBe(true);
+    });
+  });
+
   describe('its capture trace', () => {
-    const traces = () => telemetry.emit.mock.calls
-      .map(([event]) => event as Record<string, unknown>)
-      .filter((event) => event.event === 'capture_trace');
     /** A microphone with what a real one carries that the log must never hold. */
     const named = () => {
       const mic = microphone();
@@ -892,84 +1119,101 @@ describe('voice capture audio context', () => {
       telemetry.emit.mockReset();
     });
 
-    it('says, stage by stage, that a take on a Home Screen app got no frames, and nothing private', async () => {
+    it('says, stage by stage, how a Home Screen app take whose engine stalled went on at another rate, and nothing private', async () => {
       vi.useFakeTimers();
       vi.stubGlobal('window', Object.assign(new EventTarget(), { matchMedia: (query: string) => ({ matches: query === '(display-mode: standalone)' }) }));
-      const fresh = named();
-      const getUserMedia = vi.fn(async () => fresh.stream);
-      vi.stubGlobal('navigator', { mediaDevices: { getUserMedia }, audioSession: { type: 'auto', state: 'active' } });
-      vi.stubGlobal('MediaRecorder', { isTypeSupported: (type: string) => type === 'audio/mp4' || type === 'audio/webm' });
-      await prewarmVoiceCapture();
+      vi.stubGlobal('navigator', { userAgent: IPHONE, mediaDevices: { getUserMedia: vi.fn() }, audioSession: { type: 'auto', state: 'active' } });
+      // The owner's iPhone, 2026-11-07: every 48 kHz context runs with its clock standing still.
+      stalledRates = new Set([48_000]);
+      vi.resetModules();
+      const voice = await import('./voiceRecording');
+      const { VoiceCaptureTrace: Trace } = await import('./voiceCaptureTrace');
+      await voice.prewarmVoiceCapture();
       const { stream } = named();
-      const trace = new VoiceCaptureTrace('hold', 'dictation-1');
+      const trace = new Trace('hold', 'dictation-1');
       trace.micSettled(trace.mark());
-      const pipeline = pipelineOn(stream, { trace });
+      const onCaptureState = vi.fn();
+      const onPcm = vi.fn();
+      const pipeline = new voice.VoiceRecordingPipeline({ stream, trace, segmentMs: 1000, onSegment: vi.fn(), onStopped: vi.fn(), onCaptureState, onPcm });
+      pipelines.push(pipeline);
       await pipeline.start();
 
-      // The owner's iPhone, 2026-11-07: no frame on the take's graph, its rebuild, or a fresh microphone.
-      await vi.advanceTimersByTimeAsync(3 * VOICE_RENDER_WINDOW_MS);
-      nodes[2].port.onmessage?.({ data: { type: 'stopped' } });
+      // Its clock stands still: fresh contexts at the default rate, 16 kHz and 44.1 kHz are tried at
+      // once, and 16 kHz, the capture's own rate, carries the take.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const live = nodes.at(-1)!;
+      expect(live.context.sampleRate).toBe(16_000);
+      live.deliver(0, 0, 0);
+      expect(onPcm).toHaveBeenCalledOnce();
+      // The surface never left live words: the quiet recording meanwhile is dropped.
+      expect(onCaptureState).not.toHaveBeenCalled();
+      expect(recorders[0].state).toBe('inactive');
+      pipeline.finish();
+      live.port.onmessage?.({ data: { type: 'stopped' } });
 
-      expect(traces()).toHaveLength(1);
       const event = traces()[0];
       expect(event).toMatchObject({
         event: 'capture_trace',
-        outcome: 'empty',
+        outcome: 'success',
         dictationId: 'dictation-1',
         entry: 'hold',
         surface: 'standalone',
-        captureClass: 'no_frames',
-        stop: 'error',
+        captureClass: 'silence',
+        fallbackLevel: 'L0',
+        stalledRates: [48_000],
+        contextSampleRate: 16_000,
+        stop: 'finish',
         mic: 'ok',
         prewarm: 'reused',
         audioSession: 'auto',
         audioSessionState: 'active',
-        recorderTypes: ['audio/mp4', 'audio/webm'],
-        chunks: 0,
-        levels: 0,
+        recorderTypes: ['audio/mp4'],
+        fallback: 'recorder',
+        recorderType: 'audio/mp4',
         trackEvents: [],
       });
-      expect((event.attempts as Record<string, unknown>[]).map(({ kind, end, chunks, trackStart, module }) => ({ kind, end, chunks, trackStart, module }))).toEqual([
-        { kind: 'initial', end: 'no_frames', chunks: 0, trackStart: 'live', module: 'prewarmed' },
-        { kind: 'context', end: 'no_frames', chunks: 0, trackStart: 'live', module: 'ok' },
-        { kind: 'microphone', end: 'no_frames', chunks: 0, trackStart: 'live', module: 'ok' },
-      ]);
-      expect(event.attempts).toEqual([
-        expect.objectContaining({ contextState: 'running', resumedState: 'running' }),
-        expect.objectContaining({ contextState: 'suspended', resumedState: 'running', moduleMs: expect.any(Number) }),
-        expect.objectContaining({ mic: 'ok', micMs: expect.any(Number) }),
+      expect((event.attempts as Record<string, unknown>[]).map(({ kind, end, sampleRate, engine, clockAdvanceMs }) => ({ kind, end, sampleRate, engine, clockAdvanceMs }))).toEqual([
+        { kind: 'initial', end: 'stalled', sampleRate: 48_000, engine: 'stalled', clockAdvanceMs: 0 },
+        { kind: 'recorder', end: 'stopped', sampleRate: undefined, engine: undefined, clockAdvanceMs: undefined },
+        { kind: 'context', end: 'rendered', sampleRate: 16_000, engine: 'healthy', clockAdvanceMs: expect.any(Number) },
       ]);
       // The shape the server keeps (vibe/ui_server.py asr_telemetry), and nothing a device names.
       expect(Object.keys(event).sort()).toEqual([
-        'attempts', 'audioSession', 'audioSessionState', 'audioSessionStateEnd', 'captureClass', 'chunks', 'dictationId', 'entry',
-        'event', 'hiddenCount', 'levels', 'mic', 'micMs', 'outcome', 'pageAgeMs', 'prewarm', 'prewarmAgeMs', 'recorderTypes', 'stop',
-        'surface', 'totalMs', 'trackEvents',
+        'attempts', 'audioSession', 'audioSessionState', 'audioSessionStateEnd', 'captureClass', 'chunks', 'contextSampleRate', 'decodedSegments',
+        'dictationId', 'entry', 'event', 'fallback', 'fallbackLevel', 'fileSegments', 'hiddenCount', 'levels', 'mic', 'micMs', 'outcome', 'pageAgeMs',
+        'peakDbfs', 'prewarm', 'prewarmAgeMs', 'recorderBytes', 'recorderChunks', 'recorderType', 'recorderTypes', 'stalledRates', 'stop', 'surface',
+        'totalMs', 'trackEvents',
       ]);
-      const attemptKeys = new Set(['kind', 'atMs', 'micMs', 'mic', 'contextState', 'resumedState', 'resumeMs', 'sampleRate', 'module', 'moduleMs', 'chunks', 'firstFrameMs', 'levels', 'clockAdvanceMs', 'renderCalls', 'emptyInputs', 'trackStart', 'trackEnd', 'end']);
+      const attemptKeys = new Set(['kind', 'atMs', 'contextState', 'resumedState', 'resumeMs', 'sampleRate', 'module', 'moduleMs', 'chunks', 'firstFrameMs', 'levels', 'clockAdvanceMs', 'renderCalls', 'emptyInputs', 'engine', 'trackStart', 'trackEnd', 'end']);
       for (const attempt of event.attempts as Record<string, unknown>[]) {
         expect(Object.keys(attempt).filter((key) => !attemptKeys.has(key))).toEqual([]);
       }
       const logged = JSON.stringify(event);
       for (const secret of ['iPhone', 'track-id-secret', 'device-id-secret', 'group-id-secret']) expect(logged).not.toContain(secret);
+
+      // The page remembers: the next press prewarms at 16 kHz, and its take starts there.
+      await voice.prewarmVoiceCapture();
+      expect(contexts.at(-1)!.sampleRate).toBe(16_000);
+      const next = new voice.VoiceRecordingPipeline({ stream: microphone().stream, segmentMs: 1000, onSegment: vi.fn(), onStopped: vi.fn() });
+      pipelines.push(next);
+      await next.start();
+      expect(nodes.at(-1)!.context.sampleRate).toBe(16_000);
+      expect(traces()).toHaveLength(1);
     });
 
-    it('tells a graph that never renders from one whose microphone node gives it nothing', async () => {
+    it('tells a graph that renders with nothing coming in, by its heartbeat', async () => {
       vi.useFakeTimers();
       const { stream } = microphone();
       const pipeline = pipelineOn(stream);
       await pipeline.start();
-      // The take's graph: its context clock stands still, and the worklet is never called.
+      // The clock moves and the worklet is called, every time with no input at all.
+      nodes[0].port.onmessage?.({ data: { type: 'tick', calls: 282, empty: 282 } } as never);
       await vi.advanceTimersByTimeAsync(VOICE_RENDER_WINDOW_MS);
-      // Its rebuild renders (the clock moves, the worklet is called) with no input at all.
-      nodes[1].context.currentTime = 0.75;
-      nodes[1].port.onmessage?.({ data: { type: 'tick', calls: 282, empty: 282 } } as never);
       pipeline.finish();
       nodes[1].port.onmessage?.({ data: { type: 'stopped' } });
 
-      const [stalled, empty] = traces()[0].attempts as Record<string, unknown>[];
-      expect(stalled).toMatchObject({ kind: 'initial', end: 'no_frames', clockAdvanceMs: 0 });
-      expect(stalled).not.toHaveProperty('renderCalls');
-      expect(empty).toMatchObject({ kind: 'context', end: 'stopped', clockAdvanceMs: 750, renderCalls: 282, emptyInputs: 282 });
+      const [empty] = traces()[0].attempts as Record<string, unknown>[];
+      expect(empty).toMatchObject({ kind: 'initial', end: 'no_frames', engine: 'healthy', renderCalls: 282, emptyInputs: 282, clockAdvanceMs: VOICE_RENDER_WINDOW_MS });
       // The capture asks every graph's worklet for that heartbeat.
       expect(nodes.map((node) => (node.options as { processorOptions: { tickMs?: number } }).processorOptions.tickMs)).toEqual([250, 250]);
     });
@@ -1161,6 +1405,53 @@ describe('voice PCM worklet', () => {
     postMessage.mockClear();
     new Processor!({ processorOptions: { targetSampleRate: 16_000, chunkSamples: 4_000 } }).process([[]]);
     expect(ticks()).toEqual([]);
+  });
+
+  // A context at 16 kHz or 44.1 kHz carries a take whose 48 kHz engine stalled (lib/voiceEngine).
+  const processorAt = (sampleRate: number, chunkSamples: number) => {
+    const postMessage = vi.fn();
+    class FakeAudioWorkletProcessor {
+      readonly port = { onmessage: null as ((event: { data: { type?: string } }) => void) | null, postMessage };
+    }
+    let Processor: (new (options: { processorOptions: { targetSampleRate: number; chunkSamples: number } }) => {
+      port: { onmessage: ((event: { data: { type?: string } }) => void) | null };
+      process: (inputs: Float32Array[][]) => boolean;
+    }) | null = null;
+    new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', voicePcmWorkletSource)(
+      FakeAudioWorkletProcessor,
+      (_name: string, constructor: typeof Processor) => {
+        Processor = constructor;
+      },
+      sampleRate,
+    );
+    const processor = new Processor!({ processorOptions: { targetSampleRate: 16_000, chunkSamples } });
+    const emitted = () => postMessage.mock.calls
+      .map(([message]) => message as { type: string; samples?: ArrayBuffer })
+      .filter((message) => message.type === 'samples')
+      .flatMap((message) => Array.from(new Int16Array(message.samples!)));
+    return { processor, emitted };
+  };
+
+  it('passes a 16 kHz context\'s frames through unchanged', () => {
+    const { processor, emitted } = processorAt(16_000, 4);
+    const input = Float32Array.from([0, 0.25, -0.25, 0.5, -0.5, 1, -1, 0.125]);
+    processor.process([[input]]);
+
+    expect(emitted()).toEqual(Array.from(input, (sample) => (sample < 0 ? Math.round(sample * 32_768) : Math.round(sample * 32_767))));
+  });
+
+  it('downsamples a 44.1 kHz context to 16 kHz, a ratio that is not a whole number', () => {
+    const { processor, emitted } = processorAt(44_100, 16_000);
+    // One second of a steady level, in render quanta of 128 frames.
+    const quantum = new Float32Array(128).fill(0.5);
+    for (let frames = 0; frames < 44_100; frames += 128) processor.process([[quantum]]);
+    processor.port.onmessage?.({ data: { type: 'stop' } });
+
+    const samples = emitted();
+    // 44,160 frames in (345 quanta) at 16/44.1 is 16,021.8: 16,021 averages, and the last partial
+    // one flushed on stop. Each is the level it averaged.
+    expect(samples).toHaveLength(Math.ceil(345 * 128 * 16_000 / 44_100));
+    expect(new Set(samples)).toEqual(new Set([Math.round(0.5 * 32_767)]));
   });
 
   it('upsamples low-rate input before emitting target-rate PCM', () => {

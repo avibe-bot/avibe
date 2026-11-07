@@ -13,7 +13,12 @@ import { useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
 // is cut off. The pipeline itself is ShowPageVoiceDictation's own test.
 
 type Fake = {
-  input: { onPreviewParts?: (preview: { text: string; stash: string }) => void; context?: unknown; onLevel?: (rms: number) => void };
+  input: {
+    onPreviewParts?: (preview: { text: string; stash: string }) => void;
+    context?: unknown;
+    onLevel?: (rms: number) => void;
+    onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
+  };
   done: Promise<string>;
   resolve: (text: string) => void;
   reject: (error: unknown) => void;
@@ -338,10 +343,10 @@ describe('useHoldToTalk', () => {
     .filter((event) => event.event === 'dictation_finalized' && event.entry === 'hold');
 
   it.each([
-    ['no_frames', 'no_frames'],
-    ['muted', 'muted'],
-    ['silence', 'too_short'],
-  ] as const)('logs a take its microphone delivered as %s as %s', async (delivered, logged) => {
+    ['no_frames', 'no-sound', 'no_frames'],
+    ['muted', 'mic-busy', 'muted'],
+    ['silence', 'too-short', 'too_short'],
+  ] as const)('says a take its microphone delivered as %s is %s, and logs it so', async (delivered, said, logged) => {
     const el = await mount();
     await holdFor(el);
     await elapse(3_000);
@@ -350,13 +355,27 @@ describe('useHoldToTalk', () => {
     await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('empty')));
     await flush();
 
-    expect(hold.outcome).toBe('too-short');
+    expect(hold.outcome).toBe(said);
     expect(holdLogs()).toEqual([expect.objectContaining({
       outcome: logged,
       dictationId: 'take-1',
       captureClass: delivered,
       attemptCount: 1,
     })]);
+  });
+
+  it('shows how a take is recorded, and starts the next one live', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await act(async () => pipeline.takes[0].input.onCaptureState?.('no_sound'));
+    expect(hold.captureState).toBe('no_sound');
+    await elapse(1_000);
+    up(el);
+    await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('empty')));
+    await flush();
+
+    await holdFor(el);
+    expect(hold.captureState).toBe('live');
   });
 
   it('logs a sent hold, and a press the microphone refused', async () => {

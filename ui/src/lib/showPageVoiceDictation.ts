@@ -12,6 +12,7 @@ import {
   VOICE_LEVEL_INTERVAL_MS,
   VoiceRecordingPipeline,
   type VoiceCaptureClaim,
+  type VoiceCaptureState,
   type VoiceRecordingPipelineOptions,
 } from './voiceRecording';
 import { createVoiceActivity, reportVoiceSilenceGate, VOICE_SPEECH_RMS } from './voiceActivity';
@@ -54,6 +55,9 @@ export type ShowPageVoiceDictationInput = {
   onLiveChange?: (live: boolean) => void;
   /** Where the take started, for the capture trace: a press-and-hold, or a Show Page (default). */
   entry?: VoiceCaptureEntry;
+  /** How the take is recorded (lib/voiceRecording): through Web Audio, or without it (no live
+   *  words, no level: its words come on release), or without it and getting no sound at all. */
+  onCaptureState?: (state: VoiceCaptureState) => void;
 };
 
 /** Speech heard without one live preview for this long: the realtime path is taken as not
@@ -122,6 +126,8 @@ export class ShowPageVoiceDictation {
   private readonly activity = createVoiceActivity();
   /** A live preview carried words: the take held speech, whatever the levels say. */
   private heardWords = false;
+  /** Part of the take was recorded in a form this browser could not decode: its sound is unknown. */
+  private unjudgedAudio = false;
   private startedAt: number | undefined;
   /** When capture was asked to end (or ended), for the take's length. */
   private endedAt: number | undefined;
@@ -238,12 +244,10 @@ export class ShowPageVoiceDictation {
         trace: this.trace,
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: this.input.maxFileBytes,
-        onSegment: (blob, metadata) => this.queueSegment(
-          blob,
-          metadata.durationMs,
-          metadata.overlapMs,
-          metadata.final,
-        ),
+        onSegment: (blob, metadata) => {
+          if (metadata.unjudged) this.unjudgedAudio = true;
+          this.queueSegment(blob, metadata.durationMs, metadata.overlapMs, metadata.final);
+        },
         onPcm: (samples) => {
           // What would be transcribed, its flushed tail included, is what the gate judges.
           this.activity.observePcm(samples);
@@ -252,6 +256,14 @@ export class ShowPageVoiceDictation {
         onLevel: (rms) => {
           this.watchLiveness(rms);
           this.input.onLevel?.(rms);
+        },
+        onCaptureState: (state) => {
+          // Without Web Audio there is no live PCM: the take's words come over HTTP on release.
+          if (state !== 'live' && this.realtimeState !== 'failed') {
+            this.realtime?.abort();
+            this.realtimeFailed();
+          }
+          this.input.onCaptureState?.(state);
         },
         onError: (error) => {
           this.captureError = error;
@@ -415,13 +427,15 @@ export class ShowPageVoiceDictation {
 
   /** Whether the microphone heard enough sound for speech: an empty transcript of such a take is
    *  a recognition that failed, not a silence, and the take is kept. */
+  /** The take may hold speech: live words, a moment loud enough for it, or audio whose sound was
+   *  never judged (a recording this browser could not decode). */
   voiced(): boolean {
-    return this.heardWords || this.activity.voiced();
+    return this.heardWords || this.unjudgedAudio || this.activity.voiced();
   }
 
-  /** The silence gate: no live words, and no moment loud enough for speech. */
+  /** The silence gate: no live words, no moment loud enough for speech, and nothing unjudged. */
   private isSilent(): boolean {
-    return !this.heardWords && this.activity.silent();
+    return !this.heardWords && !this.unjudgedAudio && this.activity.silent();
   }
 
   /** Sends the kept audio again through whichever path works now (cloud, then the local relay):

@@ -298,7 +298,7 @@ def test_voice_telemetry_rejects_a_malformed_capture_trace():
     client = app.test_client()
     attempt_with_text = _capture_trace()
     attempt_with_text["attempts"][0]["end"] = "the graph said hello"
-    too_many_attempts = _capture_trace(attempts=[{"kind": "context"}] * 7)
+    too_many_attempts = _capture_trace(attempts=[{"kind": "context"}] * 9)
     for payload, field in (
         (attempt_with_text, "attempts"),
         (too_many_attempts, "attempts"),
@@ -342,3 +342,55 @@ def test_voice_telemetry_logs_how_a_hold_ended(caplog):
         "sent", "too_short", "no_frames", "muted", "denied", "asking", "kept", "interrupted", "cancelled",
     ]
     assert all(metric["entry"] == "hold" and metric["captureClass"] == "no_frames" for metric in metrics)
+
+
+def test_voice_telemetry_logs_how_a_stalled_take_was_carried(caplog):
+    client = app.test_client()
+    attempts = [
+        {"kind": "initial", "sampleRate": 48_000, "engine": "stalled", "end": "stalled", "clockAdvanceMs": 0, "chunks": 0, "levels": 0, "trackStart": "live"},
+        {"kind": "recorder", "end": "stopped", "chunks": 0, "levels": 0, "trackStart": "live"},
+        {"kind": "context", "sampleRate": 16_000, "engine": "healthy", "end": "rendered", "chunks": 12, "levels": 0, "trackStart": "live"},
+    ]
+    trace = _capture_trace(
+        outcome="success",
+        captureClass="sound",
+        fallbackLevel="L0",
+        stalledRates=[48_000],
+        contextSampleRate=16_000,
+        preferredRate=16_000,
+        pageStalled=False,
+        fallback="recorder",
+        recorderType="audio/mp4",
+        recorderChunks=1,
+        recorderBytes=4_000,
+        decodedSegments=0,
+        fileSegments=0,
+        prewarmDrop="stalled",
+        attempts=attempts,
+    )
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post("/api/asr/telemetry", json=trace, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    _record, metric = _logged_metric(caplog)
+    for key in (
+        "fallbackLevel", "stalledRates", "contextSampleRate", "preferredRate", "pageStalled", "fallback",
+        "recorderType", "recorderChunks", "recorderBytes", "decodedSegments", "fileSegments", "prewarmDrop",
+    ):
+        assert metric[key] == trace[key], key
+    assert metric["attempts"] == attempts
+
+
+def test_voice_telemetry_rejects_a_malformed_fallback():
+    client = app.test_client()
+    for payload, field in (
+        (_capture_trace(fallbackLevel="L9"), "fallbackLevel"),
+        (_capture_trace(stalledRates=["48000"]), "stalledRates"),
+        (_capture_trace(stalledRates=[48_000] * 5), "stalledRates"),
+        (_capture_trace(recorderType="audio/x-secret"), "recorderType"),
+        (_capture_trace(pageStalled="yes"), "pageStalled"),
+        (_capture_trace(attempts=[{"kind": "recorder", "engine": "asleep"}]), "attempts"),
+    ):
+        response = client.post("/api/asr/telemetry", json=payload, headers=csrf_headers(client))
+        assert response.status_code == 400, field
+        assert response.get_json() == {"error": "invalid_field", "field": field}

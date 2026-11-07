@@ -182,6 +182,38 @@ describe('ShowPageVoiceDictation', () => {
     dictation.abort();
   });
 
+  it('leaves live recognition when its take is recorded without Web Audio, and says how it records', async () => {
+    const { stream } = fakeStream();
+    let options: VoiceRecordingPipelineOptions | undefined;
+    const realtimeAbort = vi.fn();
+    const onLiveChange = vi.fn();
+    const onCaptureState = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold', onLiveChange, onCaptureState }, {
+      getUserMedia: async () => stream,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: '', cleanup: 'success' as const }),
+        abort: realtimeAbort,
+      }),
+      createPipeline: (pipelineOptions) => {
+        options = pipelineOptions;
+        return { start: async () => true, finish: vi.fn(), abort: vi.fn() };
+      },
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+    await dictation.start();
+
+    options?.onCaptureState?.('recorder');
+    expect(realtimeAbort).toHaveBeenCalledOnce();
+    expect(onLiveChange).toHaveBeenCalledWith(false);
+    options?.onCaptureState?.('no_sound');
+    expect(onCaptureState.mock.calls).toEqual([['recorder'], ['no_sound']]);
+    // Live recognition is left once.
+    expect(realtimeAbort).toHaveBeenCalledOnce();
+    dictation.abort();
+  });
+
   it('closes a microphone granted after the take was cancelled, and frees the capture', async () => {
     // A permission alert can answer after the press that asked has ended.
     const { stream, stop } = fakeStream();
@@ -557,6 +589,46 @@ describe('ShowPageVoiceDictation', () => {
       take.dictation.finish();
 
       await expect(take.dictation.done).resolves.toBe('轻声说的一句');
+    });
+
+    it('does not judge audio this browser could not decode as silent', async () => {
+      const { stream } = fakeStream();
+      let pipelineOptions: VoiceRecordingPipelineOptions | null = null;
+      const finalize = vi.fn()
+        .mockRejectedValueOnce(new VoiceTranscriptionError('unavailable'))
+        .mockResolvedValueOnce({ text: 'said in the second minute', cleanup: 'success' as const });
+      const dictation = new ShowPageVoiceDictation({ before: '', after: '' }, {
+        getUserMedia: async () => stream,
+        createRealtime: () => ({
+          start: async () => undefined,
+          sendPcm: vi.fn(() => true),
+          finish: async () => ({ text: '', cleanup: 'fallback' as const }),
+          abort: vi.fn(),
+        }),
+        createQueue: () => ({ enqueue: async () => undefined }),
+        createPipeline: (options) => {
+          pipelineOptions = options;
+          return { start: async () => true, abort: vi.fn(), finish: vi.fn() };
+        },
+        finalize,
+      });
+
+      await dictation.start();
+      // The first recorded minute decoded to a quiet room; the second could not be decoded at all.
+      quiet(pipelineOptions!);
+      pipelineOptions!.onSegment(new Blob(['quiet minute'], { type: 'audio/wav' }), { durationMs: 60_000, final: false });
+      expect(dictation.voiced()).toBe(false);
+      pipelineOptions!.onSegment(
+        new Blob(['undecodable minute'], { type: 'audio/mp4' }),
+        { durationMs: 60_000, final: true, unjudged: true },
+      );
+      pipelineOptions!.onStopped('finish', { pendingSegmentCount: 0 });
+
+      await expect(dictation.done).rejects.toMatchObject({ code: 'unavailable' });
+      expect(finalize).toHaveBeenCalledOnce();
+      expect(dictation.voiced()).toBe(true);
+      expect(dictation.canRetry()).toBe(true);
+      await expect(dictation.retry({ before: '', after: '' })).resolves.toBe('said in the second minute');
     });
 
     it('sends a take on as before when no loudness was reported', async () => {
