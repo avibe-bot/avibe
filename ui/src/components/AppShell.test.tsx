@@ -63,6 +63,7 @@ const makeI18n = () => {
     language: 'en',
     // The Web UI's instance holds only the language it loaded (src/i18n/app.ts).
     options: { resources: { en: {} } },
+    loadLanguages: vi.fn(async () => undefined),
     changeLanguage: vi.fn(async (code: string) => {
       instance.language = code;
     }),

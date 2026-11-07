@@ -18,6 +18,9 @@ test(`native sidebar divider owns full-height hit testing and all visual states 
   await expect(agents).toBeVisible();
   const agentsBorder = await agents.evaluate((element) => getComputedStyle(element).borderRightColor);
   await open(page, '/chat/chrome-fixture', { theme });
+  // The conversation is its own chunk (src/routePages.ts) and can draw after the
+  // sidebar; measure the edge once what sits beside it has arrived.
+  await expect(page.getByRole('button', { name: 'Back', exact: true })).toBeVisible();
   const edge = page.getByRole('separator', { name: 'Resize sidebar' });
   const contentEdge = page.locator('[data-sidebar-resizer-content]');
   await expect(edge).toBeVisible();

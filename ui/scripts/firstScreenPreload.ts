@@ -30,7 +30,9 @@ export function firstScreenPreload(): Plugin {
       order: 'post',
       handler(html, ctx) {
         const { bundle, chunk: entry } = ctx;
-        if (!bundle || !entry) return html;
+        // Only the Web UI's page: other pages built with this config (the design
+        // canvas, design.html) bundle both locales and need nothing preloaded.
+        if (!bundle || !entry || ctx.path !== '/index.html') return html;
         const chunks = Object.values(bundle).filter(
           (output): output is Rolldown.OutputChunk => output.type === 'chunk',
         );

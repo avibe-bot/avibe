@@ -60,6 +60,11 @@ type LanguageOperation = {
   picks: number;
   latest: number;
   failed: number | null;
+  /** The language last asked of the interface, while that change is still on
+   *  its way: the Web UI downloads a language's copy before it switches
+   *  (src/i18n/app.ts), and the language on screen until then is not what the
+   *  interface is becoming. */
+  asked: string | null;
 };
 
 // MODULE scope on purpose, the way `useCoalescedWrite` owns a chat's writes: the
@@ -94,10 +99,29 @@ const operationFor = (host: LanguageHost): LanguageOperation => {
     picks: 0,
     latest: 0,
     failed: null,
+    asked: null,
   };
   operations.set(host, created);
   return created;
 };
+
+/** Asks the interface for a language. When the change lands, or fails, it is no
+ *  longer pending; a later request has already taken its place if there was one,
+ *  and i18next lets only the latest request land. */
+const ask = (host: LanguageHost, operation: LanguageOperation, code: string): void => {
+  operation.asked = code;
+  void Promise.resolve(host.changeLanguage(code))
+    .catch(() => undefined)
+    .finally(() => {
+      if (operation.asked === code) operation.asked = null;
+    });
+};
+
+/** The language an interface is becoming: the one asked of it while that change
+ *  is pending, otherwise the one it shows. A pick is judged against this, so
+ *  going back to the language on screen while another one downloads is still a
+ *  pick, and it wins. */
+const becoming = (host: LanguageHost): string => operationFor(host).asked ?? host.language;
 
 /** Lends a mounted control to its interface's language operation for as long as
  *  it is on screen. Returns the release, for an effect cleanup. */
@@ -169,7 +193,7 @@ export const selectLanguage = (held: LanguageHost, code: string): Promise<void> 
   operation.latest = pick;
   // The pick they can see is the one they made, whatever the save does next —
   // and it retires any older failure, including for a user who persists nothing.
-  void host.changeLanguage(code);
+  ask(host, operation, code);
   // Whether this pick is an instance decision at all is settled here, by the
   // authority the user held while making it, and never revisited: a member
   // changing their own interface is choosing something local, so authority
@@ -192,8 +216,8 @@ export const adoptPersistedLanguage = (held: LanguageHost, code: unknown): void 
   const host = instanceOf(held);
   const operation = operationFor(host);
   if (operation.picks > 0) return;
-  if (code === host.language) return;
-  void host.changeLanguage(code);
+  if (code === becoming(host)) return;
+  ask(host, operation, code);
 };
 
 /**
@@ -235,8 +259,15 @@ export const useLanguageSelection = (): LanguageSelection => {
   }));
   const current = languages.find((lang) => lang.code === i18n.language) || languages[0];
 
+  // Every language a control offers is ready to show by the time it is picked:
+  // the Web UI downloads one language's copy at a time (src/i18n/app.ts), and
+  // these controls sit off the first screen.
+  useEffect(() => {
+    void Promise.resolve(i18n.loadLanguages([...APP_LANGUAGES])).catch(() => undefined);
+  }, [i18n]);
+
   const select = (code: string): Promise<void> => (
-    code === i18n.language ? Promise.resolve() : selectLanguage(i18n, code)
+    code === becoming(instanceOf(i18n)) ? Promise.resolve() : selectLanguage(i18n, code)
   );
 
   return { languages, current, select };
