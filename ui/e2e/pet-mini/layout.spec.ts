@@ -863,6 +863,22 @@ for (const theme of ['light', 'dark']) {
     await expect(card).toHaveCount(0);
   });
 
+test(`a replied activity card folds after 30 seconds and keeps the unread badge (${theme})`, async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(29_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(replied).toHaveCount(0);
+  await expect(page.locator('.pet-avatar > span.bg-destructive')).toBeVisible();
+});
+
   test(`one card stays in full beside the open history and everything fits (${theme})`, async ({ page }) => {
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=1&history=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
@@ -888,6 +904,120 @@ for (const theme of ['light', 'dark']) {
     expect(avatar.y + avatar.height).toBeLessThanOrEqual(600);
   });
 }
+
+test('running activity cards do not spend the replied-card budget', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=2');
+  await page.locator('.pet-mini-collapsed').click();
+  const running = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
+  await expect(running).toBeVisible();
+  await page.clock.runFor(60_000);
+  await expect(running).toBeVisible();
+});
+
+test('hover pauses a replied activity card and leaves three seconds after the pointer leaves', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(28_000);
+  await replied.hover();
+  await page.clock.runFor(60_000);
+  await expect(replied).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(2_500);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(400);
+  await expect(replied).toHaveCount(0);
+});
+
+test('keyboard focus pauses a replied activity card and leaves three seconds after focus moves', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(28_000);
+  await replied.locator('.pet-mini-card-reference').focus();
+  await page.clock.runFor(60_000);
+  await expect(replied).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(2_500);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(400);
+  await expect(replied).toHaveCount(0);
+});
+
+test('a hidden document pauses an unread replied activity card', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(600);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(60_000);
+  await expect(replied).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(28_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(replied).toHaveCount(0);
+});
+
+test('a new activity generation gets a fresh replied-card budget, while refetch does not revive an expired one', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(600);
+  await page.clock.runFor(30_200);
+  await expect(replied).toHaveCount(0);
+  await page.evaluate(() => window.petFixtureRefreshActivity('ses_fixture_2'));
+  await page.clock.runFor(100);
+  await expect(replied).toHaveCount(0);
+
+  await page.evaluate(() => window.petFixtureStartActivity('ses_fixture_2'));
+  await expect(replied).toBeVisible();
+  await page.evaluate(() => window.petFixtureFinishActivity('ses_fixture_2'));
+  await page.clock.runFor(29_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(replied).toHaveCount(0);
+});
+
+test('a pending activity authorization card remains visible', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  const needsInput = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
+  await expect(needsInput).toHaveClass(/is-needs-input/);
+  await page.clock.runFor(60_000);
+  await expect(needsInput).toBeVisible();
+});
 
 test('Vibey clicks with a lone card leave no hidden expansion for a second card', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?activities=1');

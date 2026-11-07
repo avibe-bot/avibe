@@ -43,6 +43,9 @@ declare global {
     petFixtureConnection: (connected: boolean) => void;
     petFixtureMessage: (message: Record<string, unknown>) => void;
     petFixtureAddActivity: () => void;
+    petFixtureStartActivity: (sessionId: string) => void;
+    petFixtureFinishActivity: (sessionId: string) => void;
+    petFixtureRefreshActivity: (sessionId: string) => void;
     petFixtureFinishTurn: (result: Record<string, unknown>) => void;
     petFixtureReleaseExpansion: () => void;
     petFixtureRead: (id: string) => void;
@@ -117,7 +120,7 @@ if (historyActions || params.has('pendingVault')) requests.push({
   id: 'vr_main_fixture', request_type: 'access', status: 'pending', card: { request_type: 'access' },
   session: { id: 'ses_main' }, expires_at: null,
 });
-const unread = personal ? { ses_fixture_2: 1 } : {};
+const unread: Record<string, number> = personal ? { ses_fixture_2: 1 } : {};
 // A legacy file must not steer reads or sends away from main.
 localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: 'legacy-session', revision: 1 }));
 let mainAvailable = params.get('offline') !== 'true';
@@ -220,6 +223,28 @@ window.petFixtureAddActivity = () => {
   agents.push({ ...agents[0], session_id: `ses_fixture_${agents.length}`, base_session_id: `native_${agents.length}`, title: 'Another task' });
   for (const stream of streams) {
     stream.dispatchEvent(new MessageEvent('runs.updated', { data: JSON.stringify({ type: 'runs.updated', data: { run_id: `run_${agents.length}`, status: 'running' } }) }));
+  }
+};
+window.petFixtureStartActivity = (sessionId) => {
+  const agent = agents.find((row) => row.session_id === sessionId);
+  if (!agent) throw new Error(`Missing fixture activity ${sessionId}`);
+  agent.state = 'active';
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('turn.start', { data: JSON.stringify({ type: 'turn.start', data: { session_id: sessionId } }) }));
+    stream.dispatchEvent(new MessageEvent('runs.updated', { data: JSON.stringify({ type: 'runs.updated', data: { session_id: sessionId } }) }));
+  }
+};
+window.petFixtureFinishActivity = (sessionId) => {
+  const agent = agents.find((row) => row.session_id === sessionId);
+  if (!agent) throw new Error(`Missing fixture activity ${sessionId}`);
+  agent.state = 'idle';
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('runs.updated', { data: JSON.stringify({ type: 'runs.updated', data: { session_id: sessionId } }) }));
+  }
+};
+window.petFixtureRefreshActivity = (sessionId) => {
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('session.activity', { data: JSON.stringify({ type: 'session.activity', data: { session_id: sessionId, event: 'refresh' } }) }));
   }
 };
 // End Vibey's running turn with its result, as the event stream reports it.

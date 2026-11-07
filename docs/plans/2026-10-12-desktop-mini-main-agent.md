@@ -320,6 +320,20 @@ revalidated by `getSessionResult`. No separate unread counter is created.
 The card says Replied while it has unread evidence and no running process.
 Callbacks to the main session are reported in Vibey's bubble.
 
+**Replied-card expiry (Owner, 2026-11-07).** A running activity card remains
+visible for the duration of its run. When the process ends and the card still
+has unread evidence, it enters the Replied state and uses the shared
+`REPLY_LINGER_MS = 30_000` budget. The budget counts only while the document
+is visible. Pointer hover, keyboard focus inside the activity-card area, and
+interaction with the expanded list pause it; leaving resumes with at least
+`REPLY_LINGER_RESUME_MS = 3_000` remaining. Expiry hides that card for the
+current activity generation without changing Inbox unread state, so the
+existing Inbox and PetAvatar/Vibey unread indicators remain the way to find
+the unread item. A new run or new reply gets a new generation and a new
+budget; ordinary activity refreshes do not revive an expired generation.
+Pending Vault or other authorization cards keep their existing display rules
+and are outside this automatic expiry.
+
 - Heading: project · agent; for IM, platform · project · agent.
 - Title: session title, with the existing localized fallback.
 - Priority: needs authorization, running, then replied. Preserve relative order
