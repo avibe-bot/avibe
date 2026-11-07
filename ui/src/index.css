@@ -1034,6 +1034,44 @@ pre,
 @keyframes motion-nav-return { from { transform: translateX(calc(-1 * var(--motion-drift))); } }
 @keyframes motion-fade-in { from { opacity: 0; } }
 @keyframes motion-fade-out { to { opacity: 0; } }
+/* What a disclosure in the transcript closes (src/lib/motion.ts useDisclosure;
+   docs/plans/web-ui-motion.md M3) leaves the way it came, while it still holds
+   its layout: it fades and shrinks to `--motion-scale-enter-sm` toward its
+   top-left corner on `instant`, exit (as what the turn at work hands over
+   does), then the layout lets go of it. An item it laid out (a Harness group's
+   member, with the rail it draws: `-children`) fades as a whole while what it
+   holds shrinks, so the box the scroller measures never moves. Chrome that
+   closes with it (a group head's collapse pill: `-fade`) fades out with it, on
+   the same time and curve. Reduced motion: it only fades. */
+.motion-disclose-out,
+.motion-disclose-out-children,
+.motion-disclose-out-children > *,
+.motion-disclose-out-fade {
+  pointer-events: none;
+  animation-duration: var(--motion-duration-instant);
+  animation-timing-function: var(--motion-ease-exit);
+  animation-fill-mode: forwards;
+}
+.motion-disclose-out { transform-origin: top left; animation-name: motion-disclose-out; }
+.motion-disclose-out-children,
+.motion-disclose-out-fade { animation-name: motion-fade-out; }
+.motion-disclose-out-children > * { transform-origin: top left; animation-name: motion-shrink-out; }
+@keyframes motion-disclose-out { to { opacity: 0; scale: var(--motion-scale-enter-sm); } }
+@keyframes motion-shrink-out { to { scale: var(--motion-scale-enter-sm); } }
+/* Then what stands for it closed (a chip's pill, a group's folded card, the
+   running card's compact view) comes in where it lands: it fades in and grows
+   from `--motion-scale-enter-sm` at its top-left corner on `instant`, enter,
+   so nothing appears whole in one frame. */
+.motion-summary-in {
+  transform-origin: top left;
+  animation: motion-summary-in var(--motion-duration-instant) var(--motion-ease-enter) backwards;
+}
+@keyframes motion-summary-in { from { opacity: 0; scale: var(--motion-scale-enter-sm); } }
+@media (prefers-reduced-motion: reduce) {
+  .motion-disclose-out { animation-name: motion-fade-out; }
+  .motion-disclose-out-children > * { animation-name: none; }
+  .motion-summary-in { animation-name: motion-fade-in; }
+}
 
 /* Sheets, dialogs, popovers (docs/plans/web-ui-motion.md M6; src/lib/sheetDrag.ts;
    ui/design: motion/sheets/*). Keyed on the `data-state` Radix sets, which waits

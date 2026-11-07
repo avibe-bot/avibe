@@ -94,7 +94,8 @@ import {
 } from '../../lib/transcriptOrder';
 import { prefersReducedMotion } from '../../lib/motion';
 import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
-import { BeforeCommit, HEAD_ATTRIBUTE, ITEM_FOR_ATTRIBUTE, ITEM_KEY_ATTRIBUTE, SIDE_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { BeforeCommit, HEAD_ATTRIBUTE, ITEM_FOR_ATTRIBUTE, ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, SIDE_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { useDisclosure } from '../../lib/motion';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { MentionSearchResult } from './MentionEditor';
 import {
@@ -5871,7 +5872,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
           scrollingRef.current = false;
           bottomBounceRef.current = false;
         }}
-        onClickCapture={(event) => holdTouchedRow(event.target)}
+        onClickCapture={(event) => {
+          holdTouchedRow(event.target);
+          motion.noteDisclosure(event.target);
+        }}
         onPointerDown={() => {
           lastInputAtRef.current = performance.now();
           stopGlideToLatest();
@@ -5998,25 +6002,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
                 revealHarnessGroupRef.current = key;
               };
               return (
-                <Fragment key={key}>
-                  <HarnessGroup
-                    groupKey={key}
-                    members={item.members.map(({ message }) => message)}
-                    expanded={open}
-                    onToggle={toggle}
-                  />
-                  {open && item.members.map(({ message, index }) => (
-                    <div
-                      key={message.id}
-                      data-transcript-row=""
-                      {...{ [ITEM_KEY_ATTRIBUTE]: `harness-member:${message.id}` }}
-                      className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3')}
-                    >
-                      {renderTranscriptRow(message, index)}
-                    </div>
-                  ))}
-                  {open && <HarnessGroupCollapse groupKey={key} count={memberIds.length} onCollapse={toggle} />}
-                </Fragment>
+                <HarnessGroupItem
+                  key={key}
+                  groupKey={key}
+                  members={item.members}
+                  open={open}
+                  onToggle={toggle}
+                  renderRow={renderTranscriptRow}
+                />
               );
             }
             // Keyed so a sent row keeps its element from pending to the server's row.
@@ -6068,6 +6061,51 @@ export const Transcript: React.FC<TranscriptProps> = ({
     </div>
   );
 };
+
+/**
+ * A Harness group in the transcript: its head, and while it is open its members on the rail and the bar
+ * that closes it, each a transcript item of its own. Closed, the members leave in place while the head
+ * still draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
+ */
+function HarnessGroupItem({
+  groupKey,
+  members,
+  open,
+  onToggle,
+  renderRow,
+}: {
+  groupKey: string;
+  members: { message: WorkbenchMessage; index: number }[];
+  open: boolean;
+  onToggle: () => void;
+  renderRow: (message: WorkbenchMessage, index: number) => React.ReactNode;
+}) {
+  const { present, closing, closed } = useDisclosure(open);
+  return (
+    <>
+      <HarnessGroup
+        groupKey={groupKey}
+        members={members.map(({ message }) => message)}
+        expanded={open}
+        closing={closing}
+        closed={closed}
+        onToggle={onToggle}
+      />
+      {present && members.map(({ message, index }) => (
+        <div
+          key={message.id}
+          data-transcript-row=""
+          {...{ [ITEM_KEY_ATTRIBUTE]: `harness-member:${message.id}`, [REVEAL_ATTRIBUTE]: '' }}
+          aria-hidden={closing || undefined}
+          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-out-children')}
+        >
+          {renderRow(message, index)}
+        </div>
+      ))}
+      {present && <HarnessGroupCollapse groupKey={groupKey} count={members.length} onCollapse={onToggle} closing={closing} />}
+    </>
+  );
+}
 
 const formatForkSourceLabel = (sourceSessionId: string, sourceTitle: string | null): string => {
   if (sourceTitle) return sourceTitle;
@@ -6244,6 +6282,8 @@ export const MessageRow = memo(function MessageRow({
   const replyBot = botForSession(session.id);
   // Harness rows are collapsed by default; the Transcript holds which are open.
   const expanded = harnessOpen;
+  // A Harness row's body while it is open, and for the moment it takes to leave once closed.
+  const harnessBody = useDisclosure(expanded);
 
   // Deep-link jump target dressing applied to every row's outer wrapper:
   //  - ``data-message-id`` lets the transcript locate the row to scroll to.
@@ -6557,8 +6597,13 @@ export const MessageRow = memo(function MessageRow({
             </span>
             <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')} />
           </Button>
-          {expanded && (
-            <div className="w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed">
+          {harnessBody.present && (
+            // What opening the row shows (lib/transcriptMotion reveals it), and leaves in place once closed.
+            <div
+              {...{ [REVEAL_ATTRIBUTE]: '' }}
+              aria-hidden={harnessBody.closing || undefined}
+              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-out')}
+            >
               {bodyNode}
               {attachmentsNode}
             </div>

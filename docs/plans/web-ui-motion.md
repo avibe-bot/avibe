@@ -338,9 +338,41 @@ reduced-motion form.
     live one replaces, an older page. The first row the stream delivers after
     a reconnect is live again. A row is live only while it is shown: one the
     retained window dropped, read back with an older page, lands still.
-- **Reduced**: crossfade on `fast`.
+- **Opening and closing** what the transcript folds (an execution-process
+  chip, a Harness group, a Harness row's body, the running card's full view):
+  the layout changes at once in that commit, and the scroller holds the item
+  the reader tapped where it was, leaving the tail if it was following it
+  (#3307). What opened then shows itself: it grows from
+  `--motion-scale-enter-sm` at its top-left corner while it fades in on `fast`
+  (enter). Only what is inside an item moves (a chip's panel, a row's body,
+  what an opened group's member holds), by the individual `scale` property and
+  opacity; an item a disclosure laid out (a group's member, with the rail it
+  draws) fades as a whole. The box the scroller measures never moves, and no
+  layout property is animated. A chip opened while its rows load shows its spinner in their
+  place, and the rows fade in when they land, without a second reveal. Only a
+  tap on a disclosure control (`aria-expanded`) in the last second opens
+  anything this way; what a read adds to an opened group lands still.
+- **Closing** (owner, 2026-11-06: the same easing both ways): the control says
+  so at once (`aria-expanded`), and what it closes leaves the way it came
+  while it still holds its layout: it fades and shrinks to
+  `--motion-scale-enter-sm` toward its top-left corner on `instant`, exit (the
+  turn-at-work handoff's tokens), so nothing below moves up into it and no two
+  texts are drawn over each other. Then the layout lets go of it in one commit,
+  and what was below moves up. A Harness group's head keeps its open shape
+  until its members are gone; its collapse pill fades out with them, on the
+  same time and curve. What stands for it closed (a chip's pill, a
+  group's folded card under its unchanged head line, the running card's compact
+  view) then comes in where it
+  lands, in that same commit's layout: it fades in and grows from
+  `--motion-scale-enter-sm` at its top-left corner on `instant`, enter, never
+  appearing whole in one frame (owner, 2026-11-06). The scroller holds the
+  tapped item through both commits. A tap that closes something opens nothing:
+  only a tap on a closed control marks what the next commit opens, and only
+  inside the tapped item or among the items its own Harness group lays out.
+- **Reduced**: crossfade on `fast`; what opens only fades in, what closes only
+  fades out, and what stands for it closed only fades in.
 - **Frames**: `motion/arrival/phone`, `phone-reduced`, `phone-card`,
-  `phone-turn-end`, `phone-show-page`.
+  `phone-turn-end`, `phone-show-page`; `motion/disclosure/*`.
 
 ### M4 · Cache → live hand-over (P1)
 
@@ -589,7 +621,7 @@ send (they change `ChatPage`).
   it; the server's queued row keeps that entrance. The inline error fades in;
   the jump-to-latest control grows in.
 - **Not animated yet.** Rows a live refresh removes (other than the two exits
-  above) still go at once; an activity card's own expansion is unchanged.
+  above) still go at once.
 - **Frames.** `motion/send/*` and `motion/arrival/*` render the shipped page;
   a frame's `fixtures.stream` delivers event-stream events on a clock (the
   reply arriving).
