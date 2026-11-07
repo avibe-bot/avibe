@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import sqlite3
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+from sqlalchemy.exc import OperationalError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -597,8 +600,17 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, [("message", "persisted"), ("run", "run-origin")])
 
     async def test_recovered_activity_mirror_failure_sends_once_across_drains(self):
+        """Real mirror exhaustion must preserve the transport evidence on recovery."""
         from core.scheduled_tasks import ScheduledTaskService
 
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        isolated_home = patch.dict("os.environ", {"AVIBE_HOME": home.name})
+        isolated_home.start()
+        self.addCleanup(isolated_home.stop)
+        # Only this case provisions storage; other stubs in this module exercise
+        # an uninitialized store (and must not opt into conftest's module seeding).
+        ensure_sqlite_state(db_path=Path(home.name) / "state" / "vibe.sqlite")
         controller = _StubController()
         registry = SessionActivityRegistry()
         controller.agent_service = SimpleNamespace(
@@ -671,12 +683,16 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 "SQLiteBackgroundTaskStore",
                 return_value=_Store(),
             ),
-            patch.object(message_dispatcher_module, "persist_agent_message", return_value=None),
+            patch(
+                "storage.messages_service.append",
+                side_effect=OperationalError("test write", {}, sqlite3.OperationalError("database is locked")),
+            ) as mirror_write,
             patch.object(message_dispatcher_module, "agent_message_exists", return_value=False),
         ):
             await service._drain_recovered_activity_outputs()
             await service._drain_recovered_activity_outputs()
 
+        self.assertEqual(mirror_write.call_count, 3)
         self.assertEqual(
             controller.im_client.sent,
             [("C123", None, "Recovered output")],

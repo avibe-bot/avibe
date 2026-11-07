@@ -423,8 +423,8 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 if case == "the process dies after the receipt":
                     real_persist = dispatcher_module.persist_agent_message
 
-                    def persist_then_die(*args, **kwargs):
-                        real_persist(*args, **kwargs)
+                    async def persist_then_die(*args, **kwargs):
+                        await real_persist(*args, **kwargs)
                         raise RuntimeError("the process died after the receipt committed")
 
                     with mock.patch.object(dispatcher_module, "persist_agent_message", persist_then_die):

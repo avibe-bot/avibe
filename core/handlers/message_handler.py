@@ -273,13 +273,13 @@ class MessageHandler(BaseHandler):
             # acceptance. Legacy direct turns still mirror at this boundary.
             if not durable_delivery_owned and not durable_ingress_enabled:
                 if source == self.TURN_SOURCE_HUMAN:
-                    from core.message_mirror import mirror_inbound
+                    from core.message_mirror import mirror_inbound_async
 
-                    mirror_inbound(context, control_message)
+                    await mirror_inbound_async(context, control_message)
                 else:
-                    from core.message_mirror import mirror_harness_inbound
+                    from core.message_mirror import mirror_harness_inbound_async
 
-                    mirror_harness_inbound(context, message)
+                    await mirror_harness_inbound_async(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
             payload = dict(context.platform_specific or {})
@@ -825,9 +825,9 @@ class MessageHandler(BaseHandler):
                 ):
                     bound_session_id = (context.platform_specific or {}).get("agent_session_id")
                     if bound_session_id:
-                        from core.message_mirror import link_inbound_message_session
+                        from core.message_mirror import link_inbound_message_session_async
 
-                        link_inbound_message_session(
+                        await link_inbound_message_session_async(
                             platform=context.platform,
                             native_message_id=context.message_id,
                             session_id=str(bound_session_id),
@@ -1879,11 +1879,11 @@ class MessageHandler(BaseHandler):
         live legacy ``?stream=1`` sink via ``_stream_chunk`` (no-op otherwise).
         """
         try:
-            from core.message_mirror import persist_agent_message
+            from core.message_mirror import persist_agent_message_async
 
             # Persisted as ``notify`` → renders as a status box, not an answer;
             # publishes message.new so the async send path surfaces it.
-            persist_agent_message(context, "notify", text)
+            await persist_agent_message_async(context, "notify", text)
         except Exception:
             logger.debug("failed to persist terminal error row", exc_info=True)
         try:

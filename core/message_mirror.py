@@ -16,20 +16,29 @@ Hooks live in two places:
   BEFORE the IM mute filter. Chat outputs land in ``messages``; tool-call trace
   events land in ``agent_events``.
 
-Failures are swallowed and logged. A bad mirror write must never break
-the live IM reply path.
+Failures are logged and returned to callers with receipt recovery. Legacy IM
+inbound/backfill remains best-effort after bounded retries: it has no replay
+journal, and losing a mirror must not prevent live backend dispatch.
+
+Only the scope + message transaction is retried. Async entrypoints land that
+write on a worker, then publish on the caller loop; transport and publication
+are never part of a database retry.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from core.citations import CitationBundle, finalize_citations, materialize_citations
 from core.presentation import PRESENTATION_METADATA_KEY, PresentationDecision, presentation_metadata
@@ -37,7 +46,7 @@ from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
 from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, message_deliveries, messages_service, settings_service
-from storage.db import get_cached_sqlite_engine
+from storage.db import get_cached_sqlite_engine, retry_sqlite_write
 from vibe.message_types import activity_role_for, spec_for
 
 logger = logging.getLogger(__name__)
@@ -48,6 +57,78 @@ logger = logging.getLogger(__name__)
 # avibe projects are 'project' typed and pre-created via ``/api/projects``; this
 # module never touches those.
 DEFAULT_SCOPE_TYPE = "channel"
+
+
+@dataclass
+class _MirrorCommit:
+    value: Any = None
+    publish: Callable[[], None] | None = None
+    error: Exception | None = None
+
+
+# Freeze only mirror-owned inputs, not runtime objects (locks, clients, etc.)
+# carried alongside them on the live context. Workers never mutate that context.
+_MIRROR_CONTEXT_KEYS = (
+    "is_dm", "agent_session_id", "suppress_delivery", "agent_session_target",
+    "resolved_vibe_agent", "vibe_agent_name", "vibe_agent_backend",
+    "task_trigger_kind", "task_execution_id", "turn_token", "task_definition_id",
+    "source_kind", "source_actor", "vault_request_type", "vault_request_status",
+    "delivery_override",
+)
+
+
+def _snapshot_context(context: MessageContext) -> MessageContext:
+    spec = context.platform_specific or {}
+    return MessageContext(
+        user_id=context.user_id,
+        channel_id=context.channel_id,
+        platform=context.platform,
+        thread_id=context.thread_id,
+        message_id=context.message_id,
+        platform_specific=deepcopy({key: spec[key] for key in _MIRROR_CONTEXT_KEYS if key in spec}),
+    )
+
+
+def _retry_mirror(operation: Callable[[], _MirrorCommit | None], *, failure: Any = None) -> _MirrorCommit:
+    def write() -> _MirrorCommit:
+        committed = operation() or _MirrorCommit(failure)
+        if committed.error is not None:
+            raise committed.error
+        return committed
+
+    try:
+        return retry_sqlite_write(write)
+    except Exception as error:
+        logger.exception("Message mirror transaction failed: %s", getattr(operation, "func", operation))
+        return _MirrorCommit(failure, error=error)
+
+
+def _finish_mirror(committed: _MirrorCommit, error_sink: list | None = None) -> Any:
+    if committed.error is not None and error_sink is not None:
+        error_sink.append(committed.error)
+    if committed.publish is not None:
+        try:
+            committed.publish()
+        except Exception:
+            # A committed receipt remains a receipt even if a subscriber fails.
+            # Never report it as a failed write or retry its publication.
+            logger.exception("Message mirror publication failed after commit")
+    return committed.value
+
+
+async def _land_mirror(
+    operation: Callable[[], _MirrorCommit | None], *, failure: Any = None, error_sink: list | None = None
+) -> Any:
+    from core.runtime_work import land_step, rearm_caught_cancellation
+
+    step, cancelled = await land_step(asyncio.to_thread(_retry_mirror, operation, failure=failure))
+    try:
+        # The worker's result, publication, and error sink land before cancellation
+        # reaches the caller's next await, just as with an on-loop store step.
+        return _finish_mirror(step.result(), error_sink)
+    finally:
+        if cancelled:
+            rearm_caught_cancellation()
 
 
 def _now() -> str:
@@ -103,6 +184,10 @@ def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
             now=_now(),
             supports_threads=bool(context.thread_id),
         )
+    except DBAPIError:
+        # The scope and message form one transaction. In particular BUSY must
+        # reach the transaction retry instead of turning into a successful skip.
+        raise
     except Exception:
         logger.exception("mirror: failed to upsert scope for %s::%s", platform, native_id)
         return None
@@ -125,6 +210,15 @@ def _append_quietly(conn, **kwargs) -> Optional[dict]:
             kwargs.get("platform"),
         )
         return None
+
+
+def _publish_event(topic: str, payload: dict) -> None:
+    try:
+        from core.inbox_events import bus
+
+        bus.publish(topic, payload)
+    except Exception:
+        logger.exception("message_mirror: %s publish failed after commit", topic)
 
 
 def _publish_session_message(row: Optional[dict]) -> None:
@@ -259,6 +353,8 @@ def _hosted_card(conn, context: MessageContext, hosted: dict, *, scope_id, sessi
                 content_type=mime if mime in IMAGE_MIME_TYPES else None,
             )
             row = media_service.get_by_token(conn, token) or {}
+        except DBAPIError:
+            raise
         except Exception:
             logger.exception("persist_agent_message: hosted image registration failed")
             registered.append(image)
@@ -382,8 +478,50 @@ def persist_agent_message(
     existing_row_id: Optional[str] = None,
     hosted: Optional[dict] = None,
     turn_reply: Optional[tuple[str, str]] = None,
-    presentation: Optional["PresentationDecision"] = None,
+    presentation: Optional[PresentationDecision] = None,
 ) -> Optional[dict]:
+    """Worker-side synchronous API; loop callers use ``persist_agent_message_async``.
+
+    See ``_persist_agent_message_attempt`` for the receipt and projection contract.
+    Each retry starts from the frozen original body, never the media/citation text
+    whose registrations were rolled back by an earlier attempt.
+    """
+    operation = partial(
+        _persist_agent_message_attempt, _snapshot_context(context), canonical_type, text,
+        **deepcopy(dict(
+            quick_replies=quick_replies, result_footer=result_footer, citations=citations,
+            metadata=metadata, native_message_id=native_message_id, existing_row_id=existing_row_id,
+            hosted=hosted, turn_reply=turn_reply, presentation=presentation,
+        )),
+    )
+    return _finish_mirror(_retry_mirror(operation), error_sink)
+
+
+async def persist_agent_message_async(
+    context: MessageContext, canonical_type: str, text: str, *, error_sink: list | None = None, **kwargs: Any
+) -> Optional[dict]:
+    """Land the frozen transaction off-loop, then publish and return its receipt on this loop."""
+    operation = partial(
+        _persist_agent_message_attempt, _snapshot_context(context), canonical_type, text, **deepcopy(kwargs)
+    )
+    return await _land_mirror(operation, error_sink=error_sink)
+
+
+def _persist_agent_message_attempt(
+    context: MessageContext,
+    canonical_type: str,
+    text: str,
+    *,
+    quick_replies: Optional[list[str]] = None,
+    result_footer: Optional[str] = None,
+    citations: Optional[CitationBundle] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    native_message_id: Optional[str] = None,
+    existing_row_id: Optional[str] = None,
+    hosted: Optional[dict] = None,
+    turn_reply: Optional[tuple[str, str]] = None,
+    presentation: Optional["PresentationDecision"] = None,
+) -> Optional[_MirrorCommit]:
     """Persist one agent output into the workbench ``messages`` store.
 
     ``turn_reply`` is ``(turn_id, run_copy)`` for a reply that does not end its live
@@ -437,9 +575,14 @@ def persist_agent_message(
         inbox_row = None
         appended_row = None
         tool_event_row = None
-        message_type = None
         activity_ranked = False
         is_tool_call = _is_tool_call_type(canonical_type)
+        message_type = _AGENT_TYPE_BY_CANONICAL.get(canonical_type or "", "assistant")
+        stream_activity = (
+            context.platform == "avibe" and not suppress_delivery
+            and (is_tool_call or activity_role_for(message_type, metadata) == "activity")
+            and _activity_streaming_enabled()
+        )
         with engine.begin() as conn:
             if context.platform == "avibe":
                 # Inbox groups by the avibe session's project scope; never invent
@@ -509,7 +652,6 @@ def persist_agent_message(
                     run_id=run_id,
                 )
             else:
-                message_type = _AGENT_TYPE_BY_CANONICAL.get(canonical_type or "", "assistant")
                 # Workbench Chat only: rewrite ``file://`` links in the persisted copy
                 # to same-origin media-proxy URLs so the browser renders agent images
                 # inline + files as download cards. IM rows keep the raw ``file://``
@@ -527,6 +669,8 @@ def persist_agent_message(
                         text = rewrite_agent_media(
                             conn, scope_id=scope_id, session_id=row_session_id, text=text
                         )
+                    except DBAPIError:
+                        raise
                     except Exception:
                         logger.exception("persist_agent_message: media rewrite failed")
                 # The last transform this body will see has now run, so this is
@@ -655,74 +799,36 @@ def persist_agent_message(
                 activity_ranked = workbench_sessions_service.touch_session_agent_activity(
                     conn, row_session_id
                 )
-        # A rank change means the list has to re-sort, so tell an open browser the
-        # same way an accepted user send does. Gated on the bump having actually
-        # landed, which bounds this to one event per minute per session — strictly
-        # cheaper than the per-message ``inbox.session.updated`` below. avibe-only
-        # for the reason the publishes below are: an IM session has no open Chat or
-        # sidebar consumer, so publishing it would be dead traffic.
-        #
-        # It follows the RANK, not delivery, so it fires for a hidden session too —
-        # which is right rather than merely consistent: the surface that orders
-        # background rows by this column is the agent graph, and that is the view
-        # whose consumer refetches on this event. The payload is
-        # ``{session_id, scope_id, event}`` with no content, so a reorder announces
-        # nothing a suppressed message body would have carried.
-        if activity_ranked and context.platform == "avibe":
-            from core.inbox_events import bus
+        # Only return publication work after commit; no subscriber runs in a retry.
+        def publish() -> None:
+            # Rank changes carry no message content and also announce hidden
+            # sessions to the agent graph. Content follows the delivery gate.
+            if activity_ranked and context.platform == "avibe":
+                _publish_event(
+                    "session.activity",
+                    {"session_id": row_session_id, "scope_id": scope_id, "event": "agent_activity"},
+                )
+            if is_tool_call:
+                if stream_activity:
+                    _publish_activity_event(tool_event_row)
+                return
+            if context.platform == "avibe" and not suppress_delivery and (
+                message_type in messages_service.TRANSCRIPT_TYPES or stream_activity
+            ):
+                _publish_session_message(appended_row)
+            if inbox_row is not None:
+                _publish_event("inbox.session.updated", inbox_row)
+                try:
+                    from core.web_push_notifications import maybe_notify_inbox_message
 
-            bus.publish(
-                "session.activity",
-                {"session_id": row_session_id, "scope_id": scope_id, "event": "agent_activity"},
-            )
-        # tool_call rows never enter ``messages``/TRANSCRIPT_TYPES; when the Chat
-        # activity panel is enabled they fan out here as a synthesized
-        # ``message.new`` so an open Chat page shows the step live. Default off →
-        # no publish (strict no-op). Return None to preserve the tool_call contract.
-        if is_tool_call:
-            if context.platform == "avibe" and not suppress_delivery and _activity_streaming_enabled():
-                _publish_activity_event(tool_event_row)
-            return None
-        # Fan the row out to an open Chat page (session-scoped stream), then bump
-        # the inbox card. Both ride the controller→browser bridge. Only publish
-        # transcript-visible types so the live stream carries EXACTLY what the
-        # history fetch returns — EXCEPT interim ``assistant`` rows, which stream
-        # only when the Chat activity panel is enabled (they still stay out of the
-        # transcript + inbox; the activity group renders them separately).
-        # avibe-only: IM rows now carry a session_id too, but the workbench Chat is
-        # avibe-only, so keep the live fan-out scoped to avibe (an IM session has no
-        # open Chat consumer; publishing it would be dead traffic).
-        if context.platform == "avibe" and not suppress_delivery and (
-            message_type in messages_service.TRANSCRIPT_TYPES
-            or (
-                activity_role_for(message_type, metadata) == "activity"
-                and _activity_streaming_enabled()
-            )
-        ):
-            _publish_session_message(appended_row)
-        if inbox_row is not None:
-            from core.inbox_events import bus
+                    if presentation is None or presentation.web_push:
+                        maybe_notify_inbox_message(appended_row, inbox_row)
+                except Exception:
+                    logger.debug("web push notification scheduling failed", exc_info=True)
 
-            bus.publish("inbox.session.updated", inbox_row)
-            try:
-                from core.web_push_notifications import maybe_notify_inbox_message
-
-                if presentation is None or presentation.web_push:
-                    maybe_notify_inbox_message(appended_row, inbox_row)
-            except Exception:
-                logger.debug("web push notification scheduling failed", exc_info=True)
-        return appended_row
+        return _MirrorCommit(appended_row, publish)
     except Exception as err:
-        logger.exception("persist_agent_message: failure on platform=%s", context.platform)
-        # Surfaced, not raised. A caller that owes a durable receipt needs to know
-        # WHY the row is missing — propagating only ``None`` says a receipt is
-        # absent and nothing about whether the message was delivered. Raising
-        # instead would be caught by the notify branch and discard the message id
-        # already in hand, which is the bug this channel exists to avoid.
-        # Optional so the eleven callers that ignore it are unaffected.
-        if error_sink is not None:
-            error_sink.append(err)
-        return None
+        return _MirrorCommit(error=err)
 
 
 # Display keys ``persist_agent_message`` owns in ``content_json``; ``model`` (the
@@ -815,11 +921,29 @@ def _write_committed_row(
 
 
 def persist_silent_terminal(
+    context: MessageContext, *, is_error: bool, settled_by: str | None = None
+) -> bool:
+    operation = partial(
+        _persist_silent_terminal_attempt, _snapshot_context(context), is_error=is_error, settled_by=settled_by
+    )
+    return _finish_mirror(_retry_mirror(operation, failure=False))
+
+
+async def persist_silent_terminal_async(
+    context: MessageContext, *, is_error: bool, settled_by: str | None = None
+) -> bool:
+    operation = partial(
+        _persist_silent_terminal_attempt, _snapshot_context(context), is_error=is_error, settled_by=settled_by
+    )
+    return await _land_mirror(operation, failure=False)
+
+
+def _persist_silent_terminal_attempt(
     context: MessageContext,
     *,
     is_error: bool,
     settled_by: str | None = None,
-) -> None:
+) -> _MirrorCommit | None:
     """Record reply-less IM terminal evidence outside the Message transcript.
 
     Durable Workbench turns settle through ``session_turns``. IM turns do not have
@@ -869,11 +993,9 @@ def persist_silent_terminal(
                 turn_id=turn_id,
                 run_id=run_id,
             )
-    except Exception:
-        logger.exception(
-            "persist_silent_terminal: failure on platform=%s",
-            context.platform,
-        )
+        return _MirrorCommit(True)
+    except Exception as err:
+        return _MirrorCommit(False, error=err)
 
 
 def agent_message_exists(
@@ -944,11 +1066,26 @@ def delivered_committed_row(
 
 
 def mirror_harness_inbound(
+    context: MessageContext, text: str, *, message_type: str = messages_service.HARNESS_TYPE
+) -> bool:
+    """Worker-side harness/Vault mirror; return False on exhausted persistence."""
+    operation = partial(_mirror_harness_inbound_attempt, _snapshot_context(context), text, message_type=message_type)
+    return _finish_mirror(_retry_mirror(operation, failure=False))
+
+
+async def mirror_harness_inbound_async(
+    context: MessageContext, text: str, *, message_type: str = messages_service.HARNESS_TYPE
+) -> bool:
+    operation = partial(_mirror_harness_inbound_attempt, _snapshot_context(context), text, message_type=message_type)
+    return await _land_mirror(operation, failure=False)
+
+
+def _mirror_harness_inbound_attempt(
     context: MessageContext,
     text: str,
     *,
     message_type: str = messages_service.HARNESS_TYPE,
-) -> bool:
+) -> _MirrorCommit | None:
     """Record a harness-originated prompt (scheduled task / watch / webhook).
 
     The backend consumes the prompt as turn input for the default harness type,
@@ -966,9 +1103,9 @@ def mirror_harness_inbound(
     scope, IM rows to the delivery channel.
     """
     if not text or not text.strip():
-        return False
+        return
     if not context.platform:
-        return False
+        return
     spec = context.platform_specific or {}
     trigger_kind = spec.get("task_trigger_kind")
     definition_id = spec.get("task_definition_id")
@@ -1016,7 +1153,7 @@ def mirror_harness_inbound(
                 row_session_id = session_id
                 session_row = None
             if scope_id is None and session_row is None:
-                return False
+                return
             appended_row = _append_quietly(
                 conn,
                 scope_id=scope_id,
@@ -1037,19 +1174,16 @@ def mirror_harness_inbound(
             # avibe-scoped). No-op until the session has a result row.
             if context.platform == "avibe" and row_session_id and not suppress_delivery:
                 inbox_row = messages_service.get_inbox_session(conn, row_session_id)
-        # Surface the harness-triggered prompt on an open Chat page immediately,
-        # so the upcoming agent reply isn't shown with no originating turn.
-        # avibe-only: IM rows carry a session_id now but have no open Chat consumer.
-        if context.platform == "avibe" and not suppress_delivery:
-            _publish_session_message(appended_row)
-        if inbox_row is not None:
-            from core.inbox_events import bus
+        def publish() -> None:
+            # IM rows carry a session id but have no open Chat consumer.
+            if context.platform == "avibe" and not suppress_delivery:
+                _publish_session_message(appended_row)
+            if inbox_row is not None:
+                _publish_event("inbox.session.updated", inbox_row)
 
-            bus.publish("inbox.session.updated", inbox_row)
-        return True
-    except Exception:
-        logger.exception("mirror_harness_inbound: unexpected failure on platform=%s", context.platform)
-        return False
+        return _MirrorCommit(True, publish)
+    except Exception as err:
+        return _MirrorCommit(False, error=err)
 
 
 def mirror_vault_waiter_outcome(
@@ -1093,7 +1227,18 @@ def mirror_vault_waiter_outcome(
     )
 
 
-def mirror_inbound(context: MessageContext, text: str) -> None:
+def mirror_inbound(context: MessageContext, text: str) -> bool:
+    """Worker-side legacy inbound mirror; exhaustion is logged, with no replay journal."""
+    operation = partial(_mirror_inbound_attempt, _snapshot_context(context), text)
+    return _finish_mirror(_retry_mirror(operation, failure=False))
+
+
+async def mirror_inbound_async(context: MessageContext, text: str) -> bool:
+    operation = partial(_mirror_inbound_attempt, _snapshot_context(context), text)
+    return await _land_mirror(operation, failure=False)
+
+
+def _mirror_inbound_attempt(context: MessageContext, text: str) -> _MirrorCommit | None:
     """Record a human-originated IM message into the messages table.
 
     Written scope-keyed with ``session_id=None``: the turn's agent session is not
@@ -1132,11 +1277,29 @@ def mirror_inbound(context: MessageContext, text: str) -> None:
                 native_message_id=context.message_id,
                 parent_native_message_id=context.thread_id,
             )
-    except Exception:
-        logger.exception("mirror_inbound: unexpected failure on platform=%s", context.platform)
+        return _MirrorCommit(True)
+    except Exception as err:
+        return _MirrorCommit(False, error=err)
 
 
-def link_inbound_message_session(*, platform: str, native_message_id: str, session_id: str) -> None:
+def link_inbound_message_session(*, platform: str, native_message_id: str, session_id: str) -> bool:
+    """Worker-side best-effort backfill; False makes failed worker completion observable."""
+    operation = partial(
+        _link_inbound_message_session_attempt, platform=platform, native_message_id=native_message_id, session_id=session_id
+    )
+    return _finish_mirror(_retry_mirror(operation, failure=False))
+
+
+async def link_inbound_message_session_async(*, platform: str, native_message_id: str, session_id: str) -> bool:
+    operation = partial(
+        _link_inbound_message_session_attempt, platform=platform, native_message_id=native_message_id, session_id=session_id
+    )
+    return await _land_mirror(operation, failure=False)
+
+
+def _link_inbound_message_session_attempt(
+    *, platform: str, native_message_id: str, session_id: str
+) -> _MirrorCommit | None:
     """Back-fill ``session_id`` onto the IM inbound row written by :func:`mirror_inbound`.
 
     ``message_handler`` calls this once dispatch has bound the turn's session (the PK
@@ -1164,5 +1327,6 @@ def link_inbound_message_session(*, platform: str, native_message_id: str, sessi
                 )
                 .values(session_id=session_id)
             )
-    except Exception:
-        logger.debug("link_inbound_message_session: back-fill failed", exc_info=True)
+        return _MirrorCommit(True)
+    except Exception as err:
+        return _MirrorCommit(False, error=err)
