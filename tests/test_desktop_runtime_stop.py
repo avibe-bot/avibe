@@ -1152,7 +1152,9 @@ def test_a_restart_job_s_successor_claims_only_its_own_runtime_and_undoes_what_i
     monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", stop_runtime_for_restart)
     monkeypatch.setattr(runtime, "start_service", start_service)
     monkeypatch.setattr(runtime, "start_ui", start_ui)
-    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: started["foreign"].pid)
+    monkeypatch.setattr(
+        runtime, "wait_for_service_ready", lambda pid, timeout, *, on_progress=None: started["foreign"].pid,
+    )
     runtime.write_status("stopped", "stopped", None, None)
     status_path = paths.get_runtime_status_path()
     recorded = status_path.read_bytes()

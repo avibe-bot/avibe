@@ -38,6 +38,9 @@ SHUTDOWN_INTENT_TTL_SECONDS = 30
 SHUTDOWN_INTENT_ENV = "VIBE_REQUIRE_SHUTDOWN_INTENT"
 SERVICE_LOCK_READY_TIMEOUT_SECONDS = 5.0
 SERVICE_SLOW_START_TIMEOUT_SECONDS = 120.0
+# Database preparation can legitimately exceed the ordinary startup budget.
+# Bound even a live but stuck migrator; never infer readiness from this phase.
+SERVICE_MIGRATION_TIMEOUT_SECONDS = 30 * 60.0
 
 #: The service takes the lock before it migrates the database and builds its
 #: controller, because both of those have to be done under the exclusion the lock
@@ -47,6 +50,7 @@ SERVICE_SLOW_START_TIMEOUT_SECONDS = 120.0
 #: kills the holder, and a watcher that stopped at the lock has already recorded
 #: a success by then.
 SERVICE_PHASE_STARTING = "starting"
+SERVICE_PHASE_MIGRATING = "migrating"
 SERVICE_PHASE_RUNNING = "running"
 
 
@@ -432,6 +436,36 @@ def _write_service_instance_lock_record(lock_file, phase: str) -> None:
         logger.debug("Failed to fsync service instance lock", exc_info=True)
 
 
+@contextmanager
+def service_database_preparation():
+    """Expose backup/migration/validation on the existing, process-owned record.
+
+    No heartbeat thread: a live lock holder explicitly in this phase receives
+    a bounded migration budget. A dead/reused PID or an abandoned record cannot
+    extend startup. Preparation returning (or raising) clears the phase, so a
+    later controller hang still has the ordinary startup timeout.
+    """
+    owned = current_process_owns_service_instance()
+    if owned:
+        _write_service_instance_lock_record(_SERVICE_INSTANCE_LOCK_HANDLE, SERVICE_PHASE_MIGRATING)
+    try:
+        yield
+    finally:
+        if owned and current_process_owns_service_instance():
+            _write_service_instance_lock_record(_SERVICE_INSTANCE_LOCK_HANDLE, SERVICE_PHASE_STARTING)
+
+
+def service_instance_migrating(pid: int) -> bool:
+    record = read_service_instance_lock_record()
+    return bool(
+        record is not None
+        and record.get("pid") == pid
+        and record.get("phase") == SERVICE_PHASE_MIGRATING
+        and isinstance(record.get("start_token"), str)
+        and record["start_token"] == process_start_token(pid)
+    )
+
+
 def mark_service_instance_started() -> None:
     """Record that this service is past startup and into its normal life.
 
@@ -540,7 +574,7 @@ def service_instance_still_starting(pid: int) -> bool:
     record = read_service_instance_lock_record()
     if record is None:
         return False
-    return record.get("pid") == pid and record.get("phase") == SERVICE_PHASE_STARTING
+    return record.get("pid") == pid and record.get("phase") in {SERVICE_PHASE_STARTING, SERVICE_PHASE_MIGRATING}
 
 
 def release_service_instance_lock() -> None:
@@ -1734,6 +1768,11 @@ def resolve_service_state(*, detect_extra_processes: bool = True) -> ServiceStat
         if extra_pids:
             detail = f"{detail}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
         if service_instance_still_starting(owner_pid):
+            if service_instance_migrating(owner_pid):
+                return ServiceState(
+                    "starting", "database migration in progress (backup, migration or validation)",
+                    owner_pid, owner_pid, extra_pids,
+                )
             return ServiceState("starting", f"{detail} has not finished starting", owner_pid, owner_pid, extra_pids)
         return ServiceState("running", detail, owner_pid, owner_pid, extra_pids)
     if extra_pids:
@@ -1755,11 +1794,11 @@ def _starting_record_outlived_its_start(status: dict) -> bool:
     resolves as running, and reporting that window as `stopped` would make every
     healthy start look like a failure. But unlike `setup` and `error`, `starting`
     is a claim about a process that is expected to arrive, so it holds only for
-    as long as that arrival is still possible. `wait_for_service_ready` gives up
-    after SERVICE_SLOW_START_TIMEOUT_SECONDS; past that same deadline a
-    `starting` record no longer describes a machine coming up, it describes one
-    that died on the way -- which is the exact failure this change exists to stop
-    reporting as healthy.
+    as long as that arrival is still possible. Before any live lock holder has
+    arrived, the ordinary SERVICE_SLOW_START_TIMEOUT_SECONDS budget applies.
+    A live migrating holder is resolved separately and never reaches this
+    stopped-state fallback. Past that deadline a persisted `starting` record
+    describes a process that died on the way, not a machine coming up.
     """
 
     updated_at = status.get("updated_at")
@@ -1866,6 +1905,11 @@ def _raise_service_started_but_never_ran(pid: int, *, timeout: float) -> None:
     if not pid_alive(owner_pid):
         _clear_service_pid_reservation(owner_pid)
         raise RuntimeError(f"Vibe service process pid={owner_pid} exited while starting up")
+    if service_instance_migrating(owner_pid):
+        raise RuntimeError(
+            f"Vibe service process pid={owner_pid} is still migrating after the "
+            f"{SERVICE_MIGRATION_TIMEOUT_SECONDS:.0f}-second startup hard cap"
+        )
     if service_instance_still_starting(owner_pid):
         raise RuntimeError(
             f"Vibe service process pid={owner_pid} acquired the service lock but did not "
@@ -2082,7 +2126,8 @@ def _wait_for_scoped_service_pid(spawn_pid: int, timeout: float) -> int | None:
 
 
 def wait_for_service_ready(
-    spawn_pid: int, timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS
+    spawn_pid: int, timeout: float = SERVICE_SLOW_START_TIMEOUT_SECONDS,
+    *, on_progress: Callable[[str], None] | None = None,
 ) -> int | None:
     """Wait until the service has finished starting and return its owner pid.
 
@@ -2100,21 +2145,39 @@ def wait_for_service_ready(
     on it; anything that stopped at the lock reports a healthy start and leaves.
     That is the whole shape of an upgrade taking an instance dark.
 
-    Returns the resolved owner pid, or ``None`` if none finished starting within
-    ``timeout`` -- including when the owner dies while starting, which is that
-    failure arriving early rather than as a timeout.
+    Ordinary startup spends ``timeout``. Time explicitly in database preparation
+    pauses that budget, with a separate 30-minute hard cap for the whole wait.
+    The phase never counts as readiness; owner death still fails immediately.
     """
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    hard_deadline = started + max(timeout, SERVICE_MIGRATION_TIMEOUT_SECONDS)
     owner_pid = _wait_for_scoped_service_pid(spawn_pid, timeout)
     if owner_pid is None:
         return None
+    previous_tick = time.monotonic()
+    was_migrating = False
     while True:
-        if service_instance_started(owner_pid):
-            return owner_pid
         if not pid_alive(owner_pid):
             return None
-        if time.monotonic() >= deadline:
+        if service_instance_started(owner_pid):
+            return owner_pid
+        now = time.monotonic()
+        migrating = service_instance_migrating(owner_pid)
+        if was_migrating:
+            deadline += now - previous_tick
+        if migrating != was_migrating:
+            detail = (
+                "Database migration in progress (backup, migration or validation); waiting for service readiness."
+                if migrating else "Database migration finished; waiting for service readiness."
+            )
+            logger.info(detail)
+            if on_progress is not None:
+                on_progress(detail)
+        if now >= hard_deadline or (not migrating and now >= deadline):
             return None
+        previous_tick = now
+        was_migrating = migrating
         time.sleep(0.05)
 
 
@@ -2188,7 +2251,9 @@ def start_service(
     Waiting out here also takes the wait off the spawn lock, where a slow start
     used to block every other caller for the length of it.
 
-    Both phases spend one deadline, not one each. `SERVICE_SLOW_START_TIMEOUT_SECONDS`
+    Both phases spend one ordinary-startup deadline, not one each. Explicit
+    database preparation pauses that budget inside `wait_for_service_ready`,
+    subject to its migration hard cap. Otherwise SERVICE_SLOW_START_TIMEOUT_SECONDS
     is the budget for a service starting, and taking the lock and reaching the
     serving state are two phases of that single event -- so passing the constant
     to each in turn let a start that is slow in both cost a caller twice the

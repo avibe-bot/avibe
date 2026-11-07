@@ -402,6 +402,12 @@ def test_real_migration_import_and_service_readiness_enable_expiry(monkeypatch, 
         reset_ensured_sqlite_state()
         assert probe_current_sqlite_state(db_path)
 
+    # Startup needs exact-attempt validation, not diagnostic history counts.
+    # The earlier CLI/import path above still produces its ordinary report.
+    monkeypatch.setattr(
+        "storage.importer._current_counts",
+        lambda conn: pytest.fail("service startup scanned diagnostic row counts"),
+    )
     # The real runtime owner, not a synthetic "healthy" flag, confirms readiness.
     runtime.acquire_service_instance_lock()
     try:

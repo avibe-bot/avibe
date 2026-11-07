@@ -337,7 +337,15 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path, scope, read
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_instance_started", lambda pid: pid == 222)
-    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda *args, **kwargs: 222 if ready else None)
+    def wait_for_ready(*args, on_progress, **kwargs):
+        on_progress("Database migration in progress; waiting for service readiness.")
+        progress = runtime.read_json(runtime.get_restart_status_path())
+        assert progress["state"] == "running"
+        assert "migration in progress" in progress["detail"]
+        assert "migration in progress" in runtime.read_status()["detail"]
+        return 222 if ready else None
+
+    monkeypatch.setattr(runtime, "wait_for_service_ready", wait_for_ready)
     collected = []
 
     def collect(launcher):
@@ -359,6 +367,8 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path, scope, read
     status = runtime.read_json(runtime.get_restart_status_path())
     assert status["ok"] is True
     assert status["state"] == "succeeded"
+    assert "detail" not in status
+    assert "migration in progress" in Path(status["log_path"]).read_text()
     assert status["old_pid"] == 111
     assert status["new_pid"] == 222
     # The job records its own pid + start time so a watcher can validate the
@@ -719,7 +729,7 @@ def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
     # for the service alone would be describing a different machine.
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {222, 333})
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: False)
-    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: 222 if pid == 222 else None)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout, **kwargs: 222 if pid == 222 else None)
 
     rc = restart_supervisor._run_restart_job(job_id="jobslow", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
 
@@ -997,7 +1007,7 @@ def test_failed_upgrade_restart_reports_terminal_failure_without_package_rollbac
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True, **_kwargs: _fake_start_runtime(calls))
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
-    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: None)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout, **kwargs: None)
     monkeypatch.setattr(
         restart_supervisor.subprocess,
         "run",
