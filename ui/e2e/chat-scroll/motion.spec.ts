@@ -624,3 +624,325 @@ test('while the reader is scrolled up, what comes in live enters without moving 
   expect(writes.filter((write) => !write.site?.startsWith('restoreScrollPosition'))).toEqual([]);
   expect(await fromBottom(page)).toBeGreaterThan(800);
 });
+
+// Opening and closing what the transcript folds (an execution-process chip, a Harness group, a Harness
+// row's body): the layout changes at once and the scroller holds what the reader tapped where it was
+// (#3307); what opened only shows itself, by transform and opacity on what is inside an item, never on the
+// item the scroller measures. Closing is a cut.
+
+type Revealed = { item: boolean; props: string[] };
+
+/** From now on, what each node that shows what a disclosure opened plays, read as it goes in. */
+async function watchReveals(page: Page) {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
+    const lab = window as unknown as { reveals: Revealed[]; layout: string[] };
+    lab.reveals = [];
+    lab.layout = [];
+    const props = (el: Element) => el.getAnimations().filter((animation) => !(animation instanceof CSSAnimation))
+      .flatMap((animation) => Object.keys((animation.effect as KeyframeEffect).getKeyframes()[0]))
+      .filter((key) => !['offset', 'easing', 'composite', 'computedOffset'].includes(key));
+    new MutationObserver((records) => {
+      // A node that comes in, or one React keeps that takes the mark again (one view of the same element
+      // swapped for another).
+      const nodes = records.flatMap((record) => record.type === 'attributes' ? [record.target] : [...record.addedNodes]);
+      for (const node of nodes) {
+        if (!(node instanceof HTMLElement) || node.inert) continue;
+        const shown = [node, ...node.querySelectorAll<HTMLElement>('[data-transcript-reveal]')].filter((el) => el.hasAttribute('data-transcript-reveal'));
+        for (const el of shown) {
+          if (el.parentElement === column) {
+            lab.reveals.push({ item: true, props: props(el) });
+            for (const child of el.children) lab.reveals.push({ item: false, props: props(child) });
+          } else {
+            lab.reveals.push({ item: false, props: props(el) });
+          }
+        }
+      }
+      // Nothing in the transcript animates its layout.
+      for (const animation of document.getAnimations()) {
+        const target = (animation.effect as KeyframeEffect).target;
+        if (!target || !transcript.contains(target)) continue;
+        for (const key of Object.keys((animation.effect as KeyframeEffect).getKeyframes()[0] ?? {})) {
+          if (/^(height|max-height|min-height|margin|padding|top|bottom|left|right|width)/i.test(key)) lab.layout.push(key);
+        }
+      }
+    }).observe(column, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-transcript-reveal'] });
+  });
+}
+const reveals = (page: Page) => page.evaluate(() => {
+  const lab = window as unknown as { reveals: Revealed[]; layout: string[] };
+  return { reveals: lab.reveals, layout: lab.layout };
+});
+const SHOWS = ['opacity', 'scale'];
+const topOf = (page: Page, selector: string) => page.locator(selector).last().evaluate((el) => el.getBoundingClientRect().top);
+
+type Closing = { tapped: number; below: number | null; leaving: number; bare: number; motion: string[]; expanded: string | null; summary: number | null; steady: number | null; fading: number | null; fadingMotion: string | null; leavingMotion: string | null };
+
+/** Taps the disclosure control `control` and reads each of the frames that follow: where the item it is in
+ *  and the item under what closes are, how many of the nodes matching `leaving` are still there, the
+ *  animations they play, what the control says, and how opaque what stands for it closed (`summary`) is. */
+async function closeAndWatch(page: Page, control: string, leaving: string, below: string | null, summary: string | null = null, steady: string | null = null, fading: string | null = null) {
+  return page.evaluate(async ([controlSelector, leavingSelector, belowSelector, summarySelector, steadySelector, fadingSelector]) => {
+    // The animation an element plays, with its time and curve.
+    const motionOf = (el: Element | null | undefined) => {
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      return `${style.animationName} ${style.animationDuration} ${style.animationTimingFunction}`;
+    };
+    // How opaque an element shows, with every box around it inside the transcript.
+    const shownOpacity = (el: Element | null | undefined) => {
+      if (!el) return null;
+      let opacity = 1;
+      for (let node: Element | null = el; node && node !== transcript; node = node.parentElement) opacity *= parseFloat(getComputedStyle(node).opacity);
+      return opacity;
+    };
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
+    const button = [...transcript.querySelectorAll<HTMLElement>(controlSelector)].at(-1)!;
+    const item = [...column.children].find((child) => child.contains(button))!;
+    const under = belowSelector ? [...transcript.querySelectorAll(belowSelector)].at(-1) ?? null : null;
+    const frames: Closing[] = [];
+    const read = () => {
+      const nodes = [...transcript.querySelectorAll<HTMLElement>(leavingSelector)];
+      frames.push({
+        tapped: item.getBoundingClientRect().top,
+        below: under ? under.getBoundingClientRect().top : null,
+        leaving: nodes.length,
+        // Leaving with nothing playing, on itself or on what it holds.
+        bare: nodes.filter((node) => [node, ...node.children].every((el) => getComputedStyle(el).animationName === 'none')).length,
+        motion: [...new Set(nodes.flatMap((node) => [node, ...node.children]).map((node) => getComputedStyle(node).animationName).filter((name) => name !== 'none'))],
+        expanded: button.isConnected ? button.getAttribute('aria-expanded') : null,
+        summary: (() => {
+          const shown = summarySelector ? [...transcript.querySelectorAll<HTMLElement>(summarySelector)].at(-1) : null;
+          return shown ? parseFloat(getComputedStyle(shown).opacity) : null;
+        })(),
+        steady: steadySelector ? shownOpacity([...transcript.querySelectorAll(steadySelector)].at(-1)) : null,
+        fading: fadingSelector ? shownOpacity([...transcript.querySelectorAll(fadingSelector)].at(-1)) : null,
+        fadingMotion: fadingSelector ? motionOf([...transcript.querySelectorAll(fadingSelector)].at(-1)) : null,
+        leavingMotion: motionOf(nodes[0]),
+      });
+    };
+    read();
+    // Read at every change too, not only at frames: on a slow runner one frame can outlast the whole exit.
+    const changes = new MutationObserver(read);
+    changes.observe(transcript, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'aria-expanded'] });
+    button.click();
+    for (let frame = 0; frame < 24; frame += 1) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      read();
+    }
+    changes.disconnect();
+    return frames;
+  }, [control, leaving, below, summary, steady, fading] as const);
+}
+
+/** What stands for a disclosure closed comes in once what it closed has gone: it first shows faint, then
+ *  only grows more opaque, to fully. */
+function expectSummaryComesIn(frames: Closing[]) {
+  const after = frames.filter(({ leaving, summary }) => leaving === 0 && summary !== null).map(({ summary }) => summary!);
+  expect(after.length).toBeGreaterThanOrEqual(2);
+  expect(after[0]).toBeLessThan(0.5);
+  after.forEach((opacity, index) => { if (index > 0) expect(opacity).toBeGreaterThanOrEqual(after[index - 1] - 0.001); });
+  expect(after.at(-1)).toBe(1);
+}
+
+test('opening a Harness group while following the tail holds its head where it was and shows its members; closing, they leave in place', async ({ page }) => {
+  // count=376 ends the conversation on the Harness group, at the bottom of the screen.
+  await open(page, 'delay=0&count=376');
+  const head = '[data-harness-group]';
+  await expect(page.locator(head).last()).toBeVisible();
+  await watchReveals(page);
+  await record(page);
+  const before = await topOf(page, head);
+  await page.locator(head).last().locator('button[aria-expanded="false"]').click();
+  const members = transcript(page).locator('[data-transcript-key^="harness-member:"]');
+  await expect(members).toHaveCount(4);
+  await page.waitForTimeout(300);
+  // The head held where it was tapped; the members show themselves under it: each fades as a whole (its
+  // rail too) while what it holds grows, and its own box, which the scroller measures, does not move.
+  expect(Math.abs(await topOf(page, head) - before)).toBeLessThanOrEqual(1);
+  const opened = await reveals(page);
+  expect(opened.reveals.filter(({ item }) => item).map(({ props }) => props)).toEqual(Array(5).fill(['opacity']));
+  expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.join() === 'scale')).toBe(true);
+  expect(opened.reveals.filter(({ item }) => !item).length).toBeGreaterThanOrEqual(5);
+  // No longer following: a row streaming in does not move what was opened, and stays below it.
+  await page.evaluate(() => window.__scrollLab.push('A row streaming in under the opened group.', 'agent'));
+  await page.waitForTimeout(500);
+  expect(Math.abs(await topOf(page, head) - before)).toBeLessThanOrEqual(1);
+  expect(await fromBottom(page)).toBeGreaterThan(1);
+  // Closing: the control says so at once; the members (and the bar under them) leave in place while they
+  // still hold their room, so the row below them does not move up into them; then they go, in one commit.
+  // The head holds throughout, and nothing animates a layout property.
+  await watchReveals(page);
+  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"], [data-transcript-key^="harness-collapse:"]', '[data-message-id]', '[data-harness-group] button.flex-col > span.relative', '[data-harness-group] button > span:first-child', '[data-harness-group] button:not(.flex-col) > span:last-child');
+  const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
+  expect(frames[1].expanded).toBe('false');
+  expect(during.length).toBeGreaterThan(0);
+  expect(during.every(({ motion, bare }) => [...motion].sort().join() === 'motion-fade-out,motion-shrink-out' && bare === 0)).toBe(true);
+  expect(during.every(({ below }) => Math.abs(below! - frames[0].below!) <= 1)).toBe(true);
+  expect(frames.at(-1)!.leaving).toBe(0);
+  expect(Math.max(...frames.map(({ tapped }) => Math.abs(tapped - frames[0].tapped)))).toBeLessThanOrEqual(1);
+  // The folded card comes in where they were, never whole in one frame; the head's own line stays as it was.
+  expectSummaryComesIn(frames);
+  expect(frames.every(({ steady }) => steady === 1)).toBe(true);
+  // The head's collapse pill fades out with the members, on their time and curve, never coming back.
+  expect(frames[0].fading).toBe(1);
+  expect(during.every(({ fading, fadingMotion, leavingMotion }) => fading !== null && fadingMotion === leavingMotion && fadingMotion!.startsWith('motion-fade-out '))).toBe(true);
+  const pill = frames.map(({ fading }) => fading).filter((opacity) => opacity !== null);
+  pill.forEach((opacity, index) => { if (index > 0) expect(opacity).toBeLessThanOrEqual(pill[index - 1]! + 0.001); });
+  expect(frames.at(-1)!.fading).toBeNull();
+  expect((await reveals(page)).layout).toEqual([]);
+  expect(opened.layout).toEqual([]);
+  // Still not following: the next row leaves the head where it is.
+  await page.evaluate(() => window.__scrollLab.push('Another row, after the group closed.', 'agent'));
+  await page.waitForTimeout(500);
+  expect(Math.abs(await topOf(page, head) - before)).toBeLessThanOrEqual(1);
+  expect(await fromBottom(page)).toBeGreaterThan(1);
+  // The motion wrote no scroll position.
+  const { writes } = await stop(page);
+  expect(writes.filter((write) => write.site?.includes('transcriptMotion'))).toEqual([]);
+});
+
+test('opening an execution-process chip shows its panel, and its rows fade in when they land', async ({ page }) => {
+  // count=392 puts the last execution-process chip on screen at the bottom.
+  await open(page, 'delay=0&activity=1&count=392');
+  await watchReveals(page);
+  const chip = transcript(page).locator('[data-transcript-key^="activity:"]').last();
+  const before = await chip.evaluate((el) => el.getBoundingClientRect().top);
+  await chip.locator('button[aria-expanded="false"]').click();
+  await expect(chip.locator('[data-transcript-reveal]')).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(Math.abs(await chip.evaluate((el) => el.getBoundingClientRect().top) - before)).toBeLessThanOrEqual(1);
+  const opened = await reveals(page);
+  // The panel inside the chip shows itself; the chip's own box does not move.
+  expect(opened.reveals.map(({ item, props }) => ({ item, props: props.sort() }))).toEqual([{ item: false, props: SHOWS }]);
+  expect(await chip.evaluate((el) => el.getAnimations().filter((animation) => (animation.effect as KeyframeEffect | null)?.target === el).length)).toBe(0);
+  // Its rows were read after it opened: they fade in where the spinner was.
+  const body = chip.locator('[data-transcript-reveal] > div').last();
+  await expect.poll(() => body.evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-fade-in');
+  expect(opened.layout).toEqual([]);
+  // Closing: the panel leaves in place, then the chip is a pill again; the chip holds where it was.
+  await page.waitForTimeout(300);
+  const frames = await closeAndWatch(page, '[data-transcript-key^="activity:"] button[aria-expanded="true"]', '[data-transcript-key^="activity:"] [data-transcript-reveal]', null, '[data-transcript-key^="activity:"] button.rounded-full');
+  const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
+  expect(during.length).toBeGreaterThan(0);
+  expect(during.every(({ motion, bare }) => motion.includes('motion-disclose-out') && bare === 0)).toBe(true);
+  expect(frames.at(-1)!.leaving).toBe(0);
+  expect(Math.max(...frames.map(({ tapped }) => Math.abs(tapped - frames[0].tapped)))).toBeLessThanOrEqual(1);
+  // The pill comes in where the panel was, never whole in one frame.
+  expectSummaryComesIn(frames);
+  await expect(chip.locator('button[aria-expanded="false"]')).toBeVisible();
+});
+
+test('a Harness row opened while reading up the conversation shows its body in place', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  // A Harness row of its own (not in a group), above the fold.
+  const id = await page.evaluate(() => window.__scrollLab.history.filter((message, index) => message.type === 'harness' && (index < 372 || index > 375)).at(-1)!.id);
+  const row = transcript(page).locator(`[data-message-id="${id}"]`);
+  await row.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  await watchReveals(page);
+  await record(page, 0.4);
+  const before = await row.evaluate((el) => el.getBoundingClientRect().top);
+  await row.locator('button[aria-expanded="false"]').click();
+  await expect(row.locator('[data-transcript-reveal]')).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(Math.abs(await row.evaluate((el) => el.getBoundingClientRect().top) - before)).toBeLessThanOrEqual(1);
+  const opened = await reveals(page);
+  expect(opened.reveals.map(({ item, props }) => ({ item, props: props.sort() }))).toEqual([{ item: false, props: SHOWS }]);
+  expect(opened.layout).toEqual([]);
+  // Closing: the body leaves in place, holding its room, then goes; the row holds, and so does the reader.
+  const frames = await closeAndWatch(page, `[data-message-id="${id}"] button[aria-expanded="true"]`, `[data-message-id="${id}"] [data-transcript-reveal]`, null);
+  const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
+  expect(during.length).toBeGreaterThan(0);
+  expect(during.every(({ motion, bare }) => motion.includes('motion-disclose-out') && bare === 0)).toBe(true);
+  expect(frames.at(-1)!.leaving).toBe(0);
+  expect(Math.max(...frames.map(({ tapped }) => Math.abs(tapped - frames[0].tapped)))).toBeLessThanOrEqual(1);
+  const { writes } = await stop(page);
+  expect(writes.filter((write) => write.site?.includes('transcriptMotion'))).toEqual([]);
+});
+
+test('under reduced motion what opens only fades in', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await open(page, 'delay=0&count=376');
+  await watchReveals(page);
+  await page.locator('[data-harness-group]').last().locator('button[aria-expanded="false"]').click();
+  await expect(transcript(page).locator('[data-transcript-key^="harness-member:"]')).toHaveCount(4);
+  const opened = await reveals(page);
+  expect(opened.reveals.filter(({ item }) => item).every(({ props }) => props.join() === 'opacity')).toBe(true);
+  expect(opened.reveals.filter(({ item }) => !item).every(({ props }) => props.length === 0)).toBe(true);
+  // And what closes only fades out, in place.
+  await page.waitForTimeout(300);
+  const frames = await closeAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', '[data-transcript-key^="harness-member:"]', null, '[data-harness-group] button.flex-col > span.relative');
+  const during = frames.slice(1).filter(({ leaving }) => leaving > 0);
+  expect(during.length).toBeGreaterThan(0);
+  expect(during.every(({ motion, bare }) => motion.join() === 'motion-fade-out' && bare === 0)).toBe(true);
+  // The folded card fades in, without growing.
+  expectSummaryComesIn(frames);
+  expect(await page.locator('[data-harness-group] button.flex-col > span.relative').last().evaluate((el) => getComputedStyle(el).animationName)).toBe('motion-fade-in');
+});
+
+test('what a read adds to an opened group lands still; only what the reader opens shows itself', async ({ page }) => {
+  await open(page, 'delay=0&count=376');
+  await page.locator('[data-harness-group]').last().locator('button[aria-expanded="false"]').click();
+  await expect(transcript(page).locator('[data-transcript-key^="harness-member:"]')).toHaveCount(4);
+  await page.waitForTimeout(1500);
+  await watchReveals(page);
+  // A Harness row the stream missed, read back on reconnect: it joins the opened group.
+  const missed = await page.evaluate(() => window.__scrollLab.miss({
+    author: 'harness', type: 'harness', source: 'harness', author_id: null, author_name: 'agent_run',
+    text: 'Progress: the release check passed.', source_session_id: 'seslane0001', source_session_title: 'Release helper',
+  } as Record<string, unknown>).id);
+  await page.evaluate(() => window.__scrollLab.reconnect());
+  await expect(transcript(page).locator(`[data-transcript-key="harness-member:${missed}"]`)).toHaveCount(1);
+  await page.waitForTimeout(300);
+  const after = await reveals(page);
+  expect(after.reveals.every(({ props }) => props.length === 0)).toBe(true);
+});
+
+test('the running card shows its full view each time it opens, and closing it again lands the compact view in', async ({ page }) => {
+  await open(page, 'delay=0&activity=1');
+  await page.evaluate(() => window.__scrollLab.turn('start'));
+  await page.evaluate(() => window.__scrollLab.arrive({ author: 'agent', type: 'tool_call', source: 'agent', author_id: null, text: 'Read ui/src/lib/motion.ts' }));
+  const card = page.locator('[data-transcript-key="activity-live"]');
+  await expect(card).toBeVisible();
+  await page.waitForTimeout(600);
+  // Opened by its label, then by the chevron beside it: both are the same disclosure control.
+  for (const round of [1, 2]) {
+    // The label has no name of its own; the chevron is named for what it does.
+    const toggle = card.locator(round === 1 ? 'button[aria-expanded]:not([aria-label])' : 'button[aria-expanded][aria-label]').first();
+    await watchReveals(page);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await page.waitForTimeout(300);
+    const opened = await reveals(page);
+    const shown = [...new Set(opened.reveals.map(({ props }) => props.sort().join()))];
+    expect({ round, shown }).toEqual({ round, shown: [SHOWS.join()] });
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await page.waitForTimeout(400);
+  }
+});
+
+test('closing something opens nothing: a read that adds to another opened group lands still', async ({ page }) => {
+  await open(page, 'delay=0&activity=1&count=376');
+  await page.locator('[data-harness-group]').last().locator('button[aria-expanded="false"]').click();
+  await expect(transcript(page).locator('[data-transcript-key^="harness-member:"]')).toHaveCount(4);
+  // An execution-process chip, opened and closed again: the last tap closed something.
+  const chip = transcript(page).locator('[data-transcript-key^="activity:"]').last();
+  await chip.locator('button[aria-expanded="false"]').click();
+  await expect(chip.locator('[data-transcript-reveal]')).toBeVisible();
+  await page.waitForTimeout(400);
+  await chip.locator('button[aria-expanded="true"]').first().click();
+  await watchReveals(page);
+  // Within the second after that tap, a Harness row the stream missed is read back into the opened group.
+  const missed = await page.evaluate(() => window.__scrollLab.miss({
+    author: 'harness', type: 'harness', source: 'harness', author_id: null, author_name: 'agent_run',
+    text: 'Progress: the release check passed.', source_session_id: 'seslane0001', source_session_title: 'Release helper',
+  } as Record<string, unknown>).id);
+  await page.evaluate(() => window.__scrollLab.reconnect());
+  await expect(transcript(page).locator(`[data-transcript-key="harness-member:${missed}"]`)).toHaveCount(1);
+  await page.waitForTimeout(300);
+  expect((await reveals(page)).reveals.every(({ props }) => props.length === 0)).toBe(true);
+});

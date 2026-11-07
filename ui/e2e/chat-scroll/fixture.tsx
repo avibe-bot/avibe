@@ -100,7 +100,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   // The settled execution-process groups, as the server has them now.
   if (url.pathname === `${base}/activity` && !url.searchParams.has('group_id')) {
-    return json({ groups: [...initialGroups, ...settledGroups] });
+    // As the server lists them: summaries, whose rows are read when a chip opens.
+    return json({ groups: [...initialGroups, ...settledGroups].map(({ rows: _rows, ...summary }) => summary) });
   }
   if (url.pathname !== `${base}/messages`) return designFetch(input, init);
   const before = url.searchParams.get('before_id');

@@ -31,7 +31,8 @@ import { HostedToolRow } from './HostedToolRow';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { copyTextToClipboard } from '../../lib/utils';
 import { bindCitations } from '../../lib/citations';
-import { ITEM_KEY_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { useDisclosure } from '../../lib/motion';
 import {
   filterActivityRows,
   formatActivityElapsedClock,
@@ -428,6 +429,8 @@ export const ActivityCard: React.FC<{
   onDepart,
 }) => {
   const { t } = useTranslation();
+  // The full view while it is open, and for the moment it takes to leave once closed.
+  const full = useDisclosure(expanded);
   // The turn at work, at the transcript's tail: it enters as the working bubble
   // gives way to it, and fades as what settles the turn comes in.
   const rootRef = useRef<HTMLDivElement>(null);
@@ -468,7 +471,7 @@ export const ActivityCard: React.FC<{
   // ``rows.length``: a tool row expanding its stored call text, a late-loading image,
   // or a width change reflowing an assistant markdown row.
   useLayoutEffect(() => {
-    if (expanded) return;
+    if (full.present) return;
     const el = compactBodyRef.current;
     if (!el) return;
     const measure = () => setCompactAtCap(el.offsetHeight >= COMPACT_CAP_PX);
@@ -476,7 +479,7 @@ export const ActivityCard: React.FC<{
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [expanded]);
+  }, [full.present]);
 
   const elapsedMs = Math.max(0, nowMs - (startedAtMs ?? mountedAt));
   const clock = formatActivityElapsedClock(elapsedMs, t('chat.agentActivity.dayShort'));
@@ -515,15 +518,22 @@ export const ActivityCard: React.FC<{
               <X className="size-3.5" aria-hidden="true" />
             </button>
           )}
-          <button type="button" onClick={onToggleExpanded} aria-label={t('chat.agentActivity.collapse')}>
+          {/* A disclosure control like the label beside it, so opening by either is the same tap. */}
+          <button type="button" onClick={onToggleExpanded} aria-expanded={expanded} aria-label={t('chat.agentActivity.collapse')}>
             <ChevronDown
               className={clsx('size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')}
               aria-hidden="true"
             />
           </button>
         </div>
-        {expanded ? (
-          <div className="relative">
+        {full.present ? (
+          // What opening the card shows (lib/transcriptMotion reveals it), and leaves in place once closed.
+          // Keyed apart from the compact view, so each opening is a view of its own to show.
+          <div
+            className={clsx('relative', full.closing && 'motion-disclose-out')}
+            aria-hidden={full.closing || undefined}
+            {...{ [REVEAL_ATTRIBUTE]: '' }}
+          >
             <div
               ref={scrollRef}
               onScroll={() => {
@@ -557,8 +567,9 @@ export const ActivityCard: React.FC<{
           // (justify-end) and older rows clipped + faded up. ``overflow-hidden`` clips
           // the top overflow; the tail auto-follow lives in the Transcript scroller.
           <div
+            key="compact"
             ref={compactBodyRef}
-            className="relative flex flex-col justify-end overflow-hidden px-1.5 py-1.5"
+            className={clsx('relative flex flex-col justify-end overflow-hidden px-1.5 py-1.5', full.closed && 'motion-summary-in')}
             style={{ maxHeight: COMPACT_CAP_PX }}
           >
             <ActivityRows rows={rows} showToolCalls={showToolCalls} variant="compact-live" />
@@ -602,6 +613,14 @@ export const ActivityChip: React.FC<{
     label = `${t('chat.agentActivity.label')} · ${stepLabel(t, group.steps)}${duration ? ` · ${duration}` : ''}`;
   }
 
+  // Opened while its rows load, the spinner holds their place, and the rows fade
+  // in over it when they land (no second reveal of the panel).
+  const [phase, setPhase] = useState({ loading, expanded, landed: false });
+  // The panel while it is open, and for the moment it takes to leave once closed.
+  const panel = useDisclosure(expanded);
+  if (phase.loading !== loading || phase.expanded !== expanded) {
+    setPhase({ loading, expanded, landed: expanded && phase.expanded && phase.loading && !loading });
+  }
   const body = loading ? (
     <div className="flex items-center justify-center py-3 text-muted">
       <Loader2 className="size-4 animate-spin" />
@@ -630,7 +649,7 @@ export const ActivityChip: React.FC<{
   return (
     <div {...itemAttributes} className="flex w-full justify-start">
       <div className="flex w-full max-w-[min(92%,860px)] flex-col gap-1">
-        {!expanded ? (
+        {!panel.present ? (
           <button
             type="button"
             onClick={onToggle}
@@ -638,6 +657,8 @@ export const ActivityChip: React.FC<{
             title={t('chat.agentActivity.expand')}
             className={clsx(
               'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+              // Closed just now: the pill comes in where the panel left.
+              panel.closed && 'motion-summary-in',
               group.status === 'failed'
                 ? 'border-destructive/30 bg-destructive/[0.06] hover:bg-destructive/[0.1]'
                 : group.status === 'interrupted'
@@ -653,12 +674,17 @@ export const ActivityChip: React.FC<{
           // Expanded: a full panel card. Header bar carries the status/label (toggles
           // collapse), the B eye pill, and a collapse chevron; body is the ~60vh
           // capped, top-anchored scroller (C).
-          <div className="w-full overflow-hidden rounded-xl rounded-tl-md border border-border bg-foreground/[0.02]">
+          // What opening the chip shows (lib/transcriptMotion reveals it).
+          <div
+            {...{ [REVEAL_ATTRIBUTE]: '' }}
+            aria-hidden={panel.closing || undefined}
+            className={clsx('w-full overflow-hidden rounded-xl rounded-tl-md border border-border bg-foreground/[0.02]', panel.closing && 'motion-disclose-out')}
+          >
             <div className={clsx('flex items-center gap-2 border-b px-3 py-2', statusChipClasses(group.status))}>
               <button
                 type="button"
                 onClick={onToggle}
-                aria-expanded
+                aria-expanded={expanded}
                 title={t('chat.agentActivity.collapse')}
                 className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
               >
@@ -670,7 +696,7 @@ export const ActivityChip: React.FC<{
                 <ChevronDown className="size-3.5 shrink-0 rotate-180 text-muted" aria-hidden="true" />
               </button>
             </div>
-            <div className="max-h-[60vh] overflow-y-auto px-1.5 py-1.5">{body}</div>
+            <div className={clsx('max-h-[60vh] overflow-y-auto px-1.5 py-1.5', phase.landed && !loading && 'motion-appear')}>{body}</div>
           </div>
         )}
       </div>

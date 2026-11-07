@@ -4,7 +4,7 @@ import clsx from 'clsx';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { chatTriggerLink, harnessChipLabelKey } from '../../lib/chatTrigger';
-import { ITEM_KEY_ATTRIBUTE } from '../../lib/transcriptMotion';
+import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE } from '../../lib/transcriptMotion';
 import { RoleAvatar } from './RoleAvatar';
 
 // The left rail that ties an expanded group's rows together. Each row draws its
@@ -24,12 +24,18 @@ export function HarnessGroup({
   groupKey,
   members,
   expanded,
+  closing = false,
+  closed = false,
   onToggle,
 }: {
   /** Stable across growth; the Transcript finds the head by it after a collapse. */
   groupKey: string;
   members: WorkbenchMessage[];
   expanded: boolean;
+  /** Closed, while its members leave in place: still drawn as open, so nothing moves until they are gone. */
+  closing?: boolean;
+  /** Its members have just left: the folded card comes in where they were (`motion-summary-in`). */
+  closed?: boolean;
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
@@ -56,18 +62,24 @@ export function HarnessGroup({
     'data-harness-members': members.map((message) => message.id).join(' '),
   };
 
-  if (expanded) {
+  if (expanded || closing) {
     return (
       <div {...rowAttributes} className="flex w-full justify-start">
         <button
           type="button"
           onClick={onToggle}
-          aria-expanded
+          aria-expanded={!closing}
           aria-label={countLabel}
           className="group/harness flex w-full max-w-[min(92%,860px)] items-center gap-2 rounded-lg text-left"
         >
           <span className="min-w-0 flex-1">{head}</span>
-          <span className="inline-flex shrink-0 items-center gap-0.5 rounded-md bg-cyan/[0.08] px-1.5 py-0.5 text-[11px] font-semibold text-cyan-ink group-hover/harness:bg-cyan/[0.14]">
+          {/* Closing, the collapse pill fades out with the members, so it is gone, not cut, when the folded card comes in. */}
+          <span
+            className={clsx(
+              'inline-flex shrink-0 items-center gap-0.5 rounded-md bg-cyan/[0.08] px-1.5 py-0.5 text-[11px] font-semibold text-cyan-ink group-hover/harness:bg-cyan/[0.14]',
+              closing && 'motion-disclose-out-fade',
+            )}
+          >
             {t('chat.collapse')}
             <ChevronDown className="size-3.5 rotate-180" />
           </span>
@@ -86,7 +98,8 @@ export function HarnessGroup({
         className="group/harness flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left"
       >
         {head}
-        <span className="relative block w-[min(100%,460px)] pb-3">
+        {/* The folded card comes in where the members left; the head above it stays as it was. */}
+        <span className={clsx('relative block w-[min(100%,460px)] pb-3', closed && 'motion-summary-in')}>
           {/* Two offset sheets behind the latest message: more is folded in. */}
           <span aria-hidden className="absolute inset-x-5 bottom-0 top-5 rounded-xl border border-cyan/25 bg-background opacity-60" />
           <span aria-hidden className="absolute inset-x-2.5 bottom-1.5 top-2.5 rounded-xl border border-cyan/30 bg-background" />
@@ -116,10 +129,15 @@ export function HarnessGroup({
 
 /** The trailing control of an expanded group, for when its head has scrolled away. A transcript item of
  *  its own (lib/transcriptMotion), which the scroller can hold. */
-export function HarnessGroupCollapse({ groupKey, count, onCollapse }: { groupKey: string; count: number; onCollapse: () => void }) {
+export function HarnessGroupCollapse({ groupKey, count, onCollapse, closing = false }: { groupKey: string; count: number; onCollapse: () => void; closing?: boolean }) {
   const { t } = useTranslation();
   return (
-    <div data-transcript-row="" {...{ [ITEM_KEY_ATTRIBUTE]: `harness-collapse:${groupKey}` }} className={HARNESS_GROUP_RAIL}>
+    <div
+      data-transcript-row=""
+      {...{ [ITEM_KEY_ATTRIBUTE]: `harness-collapse:${groupKey}`, [REVEAL_ATTRIBUTE]: '' }}
+      aria-hidden={closing || undefined}
+      className={clsx(HARNESS_GROUP_RAIL, closing && 'motion-disclose-out-children')}
+    >
       <button
         type="button"
         onClick={onCollapse}
