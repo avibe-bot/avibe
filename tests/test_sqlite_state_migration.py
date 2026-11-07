@@ -44,7 +44,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261030_0072"
+HEAD_REVISION = "20261107_0073"
 PREVIOUS_HEAD_REVISION = "20261016_0068"
 _SCOPE_ID_DRIFT_TABLES = ("messages", "agent_events", "media_objects")
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
@@ -4010,6 +4010,7 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
         conn.execute("drop index if exists ix_agent_sessions_scope_status_activity")
         conn.execute("drop index if exists ix_agent_sessions_agent_status")
         conn.execute("drop index if exists ix_run_definitions_live")
+        conn.execute("drop index if exists ix_agent_runs_definition_status")
         conn.execute("drop index if exists ix_messages_session_created_id")
         conn.execute("drop index if exists ix_messages_session_type_created_id")
         conn.execute("drop index if exists ix_messages_platform_session_created_id")
@@ -4029,6 +4030,7 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
         assert "message_id is not null" in _index_sql(conn, "ix_message_deliveries_message")
         assert "(agent_status, status)" in _index_sql(conn, "ix_agent_sessions_agent_status")
         assert "deleted_at is null" in _index_sql(conn, "ix_run_definitions_live")
+        assert "(definition_id, status)" in _index_sql(conn, "ix_agent_runs_definition_status")
 
     run_migrations(db_path)
 

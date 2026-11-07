@@ -16,7 +16,7 @@ from storage import migrations
 
 pytestmark = pytest.mark.no_sqlite_template
 
-REVISION = "20261030_0072"
+HEAD_REVISION = "20261107_0073"
 PREVIOUS_REVISION = "20261020_0071"
 V5 = {
     "version": 1,
@@ -83,7 +83,7 @@ def test_upgrade_gives_each_session_its_latest_checkpoint_memory(tmp_path):
         "ses_v4": ("evt_4", "2026-10-21T00:00:00Z", None, None, "# 1. Self and method\n- 只读核验"),
     }
     with sqlite3.connect(path) as conn:
-        assert conn.execute("select version_num from alembic_version").fetchone() == (REVISION,)
+        assert conn.execute("select version_num from alembic_version").fetchone() == (HEAD_REVISION,)
     assert _digests(path) == expected
 
     command.downgrade(migrations.alembic_config(path), PREVIOUS_REVISION)

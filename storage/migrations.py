@@ -806,6 +806,7 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_run_definitions_agent on run_definitions (agent_name)')
     conn.execute('create index if not exists ix_run_definitions_updated on run_definitions (updated_at)')
     conn.execute('create index if not exists ix_agent_runs_definition_created on agent_runs (definition_id, created_at)')
+    conn.execute('create index if not exists ix_agent_runs_definition_status on agent_runs (definition_id, status)')
     conn.execute('create index if not exists ix_agent_runs_status_created on agent_runs (status, created_at)')
     conn.execute('create index if not exists ix_agent_runs_type_status_created on agent_runs (run_type, status, created_at)')
     conn.execute('create index if not exists ix_agent_runs_session_created on agent_runs (session_id, created_at)')

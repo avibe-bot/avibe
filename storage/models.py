@@ -364,6 +364,7 @@ agent_runs = Table(
     Column("updated_at", String, nullable=False),
     Column("metadata_json", Text, nullable=False),
     Index("ix_agent_runs_definition_created", "definition_id", "created_at"),
+    Index("ix_agent_runs_definition_status", "definition_id", "status"),
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
