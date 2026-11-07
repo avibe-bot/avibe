@@ -375,7 +375,7 @@ def test_recovered_annotation_cannot_retire_a_different_preview_cooldown(tmp_pat
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("status,code,attempts", [(503, None, 20), (429, None, 2), (429, "quota_exhausted", 1)])
+@pytest.mark.parametrize("status,code,attempts", [(503, None, 3), (429, None, 2), (429, "quota_exhausted", 1)])
 def test_failure_persistence_error_keeps_temporary_admission_and_original_terminal(tmp_path, backend, status, code, attempts):
     async def run():
         service, _clock, models = configured_service(tmp_path, outcomes=[
@@ -722,7 +722,7 @@ def test_expiry_remains_a_closed_terminal_when_live_supply_changes(tmp_path, bac
             task = asyncio.create_task(client.post(url, headers=headers, json={"model": "shared-model"}))
             try:
                 await asyncio.wait_for(entered.wait(), 2)
-                clock.advance(1801)
+                clock.advance(121)
                 if wake == "owner_success":
                     await service._record_recovery_success(
                         source.id, generation, backend=backend, model_id=models[backend],
@@ -763,7 +763,7 @@ def test_window_expiry_during_engine_preparation_preserves_admission_cause(tmp_p
         original_prepare = service._prepare_engine_for_demand
 
         async def expire_during_preparation(**kwargs):
-            clock.advance(1801)
+            clock.advance(121)
             if change == "owner_success":
                 await service._record_recovery_success(
                     source.id, service._latest_source_attempt_generation[source.id],
@@ -810,7 +810,7 @@ def test_admitted_terminal_classification_is_not_replaced_by_elapsed_window(tmp_
             calls.append(await request.json())
             if len(calls) == 1:
                 return web.json_response({"error": {"type": "server_error"}}, status=503)
-            clock.advance(1801)  # A connected inference may outlive admission.
+            clock.advance(121)  # A connected inference may outlive admission.
             if ending == "post_output":
                 error = b'data: {"type":"error","error":{"type":"server_error","message":"fixture"}}\n\n'
                 return web.Response(body=metadata + output + error, content_type="text/event-stream")
@@ -830,7 +830,7 @@ def test_admitted_terminal_classification_is_not_replaced_by_elapsed_window(tmp_
                     client_reads.append(True)
                     if len(client_reads) == 1:
                         return engine_client
-                    clock.advance(1801)
+                    clock.advance(121)
                     raise EngineUnavailableError("fixture: engine disappeared before admission")
 
                 adapter.supervisor.client = client_or_late_engine_failure
@@ -877,7 +877,7 @@ def test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal(tmp_
             kwargs["on_admitted"] = admitted
             handle = await original_invoke(*args, **kwargs)
             if len(service.adapter.invocations) == 4:
-                clock.advance(1801)
+                clock.advance(121)
             return handle
 
         service.adapter.invoke = late_last_attempt
@@ -1056,7 +1056,7 @@ def test_slow_stream_resolution_keeps_claude_connected(monkeypatch, tmp_path, ba
                     upstream_cancelled.set()
                     raise
             elif ending == "exhausted":
-                clock.advance(1801)
+                clock.advance(121)
             if ending == "served" or (ending == "recovered" and len(calls) == 2):
                 return web.Response(body=metadata + output + terminal, content_type="text/event-stream")
             return web.json_response({"error": {"type": "server_error"}}, status=503)

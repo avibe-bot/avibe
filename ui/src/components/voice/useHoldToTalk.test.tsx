@@ -23,6 +23,8 @@ type Fake = {
   canRetry: ReturnType<typeof vi.fn>;
   retry: ReturnType<typeof vi.fn>;
   voiced: ReturnType<typeof vi.fn>;
+  id: string;
+  captureClass: ReturnType<typeof vi.fn>;
   landed: ReturnType<typeof vi.fn>;
   detach: ReturnType<typeof vi.fn>;
   setAside: ReturnType<typeof vi.fn>;
@@ -66,6 +68,8 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         canRetry: vi.fn(() => true),
         retry: vi.fn(async () => 'heard again'),
         voiced: vi.fn(() => false),
+        id: `take-${pipeline.takes.length + 1}`,
+        captureClass: vi.fn(() => 'sound'),
         landed: vi.fn(),
         detach: vi.fn(),
         // As the dictation does: its requests stop, `done` rejects as cancelled, and it says
@@ -79,6 +83,11 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
       return take;
     }
   },
+}));
+const telemetry = vi.hoisted(() => ({ emit: vi.fn() }));
+vi.mock('../../lib/voiceTelemetry', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/voiceTelemetry')>()),
+  emitVoiceTelemetry: telemetry.emit,
 }));
 vi.mock('../../lib/apiFetch', () => ({
   apiFetch: vi.fn(async () => ({ ok: true, json: async () => ({ available: pipeline.asr.available }) })),
@@ -165,6 +174,7 @@ beforeEach(() => {
   pipeline.startMs = 0;
   pipeline.keepOnSetAside = true;
   send.mockReset().mockResolvedValue(true);
+  telemetry.emit.mockReset();
   onTap.mockReset();
   native.impact.mockReset().mockResolvedValue(true);
   native.notify.mockReset().mockResolvedValue(true);
@@ -319,6 +329,63 @@ describe('useHoldToTalk', () => {
     await flush();
     expect(send).not.toHaveBeenCalled();
     expect(hold.outcome).toBe('too-short');
+  });
+
+  // The reliability log (`dictation_finalized`, entry `hold`) says how every hold ended, and
+  // tells a microphone that gave nothing apart from a take that was silent.
+  const holdLogs = () => telemetry.emit.mock.calls
+    .map(([event]) => event as { event: string; entry?: string })
+    .filter((event) => event.event === 'dictation_finalized' && event.entry === 'hold');
+
+  it.each([
+    ['no_frames', 'no_frames'],
+    ['muted', 'muted'],
+    ['silence', 'too_short'],
+  ] as const)('logs a take its microphone delivered as %s as %s', async (delivered, logged) => {
+    const el = await mount();
+    await holdFor(el);
+    await elapse(3_000);
+    up(el);
+    pipeline.takes[0].captureClass.mockReturnValue(delivered);
+    await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('empty')));
+    await flush();
+
+    expect(hold.outcome).toBe('too-short');
+    expect(holdLogs()).toEqual([expect.objectContaining({
+      outcome: logged,
+      dictationId: 'take-1',
+      captureClass: delivered,
+      attemptCount: 1,
+    })]);
+  });
+
+  it('logs a sent hold, and a press the microphone refused', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await elapse(1_000);
+    up(el);
+    await act(async () => pipeline.takes[0].resolve('hello'));
+    await flush();
+    expect(holdLogs()).toEqual([expect.objectContaining({ outcome: 'sent', dictationId: 'take-1' })]);
+
+    telemetry.emit.mockReset();
+    pipeline.permission = 'denied';
+    await holdFor(el);
+    await flush();
+    expect(hold.outcome).toBe('denied');
+    expect(holdLogs()).toEqual([expect.objectContaining({ outcome: 'denied' })]);
+    expect(holdLogs()[0]).not.toHaveProperty('dictationId');
+  });
+
+  it('logs an interrupted hold with its reason', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await elapse(3_000);
+    up(el);
+    pipeline.takes[0].voiced.mockReturnValue(true);
+    await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('empty')));
+    await flush();
+    expect(holdLogs()).toEqual([expect.objectContaining({ outcome: 'interrupted', interruptReason: 'failed', dictationId: 'take-1' })]);
   });
 
   it('keeps a take that held speech when nothing was recognized, and offers to retry it', async () => {

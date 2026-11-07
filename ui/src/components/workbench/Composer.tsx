@@ -41,6 +41,7 @@ import {
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
 import { createVoiceActivity, reportVoiceSilenceGate, type VoiceActivity } from '../../lib/voiceActivity';
+import { VoiceCaptureTrace } from '../../lib/voiceCaptureTrace';
 import { VoiceTakeKeeper } from '../../lib/voiceTakeKeeper';
 import {
   emitVoiceTelemetry,
@@ -1234,17 +1235,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     });
     voiceCaptureClaimRef.current = captureClaim;
+    // The take's capture, from here to the end of its microphone (lib/voiceCaptureTrace).
+    const dictationId = newVoiceDictationId();
+    const trace = new VoiceCaptureTrace('tap', dictationId);
+    let micRequestedAt: number | null = null;
     try {
       await captureClaim.ready;
+      micRequestedAt = trace.mark();
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      trace.micSettled(micRequestedAt);
       if (!captureClaim.isCurrent() || unmountedRef.current || disabledRef.current) {
         stream.getTracks().forEach((track) => track.stop());
+        trace.finish('cancelled');
         return;
       }
 
       const abortController = new AbortController();
       const captureRetries = new AbortController();
-      const dictationId = newVoiceDictationId();
       const session: VoiceRecordingSession = {
         sessionId: voiceKey,
         dictationId,
@@ -1295,6 +1302,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       session.keeper?.begin();
       const pipeline = new VoiceRecordingPipeline({
         stream,
+        trace,
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: asrMaxFileBytes,
         onSegment: (blob, metadata) => queueVoiceSegment(
@@ -1413,7 +1421,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000));
       }, 1000);
       setRecording(true);
-    } catch {
+    } catch (error) {
+      // The microphone never opened (refused, missing, or held by something else), or the take
+      // failed before its pipeline logged it: logged once either way.
+      if (micRequestedAt !== null && !stream) trace.micSettled(micRequestedAt, error);
+      trace.finish('failed');
       // getUserMedia may have handed us a live stream before capture setup
       // threw. Release it so the mic does not stay on.
       startingSession?.keeper?.forget();

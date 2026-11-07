@@ -1554,10 +1554,7 @@ class ModelHubRuntimeRouter:
                 {
                     "name": provider_spec["name"],
                     "npm": provider_spec["npm"],
-                    # Hub owns pre-response recovery and inference bounds. A
-                    # native header timer would abort its live recovery wait;
-                    # leave OpenCode's post-header chunk timeout unchanged.
-                    "options": {"apiKey": gateway_token, "baseURL": base_url, "headerTimeout": False},
+                    "options": {"apiKey": gateway_token, "baseURL": base_url},
                     "models": {},
                 },
             )

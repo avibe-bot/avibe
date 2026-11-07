@@ -1,11 +1,19 @@
+import { VOICE_LEVEL_INTERVAL_MS } from './voiceActivity';
+import {
+  contextStateName,
+  micErrorName,
+  VoiceCaptureTrace,
+  type VoiceCaptureAttempt,
+  type VoiceCaptureAttemptKind,
+  type VoicePrewarmDrop,
+} from './voiceCaptureTrace';
 import { VoiceTranscriptionError } from './voiceTranscription';
+
+export { VOICE_LEVEL_INTERVAL_MS };
 
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_WORKLET_NAME = 'avibe-voice-pcm-capture';
 const PCM_DELIVERY_MS = 250;
-// The microphone's loudness reaches the page this often, apart from the PCM: a meter draws it
-// as it is spoken, not a quarter second late.
-export const VOICE_LEVEL_INTERVAL_MS = 32;
 const PCM_BYTES_PER_SAMPLE = 2;
 const WAV_HEADER_BYTES = 44;
 const DEFAULT_SEGMENT_OVERLAP_MS = 500;
@@ -20,6 +28,8 @@ export const VOICE_AUDIO_START_TIMEOUT_MS = 2_000;
  * `running`: it is rebuilt, then given a fresh microphone, and failed visibly if still silent.
  */
 export const VOICE_RENDER_WINDOW_MS = 1_000;
+/** How often the capture worklet reports that the rendering thread is calling it (the trace). */
+const VOICE_TICK_MS = 250;
 
 export const voiceWavMaxSamples = (maxFileBytes?: number | null): number | null => {
   if (maxFileBytes == null || !Number.isFinite(maxFileBytes)) return null;
@@ -50,6 +60,14 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
       : 0;
     this.levelSum = 0;
     this.levelCount = 0;
+    // A heartbeat every tickMs (and on the first call), off unless asked for: how often the
+    // rendering thread called this processor, and how many of those calls had no input at all.
+    // A graph that delivers no frames either never renders, or renders with nothing coming in.
+    this.tickCalls = processorOptions.tickMs
+      ? Math.max(1, Math.round(sampleRate * processorOptions.tickMs / 1000 / 128))
+      : 0;
+    this.calls = 0;
+    this.emptyInputs = 0;
     this.output = new Int16Array(this.chunkSamples);
     this.outputOffset = 0;
     this.phase = 0;
@@ -143,6 +161,13 @@ class AvibeVoicePcmCapture extends AudioWorkletProcessor {
   process(inputs) {
     if (this.stopped) return false;
     const channels = inputs[0];
+    if (this.tickCalls) {
+      this.calls += 1;
+      if (!channels || !channels.length) this.emptyInputs += 1;
+      if (this.calls === 1 || this.calls % this.tickCalls === 0) {
+        this.port.postMessage({ type: 'tick', calls: this.calls, empty: this.emptyInputs });
+      }
+    }
     if (!channels || !channels.length) return true;
     const frameCount = channels[0].length;
     for (let frame = 0; frame < frameCount; frame += 1) {
@@ -182,6 +207,22 @@ let prewarmPromise: Promise<void> | null = null;
 // while it renders nothing: every take on it would be silent until the app is relaunched.
 let prewarmedAcrossHidden = false;
 let watchingVisibility = false;
+// For the capture trace: when the prewarmed context was made, and why the last one was dropped
+// (reported by the next take that acquires a context).
+let prewarmedAt = 0;
+let droppedPrewarm: VoicePrewarmDrop | null = null;
+const traceNow = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** Why a prewarmed context cannot carry the next take, or null if it can. */
+const prewarmDropReason = (
+  context: AudioContext,
+  constructor: AudioContextConstructor,
+): VoicePrewarmDrop | null => {
+  if (prewarmedAudioContextConstructor !== constructor) return 'constructor';
+  if (!canReuseAudioContext(context)) return 'state';
+  if (prewarmedAcrossHidden) return 'hidden';
+  return null;
+};
 
 const watchVisibility = (): void => {
   if (watchingVisibility || typeof document === 'undefined') return;
@@ -236,7 +277,8 @@ const clearPrewarmedAudioContext = (context: AudioContext): void => {
   prewarmPromise = null;
 };
 
-const closePrewarmedAudioContext = (context: AudioContext): void => {
+const closePrewarmedAudioContext = (context: AudioContext, drop?: VoicePrewarmDrop): void => {
+  if (drop && prewarmedAudioContext === context) droppedPrewarm = drop;
   clearPrewarmedAudioContext(context);
   if (context.state !== 'closed') void context.close().catch(() => undefined);
 };
@@ -274,16 +316,10 @@ export const prewarmVoiceCapture = (): Promise<void> => {
   const constructor = audioContextConstructor();
   if (!constructor) return Promise.resolve();
 
-  if (
-    prewarmedAudioContext
-    && (
-      prewarmedAudioContextConstructor !== constructor
-      || !canReuseAudioContext(prewarmedAudioContext)
-      || prewarmedAcrossHidden
-    )
-  ) {
+  const stale = prewarmedAudioContext && prewarmDropReason(prewarmedAudioContext, constructor);
+  if (prewarmedAudioContext && stale) {
     // Rebuilt here, inside the press, where a new context may start.
-    closePrewarmedAudioContext(prewarmedAudioContext);
+    closePrewarmedAudioContext(prewarmedAudioContext, stale);
   }
   if (prewarmPromise) {
     if (prewarmedAudioContext) requestAudioContextResume(prewarmedAudioContext);
@@ -299,13 +335,14 @@ export const prewarmVoiceCapture = (): Promise<void> => {
   prewarmedAudioContext = context;
   prewarmedAudioContextConstructor = constructor;
   prewarmedAcrossHidden = false;
+  prewarmedAt = traceNow();
   watchVisibility();
   requestAudioContextResume(context);
   prewarmPromise = (async () => {
     try {
       await loadVoicePcmWorklet(context);
     } catch (error) {
-      closePrewarmedAudioContext(context);
+      closePrewarmedAudioContext(context, 'module_failed');
       throw error;
     }
   })();
@@ -315,6 +352,9 @@ export const prewarmVoiceCapture = (): Promise<void> => {
 const acquireAudioContext = async (): Promise<{
   context: AudioContext;
   prewarmed: boolean;
+  /** For the capture trace: the prewarmed context's age, and why a stale one was dropped. */
+  ageMs?: number;
+  drop?: VoicePrewarmDrop;
 }> => {
   const constructor = audioContextConstructor();
   if (!constructor) throw new Error('AudioContext unavailable');
@@ -323,22 +363,22 @@ const acquireAudioContext = async (): Promise<{
     prewarmedAudioContext
     && prewarmedAudioContextConstructor !== constructor
   ) {
-    closePrewarmedAudioContext(prewarmedAudioContext);
+    closePrewarmedAudioContext(prewarmedAudioContext, 'constructor');
   }
   if (prewarmPromise) await prewarmPromise.catch(() => undefined);
-  if (
-    prewarmedAudioContext
-    && (!canReuseAudioContext(prewarmedAudioContext) || prewarmedAcrossHidden)
-  ) {
-    closePrewarmedAudioContext(prewarmedAudioContext);
+  const stale = prewarmedAudioContext && prewarmDropReason(prewarmedAudioContext, constructor);
+  if (prewarmedAudioContext && stale) {
+    closePrewarmedAudioContext(prewarmedAudioContext, stale);
   }
+  const drop = droppedPrewarm ?? undefined;
+  droppedPrewarm = null;
   if (
     prewarmedAudioContext
     && prewarmedAudioContextConstructor === constructor
   ) {
-    return { context: prewarmedAudioContext, prewarmed: true };
+    return { context: prewarmedAudioContext, prewarmed: true, ageMs: traceNow() - prewarmedAt, ...(drop ? { drop } : {}) };
   }
-  return { context: new constructor(), prewarmed: false };
+  return { context: new constructor(), prewarmed: false, ...(drop ? { drop } : {}) };
 };
 
 type VoicePcmCaptureHandlers = {
@@ -360,6 +400,8 @@ type VoicePcmCaptureFactory = (
   segmentSamples: number,
   handlers: VoicePcmCaptureHandlers,
   stopTimeoutMs?: number,
+  /** Where the capture records what each audio graph did (lib/voiceCaptureTrace). */
+  trace?: VoiceCaptureTrace,
 ) => VoicePcmCapture;
 
 class AudioWorkletPcmCapture implements VoicePcmCapture {
@@ -382,6 +424,12 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
   private recoveries = 0;
   private recovering = false;
+  private readonly trace: VoiceCaptureTrace | null;
+  /** The audio graph being tried now, as the trace records it. */
+  private attempt: VoiceCaptureAttempt | null = null;
+  /** The context clock when the current attempt's context started rendering: how far it moved
+   *  by the attempt's end says whether the context renders at all, whatever its `state`. */
+  private renderClock: { attempt: VoiceCaptureAttempt; context: AudioContext; at: number } | null = null;
 
   constructor(
     stream: MediaStream,
@@ -389,17 +437,31 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
     segmentSamples: number,
     handlers: VoicePcmCaptureHandlers,
     stopTimeoutMs = VOICE_CAPTURE_STOP_TIMEOUT_MS,
+    trace?: VoiceCaptureTrace,
   ) {
     this.stream = stream;
     this.sampleRate = sampleRate;
     this.segmentSamples = segmentSamples;
     this.handlers = handlers;
     this.stopTimeoutMs = Math.max(0, stopTimeoutMs);
+    this.trace = trace ?? null;
+  }
+
+  /** The current graph's attempt ends as `end` (once). */
+  private endAttempt(end: NonNullable<VoiceCaptureAttempt['end']>): void {
+    const attempt = this.attempt;
+    if (!attempt || attempt.end) return;
+    const clock = this.renderClock;
+    if (clock?.attempt === attempt && typeof clock.context.currentTime === 'number') {
+      attempt.clockAdvanceMs = Math.max(0, Math.round((clock.context.currentTime - clock.at) * 1000));
+    }
+    this.trace?.ended(attempt, end, this.stream);
   }
 
   async start(): Promise<void> {
     try {
       const acquired = await acquireAudioContext();
+      this.trace?.prewarmed(acquired.prewarmed, acquired.ageMs, acquired.drop);
       this.context = acquired.context;
       this.sharedContext = acquired.prewarmed;
       this.stream.getTracks().forEach((track) => {
@@ -408,7 +470,7 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       if (this.stream.getTracks().some((track) => track.readyState === 'ended')) {
         this.stop();
       }
-      if (await this.connect(acquired.context, acquired.prewarmed)) {
+      if (await this.connect(acquired.context, acquired.prewarmed, 'initial')) {
         this.watchRendering();
         return;
       }
@@ -422,12 +484,13 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       const context = new constructor();
       this.context = context;
       this.sharedContext = false;
-      if (await this.connect(context, false)) {
+      if (await this.connect(context, false, 'start_rebuild')) {
         this.watchRendering();
         return;
       }
       throw new Error('voice audio context did not start');
     } catch (error) {
+      this.endAttempt('error');
       this.detachNodes();
       await this.closeContext();
       throw error;
@@ -435,16 +498,43 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   }
 
   /** Builds the graph on `context`; true once it renders, or once the capture stopped meanwhile. */
-  private async connect(context: AudioContext, prewarmed: boolean): Promise<boolean> {
+  private async connect(
+    context: AudioContext,
+    prewarmed: boolean,
+    kind: VoiceCaptureAttemptKind,
+    mic?: { micMs: number },
+  ): Promise<boolean> {
     let moduleUrl: string | null = null;
+    const attempt = this.trace?.attempt(kind, this.stream) ?? null;
+    this.attempt = attempt;
+    if (attempt) {
+      if (mic) {
+        attempt.micMs = Math.round(mic.micMs);
+        attempt.mic = 'ok';
+      }
+      attempt.contextState = contextStateName(context);
+      if (typeof context.sampleRate === 'number') attempt.sampleRate = Math.round(context.sampleRate);
+    }
     try {
-      if (!prewarmed) {
+      if (prewarmed) {
+        if (attempt) attempt.module = 'prewarmed';
+      } else {
         moduleUrl = URL.createObjectURL(
           new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
         );
-        await context.audioWorklet.addModule(moduleUrl);
+        const loadingAt = traceNow();
+        try {
+          await context.audioWorklet.addModule(moduleUrl);
+          if (attempt) attempt.module = 'ok';
+        } catch (error) {
+          if (attempt) attempt.module = 'failed';
+          throw error;
+        } finally {
+          if (attempt) attempt.moduleMs = Math.round(traceNow() - loadingAt);
+        }
       }
       if (this.stopping) {
+        this.endAttempt('stopped');
         this.finish();
         return true;
       }
@@ -459,23 +549,34 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
           // smaller chunks so a processor failure cannot erase a whole segment.
           chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
           ...(this.handlers.onLevel ? { levelMs: VOICE_LEVEL_INTERVAL_MS } : {}),
+          ...(attempt ? { tickMs: VOICE_TICK_MS } : {}),
         },
       });
       node.port.onmessage = (event: MessageEvent<{
         type?: string;
         samples?: ArrayBuffer;
         rms?: number;
+        calls?: number;
+        empty?: number;
       }>) => {
-        if (event.data.type === 'samples' && event.data.samples) {
+        if (event.data.type === 'tick') {
+          if (attempt && typeof event.data.calls === 'number' && typeof event.data.empty === 'number') {
+            attempt.renderCalls = event.data.calls;
+            attempt.emptyInputs = event.data.empty;
+          }
+        } else if (event.data.type === 'samples' && event.data.samples) {
           this.rendered = true;
+          if (attempt) this.trace?.frames(attempt);
           this.handlers.onSamples(new Int16Array(event.data.samples));
         } else if (event.data.type === 'level' && typeof event.data.rms === 'number') {
+          if (attempt) this.trace?.level(attempt);
           this.handlers.onLevel?.(event.data.rms);
         } else if (event.data.type === 'stopped') {
           this.finish();
         }
       };
       node.onprocessorerror = () => {
+        this.endAttempt('error');
         this.reportFailure(new Error('voice PCM processor stopped unexpectedly'));
         this.finish();
       };
@@ -483,14 +584,25 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       this.source = context.createMediaStreamSource(this.stream);
       this.source.connect(node);
       node.connect(context.destination);
-      if (await startAudioContext(context, VOICE_AUDIO_START_TIMEOUT_MS)) return true;
+      const resumingAt = traceNow();
+      const running = await startAudioContext(context, VOICE_AUDIO_START_TIMEOUT_MS);
+      if (attempt) {
+        attempt.resumeMs = Math.round(traceNow() - resumingAt);
+        attempt.resumedState = contextStateName(context);
+      }
+      if (running) {
+        if (attempt && typeof context.currentTime === 'number') this.renderClock = { attempt, context, at: context.currentTime };
+        return true;
+      }
       this.disconnectNodes();
       if (this.stopping) {
         // Stopped while waiting: a context that never rendered has no PCM to flush.
+        this.endAttempt('stopped');
         await this.closeContext();
         this.finish();
         return true;
       }
+      this.endAttempt('not_running');
       return false;
     } finally {
       if (moduleUrl) URL.revokeObjectURL(moduleUrl);
@@ -542,6 +654,7 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       track.readyState === 'live' && !track.muted && track.enabled
     ));
     if (!live) return;
+    this.endAttempt('no_frames');
     if (this.recoveries >= 2) {
       // Rebuilt and given a fresh microphone, and still nothing: say so instead of recording it.
       this.reportFailure(new VoiceTranscriptionError('empty'));
@@ -564,7 +677,25 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
         this.finish();
         return;
       }
-      if (reacquire) this.replaceStream(await navigator.mediaDevices.getUserMedia({ audio: true }));
+      let mic: { micMs: number } | undefined;
+      if (reacquire) {
+        const requestedAt = traceNow();
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (error) {
+          // The fresh microphone refused: an attempt that never got a graph.
+          const failed = this.trace?.attempt('microphone', this.stream);
+          if (failed) {
+            failed.micMs = Math.round(traceNow() - requestedAt);
+            failed.mic = micErrorName(error);
+            this.trace?.ended(failed, 'error', this.stream);
+          }
+          throw error;
+        }
+        mic = { micMs: traceNow() - requestedAt };
+        this.replaceStream(stream);
+      }
       if (this.stopping) {
         this.finish();
         return;
@@ -574,12 +705,15 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       const context = new constructor();
       this.context = context;
       this.sharedContext = false;
-      if (!(await this.connect(context, false))) throw new Error('voice audio context did not start');
+      if (!(await this.connect(context, false, reacquire ? 'microphone' : 'context', mic))) {
+        throw new Error('voice audio context did not start');
+      }
       if (this.stopped) return;
       // A release during the rebuild found no graph to tell; this one flushes and finishes.
       if (this.stopping) this.node?.port.postMessage({ type: 'stop' });
       else this.watchRendering();
     } catch (error) {
+      this.endAttempt('error');
       this.reportFailure(error instanceof Error ? error : new Error(String(error)));
       this.finish();
     } finally {
@@ -616,6 +750,7 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   private finish(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.endAttempt(this.attempt && this.attempt.chunks > 0 ? 'rendered' : 'stopped');
     this.clearRenderWatch();
     this.ownedStream?.getTracks().forEach((track) => track.stop());
     if (this.stopTimer !== null) clearTimeout(this.stopTimer);
@@ -653,12 +788,14 @@ const defaultCaptureFactory: VoicePcmCaptureFactory = (
   segmentSamples,
   handlers,
   stopTimeoutMs,
+  trace,
 ) => new AudioWorkletPcmCapture(
   stream,
   sampleRate,
   segmentSamples,
   handlers,
   stopTimeoutMs,
+  trace,
 );
 
 export const deleteMapValueIfCurrent = <Key, Value>(
@@ -810,6 +947,9 @@ export type VoiceRecordingPipelineOptions = {
   overlapMs?: number;
   stopTimeoutMs?: number;
   createCapture?: VoicePcmCaptureFactory;
+  /** The take's capture trace, begun by the caller before it asked for the microphone; logged
+   *  when the capture ends (lib/voiceCaptureTrace). A caller that passes none gets its own. */
+  trace?: VoiceCaptureTrace;
 };
 
 const wavHeader = (
@@ -887,9 +1027,13 @@ export class VoiceRecordingPipeline {
   private streamStopped = false;
   private emittedSegmentCount = 0;
   private segmentCountAtStop: number | null = null;
+  /** What this take's capture did, logged once it ends. */
+  readonly trace: VoiceCaptureTrace;
+  private captureError: unknown;
 
   constructor(options: VoiceRecordingPipelineOptions) {
     this.options = options;
+    this.trace = options.trace ?? new VoiceCaptureTrace('show_page');
     this.sampleRate = options.sampleRate ?? PCM_SAMPLE_RATE;
     const durationSamples = Math.max(
       1,
@@ -926,7 +1070,7 @@ export class VoiceRecordingPipeline {
         : {}),
       onStopped: () => this.handleCaptureStopped(),
       onError: (error) => this.handleCaptureError(error),
-    }, options.stopTimeoutMs);
+    }, options.stopTimeoutMs, this.trace);
   }
 
   async start(): Promise<boolean> {
@@ -948,6 +1092,8 @@ export class VoiceRecordingPipeline {
       this.unbindVisibilityStop();
       this.stopStream();
       this.stopped = true;
+      this.trace.stoppedBy('error');
+      this.trace.finish('failed');
       throw error;
     }
     return !this.stopped && !this.stopping;
@@ -980,6 +1126,7 @@ export class VoiceRecordingPipeline {
 
   private handleSamples(samples: Int16Array<ArrayBuffer>): void {
     if (this.stopped || this.stopping === 'abort') return;
+    this.trace.observePcm(samples);
     this.options.onPcm?.(samples);
     let offset = 0;
     while (offset < samples.length) {
@@ -1019,6 +1166,7 @@ export class VoiceRecordingPipeline {
 
   private handleCaptureError(error: unknown): void {
     if (this.stopped || this.stopping === 'abort') return;
+    this.captureError ??= error;
     if (!this.stopping) this.requestStop('error');
     else this.stopping = 'error';
     this.options.onError?.(error);
@@ -1049,10 +1197,16 @@ export class VoiceRecordingPipeline {
     this.stopped = true;
     this.unbindVisibilityStop();
     this.stopStream();
-    this.options.onStopped(
-      this.stopping ?? 'finish',
-      { pendingSegmentCount },
+    const reason = this.stopping ?? 'finish';
+    this.trace.stoppedBy(reason);
+    this.trace.finish(
+      reason === 'abort'
+        ? 'cancelled'
+        : reason === 'error'
+          ? (this.captureError instanceof VoiceTranscriptionError ? this.captureError.code : 'failed')
+          : 'success',
     );
+    this.options.onStopped(reason, { pendingSegmentCount });
   }
 
   // The microphone is never held for a page the user cannot see: hidden (another app, a locked
@@ -1063,7 +1217,10 @@ export class VoiceRecordingPipeline {
     this.visibilityDocument = document;
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
     if (typeof window !== 'undefined') window.addEventListener('pagehide', this.handlePageHide);
-    if (document.visibilityState === 'hidden') this.finish();
+    if (document.visibilityState === 'hidden') {
+      this.trace.stoppedBy('hidden');
+      this.finish();
+    }
   }
 
   private unbindVisibilityStop(): void {
@@ -1073,10 +1230,13 @@ export class VoiceRecordingPipeline {
   }
 
   private readonly handleVisibilityChange = (): void => {
-    if (this.visibilityDocument?.visibilityState === 'hidden') this.finish();
+    if (this.visibilityDocument?.visibilityState !== 'hidden') return;
+    this.trace.stoppedBy('hidden');
+    this.finish();
   };
 
   private readonly handlePageHide = (): void => {
+    this.trace.stoppedBy('hidden');
     this.finish();
   };
 

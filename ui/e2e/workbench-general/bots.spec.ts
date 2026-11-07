@@ -111,6 +111,8 @@ async function serveBots(page: Page, lang: Lang, bots: FixtureBot[]) {
     await page.route(`**/api/sessions/${sessionId}/draft`, (route) => route.fulfill({ json: { ok: true, draft: { text: '', updated_at: null } } }));
   }
   await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: false } }));
+  // How a press on a Bot ended, for the reliability log (lib/voiceTelemetry).
+  await page.route('**/api/asr/telemetry', (route) => route.fulfill({ json: { ok: true } }));
   // Model Hub's catalog for Vibey, which every Bot runs on.
   const catalogModel = (id: string, displayName: string) => ({
     id, origin: 'builtin', display_name: displayName, models_dev_id: null, context_window: null, max_output_tokens: null,
