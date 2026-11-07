@@ -138,9 +138,11 @@ installation credential survives account-session rotation.
 
 APNs token, environment, and topic changes are a whole-provider-state
 replacement through the `PATCH` route in section 5.2.1. That route requires
-the current `provider_version`, increments it on a changed replacement, and
-never changes the epoch or registrations. A provider update that is identical
-to the current state is idempotent and does not increment the version.
+the expected `provider_version` for changed content, increments it on a
+changed replacement, and never changes the epoch or registrations. A provider
+update that is identical to the current content succeeds regardless of the
+expected version; it advances the version only when it clears an invalid
+marker.
 
 ### 2.4 Instance identity
 
@@ -165,20 +167,23 @@ names and constraints are part of the cross-repository contract.
 | `installation_id` | Cryptographically random UUID string, primary key | App generates it once and keeps it in the native Keychain. It never changes during the installation lifetime and is not exposed to Web content or the NSE. |
 | `account_id` | Supabase subject string | Relay derives it from the same-origin login session. It is audit and cleanup metadata, not a credential for later routes. |
 | `epoch` | Positive monotonic integer | Relay increments it exactly once for each accepted login bind. It is the current account-session generation for this installation. |
+| `last_bound_at` | UTC timestamp | Relay updates it only when a new `sign_in_id` is accepted. It orders the account's active installations for deterministic cap eviction. |
+| `retired_at` | Nullable UTC timestamp | Relay sets it when the account installation cap evicts this installation after revoking its registrations. A login bind may reactivate the row before applying the cap again. |
 | `installation_secret_hash` | SHA-256 of the decoded 32-byte installation secret, lowercase hexadecimal | Relay derives and stores it at creation or secret rotation. The raw secret is never stored, logged, or exposed to Web content or the NSE. |
 | `device_token` | Nullable opaque APNs token bytes, represented by base64url without padding at the API boundary | App receives it from APNs. Relay stores it as an encrypted-at-rest secret or in an equivalent secret store. It is never written to logs or telemetry. |
 | `device_token_sha256` | Nullable lowercase hexadecimal SHA-256 | Relay derives it for redacted diagnostics and responses. It is never used as a CAS value; provider-version CAS covers the complete provider state. |
-| `provider_version` | Non-negative monotonic integer | Relay initializes it to `0` and increments it only when a whole provider-state replacement changes `device_token`, `environment`, or `topic`. |
-| `device_token_invalid_at` | Nullable UTC timestamp | Relay sets it only after an APNs invalid-token result passes the provider-version CAS rule in section 5.6. A non-null marker applies to the current provider version until a successful provider update. |
+| `provider_version` | Non-negative monotonic integer | Relay initializes it to `0` and increments it for every accepted mutation of the complete provider state, including a provider replacement, APNs invalidation, or clearing an invalid marker. |
+| `device_token_invalid_at` | Nullable UTC timestamp | Relay sets it only after an APNs invalid-token result passes the provider-version CAS rule in section 5.6. A non-null marker is part of the versioned provider state and remains until a successful provider update clears it. |
 | `environment` | `sandbox` or `production` | App supplies it from the build/runtime environment. Debug Xcode builds use `sandbox`; TestFlight uses `production`. It is part of the provider state. |
 | `topic` | Bundle identifier string | App supplies `bot.avibe.ios`; relay validates it against its allowlist and uses it as `apns-topic`. It is part of the provider state. |
 | `created_at` | UTC timestamp | Relay writes it on first bind. |
-| `updated_at` | UTC timestamp | Relay updates it whenever the device token, environment, topic, account record, or epoch changes. |
+| `updated_at` | UTC timestamp | Relay updates it whenever the provider state, validity marker, account record, epoch, or installation retirement state changes. |
 
-The provider fields and `provider_version` are read and written as one
-versioned state. An APNs delivery captures the version before opening the
-upstream request; an invalid-token result may mutate the row only if that
-version is still current.
+The provider fields, validity marker, and `provider_version` are read and
+written as one versioned state. An APNs delivery captures the version before
+opening the upstream request; an invalid-token result may mutate the row only
+if that version is still current, and the accepted invalidation advances the
+version before returning `410`.
 
 ### 3.2 `push_registrations`
 
@@ -215,7 +220,8 @@ allocating another epoch or repeating the old-registration revocation.
 | `provider_version` | Non-negative integer | Relay stores the provider version returned by the original bind response. |
 | `response_device_token_sha256` | Nullable lowercase hexadecimal SHA-256 | Relay stores the hash returned by the original bind response, including `null` when the installation has no APNs token yet. |
 | `response_secret_issued` | Boolean | Relay records whether the original bind response carried a newly created or rotated secret; it never stores that raw secret. |
-| `registrations_revoked` | Non-negative integer | Relay stores the count returned by the bind transaction. |
+| `registrations_revoked` | Non-negative integer | Relay stores the total count of concrete registration rows revoked by the bind transaction, including older rows on the bound installation and rows removed by the account installation cap. |
+| `response_installations_retired` | Non-negative integer | Relay stores the number of other account installations retired by the cap transaction; one accepted bind can retire at most one when the pre-bind invariant holds. |
 | `response_status` | `201` or `200` | Relay stores the original response status so retries return the same result. |
 | `response_environment` | `sandbox` or `production` | Relay stores the environment returned by the original bind response. |
 | `response_topic` | Bundle identifier string | Relay stores the topic returned by the original bind response. |
@@ -234,8 +240,11 @@ rule in section 9.8.
 ### 3.4 Deferred mutation invariant
 
 These invariants apply to the relay, native coordinator, instance
-subscription handoff, and every retry path. Any new state-changing route must
-be added to the route ledger below before implementation:
+subscription handoff, and every retry path. An active installation for an
+account is a row whose `account_id` is that account and whose `retired_at` is
+null. The account-wide limit is five active installations. Any new
+state-changing route must be added to the route ledger below before
+implementation:
 
 - A `registration_id` is allocated exactly once from 32 random bytes. Its
   43-character base64url value is immutable, is never reused, and remains
@@ -251,9 +260,11 @@ be added to the route ledger below before implementation:
   the previous active registration by that concrete ID if one exists, and
   inserts the new row with that epoch.
 - Every delayed operation carries the exact scope it is allowed to mutate:
-  a concrete `registration_id`, an `epoch <= E`, or an expected complete
-  `provider_version`. No operation selects "all current registrations" or
-  "the current provider state" at execution time.
+  a concrete `registration_id`, an `epoch <= E`, an expected complete
+  `provider_version`, or a captured invalid-provider version. No operation
+  mutates an open-ended set at execution time; the cleanup sweep may enumerate
+  under the installation lock only to capture concrete IDs before revoking
+  them.
 - An APNs device-token update changes only the installation row. It never
   changes, recreates, or reactivates a registration.
 - `push.status()` and token recovery return and re-post an existing public
@@ -266,16 +277,24 @@ be added to the route ledger below before implementation:
   epoch is revoked.
 - Token-invalid state can be created only by an APNs invalid result whose
   captured `provider_version` still equals the installation's current
+  `provider_version`; the successful invalidation increments
   `provider_version`.
+- A first-use bind is allowed to create at most one new active installation
+  after authentication. If that would exceed five for the account, the
+  transaction chooses the smallest `(last_bound_at, installation_id)` among
+  the other active installations, revokes every registration on that
+  installation by its concrete ID, sets its `retired_at`, and leaves the
+  account with at most five active installations.
 
 | State-changing route or operation | Fixed scope at request start | Required deferred-mutation rule |
 | --- | --- | --- |
-| `PUT` login bind | `sign_in_id`, the newly allocated epoch, and an optional one-time secret replacement | Durable idempotency record; one transaction increments epoch, revokes only registrations with `epoch < new_epoch`, and never repeats a secret replacement on retry. |
-| `PATCH` provider update | Expected `provider_version` and the complete replacement object | Compare-and-set the whole provider state; a stale update returns `409` without changing epoch or registrations. |
-| `POST` registration | Current `epoch` plus installation/VAPID scope | Reject `epoch != current_epoch` with `409 stale_epoch`; revoke the prior active row by its concrete ID. |
+| `PUT` login bind | `sign_in_id`, authenticated `account_id`, source IP prefix, the newly allocated epoch, and an optional one-time secret replacement | Authenticate the account and exact Origin first; first-use rows consume both account and source-prefix buckets before creation. One transaction increments epoch, reactivates the row, revokes only registrations with `epoch < new_epoch`, applies the five-installation cap by concrete IDs, and never repeats a secret replacement or cap eviction on retry. |
+| `PATCH` provider update | Expected `provider_version` and the complete replacement object | Compare the requested provider content before the version check. Equal content returns `200` with the current version and clears an invalid marker once if present; changed content requires the expected version, and a true conflict returns `409` with the current version and token hash without changing epoch or registrations. |
+| `POST` registration | Current `epoch` plus installation/VAPID scope | Reject a retired installation with `409 installation_retired`, reject `epoch != current_epoch` with `409 stale_epoch`, and revoke the prior active row by its concrete ID. |
 | `DELETE` one registration | Concrete `registration_id` | Set `revoked_at` only on that row; retries are idempotent. |
 | `DELETE` all registrations for an installation | Explicit `epoch <= E` | Require `E <= current_epoch`; revoke only rows with `epoch <= E`, never a later epoch. |
-| Delivery-side APNs invalidation | Captured `provider_version` | Compare-and-set before marking the provider state invalid; a changed version returns retryable `503` and cannot disable the instance subscription. |
+| Delivery-side APNs invalidation | Captured `provider_version` | Compare-and-set before marking the provider state invalid and incrementing the version; a changed version returns retryable `503` and cannot disable the instance subscription. |
+| Provider-invalid cleanup sweep | Captured `installation_id`, `provider_version`, and `device_token_invalid_at` older than seven days | Recheck the captured version and invalid marker under the installation lock, capture all current active registration IDs, and revoke exactly those IDs. A changed version or cleared marker is a no-op for that sweep item. |
 
 ## 4. Native bridge contract
 
@@ -414,13 +433,34 @@ exists, the relay returns its stored response without incrementing the epoch,
 rotating the secret again, or revoking anything. If the record conflicts with
 the installation or authenticated account, it returns `409 sign_in_id_reuse`.
 
+When no installation row exists, the relay authenticates the account session
+and exact `Origin` first, derives `account_id`, canonicalizes the source peer
+address to an IPv4 `/24` or IPv6 `/64` prefix, and consumes both the
+account-scoped first-use bucket and then the source-prefix first-use bucket
+before creating any row. The client cannot supply either bucket key. An
+existing row uses the installation-management bucket after its installation
+credential has been verified; it does not use the first-use buckets.
+
 For a new `sign_in_id`, the relay creates the installation with `epoch = 1`
 when no row exists, initializes `provider_version = 0`, hashes a new random
-installation secret, and records the cookie's account. Otherwise it increments
-the current epoch to `E`, records the cookie's account, and revokes every
-registration with `epoch < E` by its concrete `registration_id` before
-committing. An existing provider state is untouched by the epoch transition;
-the app uses `PATCH` when its APNs token, environment, or topic differs.
+installation secret, records the cookie's account, sets `last_bound_at` to the
+commit time, and leaves `retired_at` null. Otherwise it increments
+the current epoch to `E`, records the cookie's account, clears `retired_at`,
+updates `last_bound_at`, and revokes every registration with `epoch < E` by
+its concrete `registration_id` before committing. An existing provider state
+is untouched by the epoch transition; the app uses `PATCH` when its APNs
+token, environment, or topic differs.
+
+After assigning the current account and before commit, the transaction counts
+active installations for that account. If the count would exceed five, it
+selects the oldest other active installation by
+`(last_bound_at, installation_id)`, captures all of its active registration
+IDs, sets `revoked_at` on those rows, sets that installation's `retired_at`,
+and includes those rows in `registrations_revoked`. A cap eviction never
+changes the newly bound installation's provider state. The evicted
+installation remains a retained row and its installation credential may still
+authorize concrete revoke retries; a later login bind can reactivate it and
+will apply the same cap transaction again.
 
 Success is `201` for first-use creation and `200` for an update or rebind:
 
@@ -435,6 +475,7 @@ Success is `201` for first-use creation and `200` for an update or rebind:
   "environment": "sandbox",
   "topic": "bot.avibe.ios",
   "registrations_revoked": 0,
+  "installations_retired": 0,
   "secret_issued": true,
   "installation_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "updated_at": "2026-11-08T00:00:00Z"
@@ -450,12 +491,14 @@ existing bind without rotation returns `secret_issued: false`. Every bind
 response includes `provider_version` and `device_token_sha256`, including a
 `null` hash when no token has been registered.
 
-`registrations_revoked` is the number of rows with an older epoch revoked by
-this login bind. A retry with the same `sign_in_id` returns the same status,
-epoch, provider version, token hash, count, and timestamps as the first
-response. It does not issue another secret. If the app loses the one response
-that carried a newly created or rotated secret before storing it, it abandons
-that installation credential and starts over with a new installation ID.
+`registrations_revoked` is the total number of rows revoked by this bind,
+including older-epoch rows on the bound installation and rows from a cap
+eviction. `installations_retired` is zero or one. A retry with the same
+`sign_in_id` returns the same status, epoch, provider version, token hash,
+counts, and timestamps as the first response. It does not issue another
+secret or repeat the cap eviction. If the app loses the one response that
+carried a newly created or rotated secret before storing it, it abandons that
+installation credential and starts over with a new installation ID.
 
 The route returns:
 
@@ -467,7 +510,7 @@ The route returns:
 | `409` | `sign_in_id_reuse` | The `sign_in_id` was already committed for another installation or account. |
 | `409` | `initial_provider_not_allowed` | An existing installation tried to change provider fields through the login bind. |
 | `413` | `request_too_large` | The JSON request exceeds the management body limit. |
-| `429` | `rate_limited` | The installation management limit was exceeded. |
+| `429` | `rate_limited` | The account first-use bucket, source-prefix first-use bucket, or installation management bucket was exceeded. |
 | `502` | `auth_unavailable` | The backend could not validate the account session against its configured auth provider. |
 
 ### 5.2.1 Update installation provider state
@@ -491,14 +534,27 @@ Request:
 
 This installation-credential route is the only path for an already-bound
 installation to update its APNs token, environment, or topic. The request is a
-complete replacement of the provider state. The expected version is a
-compare-and-set precondition for the complete row, not just for the token. If
-the version is current and the replacement differs, the relay stores all three
-fields, increments `provider_version` by one, clears `device_token_invalid_at`,
-and updates `updated_at`. It does not change `epoch` or any registration. If
-the replacement is identical, the relay returns the current state without
-incrementing the version; it still clears `device_token_invalid_at` because
-the caller supplied the current complete version as the CAS proof.
+complete replacement of the provider content. The relay locks the installation
+and compares the requested `device_token`, `environment`, and `topic` with
+the current provider content before evaluating
+`expected_provider_version`.
+
+If the requested provider content is identical to the current content, the
+relay returns `200` with the current provider state and current
+`provider_version` regardless of the supplied expected version. If
+`device_token_invalid_at` is non-null, this content-idempotent recovery clears
+the marker and increments `provider_version` exactly once before returning;
+retrying the same request after a lost response then returns the new current
+version without incrementing again. If the marker is already null, the
+identical request does not mutate the row.
+
+If the requested provider content differs, the expected version is a
+compare-and-set precondition for the complete versioned state, not just for
+the token. A matching expected version stores all three fields, increments
+`provider_version` by one, clears `device_token_invalid_at`, and updates
+`updated_at`. It does not change `epoch` or any registration. A mismatched
+expected version is a real conflict: the relay returns `409` with the current
+`provider_version` and `device_token_sha256` and does not mutate the row.
 
 Success is `200`:
 
@@ -515,11 +571,36 @@ Success is `200`:
 }
 ```
 
+The conflict response is also a fixed contract:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "stale_provider_version"
+  },
+  "installation_id": "00000000-0000-0000-0000-000000000000",
+  "epoch": 7,
+  "provider_version": 3,
+  "device_token_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "environment": "production",
+  "topic": "bot.avibe.ios",
+  "updated_at": "2026-11-08T00:00:00Z"
+}
+```
+
+Native stores the returned `provider_version` and token hash, then retries
+the same complete replacement with that version. The returned environment and
+topic are the current relay state and let native refresh its recovery record
+before retrying; the caller still supplies the desired complete replacement.
+
 The route returns `404 installation_not_found` for an unknown installation,
 `401 installation_credential_required` or `installation_unauthorized` for a
-missing or invalid installation credential, `409 stale_provider_version` when
-the expected version does not match, `400` for invalid fields,
-`413 request_too_large`, and `429 rate_limited`.
+missing or invalid installation credential, `409 stale_provider_version` with
+the conflict body above when a changed replacement has a mismatched expected
+version, `409 installation_retired` when a retired installation attempts a
+changed provider update before a new login bind reactivates it, `400` for
+invalid fields, `413 request_too_large`, and `429 rate_limited`.
 
 ### 5.3 Create a new registration
 
@@ -542,6 +623,9 @@ Request:
 The relay verifies the installation credential from the header. The request's
 `epoch` must equal the installation's current epoch. Otherwise the relay
 returns `409 stale_epoch` without creating or revoking anything.
+If `retired_at` is non-null, the relay returns `409 installation_retired`
+without creating or revoking anything; a successful login bind must reactivate
+the installation first.
 Every accepted request creates a new registration, even when an active row
 already exists for the same installation and VAPID hash. In one transaction it
 locks the installation and that scope, sets `revoked_at` on the previous
@@ -574,7 +658,7 @@ The route returns:
 | `400` | `invalid_installation_id`, `invalid_vapid_key_hash`, `invalid_json` | The request shape or value is invalid. |
 | `401` | `installation_credential_required`, `installation_unauthorized` | The installation credential is absent or invalid. |
 | `404` | `installation_not_found` | The installation does not exist. |
-| `409` | `stale_epoch` | The supplied epoch is not the installation's current epoch. |
+| `409` | `stale_epoch`, `installation_retired` | The supplied epoch is not the installation's current epoch, or the installation was retired by the account cap and must be reactivated by login bind. |
 | `413` | `request_too_large` | The JSON request exceeds the management body limit. |
 | `429` | `rate_limited` | The installation management limit was exceeded. |
 
@@ -673,23 +757,32 @@ by RFC 8291 AES-GCM; the relay never attempts to decrypt it.
 
 Before opening the APNs request, the relay captures the installation's
 complete provider state and `provider_version` under the installation lock. If
-the current `device_token` is null or `device_token_invalid_at` is non-null,
-it returns `503 apns_token_unavailable` and does not send to APNs. If APNs
-returns `410`, `BadDeviceToken`, `DeviceTokenNotForTopic`, or `Unregistered`,
-the relay marks the current provider state invalid only with:
+the current `device_token` is null, it returns `503 apns_token_unavailable`
+and does not send to APNs. If `device_token_invalid_at` is non-null, it
+returns `410 apns_provider_invalid` and does not send to APNs; the instance
+disables the subscription through its existing 410 path.
+
+If APNs returns `410`, `BadDeviceToken`, `DeviceTokenNotForTopic`, or
+`Unregistered`, the relay marks the current provider state invalid only with:
 
 ```text
 UPDATE push_installations
-SET device_token_invalid_at = now()
+SET device_token_invalid_at = now(),
+    provider_version = provider_version + 1,
+    updated_at = now()
 WHERE installation_id = <captured installation_id>
   AND provider_version = <captured provider_version>
+  AND device_token_invalid_at IS NULL
 ```
 
 The relay returns `410 apns_device_gone` only when that compare-and-set
-matches. If any provider field changed while APNs was processing the request,
-the provider version no longer matches; the relay leaves the installation
-untouched and returns retryable `503 apns_provider_changed`. The instance must not
-disable its subscription for that result.
+matches. The successful invalidation advances `provider_version`, and later
+delivery attempts use `410 apns_provider_invalid` until a provider update
+clears the marker. If any provider field or validity marker changed while APNs
+was processing the request, the provider version no longer matches; the relay
+leaves the installation untouched and returns retryable `503
+apns_provider_changed`. The instance must not disable its subscription for
+that result.
 
 Success is `201` after APNs accepts the request:
 
@@ -707,15 +800,35 @@ Delivery errors are fixed:
 | --- | --- | --- |
 | `400` | `invalid_vapid`, `vapid_key_mismatch`, `invalid_audience`, `vapid_expired`, `vapid_exp_too_far`, `invalid_content_encoding`, `invalid_ttl`, `invalid_urgency`, `invalid_topic`, `invalid_request` | The request is rejected. The registration remains active. |
 | `410` | `registration_not_found`, `registration_revoked` | The registration does not exist or has `revoked_at`. The instance must disable its subscription. |
-| `410` | `apns_device_gone` | APNs returned `410`, `BadDeviceToken`, `DeviceTokenNotForTopic`, or `Unregistered`, and the captured `provider_version` still matched the installation. The relay marks the current provider state invalid and the instance disables its subscription. |
+| `410` | `apns_device_gone` | APNs returned `410`, `BadDeviceToken`, `DeviceTokenNotForTopic`, or `Unregistered`, and the captured `provider_version` still matched the installation. The relay marks the current provider state invalid, advances the provider version, and the instance disables the subscription. |
+| `410` | `apns_provider_invalid` | The installation's current provider state was already marked invalid. No APNs request is made and the instance disables the subscription. |
 | `413` | `encrypted_body_too_large`, `apns_payload_too_large` | The encrypted body or resulting APNs JSON exceeds its bound. The registration remains active. |
 | `429` | `relay_rate_limited` | The registration or installation token bucket is exhausted. The response includes `Retry-After` seconds. The registration remains active. |
 | `502` | `apns_bad_gateway` | APNs rejected the request because of a relay/provider configuration or protocol error that is not a device invalidation. The registration remains active. |
-| `503` | `apns_unavailable`, `apns_timeout`, `apns_upstream_rate_limited`, `apns_provider_changed`, `apns_token_unavailable` | APNs is unavailable, timed out, or returned a transient `429`/`5xx`; the provider version changed during an invalidation race; or the current token is already marked invalid. The response may include `Retry-After`. The registration remains active and the instance must not disable it for these codes. |
+| `503` | `apns_unavailable`, `apns_timeout`, `apns_upstream_rate_limited`, `apns_provider_changed`, `apns_token_unavailable` | APNs is unavailable, timed out, or returned a transient `429`/`5xx`; the provider version changed during an invalidation race; or no device token is available. The response may include `Retry-After`. The registration remains active and the instance must not disable it for these codes. |
 
 All other APNs response bodies are redacted into an operator-safe error
 classification. The relay MUST NOT pass APNs response text, the request body,
 or a device token to the instance or logs.
+
+#### 5.6.1 Provider-invalid cleanup
+
+The relay runs a bounded cleanup sweep at least once every 24 hours. An
+installation whose `device_token_invalid_at` is at least seven days in the
+past is eligible. For each candidate, the sweep locks the installation,
+rechecks the captured `provider_version` and `device_token_invalid_at`, and
+captures every currently active registration ID. It then sets `revoked_at`
+only on those concrete IDs in the same transaction. A provider update that
+cleared the marker or advanced the version makes the sweep item a no-op; the
+next sweep may reconsider only a newly invalid provider state.
+
+The sweep is bounded by a fixed batch size and resumes from a durable
+cursor. It never decrypts a body, changes a newer provider state, or selects
+an unbounded current-registration set after releasing the installation lock.
+Every revoked ID remains a 410 endpoint. This seven-day sweep is the eventual
+cleanup path for uninstall and other terminal APNs token invalidation; the
+initial invalid result still returns 410 immediately so the instance disables
+the subscription.
 
 ### 5.7 APNs request mapping
 
@@ -773,10 +886,27 @@ burst capacity. Limits are checked before any APNs request:
 
 | Scope | Rate | Burst | Applies to |
 | --- | --- | --- | --- |
+| First-use bind per authenticated account | 5 requests/minute | 2 | `PUT` binds whose `installation_id` has no existing row, after the account session and exact Origin are authenticated |
+| First-use bind per source IP prefix | 30 requests/minute | 10 | The same first-use `PUT` binds, keyed by the trusted peer's canonical IPv4 `/24` or IPv6 `/64` prefix |
 | Installation management | 30 requests/minute | 10 | Login binds, provider PATCHes, registration creates, and revocations for one installation credential |
 | One registration delivery | 60 requests/minute | 10 | Delivery requests for one `registration_id` |
 | One installation delivery | 120 requests/minute | 20 | Delivery requests across all registrations for one installation |
 | One account delivery | 300 requests/minute | 50 | Delivery requests across the account's installations |
+
+The account bucket is keyed by the authenticated `account_id`, never by a
+client field. The source-prefix bucket uses the peer address supplied by the
+trusted ingress; caller-controlled forwarding headers cannot select it. Both
+first-use buckets must have capacity before a new installation row is
+created. They prevent random installation IDs from bypassing the per-
+installation management bucket.
+
+The account cap is separate from these token buckets: an account may have at
+most five active installations, where active means `account_id` matches and
+`retired_at` is null. A successful login bind that would exceed the cap
+retires the oldest other active installation by
+`(last_bound_at, installation_id)` and revokes all of its registrations by
+concrete ID in the same transaction. This cap action is recorded in the
+durable bind response and is not repeated by a `sign_in_id` retry.
 
 The registration and installation buckets are independent. A request that
 exhausts either returns `429` with `Retry-After`; it does not reach APNs.
@@ -1019,12 +1149,14 @@ that every field has an independent signature.
 | `account_id` | Relay from the same-origin login session | Relay audit, abuse controls, and cleanup metadata | Session cookie and Origin guard on the login bind only | Existing account authority |
 | `sign_in_id` | Native account coordinator, once per login | Relay bind idempotency ledger | HTTPS cookie-authenticated request; durable equality binding on retry | Native account session |
 | `epoch` | Relay on accepted login bind | Native key record, registration row, bulk revoke boundary, lifecycle checks | Authenticated management response; relay transaction invariant | Relay |
+| `last_bound_at` | Relay on accepted non-idempotent login bind | Account installation-cap ordering and cleanup audit | Same transaction as the authenticated bind | Relay |
+| `retired_at` | Relay when the account installation cap evicts a row | Registration creation gate and reinstall cleanup | Same transaction as concrete registration revocation | Relay |
 | `device_token` | APNs callback to the app | Relay APNs request builder | HTTPS at registration; encrypted-at-rest in relay storage | APNs |
 | `device_token_sha256` | Relay from `device_token` | Bind/PATCH responses, logs, and audit redaction | Relay-derived equality value; never a CAS value or token substitute | Relay |
-| `provider_version` | Relay on provider-state replacement | Native recovery state, delivery capture, provider-version CAS | Installation credential plus whole-row compare-and-set | Relay |
+| `provider_version` | Relay on provider-state or validity mutation | Native recovery state, delivery capture, provider-version CAS | Installation credential plus whole-row compare-and-set | Relay |
 | `expected_provider_version` | Native token coordinator | Relay provider PATCH | Authenticated request; whole-state equality precondition | Native's last accepted version |
 | `captured_provider_version` | Relay at delivery start | Relay APNs invalidation CAS | Relay transaction equality check | Protected installation row |
-| `device_token_invalid_at` | Relay after a matching APNs invalid result | Delivery admission and token recovery | Relay CAS on `provider_version` | Relay |
+| `device_token_invalid_at` | Relay after a matching APNs invalid result | Delivery admission, 410 handling, cleanup sweep, and token recovery | Relay CAS on `provider_version`; accepted invalidation advances that version | Relay |
 | `environment` | App build/runtime | Relay host selector | Installation-credential management request; not overridable at delivery | Xcode debug or TestFlight build |
 | `topic` | App bundle configuration | Relay `apns-topic` header | Installation-credential management request; allowlisted by relay | App target |
 | `vapidPublicKey` | Instance Web Push endpoint | Web UI and native registration | HTTPS from the instance; its hash binds the registration | Instance `GET /api/web-push/vapid-public-key` |
@@ -1100,10 +1232,11 @@ queued for that explicit old ID and cannot affect the new registration.
    the result.
 9. On success, APNs invokes the NSE. The NSE finds the registration `kid`,
    decrypts the original body, and presents the alert.
-10. On `410 apns_device_gone`, the instance disables the subscription using the same
-    path that currently disables a browser subscription after a 404/410.
-    On `503 apns_provider_changed` or `503 apns_token_unavailable`, it keeps the
-    subscription enabled and retries after native token recovery.
+10. On `410 apns_device_gone` or `410 apns_provider_invalid`, the instance
+    disables the subscription using the same path that currently disables a
+    browser subscription after a 404/410. On `503 apns_provider_changed` or
+    `503 apns_token_unavailable`, it keeps the subscription enabled and retries
+    after native token recovery.
 
 ### 9.4 Tap
 
@@ -1175,12 +1308,21 @@ still make such an already-accepted alert audible.
 
 When APNs supplies a new device token, native calls the installation
 `PATCH` with the last accepted `provider_version` and the complete replacement
-provider state. The relay updates `device_token`, its hash, environment, topic,
-and `updated_at` as one replacement; it increments `provider_version`, clears
-`device_token_invalid_at`, leaves the current epoch unchanged, and keeps all
-active registrations and endpoint IDs valid. A stale callback fails the
-whole-state compare-and-set and is discarded without changing relay state. The
-next delivery uses the new provider state.
+provider state. If the requested provider content is equal to the current
+content, the relay returns `200` with the current version even when the
+expected version is stale; it clears `device_token_invalid_at` and advances
+the version once when the marker was set. If the content differs and the
+expected version matches, the relay updates `device_token`, its hash,
+environment, topic, and `updated_at` as one replacement; it increments
+`provider_version`, clears `device_token_invalid_at`, leaves the current epoch
+unchanged, and keeps all active registrations and endpoint IDs valid.
+
+If a changed replacement receives `409 stale_provider_version`, native reads
+the returned `provider_version` and `device_token_sha256`, stores that
+recovery state, and retries the same complete replacement with the returned
+version. The response also supplies the relay's current environment and topic
+for the recovery record. A stale callback is never applied to the relay row,
+and the next delivery uses only the accepted provider state.
 
 If a delivery using the old token already returned relay `410`, the instance
 may already have disabled that subscription row through its existing failure
@@ -1203,19 +1345,25 @@ because iOS may have retained those ThisDeviceOnly Keychain items.
 
 After the user next completes account login, native uses the retained
 installation credential and a fresh `sign_in_id` on the same-origin bind
-route. The bind advances the epoch and revokes all older-epoch registrations
-in one transaction; native may also request login-time secret rotation. Only
-after that bind succeeds does native set the local initialized marker. If the
-retained credential is absent or invalid, native generates a new installation
-ID and completes a first-use bind. The old installation is never re-bound or
-reused by the new installation.
+route. The bind advances the epoch, reactivates the row if it was retired by
+the account cap, and revokes all older-epoch registrations in one transaction;
+native may also request login-time secret rotation. Only after that bind
+succeeds does native set the local initialized marker. If the retained
+credential is absent or invalid, native generates a new installation ID and
+completes a first-use bind. The old installation is never re-bound or reused
+by the new installation.
 
-The relay cleanup job may delete an installation row only after every
-registration is revoked, the bind-idempotency retention period has elapsed,
-and the audit retention period permits deletion. It never deletes an active
-registration or recycles an installation ID. If the old Keychain credential
-was lost before cleanup, APNs invalidation remains the eventual cleanup path
-for any surviving registration.
+The relay cleanup job may delete an installation row when either every
+registration is revoked or `device_token_invalid_at` is non-null, provided
+the bind-idempotency retention period has elapsed and the audit retention
+period permits deletion. The provider-invalid branch is sufficient and does
+not wait for the seven-day sweep: the cleanup transaction must still capture
+all active registration IDs and retain them as revoked tombstones, or make
+their deleted endpoints return `410`, before removing the installation
+credential. It never deletes a live delivery path or recycles an installation
+ID. If the old Keychain credential was lost before cleanup, APNs invalidation
+and the seven-day sweep remain the eventual cleanup paths for surviving
+registrations.
 
 Uninstall cannot reliably call the revoke API. The relay keeps the state
 until APNs reports `410`, `BadDeviceToken`, `DeviceTokenNotForTopic`, or
@@ -1236,11 +1384,12 @@ encrypted bytes and therefore needs the same review gate.
 | Threat | Invariant and control |
 | --- | --- |
 | Open relay abuse | Every delivery resolves a random stateful registration, validates RFC 8292 VAPID against the bound key hash, enforces the 2903-byte body limit, and consumes registration, installation, and account rate buckets before APNs. No delivery route accepts an arbitrary APNs token or arbitrary topic. |
+| First-use installation spraying | The first-use bind is rate limited by the authenticated `account_id` and an ingress-derived IP prefix before row creation. Each account has at most five active installations; an over-cap bind revokes the oldest installation's registrations by concrete ID and retires that row in the same transaction. |
 | Installation credential leakage | The installation credential is a device-level bearer by design: leakage can manage only that installation's push registrations and cannot read the account or another installation. The raw secret is stored only in a `ThisDeviceOnly` Keychain item, the relay stores only its hash, management routes are rate limited, and login-time rotation can invalidate it. |
 | Cross-account registration or revocation | Only the login bind uses the same-origin account cookie and Origin guard. Every other management route requires the installation credential and is scoped by the installation ID in the header and path; `account_id` is never accepted as authorization input. A new login advances the epoch and revokes all older-epoch registrations before committing the account record. |
 | Cross-instance delivery | The relay binds each registration to `vapid_key_sha256`; the delivery VAPID `k` must hash to it. The endpoint ID is random and never derived from account or origin. |
-| Deferred mutation race | Every state-changing route fixes its scope at request start: `sign_in_id`, explicit registration ID, `epoch <= E`, or an expected complete `provider_version`. No delayed operation selects an open-ended current set or compares only one provider field at execution time. |
-| APNs provider-state invalidation race | Delivery captures the complete provider state version, and an APNs invalid result can mark the installation invalid only when `provider_version` still matches. A changed version returns retryable `503` and cannot disable a valid instance subscription. |
+| Deferred mutation race | Every state-changing route fixes its scope at request start: `sign_in_id`, authenticated account and source prefix, explicit registration ID, `epoch <= E`, an expected complete `provider_version`, or a captured invalid-provider version. No delayed operation mutates an open-ended set or compares only one provider field at execution time; the cleanup sweep captures concrete IDs under lock before revoking them. |
+| APNs provider-state invalidation race | Delivery captures the complete provider state version, and an APNs invalid result can mark the installation invalid and advance that version only when the captured version still matches. A changed version returns retryable `503`; the matching result returns `410`, and later attempts remain `410` until an accepted provider update clears the marker. |
 | Native credential confusion | The account session is used only for the same-origin login bind. The installation credential is kept in native Keychain storage, never enters Web content, the bridge, instance pages, relay storage, or logs, and is not available to the NSE. |
 | Exact request replay | The relay keeps an expiring deduplication record keyed by `(registration_id, SHA-256(ciphertext))`, never the ciphertext itself. An already accepted exact body returns the prior result during the VAPID validity window without sending a second APNs request. Fresh `pywebpush` sends use fresh RFC 8291 salt and ephemeral sender keys, so a legitimate resend has a different ciphertext hash. |
 | VAPID token reuse | `aud` is exact, `exp` is future and at most 24 hours ahead, and the delivery deduplication cache limits an identical body to one APNs submission per registration. |
@@ -1373,8 +1522,9 @@ deployment configuration and must not be caller-controlled.
 2. **Backend relay lane, `avibe-backend`:** implement the same-origin login
    bind, installation-secret verifier, epoch and bind ledger, provider-version
    PATCH and registration/revocation routes, state model, delivery validation
-   and provider-version CAS, APNs mapping, rate limits, redaction, and relay
-   tests from this document.
+  and provider-version CAS, first-use account/IP-prefix buckets, the
+  five-installation cap, APNs mapping, invalid-provider cleanup, rate limits,
+  redaction, and relay tests from this document.
 3. **Avibe lane, `avibe`:** implement the instance byte budget and label,
    native installation credential storage and login-bind handoff, epoch-aware
    installation/key lifecycle, `push` bridge, NSE, tap routing, and instance
@@ -1401,7 +1551,8 @@ The Avibe lane owns a mock relay boundary for native and instance tests. It
 must validate the same registration and delivery shapes and return the same
 status mappings. The mock relay may use a deterministic in-memory state store,
 but it must enforce same-origin login bind, installation-secret authorization,
-epoch/provider-version CAS, VAPID hash binding, body size, and revocation.
+epoch/provider-version CAS, the first-use buckets and installation cap, VAPID
+hash binding, body size, invalid-provider 410 behavior, and revocation.
 
 The closed-loop acceptance test connects:
 
@@ -1428,12 +1579,17 @@ property below holds:
   logout retry remains authorized after account-session rotation;
 - the bind route creates the first installation and returns a 32-byte secret
   only once, stores a durable `sign_in_id`, increments the epoch exactly once
-  per login, revokes all older-epoch registrations, and returns `201`; a retry
-  returns the durable result without issuing another secret;
+  per login, revokes all older-epoch registrations, enforces both
+  account-and-source-prefix first-use buckets, caps the account at five active
+  installations, retires the oldest over-cap installation by concrete
+  registration IDs, and returns `201`; a retry returns the durable result
+  without issuing another secret or repeating cap eviction;
 - provider PATCH replaces `device_token`, `environment`, and `topic` as one
-  whole state using the expected `provider_version`, increments that version
-  only when the replacement changes, preserves the epoch and registrations,
-  and clears token-invalid state only for the accepted replacement;
+  whole state using the expected `provider_version`; equal content returns
+  `200` with the current version regardless of the expected version, a true
+  conflict returns `409` with the current version and token hash, and a
+  changed or accepted recovery update advances the version as defined here
+  while preserving the epoch and registrations;
 - every subscribe creates a new 43-character registration ID and never
   resurrects or reuses an old row; a stale epoch returns `409` without
   mutation;
@@ -1451,8 +1607,9 @@ property below holds:
   credential before marking initialization complete, and never reuses an old
   installation ID after the credential is unavailable;
 - an APNs invalid-token result returns `410` only when its captured provider
-  version still matches; a changed version returns retryable `503` and
-  preserves the instance subscription;
+  version still matches and advances the provider version; an already-invalid
+  provider also returns `410`, a changed version returns retryable `503`, and
+  a bounded seven-day cleanup sweep revokes all concrete registration IDs;
 - every revoked or unknown delivery registration returns `410`;
 - the relay verifies ES256 VAPID, exact audience, expiry bound, and VAPID key
   hash before forwarding;
@@ -1476,6 +1633,9 @@ property below holds:
   suites;
 - the non-ASCII scenario crosses instance, relay, mock APNs, NSE, and tap
   origin boundaries with real encryption and decryption;
+- reinstall cleanup proceeds when all registrations are revoked or the
+  provider is invalid, whichever condition is reached first, subject to the
+  retention rules;
 - disable, logout, account switch, provider rotation, reinstall, and uninstall
   converge to one of the lifecycle states defined here;
 - product and security review has explicitly approved this new ciphertext
