@@ -5,7 +5,7 @@ import { createRef, type RefObject } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   Range.prototype.getBoundingClientRect = () => new DOMRect();
@@ -22,6 +22,7 @@ const originalScrollIntoView = Element.prototype.scrollIntoView;
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
 import { Composer, type ComposerHandle } from './Composer';
+import { DeferredMentionEditor } from './deferredMentionEditor';
 
 // A chat painted from its snapshot mounts its composer before the bootstrap
 // answers, with the draft this device last cached, and keeps that composer when
@@ -70,6 +71,11 @@ const typeInto = async (mentions: boolean, handle: RefObject<ComposerHandle | nu
   await user.click(screen.getByRole('textbox'));
   await user.keyboard(text);
 };
+
+// The chat page loads its composer's editor before it mounts (routePages.ts).
+beforeAll(async () => {
+  await DeferredMentionEditor.preload();
+});
 
 beforeEach(() => {
   apiFetch.mockReset().mockResolvedValue({

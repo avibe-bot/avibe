@@ -34,7 +34,8 @@ beforeAll(async () => {
       write: false, minify: false,
       rollupOptions: {
         input: entry, preserveEntrySignatures: 'strict',
-        output: { format: 'iife', name: 'SanitizerProbe' },
+        // One IIFE file: the app config's chunk groups do not apply to it.
+        output: { format: 'iife', name: 'SanitizerProbe', codeSplitting: false },
       },
     },
   });

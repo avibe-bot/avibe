@@ -4,7 +4,7 @@ import { createInstance } from 'i18next';
 import type { ReactElement } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   Object.defineProperty(window, 'matchMedia', {
@@ -34,6 +34,7 @@ vi.mock('./MentionEditor', async (importOriginal) => {
 import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
 import { Composer } from './Composer';
+import { DeferredMentionEditor } from './deferredMentionEditor';
 
 // A saved draft restored into the chat composer is a message the reader can
 // send as it is, while the agent is idle or into the queue while it is busy,
@@ -57,6 +58,11 @@ const mentionSearch = {
   onSearchAgents: async () => [],
   onSearchSessions: async () => [],
 };
+
+// The chat page loads its composer's editor before it mounts (routePages.ts).
+beforeAll(async () => {
+  await DeferredMentionEditor.preload();
+});
 
 afterEach(() => cleanup());
 

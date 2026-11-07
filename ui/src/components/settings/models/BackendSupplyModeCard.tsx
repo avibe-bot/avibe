@@ -20,6 +20,8 @@ import { MigrationDialog } from './MigrationDialog';
 import { resumeGatewayAdoption } from './gatewayAdoption';
 import { connectOutcome, isSupplyWarning } from './sufficiency';
 import type { AgentBackend, AgentMode, AgentSupply, MigrationItem } from './types';
+// Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
+import './modelHubSurface.css';
 
 const RadioDot: React.FC<{ selected: boolean }> = ({ selected }) => (
   <span

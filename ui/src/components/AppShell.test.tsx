@@ -61,7 +61,8 @@ const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
 const makeI18n = () => {
   const instance = {
     language: 'en',
-    options: { resources: { en: {}, zh: {} } },
+    // The Web UI's instance holds only the language it loaded (src/i18n/app.ts).
+    options: { resources: { en: {} } },
     changeLanguage: vi.fn(async (code: string) => {
       instance.language = code;
     }),

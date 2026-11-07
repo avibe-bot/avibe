@@ -38,6 +38,8 @@ async function load({ touch }: Device) {
     import('i18next'),
     import('react-i18next'),
     import('react'),
+    // The chat page loads its composer's editor before it mounts (routePages.ts).
+    import('./deferredMentionEditor').then((m) => m.DeferredMentionEditor.preload()),
   ]);
   const i18n = i18next.createInstance();
   await i18n.use(reactI18next.initReactI18next).init({
