@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -88,7 +88,7 @@ class _Harness:
         controller.message_dispatcher = self.dispatcher
         self.persisted: list[str] = []
 
-        def persist(_context, _type, text, **_kwargs):
+        async def persist(_context, _type, text, **_kwargs):
             self.persisted.append(text)
             return {"id": f"row-{len(self.persisted)}", "native_message_id": None}
 
@@ -408,7 +408,7 @@ def test_a_durable_step_failure_keeps_the_turn_owner_live(managers, monkeypatch)
 
     manager, _other, engine, _engine_b, _starts = managers
     harness = _Harness(manager, engine, monkeypatch)
-    monkeypatch.setattr("core.message_dispatcher.persist_agent_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("core.message_dispatcher.persist_agent_message", AsyncMock(return_value=None))
 
     async def run() -> tuple[str, BaseException | None, dict]:
         turn_id, context = await _activate(manager, text="prompt")

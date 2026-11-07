@@ -188,6 +188,7 @@ def test_scheduled_service_ownership_snapshot_uses_pure_turn_projection():
     calls = []
     service = object.__new__(ScheduledTaskService)
     service._inflight_executions = {"run-drain": object()}
+    service._pending_terminal_writes = {}
     service.controller = types.SimpleNamespace(
         session_turns=types.SimpleNamespace(
             snapshot_owned_agent_run_ids=lambda candidates: calls.append(
