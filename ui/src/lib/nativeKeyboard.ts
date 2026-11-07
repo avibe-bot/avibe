@@ -5,6 +5,7 @@ import { isTextField, SOFT_KEYBOARD_MIN_DELTA } from './softKeyboard';
 
 const MOBILE_QUERY = '(max-width: 767px)';
 const KEYBOARD_CLOSE_DELTA = 60;
+const VIEWPORT_GEOMETRY_EPSILON = 2;
 const VIEWPORT_SETTLE_MS = 140;
 const REVEAL_WINDOW_MS = 900;
 
@@ -13,6 +14,9 @@ const viewportHeight = (viewport: VisualViewport | null): number =>
 
 const viewportScale = (viewport: VisualViewport | null): number =>
   viewport?.scale ?? 1;
+
+const viewportLayoutWidth = (viewport: VisualViewport | null): number =>
+  viewport ? viewport.width * viewport.scale : window.innerWidth;
 
 /**
  * The native shell shrinks the whole WKWebView to `keyboardLayoutGuide`, so a
@@ -33,21 +37,40 @@ export function useNativeKeyboardOpen(): boolean {
     const viewport = window.visualViewport;
     const mobile = window.matchMedia(MOBILE_QUERY);
     let baseline = viewportHeight(viewport);
+    let baselineWidth = viewportLayoutWidth(viewport);
     let keyboardOpen = false;
+    let syncFrame = 0;
 
     const sync = () => {
+      syncFrame = 0;
       const height = viewportHeight(viewport);
+      const width = viewportLayoutWidth(viewport);
       const editableFocused = isTextField(document.activeElement);
 
       if (!mobile.matches) {
         baseline = height;
+        baselineWidth = width;
         keyboardOpen = false;
         setOpen(false);
         return;
       }
 
+      if (Math.abs(width - baselineWidth) > VIEWPORT_GEOMETRY_EPSILON) {
+        baselineWidth = width;
+        // A known software keyboard can survive rotation. Keep that state until
+        // the resized viewport recovers; a hardware-keyboard focus has no such
+        // state and rebases without hiding the phone chrome.
+        keyboardOpen = keyboardOpen && editableFocused;
+        baseline = keyboardOpen
+          ? height + SOFT_KEYBOARD_MIN_DELTA / viewportScale(viewport)
+          : height;
+        setOpen(keyboardOpen);
+        return;
+      }
+
       if (!editableFocused && !keyboardOpen) {
         baseline = height;
+        baselineWidth = width;
         setOpen(false);
         return;
       }
@@ -60,19 +83,25 @@ export function useNativeKeyboardOpen(): boolean {
       setOpen(next);
     };
 
-    viewport?.addEventListener('resize', sync);
-    window.addEventListener('resize', sync);
+    const scheduleSync = () => {
+      window.cancelAnimationFrame(syncFrame);
+      syncFrame = window.requestAnimationFrame(sync);
+    };
+
+    viewport?.addEventListener('resize', scheduleSync);
+    window.addEventListener('resize', scheduleSync);
     document.addEventListener('focusin', sync);
     document.addEventListener('focusout', sync);
-    mobile.addEventListener('change', sync);
+    mobile.addEventListener('change', scheduleSync);
     sync();
 
     return () => {
-      viewport?.removeEventListener('resize', sync);
-      window.removeEventListener('resize', sync);
+      window.cancelAnimationFrame(syncFrame);
+      viewport?.removeEventListener('resize', scheduleSync);
+      window.removeEventListener('resize', scheduleSync);
       document.removeEventListener('focusin', sync);
       document.removeEventListener('focusout', sync);
-      mobile.removeEventListener('change', sync);
+      mobile.removeEventListener('change', scheduleSync);
     };
   }, [resizesViewport]);
 

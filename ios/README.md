@@ -80,8 +80,10 @@ and Web resizing cannot both run.
   the Workbench hide its fixed bottom tab bar and matching clearance only while
   a focused editor has caused a software-keyboard-sized viewport contraction.
   Home quick tasks reveal the complete shared composer after the native
-  viewport settles; hardware keyboards, Safari, and installed Web apps keep
-  their existing chrome behavior.
+  viewport settles. Hardware-keyboard focus and phone rotations rebase the
+  keyboard-free geometry without hiding chrome; a known software keyboard stays
+  active across rotation until the resized viewport recovers. Safari and
+  installed Web apps keep their existing chrome behavior.
 - `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
   upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
   replaced when a native 1024-pixel source is delivered.

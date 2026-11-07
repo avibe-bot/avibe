@@ -282,6 +282,12 @@ const installVisualViewport = () => {
   return visualViewport;
 };
 
+const flushViewportSync = async () => {
+  await act(async () => {
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  });
+};
+
 describe('AppShell stale login session notice', () => {
   it('shows the restart instruction when the service outlived the macOS login session', async () => {
     api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
@@ -884,6 +890,80 @@ describe('AppShell persistent Workbench chrome', () => {
     await act(async () => undefined);
 
     expect(view.container.querySelector('nav.fixed.bottom-0')).not.toBeNull();
+    expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
+  });
+
+  it('rebases native keyboard detection when a focused phone rotates', async () => {
+    installNativeKeyboardBridge();
+    const visualViewport = installVisualViewport();
+    visualViewport.width = 375;
+    visualViewport.height = 667;
+    const view = render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<textarea aria-label="Rotating composer" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    const main = view.container.querySelector('main#app-shell-scroll')!;
+    const tabBar = () => view.container.querySelector('nav.fixed.bottom-0');
+    const composer = screen.getByRole('textbox', { name: 'Rotating composer' });
+
+    composer.focus();
+    act(() => {
+      visualViewport.width = 667;
+      visualViewport.height = 375;
+      visualViewport.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+    });
+    await flushViewportSync();
+    await waitFor(() => expect(tabBar()).not.toBeNull());
+    expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
+    composer.blur();
+    await act(async () => undefined);
+    expect(tabBar()).not.toBeNull();
+    composer.focus();
+
+    act(() => {
+      visualViewport.width = 375;
+      visualViewport.height = 667;
+      visualViewport.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+    });
+    await flushViewportSync();
+    await waitFor(() => expect(tabBar()).not.toBeNull());
+
+    act(() => {
+      visualViewport.height = 350;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await flushViewportSync();
+    await waitFor(() => expect(tabBar()).toBeNull());
+
+    act(() => {
+      visualViewport.width = 667;
+      visualViewport.height = 200;
+      visualViewport.dispatchEvent(new Event('resize'));
+      window.dispatchEvent(new Event('resize'));
+    });
+    await flushViewportSync();
+    await waitFor(() => expect(tabBar()).toBeNull());
+
+    act(() => {
+      visualViewport.height = 220;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await flushViewportSync();
+    await waitFor(() => expect(tabBar()).toBeNull());
+
+    act(() => {
+      visualViewport.height = 375;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await flushViewportSync();
+    await waitFor(() => expect(tabBar()).not.toBeNull());
     expect(main.className).toContain('pb-[var(--mobile-nav-clearance)]');
   });
 

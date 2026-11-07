@@ -14,6 +14,9 @@ changing Safari or PWA keyboard behavior.
 - Focus alone does not hide chrome. A focused text field plus a substantial
   observed viewport contraction identifies the software keyboard, so a hardware
   keyboard leaves the tab bar unchanged.
+- A phone geometry change rebases hardware-keyboard focus instead of treating
+  rotation as a keyboard. A software keyboard already known to be open remains
+  active across rotation until the resized viewport recovers.
 - While the native software keyboard is open, the tab bar and its matching
   `--mobile-nav-clearance` padding disappear together. Both return after the
   viewport recovers.
@@ -35,7 +38,8 @@ changing Safari or PWA keyboard behavior.
   injects the versioned native bridge, clicks the real **Add a Bot** quick task,
   contracts the viewport, and proves the tab bar and clearance are absent while
   the complete composer and Send action remain visible. It also covers viewport
-  restoration and a no-native browser case.
+  restoration, hardware-keyboard rotation, software-keyboard rotation, and a
+  no-native browser case.
 - The browser fixture is part of the regular `ui-browser-checks` selection.
 
 Light:

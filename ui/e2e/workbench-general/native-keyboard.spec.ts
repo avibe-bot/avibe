@@ -4,6 +4,11 @@ import { open, serveProduct } from './support';
 
 const PHONE = { width: 390, height: 844 };
 const KEYBOARD_VIEWPORT = { width: 390, height: 500 };
+const SMALL_PHONE = { width: 375, height: 667 };
+const SMALL_PHONE_LANDSCAPE = { width: 667, height: 375 };
+const SMALL_KEYBOARD_VIEWPORT = { width: 375, height: 350 };
+const SMALL_LANDSCAPE_KEYBOARD_VIEWPORT = { width: 667, height: 200 };
+const SMALL_LANDSCAPE_KEYBOARD_SETTLED = { width: 667, height: 220 };
 const TAB_BAR = 'nav.fixed.bottom-0';
 const SHELL_SCROLL = 'main#app-shell-scroll';
 
@@ -66,6 +71,9 @@ const setKeyboardViewport = async (page: Page, size: { width: number; height: nu
   await page.evaluate((height) => {
     (window as unknown as { __setNativeViewport: (next: number) => void }).__setNativeViewport(height);
   }, size.height);
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
 };
 
 const composerBox = (page: Page) => page.locator('[data-composer-root]');
@@ -122,4 +130,40 @@ test('browser Home keeps its existing tab-bar behavior without the native capabi
   await expect(page.locator(TAB_BAR)).toBeVisible();
   expect(Number.parseFloat(await page.locator(SHELL_SCROLL).evaluate((node) => getComputedStyle(node).paddingBottom)))
     .toBeGreaterThan(0);
+});
+
+test('native phone rotation rebases hardware focus and preserves a known software keyboard', async ({ page }) => {
+  const denied = await serveProduct(page);
+  await page.setViewportSize(SMALL_PHONE);
+  await installNativeKeyboardShell(page);
+  await open(page, '/');
+  await setKeyboardViewport(page, SMALL_PHONE);
+
+  const tabBar = page.locator(TAB_BAR);
+  const shell = page.locator(SHELL_SCROLL);
+  await page.getByRole('button', { name: en.workbench.home.asks.addBot, exact: true }).click();
+  const composer = page.getByRole('textbox');
+  await expect(composer).toBeFocused();
+
+  await setKeyboardViewport(page, SMALL_PHONE_LANDSCAPE);
+  await expect(tabBar).toBeVisible();
+  expect(Number.parseFloat(await shell.evaluate((node) => getComputedStyle(node).paddingBottom))).toBeGreaterThan(0);
+  await composer.evaluate((node) => (node as HTMLElement).blur());
+  await expect(tabBar).toBeVisible();
+  await composer.focus();
+
+  await setKeyboardViewport(page, SMALL_PHONE);
+  await setKeyboardViewport(page, SMALL_KEYBOARD_VIEWPORT);
+  await expect(tabBar).toHaveCount(0);
+
+  await setKeyboardViewport(page, SMALL_LANDSCAPE_KEYBOARD_VIEWPORT);
+  await expect(tabBar).toHaveCount(0);
+
+  await setKeyboardViewport(page, SMALL_LANDSCAPE_KEYBOARD_SETTLED);
+  await expect(tabBar).toHaveCount(0);
+
+  await setKeyboardViewport(page, SMALL_PHONE_LANDSCAPE);
+  await expect(tabBar).toBeVisible();
+  expect(Number.parseFloat(await shell.evaluate((node) => getComputedStyle(node).paddingBottom))).toBeGreaterThan(0);
+  expect(denied).toEqual([]);
 });
