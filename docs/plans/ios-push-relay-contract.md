@@ -167,7 +167,7 @@ The shell advertises `capabilities.push >= 1` and implements:
 | --- | --- | --- |
 | Web -> native | `push.status()` | Returns `{state: "unavailable" \| "off" \| "on", endpoint?: string}`. `endpoint` is present only for `on`. |
 | Web -> native | `push.subscribe({vapidPublicKey})` | Returns `{endpoint: string, keys: {p256dh: string, auth: string}}`. Both key values are base64url without padding. |
-| Web -> native | `push.unsubscribe()` | Returns `{revoked: boolean}` after local key removal and a best-effort relay revoke. |
+| Web -> native | `push.unsubscribe()` | Returns `{revoked: boolean}` after local key removal and a best-effort relay revoke. `revoked: true` means the relay confirmed the registration is revoked or already revoked; `false` means the local key was removed and a pending revoke was queued because the relay could not be confirmed. |
 | Native -> Web | `push.opened({url})` | Delivers a same-origin path such as `/chat/ses_123?from=notification`. |
 
 `vapidPublicKey` is the current instance VAPID public key returned by
@@ -451,8 +451,8 @@ For every accepted delivery, the relay sends:
 | `apns-push-type` | `alert` |
 | `apns-topic` | `push_installations.topic` |
 | `apns-priority` | `10` for Web Push `Urgency: high` or `normal`; `5` for `low` or `very-low`; `10` when absent |
-| `apns-expiration` | Current Unix time plus validated `TTL` |
-| `apns-collapse-id` | Web Push `Topic`, when supplied; the value is no more than 64 UTF-8 bytes |
+| `apns-expiration` | Literal `0` when validated `TTL` is `0`; otherwise the current Unix time plus validated `TTL` |
+| `apns-collapse-id` | When `Topic` is supplied, `base64url_no_pad(SHA-256(registration_id_bytes || 0x00 || UTF-8(Topic)))`; omit when absent. The decoded 32-byte registration ID is used, and the result is 43 ASCII bytes. |
 
 The APNs JSON body is compact UTF-8 JSON with this exact shape:
 
@@ -523,10 +523,14 @@ may carry additional forward-compatible fields, but the byte invariant
 applies to the complete serialized object.
 
 For a relay delivery, the instance sends the Web Push `Topic` header from the
-same value as `tag` when `tag` is present. The relay maps that header to
-`apns-collapse-id`. A browser subscription may continue to use the existing
-service-worker tag behavior; the relay mapping is the authoritative path for
-iOS.
+same value as `tag` when `tag` is present. The relay maps that header to a
+registration-scoped `apns-collapse-id` by hashing the decoded 32-byte
+`registration_id`, a single zero separator byte, and the UTF-8 Topic bytes,
+then encoding the SHA-256 digest as base64url without padding. Therefore the
+same registration and Topic can collapse, while equal Topics from different
+registrations cannot replace one another. A browser subscription may continue
+to use the existing service-worker tag behavior; the relay mapping is the
+authoritative path for iOS.
 
 The instance MUST:
 
@@ -757,9 +761,17 @@ instance-origin primary frame is ready.
 
 If the relay revoke is offline, native removes the local key immediately,
 stores a bounded pending revoke for the next authenticated opportunity, and
-the instance subscription is still deleted. A registration without its
-native key cannot produce a visible notification; the relay's later revoke
-closes the server state.
+still attempts to delete the instance subscription. This does not guarantee
+that no visible alert will appear: a notification already accepted by APNs,
+or accepted before the relay observes the pending revoke, may still be
+delivered. Because the NSE fallback behavior is part of this contract, a
+delivery whose key is already gone shows only the localized
+`AVIBE_PUSH_FALLBACK` alert; it cannot reveal the old encrypted title, body,
+URL, or instance origin, but the outer `sound: "default"` may still make the
+alert audible. The successful instance deletion stops future ordinary sends
+from that subscription. The pending revoke MUST be retried at the next
+authenticated opportunity; after the relay confirms it, new delivery
+requests return `410`.
 
 ### 9.6 Logout and account switch
 
@@ -772,7 +784,10 @@ authority and WebKit store-rotation lifecycle:
 3. the native coordinator revokes the old account snapshot and rotates the
    named WebKit store as already specified by the iOS plan;
 4. if the request failed offline, the local deletion and store rotation still
-   complete;
+   complete. The same pending-revocation rule as section 9.5 applies: queued
+   notifications may still show the localized fallback until the relay
+   observes the revoke, but old encrypted content remains unavailable because
+   the key record was deleted;
 5. the next login binds the same `installation_id` to the new account, and
    the relay transaction revokes any registrations still associated with the
    old account before a new registration is created.
