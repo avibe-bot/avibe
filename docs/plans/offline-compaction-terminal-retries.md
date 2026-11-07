@@ -69,8 +69,13 @@ orphan settlement, and a new global writer system or disk recovery journal.
   same lock and respects the existing output grace. New pending work rewinds the
   lane cursor. The AgentService idle sweep retains failed Run-notification/ack
   operations. Deferred settlement rechecks durable sibling Activity blockers
-  under its writer reservation. Terminal-ack compensation retains its exact
-  committed restoration payload until replacement or cleanup commits; retry
+  under its writer reservation. Completion retries merge frozen native facts
+  onto the current Activity; resolved `provenance_*`, Run IDs and delivery-key
+  metadata remain owned by classification, including when its write failed.
+  A foreground completion published after its human classification retires its
+  provenance snapshot without settling the Run; ack exhaustion remains owned by
+  the idle sweep. Terminal-ack compensation retains its exact committed
+  restoration payload until replacement or cleanup commits; retry
   cannot repeat the insert or abandon cleanup when the loop snapshot changes.
 - Message mirrors freeze original inputs, retry the complete scope/message/media
   transaction, then publish once on the caller loop. Show backfill uses its
@@ -124,5 +129,13 @@ and normalized payloads, preserving a durable successor, and a provenance retry
 that replaces the tag with the same loop snapshot. The first four fail on the
 pre-fix implementation; the fifth fails on a guard-only repair that does not
 invalidate ownership after a refused CAS. Their Activity/service/Claude/dispatcher
-consumer suite passed 457 tests and 20 subtests. All checks use isolated state;
+consumer suite passed 457 tests and 20 subtests. The completion-provenance matrix
+covers human/detached resolution after exhaustion with either a committed or a
+failed classification write; all four cases fail before the fix on resurrected
+provisional state. Four Claude-hook cases cover foreground completed/failed
+steps classified before retry publication, both healthy and exhausted ack writes;
+all four fail before the retirement fix, and none lets a step settle its Run.
+The expanded Activity/service/Claude/dispatcher suite passed 562 tests and
+35 subtests; the scheduler/failure-visibility suite passed another 777 tests.
+All checks use isolated state;
 PR CI and exact-head Codex review remain delivery gates.

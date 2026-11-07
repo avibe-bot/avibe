@@ -1152,11 +1152,24 @@ class SessionActivityRegistry:
                     return None
                 source = self._active[pending.key]
                 expected = self._persisted_active[pending.key]
+                completion_metadata = deepcopy(pending.metadata)
+                if any(source.metadata.get(marker) for marker in (
+                    "provenance_human", "provenance_detached",
+                    "provenance_generation_ended", "provenance_unresolved",
+                )):
+                    # Result classification owns this whole provenance group.
+                    # Frozen native facts must not resurrect provisional flags
+                    # or owner hints removed while persistence was pending.
+                    completion_metadata = {
+                        key: value for key, value in completion_metadata.items()
+                        if not key.startswith("provenance_")
+                        and key not in {"run_ids", "delivery_key_external"}
+                    }
                 completed = replace(
                     source,
                     status=pending.status,
                     metadata={
-                        **deepcopy(source.metadata), **deepcopy(pending.metadata),
+                        **deepcopy(source.metadata), **completion_metadata,
                         "_completion_write_id": pending.token,
                     },
                     updated_at=pending.completed_at,

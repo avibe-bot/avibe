@@ -425,34 +425,131 @@ async def test_exhausted_completion_reconciles_its_frozen_intent_and_sends_only_
     assert not registry.has_completed_output("claude", "runtime")
 
 
-async def test_retry_keeps_terminal_time_metadata_and_failed_provenance(activity_store, monkeypatch):
-    """Classification can be newer in memory than disk; CAS must use the committed image."""
+@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("classification_commits", [False, True])
+async def test_retry_keeps_terminal_facts_without_overriding_resolved_provenance(
+    activity_store, monkeypatch, detached, classification_commits,
+):
+    """A later Result owns provenance, even when its own store write fails.
+
+    Freezing native completion metadata also freezes the provisional flag and
+    owner hints. Replaying those over classification strands failed terminals;
+    the old test only passed non-provenance facts into the completion intent.
+    """
     _no_wait(activity_store)
     registry = SessionActivityRegistry(activity_store)
-    _start(registry, metadata={"provenance_pending": True})
+    provisional = {
+        "provenance_pending": True, "provenance_phase_id": "old-phase",
+        "run_ids": ["old-run"], "delivery_key_external": "old-delivery",
+    }
+    _start(registry, metadata={**provisional, "progress_fact": "kept"})
+    metadata = {**provisional, "output_file": "frozen-output", "facts": ["first"]}
     holder = _holder()
-    metadata = {"summary": "frozen", "facts": ["first"]}
     try:
-        registry.classify_provisional_provenance(
-            "claude", "runtime", activity_ids={"task"}, parent_activity_ids=set(),
-            turn_id="turn", run_ids=["run"], detached=False,
-        )
-        assert registry.provenance_persistence_recovery("claude", "runtime")
         monkeypatch.setattr("core.session_activities._now_iso", lambda: "2026-11-07T01:00:00Z")
         with pytest.raises(OperationalError):
-            await _complete(registry, metadata=metadata)
+            await registry.complete_async(
+                backend="claude", runtime_key="runtime", activity_id="task",
+                status="failed", metadata=metadata, retain_terminal_snapshot=True,
+            )
+        metadata["facts"].append("not part of the native completion")
+        metadata["output_file"] = "changed-after-completion"
+        monkeypatch.setattr("core.session_activities._now_iso", lambda: "2026-11-07T02:00:00Z")
+        if classification_commits:
+            holder.execute("COMMIT")
+        registry.classify_provisional_provenance(
+            "claude", "runtime", activity_ids={"task"}, parent_activity_ids=set(),
+            turn_id="turn", run_ids=["run"], detached=detached,
+            phase_id="resolved-phase", delivery_key_external="delivery",
+        )
+        assert bool(registry.provenance_persistence_recovery("claude", "runtime")) is not classification_commits
     finally:
         holder.close()
-    metadata["facts"].append("not part of the native completion")
-    monkeypatch.setattr("core.session_activities._now_iso", lambda: "2026-11-07T02:00:00Z")
     [completed] = await registry.retry_pending_completions("claude", "runtime")
+    assert completed.status == "failed"
     assert completed.completed_at == "2026-11-07T01:00:00Z"
     assert completed.metadata["facts"] == ["first"]
-    assert completed.run_id == "run" and completed.turn_id == "turn"
-    assert completed.metadata["provenance_human"]
+    assert completed.metadata["output_file"] == "frozen-output"
+    assert completed.metadata["progress_fact"] == "kept"
+    assert "provenance_pending" not in completed.metadata
+    assert completed.metadata["provenance_phase_id"] == "resolved-phase"
+    if detached:
+        assert completed.metadata["provenance_detached"]
+        assert "run_ids" not in completed.metadata
+        assert "delivery_key_external" not in completed.metadata
+        assert completed.run_id is None and completed.turn_id is None
+        assert completed.detached_from_run
+    else:
+        assert completed.metadata["provenance_human"]
+        assert completed.metadata["run_ids"] == ["run"]
+        assert completed.metadata["delivery_key_external"] == "delivery"
+        assert completed.run_id == "run" and completed.turn_id == "turn"
+        assert not completed.detached_from_run
     assert registry.provenance_persistence_recovery("claude", "runtime") == {}
     [durable] = activity_store.list_activities()
     assert durable["activity"] == completed.to_dict()
+    assert await registry.ack_recovered_terminal_async(completed)
+    assert activity_store.list_activities() == []
+    assert registry.terminal_snapshots_for_runtime("claude", "runtime") == []
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+@pytest.mark.parametrize("ack_contended", [False, True])
+async def test_classified_foreground_completion_retires_without_settling_run(
+    activity_store, monkeypatch, status, ack_contended,
+):
+    """Result-before-retry must retire the step, including a later BUSY ack.
+
+    The registry metadata tests acknowledge directly, missing the Claude hook
+    that previously notified only background completions after publication.
+    """
+    from unittest.mock import AsyncMock
+
+    from tests.test_claude_agent_initiated_turn import _build_agent
+
+    _no_wait(activity_store)
+    agent, service = _build_agent()
+    registry = service.activities = SessionActivityRegistry(activity_store)
+    supervisor = SimpleNamespace(notify=Mock(), run_sync=None)
+    agent.controller.runtime_work_supervisor = supervisor
+    on_terminal = AsyncMock()
+    monkeypatch.setattr(service, "on_activity_terminal_async", on_terminal)
+    _start(registry, foreground=True, metadata={
+        "provenance_pending": True, "provenance_phase_id": "phase",
+    })
+    holder = _holder()
+    try:
+        with pytest.raises(OperationalError):
+            await agent._handle_activity_message(
+                SimpleNamespace(subtype="task_notification", task_id="task", status=status, data={}),
+                "runtime", MessageContext(user_id="user", channel_id="channel", platform="discord"),
+            )
+    finally:
+        holder.close()
+    classified = registry.classify_provisional_provenance(
+        "claude", "runtime", activity_ids={"task"}, parent_activity_ids=set(),
+        turn_id="turn", run_ids=["run"], phase_id="phase", detached=False,
+    )
+    assert len(classified) == 1 and classified[0].completed_at is None
+    agent._notify_classified_terminal_activities(classified)
+    [completed] = await registry.retry_pending_completions("claude", "runtime")
+    assert completed.foreground and completed.status == status
+    assert registry.terminal_snapshots_for_runtime("claude", "runtime") == [completed]
+    holder = _holder() if ack_contended else None
+    try:
+        await agent.on_activity_completed(completed)
+    finally:
+        if holder is not None:
+            holder.close()
+    if ack_contended:
+        assert registry.terminal_snapshots_for_runtime("claude", "runtime") == [completed]
+        assert service._pending_operations
+        await service.retry_pending()
+    on_terminal.assert_not_awaited()  # Result, never a foreground step, owns Run settlement.
+    assert registry.terminal_snapshots_for_runtime("claude", "runtime") == []
+    assert activity_store.list_activities() == []
+    assert not service._pending_operations
+    assert await registry.retry_pending_completions("claude", "runtime") == []
 
 
 async def test_cancelled_completion_lands_before_loop_notification_and_cancellation(activity_store, monkeypatch):
