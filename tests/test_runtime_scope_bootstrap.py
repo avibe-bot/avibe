@@ -271,6 +271,7 @@ class WaitForServiceReadyTests(unittest.TestCase):
             stack.enter_context(patch("vibe.runtime.service_pid_recorded", side_effect=[False, True]))
             stack.enter_context(patch("vibe.runtime._adopt_scoped_service_owner", return_value=999))
             stack.enter_context(patch("vibe.runtime.service_instance_started", return_value=True))
+            stack.enter_context(patch("vibe.runtime.pid_alive", return_value=True))
             stack.enter_context(patch("vibe.runtime.time.sleep"))
             self.assertEqual(runtime.wait_for_service_ready(111, 5.0), 999)
 
@@ -287,13 +288,14 @@ class WaitForServiceReadyTests(unittest.TestCase):
             self.assertIsNone(runtime.wait_for_service_ready(111, 5.0))
 
     def test_an_owner_still_starting_is_waited_out_rather_than_declared_ready(self):
-        times = iter([0.0, 0.0, 10.0])
+        clock = [0.0]
         with ExitStack() as stack:
             stack.enter_context(patch("vibe.runtime.service_pid_recorded", return_value=True))
             stack.enter_context(patch("vibe.runtime.service_instance_started", return_value=False))
+            stack.enter_context(patch("vibe.runtime.service_instance_migrating", return_value=False))
             stack.enter_context(patch("vibe.runtime.pid_alive", return_value=True))
-            stack.enter_context(patch("vibe.runtime.time.sleep"))
-            stack.enter_context(patch("vibe.runtime.time.monotonic", side_effect=lambda: next(times)))
+            stack.enter_context(patch("vibe.runtime.time.sleep", side_effect=lambda _: clock.__setitem__(0, 10.0)))
+            stack.enter_context(patch("vibe.runtime.time.monotonic", side_effect=lambda: clock[0]))
             self.assertIsNone(runtime.wait_for_service_ready(111, 5.0))
 
     def test_returns_none_when_no_owner_appears(self):

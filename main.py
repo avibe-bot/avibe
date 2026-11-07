@@ -100,8 +100,10 @@ def prepare_sqlite_state(config: Any):
     so service readiness can still start the existing 72-hour expiry clock.
     """
     from storage.importer import repair_sqlite_state
+    from vibe.runtime import service_database_preparation
 
-    return repair_sqlite_state(primary_platform=config.platform)
+    with service_database_preparation():
+        return repair_sqlite_state(primary_platform=config.platform, include_counts=False)
 
 
 def _log_shutdown_signal(logger: logging.Logger, signum: int) -> None:

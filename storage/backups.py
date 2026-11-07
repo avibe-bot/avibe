@@ -7,8 +7,12 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
+import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -523,6 +527,61 @@ def _unique_backup_dir(backups_dir: Path, *, now: datetime) -> Path:
     return candidate
 
 
+def _clone_file(source: Path, destination: Path) -> None:
+    """Create an independent COW file, or raise; never silently do a full copy."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        clonefile = ctypes.CDLL(None, use_errno=True).clonefile
+        clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        clonefile.restype = ctypes.c_int
+        if clonefile(os.fsencode(source), os.fsencode(destination), 0) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+    elif sys.platform.startswith("linux"):
+        # POSIX closing ANY descriptor for this inode drops this process's
+        # SQLite record locks, including those of other local connections. Run
+        # FICLONE in a child so opening/closing its source cannot drop our lock.
+        # Linux UAPI <linux/fs.h>: FICLONE = _IOW(0x94, 9, int).
+        subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import fcntl, sys\n"
+             "with open(sys.argv[1], 'rb') as src, open(sys.argv[2], 'xb') as dst:\n"
+             "    fcntl.ioctl(dst.fileno(), 0x40049409, src.fileno())\n",
+             str(source), str(destination)],
+            check=True, capture_output=True, timeout=30,
+        )
+    else:
+        raise OSError(errno.ENOTSUP, "Filesystem cloning is unavailable")
+
+
+def _try_clone_sqlite_snapshot(source_path: Path, destination_path: Path) -> bool:
+    """Checkpoint and clone while SQLite itself excludes every other writer.
+
+    The caller holds MigrationFileLock, but ordinary SQL writers do not. Keep
+    SQLite's EXCLUSIVE locking mode across a completed transaction, checkpoint
+    and clone: a BEGIN IMMEDIATE after the checkpoint would leave a race, and a
+    checkpoint inside a transaction is refused. Existing readers/connections
+    may prevent exclusive access; do not wait for them, use online backup.
+    """
+    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+        return False
+    try:
+        with closing(sqlite3.connect(f"{source_path.as_uri()}?mode=rw", uri=True, timeout=0)) as source:
+            source.execute("PRAGMA locking_mode = EXCLUSIVE")
+            source.execute("BEGIN EXCLUSIVE")
+            source.execute("COMMIT")
+            checkpoint = source.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is None or checkpoint[0] != 0:
+                return False
+            _clone_file(source_path, destination_path)
+        return True
+    except (OSError, sqlite3.Error, AttributeError, subprocess.SubprocessError) as exc:
+        logger.debug("SQLite snapshot clone unavailable; using online backup: %s", exc)
+        destination_path.unlink(missing_ok=True)
+        return False
+
+
 def create_sqlite_migration_backup(
     db_path: Path,
     *,
@@ -601,14 +660,24 @@ def _create_sqlite_migration_backup_locked(
     backup_db = backup_dir / "vibe.sqlite"
 
     try:
-        with sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True) as source:
-            with sqlite3.connect(temp_db) as destination:
-                source.backup(destination)
-                destination.execute("PRAGMA journal_mode = DELETE")
-                check = destination.execute("PRAGMA quick_check").fetchone()
-                if check != ("ok",):
-                    raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
-                from_revisions = _stamped_revisions(destination)
+        copy_started = time.monotonic()
+        cloned = _try_clone_sqlite_snapshot(source_path, temp_db)
+        with closing(sqlite3.connect(temp_db)) as destination:
+            if not cloned:
+                with closing(sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True)) as source:
+                    source.backup(destination)
+            copy_seconds = time.monotonic() - copy_started
+            check_started = time.monotonic()
+            destination.execute("PRAGMA journal_mode = DELETE")
+            check = destination.execute("PRAGMA quick_check").fetchone()
+            if check != ("ok",):
+                raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
+            from_revisions = _stamped_revisions(destination)
+        logger.info(
+            "SQLite rollback copy: method=%s copy_seconds=%.3f verification_seconds=%.3f",
+            "filesystem clone" if cloned else "SQLite online backup",
+            copy_seconds, time.monotonic() - check_started,
+        )
         os.chmod(temp_db, 0o600)
         _fsync_file(temp_db)
         temp_db.replace(backup_db)

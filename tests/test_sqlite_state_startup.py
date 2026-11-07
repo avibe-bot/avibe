@@ -27,14 +27,14 @@ def _config() -> V2Config:
 def test_prepare_sqlite_state_uses_config_primary_platform(monkeypatch) -> None:
     calls = []
 
-    def fake_repair_sqlite_state(*, primary_platform: str):
-        calls.append(primary_platform)
+    def fake_repair_sqlite_state(*, primary_platform: str, include_counts: bool):
+        calls.append((primary_platform, include_counts))
         return SimpleNamespace(imported=True, db_path=Path("/tmp/vibe.sqlite"), backup_path=Path("/tmp/backup"))
 
     monkeypatch.setattr("storage.importer.repair_sqlite_state", fake_repair_sqlite_state)
 
     report = service_main.prepare_sqlite_state(_config())
 
-    assert calls == ["slack"]
+    assert calls == [("slack", False)]
     assert report.imported is True
 

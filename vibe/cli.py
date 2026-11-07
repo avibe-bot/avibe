@@ -17118,7 +17118,7 @@ def cmd_upgrade():
             if restart is not None:
                 print("Restart scheduled to use the new version.")
                 print(f"Job ID: {restart['job_id']}")
-                print("Run `vibe status` to inspect the restart result.")
+                print("Run `vibe status` to inspect the restart result and database migration progress.")
             else:
                 print("Avibe was not running; the new version will be used next time you start it.")
             return 0
@@ -17827,6 +17827,7 @@ def _schedule_delayed_restart(delay_seconds: float) -> int:
     print(f"Restart scheduled in {_format_restart_delay(delay_seconds)}.")
     print(f"Job ID: {result['job_id']}")
     print("This command exits immediately; the restart supervisor will run in the background.")
+    print("Run `vibe status` to inspect the restart result and database migration progress.")
     return 0
 
 
@@ -17877,7 +17878,7 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
     result = schedule_restart(delay_seconds=0.0, vibe_path=cache_running_vibe_path(), trigger="cli")
     print("Restart scheduled.")
     print(f"Job ID: {result['job_id']}")
-    print("Run `vibe status` to inspect the restart result.")
+    print("Run `vibe status` to inspect the restart result and database migration progress.")
     return 0
 
 

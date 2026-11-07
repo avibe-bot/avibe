@@ -545,14 +545,24 @@ def _run_restart_job(
         # `wait_for_service_ready` also resolves the real holder, since under a
         # delegated user scope the returned pid may be a launcher that never
         # records itself.
-        resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
+        def startup_progress(detail: str) -> None:
+            write(detail)
+            payload["detail"] = detail
+            _write_status(payload)
+            runtime.write_status("starting", detail, new_pid, _live_ui_pid(ui_pid))
+
+        resolved_pid = runtime.wait_for_service_ready(
+            new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS, on_progress=startup_progress,
+        )
         if resolved_pid is None:
             mark_duration("wait_service_lock_seconds", wait_lock_started_at)
-            return fail(
-                f"service pid {new_pid} did not finish starting",
-                3,
-                started_at=restart_started_at,
-            )
+            error = f"service pid {new_pid} did not finish starting"
+            if runtime.pid_alive(new_pid) and runtime.service_instance_migrating(new_pid):
+                error = (
+                    f"service pid {new_pid} is still migrating after the "
+                    f"{runtime.SERVICE_MIGRATION_TIMEOUT_SECONDS:.0f}-second startup hard cap"
+                )
+            return fail(error, 3, started_at=restart_started_at)
         try:
             runtime.claim_ready_service(resolved_pid, started_pid=new_pid)
         except runtime.DesktopRuntimeClaimRefused as exc:
@@ -564,6 +574,7 @@ def _run_restart_job(
         runtime.write_status("running", f"pid={new_pid}", new_pid, _live_ui_pid(recorded_ui_pid))
 
         mark_duration("restart_total_seconds", restart_started_at)
+        payload.pop("detail", None)
         payload.update(ok=True, state=RestartState.SUCCEEDED.value, new_pid=new_pid, error=None)
         _write_status(payload)
         write(f"restart job succeeded new_pid={new_pid}")

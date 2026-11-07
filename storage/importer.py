@@ -173,8 +173,13 @@ def repair_sqlite_state(
     db_path: Path | None = None,
     state_dir: Path | None = None,
     primary_platform: str | None = None,
+    include_counts: bool = True,
 ) -> MigrationImportReport:
-    """Create/migrate/import state, retaining the full conservative repair path."""
+    """Create/migrate/import state, retaining the full conservative repair path.
+
+    Service startup does not consume diagnostic row counts; omit those scans
+    there without bypassing migration or the service's own backup validation.
+    """
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
     ensured_key = (target_db, target_state_dir)
@@ -224,7 +229,7 @@ def repair_sqlite_state(
                 else:
                     _clear_imported_state(conn)
 
-            if report is not None:
+            if report is not None and include_counts:
                 # Report-only scans must not extend a migration's writer hold.
                 # Initial import validation below keeps its original boundary.
                 with engine.connect() as conn:
