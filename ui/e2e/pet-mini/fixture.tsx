@@ -45,6 +45,7 @@ declare global {
     petFixtureAddActivity: () => void;
     petFixtureStartActivity: (sessionId: string) => void;
     petFixtureFinishActivity: (sessionId: string) => void;
+    petFixtureReplyActivity: (sessionId: string) => void;
     petFixtureRefreshActivity: (sessionId: string) => void;
     petFixtureFinishTurn: (result: Record<string, unknown>) => void;
     petFixtureReleaseExpansion: () => void;
@@ -123,6 +124,13 @@ if (historyActions || params.has('pendingVault')) requests.push({
 const unread: Record<string, number> = personal ? { ses_fixture_2: 1 } : {};
 // A legacy file must not steer reads or sends away from main.
 localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: 'legacy-session', revision: 1 }));
+let activityReplySequence = 0;
+const activityInbox = personal && agents[2] ? [{
+  session_id: 'ses_fixture_2', scope_id: 'fixture', project_id: null, project_name: 'avibe-docs',
+  title: agents[2]?.title ?? 'Replied activity', last_activity_at: '2026-11-07T00:00:00Z',
+  last_message_author: 'agent', replied: true, preview_text: '',
+  preview_at: params.has('noPreviewAt') ? null : '2026-11-07T00:00:00Z', unread_count: 1, unread: true,
+}] : [];
 let mainAvailable = params.get('offline') !== 'true';
 let mainRunning = params.get('running') === '1';
 window.petFixtureMainReads = 0;
@@ -148,6 +156,10 @@ window.fetch = async (input, init) => {
     window.petFixtureStops.push(path.split('/')[3]);
     return json({ ok: true });
   }
+  if (/^\/api\/sessions\/ses_fixture_\d+$/.test(path)) {
+    const agent = agents.find((row) => row.session_id === path.split('/')[3]);
+    return json({ ...session, id: path.split('/')[3], title: agent?.title });
+  }
   if (path.endsWith('/turn-state') && !path.includes('ses_main')) return json({ in_flight: true, foreground: 'running' });
   if (path.endsWith('/mark-read')) {
     window.petFixtureMarkReads.push(path.split('/')[3]);
@@ -172,7 +184,7 @@ window.fetch = async (input, init) => {
     '/api/asr/status': { available: params.get('asr') === '1' },
     '/api/running-agents': { ok: true, agents, counts: { total: agents.length, active: agents.length, idle: 0, orphan: 0, by_backend: {} } },
     '/api/sessions': { sessions: [session], next_before_id: null },
-    '/api/inbox': { ok: true, sessions: [], unread_by_session: unread, total_unread: Object.values(unread).reduce((a, b) => a + b, 0), next_before_id: null },
+    '/api/inbox': { ok: true, sessions: activityInbox, unread_by_session: unread, total_unread: Object.values(unread).reduce((a, b) => a + b, 0), next_before_id: null },
   };
   if (!(path in payloads)) throw new Error(`Unexpected pet fixture request: ${path}`);
   return json(payloads[path]);
@@ -238,8 +250,19 @@ window.petFixtureFinishActivity = (sessionId) => {
   const agent = agents.find((row) => row.session_id === sessionId);
   if (!agent) throw new Error(`Missing fixture activity ${sessionId}`);
   agent.state = 'idle';
+  window.petFixtureReplyActivity(sessionId);
   for (const stream of streams) {
     stream.dispatchEvent(new MessageEvent('runs.updated', { data: JSON.stringify({ type: 'runs.updated', data: { session_id: sessionId } }) }));
+  }
+};
+window.petFixtureReplyActivity = (sessionId) => {
+  const row = activityInbox.find((item) => item.session_id === sessionId);
+  if (!row) throw new Error(`Missing fixture inbox ${sessionId}`);
+  const stamp = new Date(Date.UTC(2026, 10, 7, 0, 0, ++activityReplySequence)).toISOString();
+  row.last_activity_at = stamp;
+  if (!params.has('noPreviewAt')) row.preview_at = stamp;
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('inbox.session.updated', { data: JSON.stringify({ type: 'inbox.session.updated', data: row }) }));
   }
 };
 window.petFixtureRefreshActivity = (sessionId) => {

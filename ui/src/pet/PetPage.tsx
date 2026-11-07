@@ -75,6 +75,7 @@ type PetCard = {
   running: boolean;
   needsInput: boolean;
   hasUnread: boolean;
+  replyId?: string;
   canStop: boolean;
   canOpen: boolean;
   vaultRequestIds: string[];
@@ -262,6 +263,8 @@ const PetSurface: React.FC = () => {
     () => Object.fromEntries((inbox.inboxSessions ?? []).map((row) => [row.session_id, row.preview_text ?? ''])),
     [inbox.inboxSessions],
   );
+  const replyIdsBySession = useMemo(() => Object.fromEntries((inbox.inboxSessions ?? [])
+    .map((row) => [row.session_id, JSON.stringify([row.session_id, row.preview_at ?? row.last_activity_at])])), [inbox.inboxSessions]);
   const activitySnapshotReady = inbox.unreadLoaded === true && !inbox.loading && runningAgents.ok && !repliesPending;
   const visibleAgentRows = useMemo(() => (
     [...(runningAgents.ok ? runningAgents.agents : []), ...repliedAgents].filter((agent) => (
@@ -307,6 +310,7 @@ const PetSurface: React.FC = () => {
   const reducedMotion = useReducedMotion();
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
   const stopTimers = useRef<Record<string, number>>({});
+  const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const avatarRef = useRef<HTMLButtonElement>(null);
   // Pair native mousedown click counts with time for webviews that always report 1.
@@ -435,10 +439,11 @@ const PetSurface: React.FC = () => {
       (key, options) => String(t(key as never, options as never)),
     ))
     .filter((card): card is PetCard => Boolean(card && (card.running || card.hasUnread || card.needsInput)))
-    .map((card) => ({ ...card, id: `${card.sessionId}:${generations[card.sessionId] ?? 0}` }));
+    .map((card) => ({ ...card, id: `${card.sessionId}:${generations[card.sessionId] ?? 0}`, replyId: replyIdsBySession[card.sessionId] }));
   }, [
     inbox.unreadBySession,
     previewBySession,
+    replyIdsBySession,
     t,
     visibleAgentRows,
     visibleVaultRequests,
@@ -495,9 +500,10 @@ const PetSurface: React.FC = () => {
       if (typeof document.elementFromPoint !== 'function') return;
       const target = document.elementFromPoint(event.clientX, event.clientY);
       const inside = target instanceof Element && Boolean(target.closest('.pet-mini-cards'));
-      if (inside === cardsPointerInsideRef.current) return;
-      cardsPointerInsideRef.current = inside;
-      setCardsPointerInside(inside);
+      if (inside !== cardsPointerInsideRef.current) {
+        cardsPointerInsideRef.current = inside;
+        setCardsPointerInside(inside);
+      }
       if (!inside) {
         const cards = rootRef.current?.querySelector('.pet-mini-cards');
         if (!cards?.contains(document.activeElement)) setCardsFocusWithin(false);
@@ -509,31 +515,30 @@ const PetSurface: React.FC = () => {
   const repliedActivityIds = useMemo(
     () => sortedActivities
       .filter((card) => !dismissed.includes(card.sessionId) && stops[card.id] !== 'exited' && !card.running && card.hasUnread && !card.needsInput)
-      .map((card) => card.id),
+      .flatMap((card) => card.replyId ? [card.replyId] : []),
     [dismissed, sortedActivities, stops],
-  );
-  const pausedActivityIds = useMemo(
-    () => {
-      const next = new Set<string>();
-      if (cardsPointerInside || cardsFocusWithin) for (const id of repliedActivityIds) next.add(id);
-      return next;
-    },
-    [cardsFocusWithin, cardsPointerInside, repliedActivityIds],
   );
   const expiredActivityIds = useActivityCardLinger({
     scope: epoch,
     candidateIds: repliedActivityIds,
-    documentVisible: documentVisible && !voice.busy,
-    pausedIds: pausedActivityIds,
+    documentVisible: documentVisible && !voice.busy && !awaitingLayout,
+    paused: cardsPointerInside || cardsFocusWithin,
+    root: rootRef,
   });
   const visibleCards = useMemo(
     () => sortedActivities.filter((card) => (
       !dismissed.includes(card.sessionId)
       && stops[card.id] !== 'exited'
-      && !expiredActivityIds.has(card.id)
+      && (card.running || card.needsInput || !card.replyId || !expiredActivityIds.has(card.replyId))
     )),
     [dismissed, expiredActivityIds, sortedActivities, stops],
   );
+  useEffect(() => {
+    // Replacing the collapsed trigger or a removed card need not fire blur.
+    if (cardsFocusWithin && !rootRef.current?.querySelector('.pet-mini-cards')?.contains(document.activeElement)) {
+      setCardsFocusWithin(false);
+    }
+  }, [cardsExpanded, cardsFocusWithin, visibleCards]);
   // A result or authorization arriving after a stopped turn still deserves
   // a card. This releases only that key; new turns use a new key altogether.
   useEffect(() => {
@@ -766,7 +771,6 @@ const PetSurface: React.FC = () => {
     node.style.height = `${Math.min(node.scrollHeight, 96)}px`;
   }, [draft, composing]);
 
-  const rootRef = useRef<HTMLDivElement>(null);
   useHitRegions(rootRef, epoch);
   // The input (or marquee) below an open history: its height leaves the
   // history less room in the fixed window.
@@ -1148,6 +1152,11 @@ const PetSurface: React.FC = () => {
           onPointerEnter={() => {
             cardsPointerInsideRef.current = true;
             setCardsPointerInside(true);
+          }}
+          onPointerLeave={(event) => {
+            cardsPointerInsideRef.current = false;
+            setCardsPointerInside(false);
+            if (!event.currentTarget.contains(document.activeElement)) setCardsFocusWithin(false);
           }}
           onFocusCapture={() => setCardsFocusWithin(true)}
           onBlurCapture={(event) => {
@@ -1623,7 +1632,7 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
   const Reference = expanded ? 'button' : 'span';
   const unread = card.hasUnread && !card.running && !card.needsInput;
   return (
-    <article className={clsx('pet-mini-card', card.needsInput && 'is-needs-input')} title={card.title} data-session-id={card.sessionId} data-pet-hit>
+    <article className={clsx('pet-mini-card', card.needsInput && 'is-needs-input')} title={card.title} data-session-id={card.sessionId} data-pet-reply-id={unread ? card.replyId : undefined} data-pet-hit>
       {expanded && <button type="button" className="pet-mini-dismiss" data-pet-hit onClick={onDismiss} aria-label={t('pet.dismiss')}><svg viewBox="0 0 16 16" aria-hidden><path d="m4 4 8 8M12 4 4 12" /></svg></button>}
       <Reference className="pet-mini-card-content pet-mini-card-reference" onClick={onClick} {...(expanded ? { type: 'button' as const, 'aria-label': t('pet.referenceSession', { title: card.title }) } : {})}>
         <div className="pet-mini-eyebrow">
