@@ -293,6 +293,35 @@
       "switch": "Switch instance",
       "choose": "Choose an instance"
     },
+    "twoFactor": {
+      "title": "Confirm it’s you.",
+      "onFor": "Two-step verification is on for",
+      "onThisAccount": "Two-step verification is on for this account.",
+      "setupTitle": "Turn on two-step verification first.",
+      "requiredFor": "This account requires two-step verification",
+      "usePasskey": "Use your passkey",
+      "waitingForPasskey": "Waiting for your passkey…",
+      "passkeyHint": "Confirm with Face ID, Touch ID, or your device passcode.",
+      "totpLabel": "Enter the 6-digit code from your authenticator app",
+      "totpHint": "Open your authenticator app and enter the 6-digit code for avibe.bot",
+      "recoveryLabel": "Recovery code",
+      "recoveryPlaceholder": "xxxxx-xxxxx",
+      "recoveryHint": "Each recovery code works once. After using one, make a new set on avibe.bot.",
+      "verify": "Verify",
+      "verifying": "Verifying…",
+      "useTotp": "Use an authenticator code instead",
+      "usePasskeyInstead": "Use your passkey instead",
+      "useRecovery": "Use a recovery code",
+      "setupBody": "On avibe.bot, open Account security and add a passkey or an authenticator app. Then come back here to continue.",
+      "openSecurity": "Open avibe.bot",
+      "setupDone": "I’ve turned it on · Continue",
+      "differentAccount": "Sign in with a different account",
+      "passkeyFailed": "The passkey check didn’t finish. Try again, or use a code instead.",
+      "codeInvalid": "That code isn’t right. Enter the latest 6 digits from your app.",
+      "recoveryInvalid": "That recovery code is wrong or already used.",
+      "rateLimited": "Too many attempts. Try again in {{count}} minutes.",
+      "rateLimited_one": "Too many attempts. Try again in {{count}} minute."
+    },
     "errors": {
       "network": "Could not reach avibe.bot. Check your connection and retry."
     }

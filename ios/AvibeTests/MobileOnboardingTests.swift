@@ -1,3 +1,4 @@
+import AuthenticationServices
 import WebKit
 import XCTest
 @testable import Avibe
@@ -397,6 +398,77 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(object["bridge"], "object", details)
     }
 
+    func testBundledPagePassesAnAuthenticatorCodeThroughTheBridge() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "alex@example.com",
+            gate: .challenge,
+            methods: [.totp]
+        )
+        let proved = snapshot(accountID: "account-1")
+        transport.verifySecondFactorHandler = { _ in
+            transport.secondFactor = nil
+            transport.session = proved
+            return .signedIn(proved)
+        }
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            )
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer {
+            window.isHidden = true
+        }
+
+        let owed = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.querySelector("#mobile-login-code") !== null
+              && document.body.textContent.includes("alex@example.com")
+            """
+        }
+        XCTAssertTrue(owed)
+        let entered = try await replaceText(
+            "287082",
+            in: webView,
+            selector: "#mobile-login-code"
+        )
+        XCTAssertTrue(entered)
+        let verifyReady = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const button = document.querySelector(
+                "[data-mobile-code-actions] button.shadow-mint-card-sm"
+              );
+              return button instanceof HTMLButtonElement && !button.disabled;
+            })()
+            """
+        }
+        XCTAssertTrue(verifyReady)
+        _ = try await webView.evaluateJavaScript(
+            """
+            document.querySelector(
+              "[data-mobile-code-actions] button.shadow-mint-card-sm"
+            )?.click();
+            true;
+            """
+        )
+
+        let signedIn = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.body.textContent.includes("Personal Avibe")
+            """
+        }
+        XCTAssertTrue(signedIn)
+        XCTAssertEqual(transport.proofs.count, 1)
+        XCTAssertEqual(transport.proofs.first?.codeProof?.0, .totp)
+        XCTAssertEqual(transport.proofs.first?.codeProof?.1, "287082")
+    }
+
     func testMobileBridgeMethodSurfaceIsClosed() {
         XCTAssertEqual(
             Set(MobileBridgeMethod.allCases.map(\.rawValue)),
@@ -404,6 +476,8 @@ final class MobileOnboardingTests: XCTestCase {
                 "session.bootstrap",
                 "auth.requestOtp",
                 "auth.verifyOtp",
+                "auth.verifySecondFactor",
+                "auth.verifyPasskey",
                 "session.refresh",
                 "session.selectInstance",
                 "session.logout",
@@ -506,6 +580,31 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(object["selected_instance_id"] is NSNull)
         let instances = try XCTUnwrap(object["instances"] as? [[String: Any]])
         XCTAssertTrue(instances[0]["owner_email"] is NSNull)
+
+        let owed = MobileSessionState.twoFactorRequired(
+            MobileSecondFactorRequirement(email: nil, gate: .enroll, methods: [])
+        ).jsonObject
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(owed))
+        XCTAssertEqual(owed["status"] as? String, "twoFactorRequired")
+        XCTAssertTrue(owed["email"] is NSNull)
+        XCTAssertEqual(owed["gate"] as? String, "enroll")
+        XCTAssertEqual(owed["methods"] as? [String], [])
+    }
+
+    func testExternalURLAllowlistAddsOnlyTheAccountSecurityPage() {
+        XCTAssertTrue(
+            MobileExternalURLPolicy.allows(
+                URL(string: "https://avibe.bot/app/account/security")!
+            )
+        )
+        for url in [
+            "http://avibe.bot/app/account/security",
+            "https://avibe.bot/app/account/security?next=/",
+            "https://avibe.bot/app/account",
+            "https://avibe.bot.example.com/app/account/security",
+        ] {
+            XCTAssertFalse(MobileExternalURLPolicy.allows(URL(string: url)!), url)
+        }
     }
 
     func testDebugControlPlaneOverrideIsBuildBounded() {
@@ -825,6 +924,305 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    func testSecondFactorKeepsTheSignInStoreUntilItPasses() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: nil,
+            gate: .challenge,
+            methods: [.totp]
+        )
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [transport]
+        )
+        coordinator.activateAccountSurface()
+        let storeIdentifier = store.identifier
+
+        let owed = try await coordinator.verifyOTP(
+            email: " alex@example.com ",
+            code: "123456"
+        )
+        XCTAssertEqual(
+            owed,
+            .twoFactorRequired(
+                MobileSecondFactorRequirement(
+                    email: "alex@example.com",
+                    gate: .challenge,
+                    methods: [.totp]
+                )
+            )
+        )
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id)) {
+            XCTAssertEqual(($0 as? MobileAccountError)?.code, "unauthorized_instance")
+        }
+
+        do {
+            _ = try await coordinator.verifySecondFactor(method: .totp, code: "000000")
+            XCTFail("Expected the rejected code to fail")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .secondFactorInvalid)
+        }
+        XCTAssertEqual(store.identifier, storeIdentifier)
+        let relaunched = try await coordinator.bootstrap()
+        XCTAssertEqual(relaunched, owed)
+
+        let proved = snapshot(accountID: "account-1")
+        transport.verifySecondFactorHandler = { _ in
+            transport.secondFactor = nil
+            transport.session = proved
+            return .signedIn(proved)
+        }
+        let state = try await coordinator.verifySecondFactor(
+            method: .totp,
+            code: " 287082 "
+        )
+        XCTAssertEqual(
+            state,
+            .signedIn(snapshot: proved, selectedInstanceID: nil)
+        )
+        XCTAssertEqual(transport.proofs.count, 2)
+        XCTAssertEqual(transport.proofs.last?.codeProof?.0, .totp)
+        XCTAssertEqual(transport.proofs.last?.codeProof?.1, "287082")
+        XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertFalse(transport.invalidated)
+        XCTAssertEqual(try coordinator.selectInstance(id: instance.id), instance)
+    }
+
+    func testColdLaunchSecondFactorKeepsTheSelectionForTheSameAccount() async throws {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let store = makeAccountStore(defaults: defaults)
+        let storeIdentifier = store.identifier
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .enroll,
+            methods: []
+        )
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [transport]
+        )
+        relaunched.activateAccountSurface()
+        let owed = try await relaunched.bootstrap()
+        XCTAssertEqual(
+            owed,
+            .twoFactorRequired(
+                MobileSecondFactorRequirement(
+                    email: "account-1@example.com",
+                    gate: .enroll,
+                    methods: []
+                )
+            )
+        )
+        XCTAssertNil(relaunched.restorableRuntime(from: owed))
+
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.passkey]
+        )
+        guard case .twoFactorRequired(let enrolled) = try await relaunched.refresh() else {
+            return XCTFail("Expected the session to still owe the second factor")
+        }
+        XCTAssertEqual(enrolled.gate, .challenge)
+
+        transport.secondFactor = nil
+        transport.session = snapshot(accountID: "account-1")
+        let state = try await relaunched.refresh()
+        XCTAssertEqual(
+            state,
+            .signedIn(
+                snapshot: snapshot(accountID: "account-1"),
+                selectedInstanceID: instance.id
+            )
+        )
+        XCTAssertEqual(store.identifier, storeIdentifier)
+    }
+
+    func testSecondFactorSignedOutAnswerReplacesTheStore() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "alex@example.com",
+            gate: .challenge,
+            methods: [.passkey, .totp]
+        )
+        transport.verifySecondFactorHandler = { _ in
+            throw MobileAccountError.signedOut
+        }
+        let replacement = FakeMobileAuthTransport()
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [transport, replacement]
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        let storeIdentifier = store.identifier
+
+        let state = try await coordinator.verifySecondFactor(
+            method: .recovery,
+            code: "k7m2p-9xq4r"
+        )
+
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNotEqual(store.identifier, storeIdentifier)
+        XCTAssertTrue(transport.invalidated)
+        XCTAssertTrue(coordinator.isAccountSurfaceActive)
+    }
+
+    func testPasskeyExchangeStaysBetweenTransportAndNativeCode() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "alex@example.com",
+            gate: .challenge,
+            methods: [.passkey, .totp]
+        )
+        let request = MobilePasskeyRequest(
+            challenge: Data([1, 2, 3]),
+            allowedCredentialIDs: [Data("cred-1".utf8)]
+        )
+        transport.passkeyChallengeHandler = {
+            MobilePasskeyChallenge(request: request, token: "signed-challenge")
+        }
+        let authenticator = FakePasskeyAuthenticator()
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        let anchor = UIWindow(frame: .zero)
+
+        do {
+            _ = try await coordinator.verifyPasskey(presentationAnchor: anchor)
+            XCTFail("Expected the cancelled passkey to fail")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .passkeyCancelled)
+        }
+        XCTAssertTrue(transport.proofs.isEmpty)
+
+        let assertion = MobilePasskeyAssertion(
+            credentialID: Data("cred-1".utf8),
+            clientDataJSON: Data("{}".utf8),
+            authenticatorData: Data([1]),
+            signature: Data([2]),
+            userHandle: nil
+        )
+        authenticator.result = .success(assertion)
+        let proved = snapshot(accountID: "account-1")
+        transport.verifySecondFactorHandler = { _ in .signedIn(proved) }
+        let state = try await coordinator.verifyPasskey(presentationAnchor: anchor)
+
+        XCTAssertEqual(state, .signedIn(snapshot: proved, selectedInstanceID: nil))
+        XCTAssertEqual(authenticator.requests, [request, request])
+        let proof = try XCTUnwrap(transport.proofs.last?.passkeyProof)
+        XCTAssertEqual(proof.token, "signed-challenge")
+        XCTAssertEqual(
+            proof.response as NSDictionary,
+            assertion.authenticationResponseJSON as NSDictionary
+        )
+
+        let unavailable = FakeMobileAuthTransport()
+        unavailable.secondFactor = transport.secondFactor
+        let noPasskey = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [unavailable],
+            passkeyAuthenticator: authenticator
+        )
+        noPasskey.activateAccountSurface()
+        _ = try await noPasskey.bootstrap()
+        do {
+            _ = try await noPasskey.verifyPasskey(presentationAnchor: anchor)
+            XCTFail("Expected an account without a passkey to fail")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .passkeyUnavailable)
+        }
+        XCTAssertEqual(authenticator.requests.count, 2)
+    }
+
+    func testPasskeyOptionsAndAssertionUseWebAuthnJSON() throws {
+        XCTAssertEqual(MobileBase64URL.decode("AAEC_-8"), Data([0, 1, 2, 255, 239]))
+        XCTAssertEqual(MobileBase64URL.encode(Data([0xfb, 0xff])), "-_8")
+        for invalid in ["", "a", "AAEC+-8", "AAEC/-8", "AAEC_-8="] {
+            XCTAssertNil(MobileBase64URL.decode(invalid), invalid)
+        }
+
+        let request = try MobilePasskeyRequest(
+            options: [
+                "challenge": "AAEC_-8",
+                "rpId": "avibe.bot",
+                "userVerification": "required",
+                "allowCredentials": [
+                    ["id": "Y3JlZC0x", "type": "public-key", "transports": ["internal"]],
+                ],
+            ]
+        )
+        XCTAssertEqual(request.challenge, Data([0, 1, 2, 255, 239]))
+        XCTAssertEqual(request.allowedCredentialIDs, [Data("cred-1".utf8)])
+
+        XCTAssertThrowsError(
+            try MobilePasskeyRequest(options: ["challenge": "AAEC_-8", "rpId": "evil.example"])
+        ) {
+            XCTAssertEqual($0 as? MobileAccountError, .passkeyUnavailable)
+        }
+        XCTAssertThrowsError(
+            try MobilePasskeyRequest(options: ["challenge": "AAEC_-8"])
+        ) {
+            XCTAssertEqual($0 as? MobileAccountError, .passkeyUnavailable)
+        }
+        XCTAssertThrowsError(
+            try MobilePasskeyRequest(options: ["challenge": "not base64url!", "rpId": "avibe.bot"])
+        ) {
+            XCTAssertEqual($0 as? MobileAccountError, .network)
+        }
+
+        let response = MobilePasskeyAssertion(
+            credentialID: Data("cred-1".utf8),
+            clientDataJSON: Data("{}".utf8),
+            authenticatorData: Data([1]),
+            signature: Data([2]),
+            userHandle: Data()
+        ).authenticationResponseJSON
+        let inner = try XCTUnwrap(response["response"] as? [String: Any])
+        XCTAssertEqual(response["id"] as? String, "Y3JlZC0x")
+        XCTAssertEqual(response["rawId"] as? String, "Y3JlZC0x")
+        XCTAssertEqual(response["type"] as? String, "public-key")
+        XCTAssertEqual(inner["clientDataJSON"] as? String, "e30")
+        XCTAssertNil(inner["userHandle"])
+
+        XCTAssertEqual(
+            MobilePasskeyAuthenticator.mappedError(ASAuthorizationError(.canceled)),
+            .passkeyCancelled
+        )
+        for error: Error in [
+            ASAuthorizationError(.failed),
+            ASAuthorizationError(.notHandled),
+            URLError(.notConnectedToInternet),
+        ] {
+            XCTAssertEqual(
+                MobilePasskeyAuthenticator.mappedError(error),
+                .passkeyUnavailable
+            )
+        }
+    }
+
     func testNamedStoreRemovalFailurePersistsUntilALaterSweep() async {
         let defaults = makeDefaults()
         let registry = FakeNamedDataStoreRegistry()
@@ -1141,6 +1539,7 @@ final class MobileOnboardingTests: XCTestCase {
         defaults: UserDefaults,
         websiteDataStore: AccountWebsiteDataStore? = nil,
         transports: [FakeMobileAuthTransport],
+        passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
         onCreateTransport: @escaping () -> Void = {},
         onOpen: @escaping (MobileRuntimeContext) -> Void = { _ in },
         onPrepareAccountTransition: @escaping () -> [
@@ -1160,6 +1559,7 @@ final class MobileOnboardingTests: XCTestCase {
                 onCreateTransport()
                 return queue.removeFirst()
             },
+            passkeyAuthenticator: passkeyAuthenticator ?? FakePasskeyAuthenticator(),
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition
         )
@@ -1368,6 +1768,17 @@ private final class WeakObjectReference<Value: AnyObject> {
 @MainActor
 private final class FakeMobileAuthTransport: MobileAuthTransporting {
     var session: MobileSessionSnapshot?
+    /// When set, the session read answers `403 two_factor_required`.
+    var secondFactor: MobileSecondFactorRequirement?
+    var passkeyChallengeHandler: () async throws -> MobilePasskeyChallenge = {
+        throw MobileAccountError.passkeyUnavailable
+    }
+    var verifySecondFactorHandler: (
+        MobileSecondFactorProof
+    ) async throws -> MobileSessionDiscovery = { _ in
+        throw MobileAccountError.secondFactorInvalid
+    }
+    private(set) var proofs: [MobileSecondFactorProof] = []
     var logoutError: Error?
     var logoutHandler: () async throws -> Void = {}
     var requestOTPHandler: (String) async throws -> Int = { _ in 60 }
@@ -1388,15 +1799,32 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     func verifyOTP(
         email: String,
         code: String
-    ) async throws -> MobileSessionSnapshot {
-        if let session {
-            return session
+    ) async throws -> MobileSessionDiscovery {
+        if let secondFactor {
+            return .secondFactorRequired(secondFactor)
         }
-        return try await verifyOTPHandler(email, code)
+        if let session {
+            return .signedIn(session)
+        }
+        return .signedIn(try await verifyOTPHandler(email, code))
     }
 
-    func fetchSession() async throws -> MobileSessionSnapshot? {
-        session
+    func fetchSession() async throws -> MobileSessionDiscovery? {
+        if let secondFactor {
+            return .secondFactorRequired(secondFactor)
+        }
+        return session.map(MobileSessionDiscovery.signedIn)
+    }
+
+    func passkeyChallenge() async throws -> MobilePasskeyChallenge {
+        try await passkeyChallengeHandler()
+    }
+
+    func verifySecondFactor(
+        _ proof: MobileSecondFactorProof
+    ) async throws -> MobileSessionDiscovery {
+        proofs.append(proof)
+        return try await verifySecondFactorHandler(proof)
     }
 
     func logout() async throws {
@@ -1414,6 +1842,38 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         invalidated = true
         onInvalidate()
         return nil
+    }
+}
+
+@MainActor
+private final class FakePasskeyAuthenticator: MobilePasskeyAuthenticating {
+    var result: Result<MobilePasskeyAssertion, MobileAccountError> = .failure(
+        .passkeyCancelled
+    )
+    private(set) var requests: [MobilePasskeyRequest] = []
+
+    func assert(
+        _ request: MobilePasskeyRequest,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobilePasskeyAssertion {
+        requests.append(request)
+        return try result.get()
+    }
+}
+
+private extension MobileSecondFactorProof {
+    var codeProof: (MobileSecondFactorCodeMethod, String)? {
+        guard case .code(let method, let code) = self else {
+            return nil
+        }
+        return (method, code)
+    }
+
+    var passkeyProof: (token: String, response: [String: Any])? {
+        guard case .passkey(let token, let response) = self else {
+            return nil
+        }
+        return (token, response)
     }
 }
 

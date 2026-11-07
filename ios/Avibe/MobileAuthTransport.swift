@@ -5,6 +5,8 @@ enum MobileAuthTransportOperation: CaseIterable, Equatable {
     case requestOTP
     case verifyOTP
     case fetchSession
+    case passkeyChallenge
+    case verifySecondFactor
     case logout
 }
 
@@ -13,6 +15,8 @@ enum MobileAuthTransportStage: String, CaseIterable, Equatable {
     case verify
     case callback
     case session
+    case challenge
+    case secondFactor = "second_factor"
     case logout
 }
 
@@ -82,7 +86,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
     func verifyOTP(
         email: String,
         code: String
-    ) async throws -> MobileSessionSnapshot {
+    ) async throws -> MobileSessionDiscovery {
         let response = try await evaluateJSON(
             Self.verifyOTPScript,
             operation: .verifyOTP,
@@ -94,13 +98,10 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         guard response.boolean("ok") else {
             throw Self.mappedError(for: .verifyOTP, response: response)
         }
-        guard let payload = response["session"] as? [String: Any] else {
-            throw MobileAccountError.network
-        }
-        return try decodeSnapshot(payload)
+        return try decodeDiscovery(response)
     }
 
-    func fetchSession() async throws -> MobileSessionSnapshot? {
+    func fetchSession() async throws -> MobileSessionDiscovery? {
         let response = try await evaluateJSON(
             Self.fetchSessionScript,
             operation: .fetchSession,
@@ -109,13 +110,47 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         if response.integer("status") == 401 {
             return nil
         }
+        guard response.boolean("ok") else {
+            throw MobileAccountError.network
+        }
+        return try decodeDiscovery(response)
+    }
+
+    func passkeyChallenge() async throws -> MobilePasskeyChallenge {
+        let response = try await evaluateJSON(
+            Self.passkeyChallengeScript,
+            operation: .passkeyChallenge,
+            arguments: [:]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .passkeyChallenge, response: response)
+        }
         guard
-            response.boolean("ok"),
-            let payload = response["session"] as? [String: Any]
+            let payload = response["challenge"] as? [String: Any],
+            let token = payload["token"] as? String,
+            !token.isEmpty,
+            let options = payload["options"] as? [String: Any]
         else {
             throw MobileAccountError.network
         }
-        return try decodeSnapshot(payload)
+        return MobilePasskeyChallenge(
+            request: try MobilePasskeyRequest(options: options),
+            token: token
+        )
+    }
+
+    func verifySecondFactor(
+        _ proof: MobileSecondFactorProof
+    ) async throws -> MobileSessionDiscovery {
+        let response = try await evaluateJSON(
+            Self.verifySecondFactorScript,
+            operation: .verifySecondFactor,
+            arguments: ["proof": proof.jsonObject]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .verifySecondFactor, response: response)
+        }
+        return try decodeDiscovery(response)
     }
 
     func logout() async throws {
@@ -240,7 +275,11 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         switch operation {
         case .logout:
             return deadlines.logoutMilliseconds
-        case .requestOTP, .verifyOTP, .fetchSession:
+        case .requestOTP,
+             .verifyOTP,
+             .fetchSession,
+             .passkeyChallenge,
+             .verifySecondFactor:
             return deadlines.requestMilliseconds
         }
     }
@@ -258,6 +297,50 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             self.webView?.stopLoading()
             self.finishLoading(with: .failure(MobileAccountError.network))
         }
+    }
+
+    private func decodeDiscovery(
+        _ response: [String: Any]
+    ) throws -> MobileSessionDiscovery {
+        if let requirement = response["twoFactor"] as? [String: Any] {
+            return .secondFactorRequired(
+                try Self.decodeSecondFactorRequirement(requirement)
+            )
+        }
+        guard let payload = response["session"] as? [String: Any] else {
+            throw MobileAccountError.network
+        }
+        return .signedIn(try decodeSnapshot(payload))
+    }
+
+    /// Reads `403 {"error":"two_factor_required", ...}`. Method kinds this
+    /// app does not know are skipped rather than failing the sign-in.
+    static func decodeSecondFactorRequirement(
+        _ object: [String: Any]
+    ) throws -> MobileSecondFactorRequirement {
+        guard
+            object.string("error") == "two_factor_required",
+            let rawGate = object.string("gate"),
+            let gate = MobileSecondFactorGate(rawValue: rawGate)
+        else {
+            throw MobileAccountError.network
+        }
+        var methods: [MobileSecondFactorMethod] = []
+        for case let rawMethod as String in object["methods"] as? [Any] ?? [] {
+            if
+                let method = MobileSecondFactorMethod(rawValue: rawMethod),
+                !methods.contains(method)
+            {
+                methods.append(method)
+            }
+        }
+        let email = object.string("email")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return MobileSecondFactorRequirement(
+            email: email?.isEmpty == false ? email : nil,
+            gate: gate,
+            methods: methods
+        )
     }
 
     private func decodeSnapshot(
@@ -288,6 +371,8 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             status == 429,
             operation == .requestOTP
                 || operation == .verifyOTP && stage == MobileAuthTransportStage.verify.rawValue
+                || operation == .verifySecondFactor
+                    && stage == MobileAuthTransportStage.secondFactor.rawValue
         {
             return MobileAccountError(
                 code: "rate_limited",
@@ -321,6 +406,33 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                     ?? "The verification code is invalid or expired.",
                 retryAfterSeconds: retryAfter
             )
+        case .passkeyChallenge:
+            guard stage == MobileAuthTransportStage.challenge.rawValue else {
+                return .network
+            }
+            switch status {
+            case 401:
+                return .signedOut
+            case 404:
+                return .passkeyUnavailable
+            default:
+                return .network
+            }
+        case .verifySecondFactor:
+            if
+                status == 401,
+                stage == MobileAuthTransportStage.secondFactor.rawValue
+                    || stage == MobileAuthTransportStage.session.rawValue
+            {
+                return .signedOut
+            }
+            guard
+                stage == MobileAuthTransportStage.secondFactor.rawValue,
+                status == 400
+            else {
+                return .network
+            }
+            return .secondFactorInvalid
         case .fetchSession, .logout:
             return .network
         }
@@ -621,11 +733,22 @@ extension MobileAuthTransport: WKNavigationDelegate {
             });
           }
 
+        \(sessionDiscoveryBody)
+        """
+    )
+
+    // Reads the account session. `401` is signed out; `403
+    // two_factor_required` is a signed-in session that still owes the second
+    // factor, reported as `twoFactor` with an `ok` result.
+    private static let sessionDiscoveryBody = """
           stage = "session";
           const sessionResponse = await boundedFetch(new URL("/api/mobile/session", window.location.origin), {
             credentials: "same-origin",
             cache: "no-store"
           });
+          if (sessionResponse.status === 401) {
+            return JSON.stringify({ok: false, stage, status: 401});
+          }
           let session;
           try {
             session = await sessionResponse.json();
@@ -636,6 +759,9 @@ extension MobileAuthTransport: WKNavigationDelegate {
               "Session discovery returned an invalid response."
             );
           }
+          if (sessionResponse.status === 403 && session?.error === "two_factor_required") {
+            return JSON.stringify({ok: true, stage, status: 403, twoFactor: session});
+          }
           return JSON.stringify({
             ok: sessionResponse.ok,
             stage,
@@ -643,29 +769,70 @@ extension MobileAuthTransport: WKNavigationDelegate {
             session
           });
         """
-    )
 
     private static let fetchSessionScript = boundedScript(
         initialStage: .session,
+        body: sessionDiscoveryBody
+    )
+
+    private static let passkeyChallengeScript = boundedScript(
+        initialStage: .challenge,
         body: """
-          const response = await boundedFetch(new URL("/api/mobile/session", window.location.origin), {
+          const response = await boundedFetch(new URL("/api/two-factor/passkey-challenge", window.location.origin), {
+            method: "POST",
             credentials: "same-origin",
-            cache: "no-store"
+            cache: "no-store",
+            headers: {"Content-Type": "application/json"},
+            body: "{}"
           });
-          if (response.status === 401) {
-            return JSON.stringify({ok: false, stage, status: 401});
+          const payload = await response.json().catch(() => null);
+          if (!response.ok) {
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: response.status,
+              code: payload?.error || null
+            });
           }
-          let session;
-          try {
-            session = await response.json();
-          } catch {
+          if (!payload) {
             return failed(
               "invalid_response",
               response.status,
-              "Session discovery returned an invalid response."
+              "Passkey options returned an invalid response."
             );
           }
-          return JSON.stringify({ok: response.ok, stage, status: response.status, session});
+          return JSON.stringify({ok: true, stage, status: response.status, challenge: payload});
+        """
+    )
+
+    private static let verifySecondFactorScript = boundedScript(
+        initialStage: .secondFactor,
+        body: """
+          const verifyResponse = await boundedFetch(new URL("/api/two-factor/verify", window.location.origin), {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(proof)
+          });
+          const verified = await verifyResponse.json().catch(() => null);
+          if (!verifyResponse.ok) {
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: verifyResponse.status,
+              code: verified?.error || null,
+              retryAfter: Number(verifyResponse.headers.get("retry-after")) || null
+            });
+          }
+          if (verified?.ok !== true) {
+            return failed(
+              "invalid_response",
+              verifyResponse.status,
+              "Verification returned an invalid response."
+            );
+          }
+        \(sessionDiscoveryBody)
         """
     )
 

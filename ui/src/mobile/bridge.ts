@@ -13,6 +13,8 @@ export type MobileInstance = {
   available: boolean;
 };
 
+export type MobileSecondFactorMethod = 'passkey' | 'totp';
+
 export type MobileSessionState =
   | {
       status: 'signedOut';
@@ -22,6 +24,16 @@ export type MobileSessionState =
       account: MobileAccount;
       instances: MobileInstance[];
       selected_instance_id: string | null;
+    }
+  | {
+      /** The email code passed; this session still owes avibe.bot's second factor. */
+      status: 'twoFactorRequired';
+      /** The account's email when native knows it; the page then omits that line. */
+      email: string | null;
+      /** `enroll`: the account must turn two-step verification on at avibe.bot first. */
+      gate: 'challenge' | 'enroll';
+      /** The account's method kinds, passkey first; empty for `enroll`. */
+      methods: MobileSecondFactorMethod[];
     };
 
 export type MobileBridgeError = {
@@ -97,6 +109,20 @@ export const verifyMobileOtp = (
 export const refreshMobileSession = (): Promise<MobileSessionState> =>
   call('session.refresh');
 
+/** Errors: `invalid`, `rate_limited` (with `retry_after_seconds`), `network`. */
+export const verifyMobileSecondFactor = (
+  method: 'totp' | 'recovery',
+  code: string,
+): Promise<MobileSessionState> =>
+  call('auth.verifySecondFactor', { method, code });
+
+/**
+ * Runs the system passkey sheet natively. Errors: `passkey_cancelled`,
+ * `passkey_unavailable`, `invalid`, `rate_limited`, `network`.
+ */
+export const verifyMobilePasskey = (): Promise<MobileSessionState> =>
+  call('auth.verifyPasskey');
+
 export const selectMobileInstance = (
   id: string,
 ): Promise<{ instance: MobileInstance }> =>
@@ -107,3 +133,6 @@ export const logoutMobileSession = (): Promise<MobileSessionState> =>
 
 export const openMobileExternal = (url: string): Promise<{ opened: boolean }> =>
   call('app.openExternal', { url });
+
+/** Where an account that must turn on two-step verification sets it up. */
+export const ACCOUNT_SECURITY_URL = 'https://avibe.bot/app/account/security';

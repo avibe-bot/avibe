@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Foundation
 import OSLog
 import WebKit
@@ -32,6 +33,61 @@ struct MobileSessionSnapshot: Codable, Equatable {
     let instances: [MobileInstance]
 }
 
+enum MobileSecondFactorGate: String, Equatable {
+    /// The account has a method; this session must pass it.
+    case challenge
+    /// Policy requires a method and the account has none yet.
+    case enroll
+}
+
+enum MobileSecondFactorMethod: String, Equatable {
+    case passkey
+    case totp
+}
+
+/// What `GET /api/mobile/session` answers with `403 two_factor_required`:
+/// the email code passed, and this session still owes the second factor.
+struct MobileSecondFactorRequirement: Equatable {
+    let email: String?
+    let gate: MobileSecondFactorGate
+    let methods: [MobileSecondFactorMethod]
+
+    func withEmail(fallback: String?) -> MobileSecondFactorRequirement {
+        MobileSecondFactorRequirement(
+            email: email ?? fallback,
+            gate: gate,
+            methods: methods
+        )
+    }
+}
+
+enum MobileSessionDiscovery: Equatable {
+    case signedIn(MobileSessionSnapshot)
+    case secondFactorRequired(MobileSecondFactorRequirement)
+}
+
+enum MobileSecondFactorCodeMethod: String, Equatable {
+    case totp
+    case recovery
+}
+
+/// The body of `POST /api/two-factor/verify`. Codes come from the bundled
+/// page; the passkey token and assertion stay between the transport and
+/// native code.
+enum MobileSecondFactorProof {
+    case code(MobileSecondFactorCodeMethod, String)
+    case passkey(token: String, response: [String: Any])
+
+    var jsonObject: [String: Any] {
+        switch self {
+        case .code(let method, let code):
+            return ["method": method.rawValue, "code": code]
+        case .passkey(let token, let response):
+            return ["method": "passkey", "token": token, "response": response]
+        }
+    }
+}
+
 struct MobileRuntimeContext: Equatable {
     let account: MobileAccount
     let instance: MobileInstance
@@ -45,11 +101,19 @@ enum MobileSessionState: Equatable {
         snapshot: MobileSessionSnapshot,
         selectedInstanceID: String?
     )
+    case twoFactorRequired(MobileSecondFactorRequirement)
 
     var jsonObject: [String: Any] {
         switch self {
         case .signedOut:
             return ["status": "signedOut"]
+        case .twoFactorRequired(let requirement):
+            return [
+                "status": "twoFactorRequired",
+                "email": requirement.email ?? NSNull(),
+                "gate": requirement.gate.rawValue,
+                "methods": requirement.methods.map(\.rawValue),
+            ]
         case .signedIn(let snapshot, let selectedInstanceID):
             let account = [
                 "id": snapshot.account.id,
@@ -121,6 +185,18 @@ struct MobileAccountError: Error, Equatable {
     static let signedOut = MobileAccountError(
         code: "signed_out",
         message: "The account session is no longer active."
+    )
+    static let secondFactorInvalid = MobileAccountError(
+        code: "invalid",
+        message: "The second factor was not accepted."
+    )
+    static let passkeyCancelled = MobileAccountError(
+        code: "passkey_cancelled",
+        message: "The passkey request was cancelled."
+    )
+    static let passkeyUnavailable = MobileAccountError(
+        code: "passkey_unavailable",
+        message: "No passkey for this account is available on this device."
     )
 }
 
@@ -313,8 +389,17 @@ final class AccountWebsiteDataStore {
 @MainActor
 protocol MobileAuthTransporting: AnyObject {
     func requestOTP(email: String) async throws -> Int
-    func verifyOTP(email: String, code: String) async throws -> MobileSessionSnapshot
-    func fetchSession() async throws -> MobileSessionSnapshot?
+    func verifyOTP(email: String, code: String) async throws -> MobileSessionDiscovery
+    /// `nil` means signed out (`401`).
+    func fetchSession() async throws -> MobileSessionDiscovery?
+    /// Throws `signedOut` for `401` and `passkeyUnavailable` when the account
+    /// has no passkey.
+    func passkeyChallenge() async throws -> MobilePasskeyChallenge
+    /// Passes the second factor, then reads the session again. Throws
+    /// `signedOut` for `401`.
+    func verifySecondFactor(
+        _ proof: MobileSecondFactorProof
+    ) async throws -> MobileSessionDiscovery
     func logout() async throws
     func cancelAll() async
     func invalidate() -> WebsiteDataStoreReleaseBarrier?
@@ -339,6 +424,7 @@ final class MobileSessionCoordinator {
     private let controlPlane: MobileControlPlaneConfiguration
     private let websiteDataStore: AccountWebsiteDataStore
     private let transportFactory: TransportFactory
+    private let passkeyAuthenticator: MobilePasskeyAuthenticating
     private let onOpenRuntime: (MobileRuntimeContext) -> Void
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
@@ -346,6 +432,9 @@ final class MobileSessionCoordinator {
 
     private var transport: MobileAuthTransporting?
     private var snapshot: MobileSessionSnapshot?
+    /// The email typed for the sign-in that now owes a second factor, shown
+    /// when the backend's answer does not name the account.
+    private var secondFactorEmail: String?
     private var generation = 0
     private var phase = Phase.ready
     private var signedOutStoreIsFresh = false
@@ -370,6 +459,7 @@ final class MobileSessionCoordinator {
         transportFactory: @escaping TransportFactory = {
             MobileAuthTransport(controlPlaneURL: $0, websiteDataStore: $1)
         },
+        passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
@@ -379,6 +469,8 @@ final class MobileSessionCoordinator {
         self.controlPlane = controlPlane
         self.websiteDataStore = websiteDataStore
         self.transportFactory = transportFactory
+        self.passkeyAuthenticator = passkeyAuthenticator
+            ?? MobilePasskeyAuthenticator()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
         transport = nil
@@ -408,24 +500,20 @@ final class MobileSessionCoordinator {
         }
         return try await runExclusive {
             let requestGeneration = self.generation
-            let fresh = try await self.requireTransport().fetchSession()
+            let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
-            guard let fresh else {
+            guard let discovery else {
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
-            if
-                let selection = self.storedSelection(),
-                selection.accountID != fresh.account.id
-            {
+            if self.belongsToAnotherAccount(discovery) {
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
             self.signedOutStoreIsFresh = false
-            self.snapshot = fresh
-            return self.state(for: fresh)
+            return self.state(for: discovery)
         }
     }
 
@@ -460,15 +548,15 @@ final class MobileSessionCoordinator {
                 clearSelection: true
             )
             do {
-                let fresh = try await self.requireTransport().verifyOTP(
+                let discovery = try await self.requireTransport().verifyOTP(
                     email: normalizedEmail,
                     code: code
                 )
                 try self.requireCurrentGeneration(loginGeneration)
                 self.clearStoredSelection()
                 self.signedOutStoreIsFresh = false
-                self.snapshot = fresh
-                return self.state(for: fresh)
+                self.secondFactorEmail = normalizedEmail
+                return self.state(for: discovery)
             } catch {
                 if self.generation == loginGeneration {
                     await self.replaceWithFreshSignedOutStore()
@@ -483,24 +571,78 @@ final class MobileSessionCoordinator {
             let requestGeneration = self.beginAccountTransition(
                 clearSelection: false
             )
-            let fresh = try await self.requireTransport().fetchSession()
+            let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
-            guard let fresh else {
+            guard let discovery else {
                 self.clearStoredSelection()
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
-            if
-                let selection = self.storedSelection(),
-                selection.accountID != fresh.account.id
-            {
+            if self.belongsToAnotherAccount(discovery) {
                 self.clearStoredSelection()
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
             self.signedOutStoreIsFresh = false
-            self.snapshot = fresh
-            return self.state(for: fresh)
+            return self.state(for: discovery)
+        }
+    }
+
+    /// Passes an authenticator or recovery code for the signed-in session that
+    /// owes the second factor. A rejected code keeps the store: it is the same
+    /// first-factor session either way.
+    func verifySecondFactor(
+        method: MobileSecondFactorCodeMethod,
+        code: String
+    ) async throws -> MobileSessionState {
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch method {
+        case .totp:
+            guard normalized.range(of: #"^\d{6}$"#, options: .regularExpression) != nil else {
+                throw MobileAccountError.invalidRequest
+            }
+        case .recovery:
+            guard !normalized.isEmpty, normalized.count <= 32 else {
+                throw MobileAccountError.secondFactorInvalid
+            }
+        }
+        return try await runExclusive {
+            let requestGeneration = self.generation
+            return try await self.completeSecondFactor(
+                generation: requestGeneration
+            ) {
+                try await self.requireTransport().verifySecondFactor(
+                    .code(method, normalized)
+                )
+            }
+        }
+    }
+
+    /// Confirms with one of the account's passkeys: options from avibe.bot,
+    /// the system passkey sheet, then the assertion back to avibe.bot. Neither
+    /// side of the exchange reaches the bundled page.
+    func verifyPasskey(
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileSessionState {
+        try await runExclusive {
+            let requestGeneration = self.generation
+            return try await self.completeSecondFactor(
+                generation: requestGeneration
+            ) {
+                let challenge = try await self.requireTransport().passkeyChallenge()
+                try self.requireCurrentGeneration(requestGeneration)
+                let assertion = try await self.passkeyAuthenticator.assert(
+                    challenge.request,
+                    presentationAnchor: presentationAnchor
+                )
+                try self.requireCurrentGeneration(requestGeneration)
+                return try await self.requireTransport().verifySecondFactor(
+                    .passkey(
+                        token: challenge.token,
+                        response: assertion.authenticationResponseJSON
+                    )
+                )
+            }
         }
     }
 
@@ -552,6 +694,7 @@ final class MobileSessionCoordinator {
         let resetToken = try beginReset()
         defer { finishReset(resetToken) }
         beginAccountTransition(clearSelection: true)
+        secondFactorEmail = nil
 
         if let oldTransport = transport {
             await oldTransport.cancelAll()
@@ -563,6 +706,53 @@ final class MobileSessionCoordinator {
         signedOutStoreIsFresh = true
         activateAccountSurface()
         return .signedOut
+    }
+
+    private func completeSecondFactor(
+        generation requestGeneration: Int,
+        _ operation: () async throws -> MobileSessionDiscovery
+    ) async throws -> MobileSessionState {
+        do {
+            let discovery = try await operation()
+            try requireCurrentGeneration(requestGeneration)
+            signedOutStoreIsFresh = false
+            return state(for: discovery)
+        } catch let error as MobileAccountError
+            where error.code == MobileAccountError.signedOut.code
+        {
+            // The first-factor session ended while it owed the second factor:
+            // an explicit signed-out answer, like a session read's `401`.
+            try requireCurrentGeneration(requestGeneration)
+            beginAccountTransition(clearSelection: true)
+            await replaceWithFreshSignedOutStore()
+            return .signedOut
+        }
+    }
+
+    private func belongsToAnotherAccount(
+        _ discovery: MobileSessionDiscovery
+    ) -> Bool {
+        guard
+            case .signedIn(let fresh) = discovery,
+            let selection = storedSelection()
+        else {
+            return false
+        }
+        return selection.accountID != fresh.account.id
+    }
+
+    private func state(for discovery: MobileSessionDiscovery) -> MobileSessionState {
+        switch discovery {
+        case .signedIn(let fresh):
+            secondFactorEmail = nil
+            snapshot = fresh
+            return state(for: fresh)
+        case .secondFactorRequired(let requirement):
+            snapshot = nil
+            return .twoFactorRequired(
+                requirement.withEmail(fallback: secondFactorEmail)
+            )
+        }
     }
 
     private func state(for snapshot: MobileSessionSnapshot) -> MobileSessionState {
@@ -707,6 +897,7 @@ final class MobileSessionCoordinator {
     private func replaceWithFreshSignedOutStore() async {
         deactivateAccountSurface()
         snapshot = nil
+        secondFactorEmail = nil
         clearStoredSelection()
         await rotateWebsiteDataStore()
         signedOutStoreIsFresh = true
@@ -744,6 +935,8 @@ enum MobileExternalURLPolicy {
     private static let allowedURLs: Set<String> = [
         "https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md",
         "https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI_ZH.md",
+        // Where an account that must turn on two-step verification sets it up.
+        "https://avibe.bot/app/account/security",
     ]
 
     static func allows(_ url: URL) -> Bool {

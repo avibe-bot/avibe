@@ -14,9 +14,12 @@ const mobile = vi.hoisted(() => ({
   requestOtp: vi.fn(),
   selectInstance: vi.fn(),
   verifyOtp: vi.fn<() => Promise<MobileSessionState>>(),
+  verifyPasskey: vi.fn<() => Promise<MobileSessionState>>(),
+  verifySecondFactor: vi.fn<(method: string, code: string) => Promise<MobileSessionState>>(),
 }));
 
 vi.mock('./bridge', () => ({
+  ACCOUNT_SECURITY_URL: 'https://avibe.bot/app/account/security',
   bootstrapMobileSession: mobile.bootstrap,
   logoutMobileSession: mobile.logout,
   openMobileExternal: mobile.openExternal,
@@ -24,6 +27,8 @@ vi.mock('./bridge', () => ({
   requestMobileOtp: mobile.requestOtp,
   selectMobileInstance: mobile.selectInstance,
   verifyMobileOtp: mobile.verifyOtp,
+  verifyMobilePasskey: mobile.verifyPasskey,
+  verifyMobileSecondFactor: mobile.verifySecondFactor,
   normalizeMobileBridgeError: (error: unknown): MobileBridgeError => {
     if (
       typeof error === 'object'
@@ -85,6 +90,16 @@ const signedIn = (): Extract<MobileSessionState, { status: 'signedIn' }> => ({
   ],
 });
 
+type SecondFactorState = Extract<MobileSessionState, { status: 'twoFactorRequired' }>;
+
+const owed = (overrides: Partial<SecondFactorState> = {}): SecondFactorState => ({
+  status: 'twoFactorRequired',
+  email: 'alex@example.com',
+  gate: 'challenge',
+  methods: ['passkey', 'totp'],
+  ...overrides,
+});
+
 const resetMobileMocks = () => {
   mobile.bootstrap.mockReset();
   mobile.logout.mockReset();
@@ -93,12 +108,16 @@ const resetMobileMocks = () => {
   mobile.requestOtp.mockReset();
   mobile.selectInstance.mockReset();
   mobile.verifyOtp.mockReset();
+  mobile.verifyPasskey.mockReset();
+  mobile.verifySecondFactor.mockReset();
   mobile.bootstrap.mockResolvedValue({ status: 'signedOut' });
   mobile.logout.mockResolvedValue({ status: 'signedOut' });
   mobile.refresh.mockResolvedValue(signedIn());
   mobile.requestOtp.mockResolvedValue({ cooldown_seconds: 0 });
   mobile.selectInstance.mockResolvedValue({ instance: signedIn().instances[0] });
   mobile.verifyOtp.mockResolvedValue(signedIn());
+  mobile.verifyPasskey.mockResolvedValue(signedIn());
+  mobile.verifySecondFactor.mockResolvedValue(signedIn());
 };
 
 const deferred = <T,>() => {
@@ -129,6 +148,10 @@ type FailureOperation =
   | 'request'
   | 'resend'
   | 'verify'
+  | 'passkey'
+  | 'totp'
+  | 'recovery'
+  | 'setupDone'
   | 'refresh'
   | 'select'
   | 'logout';
@@ -139,6 +162,9 @@ const bridgeErrorCodes = [
   'invalid_email',
   'email_address_invalid',
   'invalid_or_expired',
+  'invalid',
+  'passkey_cancelled',
+  'passkey_unavailable',
   'busy',
   'stale_session',
   'inactive',
@@ -167,10 +193,42 @@ const expectedErrorKey = (
   if (operation === 'verify' && code === 'invalid_or_expired') {
     return 'mobileApp.code.invalid';
   }
+  if (operation === 'passkey' || operation === 'totp' || operation === 'recovery') {
+    if (code === 'rate_limited') return 'mobileApp.twoFactor.rateLimited:1';
+    if (
+      operation === 'passkey'
+      && (code === 'passkey_cancelled' || code === 'passkey_unavailable' || code === 'invalid')
+    ) {
+      return 'mobileApp.twoFactor.passkeyFailed';
+    }
+    if (code === 'invalid') {
+      return operation === 'totp'
+        ? 'mobileApp.twoFactor.codeInvalid'
+        : 'mobileApp.twoFactor.recoveryInvalid';
+    }
+  }
   if (code === 'rate_limited') {
     return 'mobileApp.code.rateLimited';
   }
   return 'mobileApp.errors.network';
+};
+
+/** Signs in with the email code into an account that owes the second factor. */
+const reachSecondFactor = async (state: SecondFactorState = owed()) => {
+  mobile.verifyOtp.mockResolvedValueOnce(state);
+  render(<MobileOnboarding />);
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+    target: { value: 'alex@example.com' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+  fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
+    target: { value: '123456' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+  await screen.findByRole('heading', {
+    name: state.gate === 'enroll' ? 'mobileApp.twoFactor.setupTitle' : 'mobileApp.twoFactor.title',
+  });
 };
 
 beforeEach(() => {
@@ -212,6 +270,10 @@ describe('mobile onboarding', () => {
       'request',
       'resend',
       'verify',
+      'passkey',
+      'totp',
+      'recovery',
+      'setupDone',
       'refresh',
       'select',
       'logout',
@@ -274,6 +336,41 @@ describe('mobile onboarding', () => {
           });
           fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
           break;
+        case 'passkey':
+          mobile.bootstrap.mockResolvedValueOnce(owed());
+          mobile.verifyPasskey.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.twoFactor.usePasskey',
+          }));
+          break;
+        case 'totp':
+        case 'recovery':
+          mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'] }));
+          mobile.verifySecondFactor.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          if (operation === 'recovery') {
+            fireEvent.click(await screen.findByRole('button', {
+              name: 'mobileApp.twoFactor.useRecovery',
+            }));
+            fireEvent.change(screen.getByLabelText('mobileApp.twoFactor.recoveryLabel'), {
+              target: { value: 'k7m2p-9xq4r' },
+            });
+          } else {
+            fireEvent.change(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), {
+              target: { value: '287082' },
+            });
+          }
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+          break;
+        case 'setupDone':
+          mobile.bootstrap.mockResolvedValueOnce(owed({ gate: 'enroll', methods: [] }));
+          mobile.refresh.mockRejectedValueOnce(error);
+          render(<MobileOnboarding />);
+          fireEvent.click(await screen.findByRole('button', {
+            name: 'mobileApp.twoFactor.setupDone',
+          }));
+          break;
         case 'refresh':
           mobile.bootstrap.mockResolvedValueOnce(signedIn());
           mobile.refresh.mockRejectedValueOnce(error);
@@ -322,6 +419,24 @@ describe('mobile onboarding', () => {
         case 'resend':
         case 'verify':
           expect(screen.getByLabelText('mobileApp.code.label')).toBeTruthy();
+          break;
+        case 'passkey':
+          expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.usePasskey' })).toBeTruthy();
+          break;
+        case 'totp':
+          expect(
+            (screen.getByLabelText('mobileApp.twoFactor.totpLabel') as HTMLInputElement).value,
+          ).toBe('287082');
+          break;
+        case 'recovery':
+          expect(
+            (screen.getByLabelText('mobileApp.twoFactor.recoveryLabel') as HTMLInputElement).value,
+          ).toBe('k7m2p-9xq4r');
+          break;
+        case 'setupDone':
+          expect(screen.getByRole('heading', {
+            name: 'mobileApp.twoFactor.setupTitle',
+          })).toBeTruthy();
           break;
         case 'refresh':
         case 'select':
@@ -874,5 +989,163 @@ describe('mobile onboarding', () => {
         .disabled,
     ).toBe(false);
     expect(enabledInteractiveControls().length).toBeGreaterThan(0);
+  });
+
+  it('AUTH-SETUP-156 passes the second factor after the email code and reaches the instances', async () => {
+    mobile.verifyPasskey.mockRejectedValueOnce({
+      code: 'passkey_cancelled',
+      message: 'cancelled',
+    });
+    await reachSecondFactor();
+
+    expect(screen.getByText('mobileApp.twoFactor.onFor')).toBeTruthy();
+    expect(screen.getByText('alex@example.com')).toBeTruthy();
+    expect(screen.queryByLabelText('mobileApp.twoFactor.totpLabel')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.usePasskey' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      'mobileApp.twoFactor.passkeyFailed',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.useTotp' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.usePasskeyInstead' })).toBeTruthy();
+    const code = screen.getByLabelText('mobileApp.twoFactor.totpLabel');
+    fireEvent.change(code, { target: { value: '28 70a82' } });
+    expect((code as HTMLInputElement).value).toBe('287082');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+    expect(mobile.verifyPasskey).toHaveBeenCalledTimes(1);
+    expect(mobile.verifySecondFactor).toHaveBeenCalledWith('totp', '287082');
+    expect(mobile.logout).not.toHaveBeenCalled();
+  });
+
+  it('offers each account only the second factors it has', async () => {
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'], email: null }));
+    render(<MobileOnboarding />);
+
+    expect(await screen.findByLabelText('mobileApp.twoFactor.totpLabel')).toBeTruthy();
+    expect(screen.getByText('mobileApp.twoFactor.onThisAccount')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'mobileApp.twoFactor.usePasskeyInstead' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.useRecovery' }));
+    expect(screen.queryByRole('button', { name: 'mobileApp.twoFactor.useRecovery' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.useTotp' })).toBeTruthy();
+    cleanup();
+
+    resetMobileMocks();
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['passkey'] }));
+    render(<MobileOnboarding />);
+    expect(await screen.findByRole('button', { name: 'mobileApp.twoFactor.usePasskey' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'mobileApp.twoFactor.useTotp' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.useRecovery' }));
+    expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.usePasskeyInstead' })).toBeTruthy();
+  });
+
+  it('keeps a rejected or unsent code and shows avibe.bot retry timing', async () => {
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'] }));
+    mobile.verifySecondFactor
+      .mockRejectedValueOnce({ code: 'invalid', message: 'invalid' })
+      .mockRejectedValueOnce({ code: 'rate_limited', message: 'slow', retry_after_seconds: 900 })
+      .mockRejectedValueOnce({ code: 'rate_limited', message: 'slow' })
+      .mockRejectedValueOnce({ code: 'network', message: 'offline' });
+    render(<MobileOnboarding />);
+    const code = await screen.findByLabelText('mobileApp.twoFactor.totpLabel');
+    fireEvent.change(code, { target: { value: '287083' } });
+
+    for (const expected of [
+      'mobileApp.twoFactor.codeInvalid',
+      'mobileApp.twoFactor.rateLimited:15',
+      'mobileApp.twoFactor.rateLimited:15',
+      'mobileApp.errors.network',
+    ]) {
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+      expect((await screen.findByRole('alert')).textContent).toBe(expected);
+      expect((code as HTMLInputElement).value).toBe('287083');
+      expect(code.getAttribute('aria-invalid')).toBe(
+        expected === 'mobileApp.twoFactor.codeInvalid' ? 'true' : null,
+      );
+    }
+    expect(mobile.verifySecondFactor).toHaveBeenCalledTimes(4);
+  });
+
+  it('verifies a recovery code and reports one that is wrong or used', async () => {
+    mobile.bootstrap.mockResolvedValueOnce(owed());
+    mobile.verifySecondFactor.mockRejectedValueOnce({ code: 'invalid', message: 'used' });
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.useRecovery' }));
+
+    const verify = screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' });
+    expect((verify as HTMLButtonElement).disabled).toBe(true);
+    const input = screen.getByLabelText('mobileApp.twoFactor.recoveryLabel');
+    fireEvent.change(input, { target: { value: 'k7m2p-9xq4r' } });
+    fireEvent.click(verify);
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'mobileApp.twoFactor.recoveryInvalid',
+    );
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+
+    fireEvent.submit(input);
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifySecondFactor).toHaveBeenNthCalledWith(1, 'recovery', 'k7m2p-9xq4r');
+    expect(mobile.verifySecondFactor).toHaveBeenNthCalledWith(2, 'recovery', 'k7m2p-9xq4r');
+  });
+
+  it('sends an account that must turn it on to avibe.bot and continues with the new gate', async () => {
+    await reachSecondFactor(owed({ gate: 'enroll', methods: [] }));
+
+    expect(screen.getByText('mobileApp.twoFactor.requiredFor')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'mobileApp.twoFactor.useRecovery' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.openSecurity' }));
+    expect(mobile.openExternal).toHaveBeenCalledWith('https://avibe.bot/app/account/security');
+
+    mobile.refresh.mockResolvedValueOnce(owed({ methods: ['passkey'] }));
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.setupDone' }));
+    expect(await screen.findByRole('button', { name: 'mobileApp.twoFactor.usePasskey' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'mobileApp.twoFactor.title' })).toBeTruthy();
+  });
+
+  it('locks the second-factor screen while the passkey sheet or a code check runs', async () => {
+    const passkey = deferred<MobileSessionState>();
+    mobile.verifyPasskey.mockReturnValueOnce(passkey.promise);
+    mobile.bootstrap.mockResolvedValueOnce(owed());
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.usePasskey' }));
+
+    expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.waitingForPasskey' })).toBeTruthy();
+    expectScreenLocked();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
+    expect(mobile.logout).not.toHaveBeenCalled();
+    passkey.reject({ code: 'passkey_unavailable', message: 'none' });
+    expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.twoFactor.passkeyFailed');
+
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.useTotp' }));
+    fireEvent.change(screen.getByLabelText('mobileApp.twoFactor.totpLabel'), {
+      target: { value: '287082' },
+    });
+    mobile.verifySecondFactor.mockReturnValueOnce(deferred<MobileSessionState>().promise);
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+    expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.verifying' })).toBeTruthy();
+    expectScreenLocked();
+  });
+
+  it('returns to Welcome when the email sign-in ended or the person switches account', async () => {
+    mobile.bootstrap.mockResolvedValueOnce(owed());
+    mobile.verifyPasskey.mockResolvedValueOnce({ status: 'signedOut' });
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.usePasskey' }));
+    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    expect(mobile.logout).not.toHaveBeenCalled();
+    cleanup();
+
+    resetMobileMocks();
+    mobile.bootstrap.mockResolvedValueOnce(owed());
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'mobileApp.twoFactor.differentAccount',
+    }));
+    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    expect(mobile.logout).toHaveBeenCalledTimes(1);
+    expect(mobile.verifyPasskey).not.toHaveBeenCalled();
   });
 });

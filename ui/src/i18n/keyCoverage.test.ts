@@ -920,6 +920,8 @@ const NON_KEY_LITERALS = [
   'app.showAccount',
   'auth.requestOtp',
   'auth.verifyOtp',
+  'auth.verifyPasskey',
+  'auth.verifySecondFactor',
   'haptics.impact',
   'haptics.notify',
   'haptics.selection',

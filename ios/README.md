@@ -171,9 +171,11 @@ The app bundles the approved `mobile-app/*` React flow and exposes a separate
 Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
-`session.refresh`, `session.selectInstance`, `session.logout`, and the closed
-install-guide `app.openExternal` allowlist. Instance documents, child windows,
-Show Pages, and iframes do not receive these handlers.
+`auth.verifySecondFactor`, `auth.verifyPasskey`, `session.refresh`,
+`session.selectInstance`, `session.logout`, and the closed `app.openExternal`
+allowlist (the two install guides and avibe.bot's Account security page).
+Instance documents, child windows, Show Pages, and iframes do not receive these
+handlers.
 
 The bundled surface fills the container safe area so its gradient reaches the
 status bar and Home indicator. Its shared `h-dvh` viewport owns vertical
@@ -187,7 +189,9 @@ instance lists. UIKit still pins the WebView bottom to
 The hidden account transport is a native-owned `WKWebView` with no message
 handler. It loads only the configured control-plane auth configuration and runs
 fixed scripts in `WKContentWorld.defaultClient`: public Supabase OTP requests,
-the existing `/auth/callback`, and the mobile session GET/DELETE endpoints. The
+the existing `/auth/callback`, the mobile session GET/DELETE endpoints, and the
+second-factor `POST /api/two-factor/passkey-challenge` and
+`POST /api/two-factor/verify`. The
 isolated world is defense in depth, not a separate security process. The actual
 boundary comes from the fixed control-plane origin, narrow compiled scripts,
 no page bridge, and lifecycle separation from runtime WebViews. Access and
@@ -252,6 +256,57 @@ The hermetic WebKit transport tests run serially, wait for fixture events with
 budgets separate from the app's deadlines, and use numeric loopback origins for
 cross-origin redirect checks. When `ios-shell` XCTest fails, CI uploads
 `AvibeTests.xcresult` as `ios-shell-xcresult`.
+
+### Two-step verification
+
+An account with avibe.bot two-step verification passes its second factor in
+the app after the email code (`docs/plans/2026-11-07-mobile-two-factor.md`,
+design frames `mobile-app/two-factor/*`). The flow depends on avibe-backend's
+`403 two_factor_required` session answer and its
+`apple-app-site-association` file.
+
+- `GET /api/mobile/session` answers `403 {"error":"two_factor_required",
+  "email","gate","methods"}` for a session that passed the email code and owes
+  the second factor; `401` still alone means signed out. The transport reports
+  it as a signed-in discovery, so `auth.verifyOtp`, `session.bootstrap`, and
+  `session.refresh` return `{status: "twoFactorRequired", email, gate,
+  methods}` and nothing rotates the store. `email` falls back to the address
+  typed in this sign-in and is `null` when neither is known. Unknown method
+  kinds are skipped.
+- `auth.verifySecondFactor({method: "totp" | "recovery", code})` posts the code
+  to `/api/two-factor/verify`, then reads the session again. Its errors are
+  `invalid` (any `400`), `rate_limited` with `retry_after_seconds`, and
+  `network`. A `401` from either step is the explicit signed-out answer: the
+  coordinator rotates to a fresh store and returns `{status: "signedOut"}`.
+- `auth.verifyPasskey()` fetches WebAuthn request options from
+  `/api/two-factor/passkey-challenge` (`404` is `passkey_unavailable`), runs
+  `ASAuthorizationPlatformPublicKeyCredentialProvider` for relying party
+  `avibe.bot` with user verification required, and posts the assertion as
+  WebAuthn `AuthenticationResponseJSON` (unpadded base64url) with the
+  challenge token. Native code asserts only for `avibe.bot`; options naming
+  another relying party are `passkey_unavailable`. Dismissing the system sheet
+  is `passkey_cancelled`; every other system failure is
+  `passkey_unavailable`. The options, token, and assertion pass only between
+  the transport and native code, never to the bundled page.
+- Both routes require a trusted Origin on cookie mutations; the transport's
+  same-origin `fetch` supplies it. Success re-issues `avibe_session` with the
+  proof into the account's WebKit store, which the runtime WebView shares, so
+  instance OIDC on avibe.bot sees the proof. The proof belongs to this app's
+  Supabase session, so the app asks once per sign-in.
+- An account that must turn the feature on (`gate: "enroll"`) opens
+  `https://avibe.bot/app/account/security` in Safari; "I've turned it on"
+  runs `session.refresh`, which then answers with the `challenge` gate.
+
+`Avibe.entitlements` adds `com.apple.developer.associated-domains` with
+`webcredentials:avibe.bot` to Debug and Release. avibe-backend's
+`/.well-known/apple-app-site-association` lists `68B2SQ6YK3.bot.avibe.ios`.
+The owner enabled the Associated Domains capability for the `bot.avibe.ios`
+App ID (Team ID prefix `68B2SQ6YK3`, confirmed) on 2026-11-07; its existing
+provisioning profiles were invalidated and regenerate on the next automatic
+signing. Simulator CI builds without signing, so it compiles the entitlement
+but cannot exercise a system passkey. That check needs a signed build on a
+device (or a simulator with the domain in developer mode) and an account with a
+passkey, and remains manual.
 
 Coordinator tests inject an in-memory named-store registry. Integration tests
 that require real named stores use suite-scoped `UserDefaults`, track every UUID
@@ -442,8 +497,13 @@ download activity after the runtime is invalidated.
   readiness/GET/DELETE, cold selection ownership, bundled
   full-bleed/keyboard constraints, named-store failure/relaunch/orphan cleanup,
   release of runtime primary and child WebViews before removal, and real WebKit
-  cookie behavior against a hermetic local server.
+  cookie behavior against a hermetic local server. Second-factor coverage
+  reads the `403` gate after the email code and on a session read, posts codes
+  and a passkey assertion with the trusted Origin, maps throttling and
+  rejection, stores the re-issued cookie, keeps the store and selection until
+  the factor passes, and drives the bundled page through the bridge.
 - Web UI: focused Vitest coverage for the bundled OTP/picker/account flow,
+  every two-step verification state,
   provider rate-limit cooldown across send/resend/verify, send-only success
   cooldown, bridge adapter, haptics, Workbench outer-scroll lifecycle, keyboard
   ownership, hidden Web Push/installation surfaces, and all five PWA decisions;
@@ -529,6 +589,8 @@ Apple Account Holder:
 - an Apple Distribution certificate and password;
 - an App Store provisioning profile for the app target;
 - the Apple Team ID;
+- the Associated Domains capability on that App ID, for the
+  `webcredentials:avibe.bot` entitlement (enabled 2026-11-07);
 - a dedicated App Store Connect API key ID, issuer ID, and private key.
 
 Those credentials belong in a protected GitHub Environment. They are not

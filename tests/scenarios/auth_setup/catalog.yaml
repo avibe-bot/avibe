@@ -422,6 +422,35 @@ scenarios:
       so this row records the boundary without inventing a Python case.
       Physical-device interactive gesture feel remains manual.
     owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-156
+    name: Bundled iOS sign-in passes avibe.bot's second factor after the email code
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: ios
+    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-156 passes the second factor after the email code and reaches the instances
+    reason: >-
+      The bundled page owns the approved two-factor screen and consumes the
+      native twoFactorRequired state. The collected Vitest case drives the
+      email code into an account that owes the second factor, a cancelled
+      passkey, the authenticator-code alternative, and authorized instance
+      selection. AUTH-SETUP-149 covers every second-factor failure code.
+  - id: AUTH-SETUP-157
+    name: Native second-factor transport and passkey assertion stay inside the account store
+    status: partial
+    kind: authorization
+    layer: contract
+    missing_layer: physical-device-passkey
+    backend: ios
+    reason: >-
+      Hermetic real-WKWebView XCTest owns the 403 two_factor_required reading,
+      the passkey-challenge and verify scripts with their trusted Origin, the
+      re-issued session cookie, failure mapping, and WebAuthn JSON conversion;
+      coordinator tests own store preservation and the signed-out answer. The
+      catalog citation checker does not collect Swift XCTest. A system passkey
+      assertion for avibe.bot needs the associated domain on a signed build and
+      a real account with a passkey, so it remains a manual device check.
+    owning_layer: iOS XCTest plus physical-device acceptance
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered
