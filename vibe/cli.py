@@ -1130,8 +1130,88 @@ def _print_definition_list_payload(
     )
 
 
+def _definition_payload(definition, *, warnings: Optional[list[dict]] = None) -> dict:
+    return _cli_payload("run_definition", definition=definition, **({"warnings": warnings} if warnings else {}))
+
+
 def _print_definition_payload(definition, *, warnings: Optional[list[dict]] = None) -> None:
-    _print_cli_payload("run_definition", definition=definition, **({"warnings": warnings} if warnings else {}))
+    print(_json_text(_definition_payload(definition, warnings=warnings), stream=sys.stdout))
+
+
+class _ServiceInvocation(NamedTuple):
+    """One service-owned command's own inputs, and the warm stores lent to it.
+
+    Passed explicitly because the controller serves concurrent invocations: its
+    process environment, working directory and store factories describe the
+    service, never the caller. ``cwd`` is empty when the invoking shell's
+    directory no longer exists.
+    """
+
+    caller_env: Mapping[str, str]
+    cwd: str
+    stores: Any
+    #: The invoking user's home, present only when a ``--cwd`` starts with ``~``.
+    home: Optional[str] = None
+
+
+def _control_arguments(operation: str, args) -> dict[str, Any]:
+    """Parsed arguments plus the inputs only this process can read."""
+
+    arguments = {
+        key: (repr(value) if isinstance(value, float) and not math.isfinite(value) else value)
+        for key, value in vars(args).items()
+    }
+    if "message_file" in arguments:
+        materialized = _materialize_message_file(args)
+        if materialized is not None:
+            arguments["message_file_input"] = materialized
+    if operation == "task.add" and not arguments.get("timezone"):
+        arguments["invocation_timezone"] = _default_timezone_name()
+    home = _invocation_home(args)
+    if home is not None:
+        arguments["invocation_home"] = home
+    return arguments
+
+
+def _invocation_home(args) -> Optional[str]:
+    """This user's home, for a ``--cwd`` that starts with ``~``; the service's is not it."""
+
+    raw = getattr(args, "cwd", None)
+    if not isinstance(raw, str) or Path(raw.strip()).parts[:1] != ("~",):
+        return None
+    home = os.path.expanduser("~")
+    return None if home == "~" else home
+
+
+def _control_command(operation: str, args) -> int:
+    """Submit one named mutation to the running service; this process opens no SQLite."""
+    from core.control_requests import (
+        ADMISSION_SECONDS,
+        EXECUTION_SECONDS,
+        OPERATION_WAIT_SECONDS,
+        failure,
+        new_request,
+    )
+    from vibe import internal_client
+
+    request = new_request(operation, _control_arguments(operation, args))
+    wait = OPERATION_WAIT_SECONDS.get(operation, 0.0)
+    # No response read bound where only the service knows how long its answer
+    # may take; connecting stays bounded either way.
+    timeout = None if wait is None else ADMISSION_SECONDS + wait + EXECUTION_SECONDS
+    command = "vibe " + operation.replace(".", " ")
+    try:
+        response = internal_client.control_request_sync(request.to_payload(), timeout=timeout)
+    except internal_client.InternalServerUnavailable:
+        response = failure("service_unavailable", f"Avibe service unavailable; `{command}` not executed")
+    except internal_client.InternalServerTimeout:
+        response = failure(
+            "execution_unknown", f"`{command}` may have been applied; its result could not be confirmed",
+            execution="execution_unknown",
+        )
+    stream = sys.stdout if response["exit_code"] == 0 else sys.stderr
+    print(_json_text(response["payload"], stream=stream), file=stream)
+    return response["exit_code"]
 
 
 def _parse_cli_time_filter(value: str | None, *, field_name: str, help_command: str) -> str | None:
@@ -2220,7 +2300,7 @@ def _resolve_message_input(args, *, help_command: str, example_command: str) -> 
         )
     if message_file:
         try:
-            content = Path(message_file).read_text(encoding="utf-8").strip()
+            content = _read_message_file(args, message_file).strip()
         except OSError as exc:
             raise TaskCliError(
                 f"failed to read message file: {exc}",
@@ -2246,6 +2326,40 @@ def _resolve_message_input(args, *, help_command: str, example_command: str) -> 
         hint="Pass inline text with --message or load it from disk with --message-file.",
         help_command=help_command,
     )
+
+
+class _MaterializedInputError(Exception):
+    """A non-OS read failure the invoking client met, re-raised where the command read."""
+
+
+def _materialize_message_file(args) -> Optional[dict[str, str]]:
+    """Prepare a nonempty file flag when no inline message was supplied.
+
+    ``/dev/stdin``, ``/dev/fd/N`` and relative paths name this process's inputs,
+    so preparation precedes service admission and mode checks. The service
+    consumes the text or read failure only at the command's original read point.
+    """
+
+    path = getattr(args, "message_file", None)
+    if getattr(args, "message", None) is not None or not path:
+        return None
+    try:
+        return {"text": Path(path).read_text(encoding="utf-8")}
+    except OSError as exc:
+        return {"os_error": str(exc)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _read_message_file(args, path: str) -> str:
+    materialized = getattr(args, "message_file_input", None)
+    if materialized is None:
+        return Path(path).read_text(encoding="utf-8")
+    if "os_error" in materialized:
+        raise OSError(materialized["os_error"])
+    if "error" in materialized:
+        raise _MaterializedInputError(materialized["error"])
+    return materialized["text"]
 
 
 def _resolve_optional_message_input(
@@ -2297,8 +2411,41 @@ def _normalize_watch_name(value: Optional[str], *, help_command: str = "vibe wat
     return normalized
 
 
-def _resolve_existing_cwd(value: str, *, help_command: str, code: str, label: str) -> str:
-    resolved = Path(value).expanduser().resolve()
+def _invocation_directory(invocation_cwd: Optional[str], *, help_command: str) -> str:
+    """The invoking shell's directory: the request's own, or this process's."""
+
+    if invocation_cwd is None:
+        return os.getcwd()
+    if not invocation_cwd:
+        raise TaskCliError("The invocation working directory is unavailable", code="cwd_not_found", help_command=help_command)
+    return invocation_cwd
+
+
+def _caller_home_path(value: str, invocation_home: Optional[str]) -> Optional[Path]:
+    """``value`` with its leading ``~`` as the invoking user's home, else ``None``.
+
+    Only the bare ``~`` is the caller's; ``~user`` keeps this host's expansion.
+    """
+
+    path = Path(value)
+    if invocation_home is None or path.parts[:1] != ("~",):
+        return None
+    return Path(invocation_home, *path.parts[1:])
+
+
+def _resolve_existing_cwd(
+    value: str,
+    *,
+    help_command: str,
+    code: str,
+    label: str,
+    invocation_cwd: Optional[str] = None,
+    invocation_home: Optional[str] = None,
+) -> str:
+    path = _caller_home_path(value, invocation_home) or Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(_invocation_directory(invocation_cwd, help_command=help_command)) / path
+    resolved = path.resolve()
     if not resolved.exists() or not resolved.is_dir():
         raise TaskCliError(
             f"{label} cwd does not exist: {value}",
@@ -2310,10 +2457,24 @@ def _resolve_existing_cwd(value: str, *, help_command: str, code: str, label: st
     return str(resolved)
 
 
-def _resolve_watch_cwd(value: Optional[str], *, help_command: str, default_to_invocation: bool = False) -> Optional[str]:
+def _resolve_watch_cwd(
+    value: Optional[str],
+    *,
+    help_command: str,
+    default_to_invocation: bool = False,
+    invocation_cwd: Optional[str] = None,
+    invocation_home: Optional[str] = None,
+) -> Optional[str]:
     if not value:
-        return os.getcwd() if default_to_invocation else None
-    return _resolve_existing_cwd(value, help_command=help_command, code="invalid_watch_cwd", label="watch")
+        return _invocation_directory(invocation_cwd, help_command=help_command) if default_to_invocation else None
+    return _resolve_existing_cwd(
+        value,
+        help_command=help_command,
+        code="invalid_watch_cwd",
+        label="watch",
+        invocation_cwd=invocation_cwd,
+        invocation_home=invocation_home,
+    )
 
 
 def _validate_watch_timing(
@@ -2616,26 +2777,36 @@ def _task_fallback_projection(task) -> dict:
     return payload
 
 
-def _task_store() -> ScheduledTaskStore:
-    from core.scheduled_tasks import ScheduledTaskStore
-
-    return ScheduledTaskStore()
-
-
-@contextlib.contextmanager
-def _definition_read_store():
-    """Own the canonical read projection store used by CLI read commands."""
+def _definition_reader() -> SQLiteBackgroundTaskStore:
     from storage.background import SQLiteBackgroundTaskStore
 
     _ensure_cli_sqlite_state()
-    store = SQLiteBackgroundTaskStore(include_private_metadata=False, read_only=True)
+    return SQLiteBackgroundTaskStore(include_private_metadata=False, read_only=True)
+
+
+@contextlib.contextmanager
+def _definition_read_store(reader: SQLiteBackgroundTaskStore | None = None):
+    """Own the canonical read projection store used by CLI read commands.
+
+    A service-owned command lends its warm ``reader`` instead, which stays open.
+    """
+    if reader is not None:
+        yield reader
+        return
+    store = _definition_reader()
     try:
         yield store
     finally:
         store.close()
 
 
-def _missing_definition_error(definition_type: str, definition_id: str, *, action: str) -> TaskCliError:
+def _missing_definition_error(
+    definition_type: str,
+    definition_id: str,
+    *,
+    action: str,
+    reader: SQLiteBackgroundTaskStore | None = None,
+) -> TaskCliError:
     """Why a command found no live task or watch: it was removed, or never existed.
 
     Watches are routinely removed at close-out and checked again later, so a bare
@@ -2643,7 +2814,7 @@ def _missing_definition_error(definition_type: str, definition_id: str, *, actio
     """
 
     noun = "task" if definition_type == "scheduled" else "watch"
-    with _definition_read_store() as store:
+    with _definition_read_store(reader) as store:
         read = store.get_scheduled_task if definition_type == "scheduled" else store.get_watch
         definition = read(definition_id, include_removed=True)
     removed_at = (definition or {}).get("removed_at")
@@ -2671,6 +2842,7 @@ def _missing_definition_error(definition_type: str, definition_id: str, *, actio
 
 def _read_definition_projection(
     read: Callable[[SQLiteBackgroundTaskStore], Optional[dict[str, Any]]],
+    reader: SQLiteBackgroundTaskStore | None = None,
 ) -> Optional[dict[str, Any]]:
     """Read one definition back through ``_enrich_definitions``, or ``None``.
 
@@ -2680,14 +2852,14 @@ def _read_definition_projection(
     """
 
     try:
-        with _definition_read_store() as store:
+        with _definition_read_store(reader) as store:
             return read(store)
     except Exception:
         logger.debug("definition projection read-back failed", exc_info=True)
         return None
 
 
-def _task_mutation_payload(task) -> dict:
+def _task_mutation_payload(task, reader: SQLiteBackgroundTaskStore | None = None) -> dict:
     """The projected row a task mutation just wrote.
 
     Create / pause / resume / update answer with exactly what ``vibe task show``
@@ -2700,7 +2872,7 @@ def _task_mutation_payload(task) -> dict:
     ``agent_runs`` history), which degrades to the stored row.
     """
 
-    projected = _read_definition_projection(lambda store: store.get_scheduled_task(task.id))
+    projected = _read_definition_projection(lambda store: store.get_scheduled_task(task.id), reader)
     if projected is None:
         projected = _task_fallback_projection(task)
     return _task_projection_payload(projected)
@@ -2741,18 +2913,6 @@ def _primary_platform() -> str:
         return _ensure_config().platform
     except Exception:
         return "slack"
-
-
-def _watch_store() -> ManagedWatchStore:
-    from core.watches import ManagedWatchStore
-
-    return ManagedWatchStore()
-
-
-def _watch_runtime_store() -> WatchRuntimeStateStore:
-    from core.watches import WatchRuntimeStateStore
-
-    return WatchRuntimeStateStore()
 
 
 def _supported_task_platforms() -> set[str]:
@@ -3093,10 +3253,12 @@ def _apply_caller_session_default(args, caller_context) -> None:
         setattr(args, "session_id", default_session_id)
 
 
-def _resolve_caller_session_id(args, *, help_command: str) -> str:
+def _resolve_caller_session_id(
+    args, *, help_command: str, caller_env: Optional[Mapping[str, str]] = None
+) -> str:
     """The one Session a single-Session command acts on: ``--session-id``, else the caller."""
 
-    _apply_caller_session_default(args, caller_context_from_env())
+    _apply_caller_session_default(args, caller_context_from_env(caller_env))
     session_id = (getattr(args, "session_id", None) or "").strip()
     if not session_id:
         raise TaskCliError(
@@ -3542,11 +3704,11 @@ def _collect_target_warnings(*targets) -> list[dict]:
     return warnings
 
 
-def _validate_agent_name_arg(agent_name: Optional[str]) -> Optional[str]:
+def _validate_agent_name_arg(agent_name: Optional[str], *, agent_store: VibeAgentStore | None = None) -> Optional[str]:
     value = (agent_name or "").strip()
     if not value:
         return None
-    _agent_store().require_enabled(value)
+    (agent_store if agent_store is not None else _agent_store()).require_enabled(value)
     return value
 
 
@@ -3728,6 +3890,7 @@ def _resolve_agent_for_session_reservation(
     agent_id: Optional[str] = None,
     deliver_key: str,
     help_command: str,
+    agent_store: VibeAgentStore | None = None,
 ) -> Optional[VibeAgent]:
     resolved_agent_name = agent_name
     scope_target = _ScopeRoutingTarget(None, None)
@@ -3735,7 +3898,7 @@ def _resolve_agent_for_session_reservation(
         scope_target = _resolve_scope_routing_target(deliver_key)
         resolved_agent_name = scope_target.agent_name
 
-    store = _agent_store()
+    store = agent_store if agent_store is not None else _agent_store()
     try:
         if agent_id:
             return store.require_reference_by_id(agent_id)
@@ -3745,7 +3908,8 @@ def _resolve_agent_for_session_reservation(
             return store.require_reference(resolved_agent_name)
         return store.get_default_agent()
     finally:
-        store.close()
+        if agent_store is None:
+            store.close()
 
 
 def _resolve_watch_command(args, *, help_command: str) -> tuple[list[str], Optional[str]]:
@@ -3860,7 +4024,9 @@ def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = Fals
     )
 
 
-def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -> dict:
+def _watch_mutation_payload(
+    watch, runtime_entry: Optional[dict[str, object]], reader: SQLiteBackgroundTaskStore | None = None
+) -> dict:
     """The projected row a watch mutation just wrote.
 
     The twin of ``_task_mutation_payload``, and the reason watches needed one:
@@ -3874,7 +4040,7 @@ def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -
     rows the Workbench reads.
     """
 
-    projected = _read_definition_projection(lambda store: store.get_watch(watch.id))
+    projected = _read_definition_projection(lambda store: store.get_watch(watch.id), reader)
     if projected is None:
         from storage.message_deliveries import public_message_metadata
 
@@ -4111,7 +4277,7 @@ def _default_watch_startup_timeout_seconds(
     )
 
 
-def _wait_for_watch_startup(
+async def _wait_for_watch_startup(
     store: ManagedWatchStore,
     runtime_store: WatchRuntimeStateStore,
     watch_id: str,
@@ -4119,17 +4285,34 @@ def _wait_for_watch_startup(
     timeout_seconds: float | None = None,
     poll_interval_seconds: float = 0.1,
     stable_running_seconds: float = WATCH_STARTUP_STABLE_RUNNING_SECONDS,
+    reader: SQLiteBackgroundTaskStore | None = None,
 ):
+    """Confirm a new Watch's first cycle, sleeping asynchronously between short reads.
+
+    The controller serves this wait, so it holds no runtime-work worker while the
+    Watch service it is waiting on needs one, and every read -- an error's
+    projection included, through the lent ``reader`` -- runs off the loop.
+    """
+
+    async def projection(watch, runtime_entry) -> dict:
+        return await asyncio.to_thread(_watch_mutation_payload, watch, runtime_entry, reader)
+
+    def observe(*, with_runtime: bool):
+        store.maybe_reload()
+        watch = store.get_watch(watch_id)
+        if watch is None and not with_runtime:
+            return None, None
+        return watch, runtime_store.load().get("watches", {}).get(watch_id)
+
     inspect_command = f"vibe watch show {watch_id}"
     if timeout_seconds is None:
         timeout_seconds = _default_watch_startup_timeout_seconds(
             stable_running_seconds=stable_running_seconds,
-            recovery_entry_count=_watch_recovery_entry_count(runtime_store),
+            recovery_entry_count=await asyncio.to_thread(_watch_recovery_entry_count, runtime_store),
         )
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        store.maybe_reload()
-        watch = store.get_watch(watch_id)
+        watch, runtime_entry = await asyncio.to_thread(observe, with_runtime=False)
         if watch is None:
             raise TaskCliError(
                 f"watch '{watch_id}' could not be verified because it disappeared during startup",
@@ -4139,7 +4322,6 @@ def _wait_for_watch_startup(
                 help_command=inspect_command,
                 details={"watch_id": watch_id},
             )
-        runtime_entry = runtime_store.load().get("watches", {}).get(watch_id)
         if watch.last_error and not watch.enabled:
             raise TaskCliError(
                 f"watch '{watch.name or watch.id}' failed during startup and has already been disabled",
@@ -4147,7 +4329,7 @@ def _wait_for_watch_startup(
                 hint="Inspect the stored watch error, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.",
                 example=inspect_command,
                 help_command=inspect_command,
-                details={"watch": _watch_mutation_payload(watch, runtime_entry)},
+                details={"watch": await projection(watch, runtime_entry)},
             )
         # NO_EVENT_EXIT_CODE is a clean finish too: a once watch whose first cycle
         # already decided there is nothing to report has completed, not hung.
@@ -4162,11 +4344,9 @@ def _wait_for_watch_startup(
             stable_for = _seconds_since_iso(runtime_entry.get("started_at")) or _seconds_since_iso(watch.last_started_at)
             if stable_for is not None and stable_for >= stable_running_seconds:
                 return watch, runtime_entry
-        time.sleep(poll_interval_seconds)
+        await asyncio.sleep(poll_interval_seconds)
 
-    store.maybe_reload()
-    watch = store.get_watch(watch_id)
-    runtime_entry = runtime_store.load().get("watches", {}).get(watch_id)
+    watch, runtime_entry = await asyncio.to_thread(observe, with_runtime=True)
     if watch is not None and watch.last_error and not watch.enabled:
         raise TaskCliError(
             f"watch '{watch.name or watch.id}' failed during startup and has already been disabled",
@@ -4174,7 +4354,7 @@ def _wait_for_watch_startup(
             hint="Inspect the stored watch error, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.",
             example=inspect_command,
             help_command=inspect_command,
-            details={"watch": _watch_mutation_payload(watch, runtime_entry)},
+            details={"watch": await projection(watch, runtime_entry)},
         )
     raise TaskCliError(
         f"watch '{watch_id}' was created but startup was not confirmed within {timeout_seconds:.0f} second(s)",
@@ -4182,7 +4362,7 @@ def _wait_for_watch_startup(
         hint="Confirm that the Avibe service is running, then inspect the watch state before reporting that monitoring is active.",
         example=inspect_command,
         help_command=inspect_command,
-        details={"watch": _watch_mutation_payload(watch, runtime_entry) if watch is not None else {"id": watch_id}},
+        details={"watch": await projection(watch, runtime_entry) if watch is not None else {"id": watch_id}},
     )
 
 
@@ -4310,9 +4490,14 @@ def _validate_task_action_matrix(
 
 
 def cmd_task_add(args):
+    return _control_command("task.add", args)
+
+
+def _task_add(args, invocation: _ServiceInvocation) -> dict:
+    stores = invocation.stores
     reserved_session_id: Optional[str] = None
     try:
-        caller_context = caller_context_from_env()
+        caller_context = caller_context_from_env(invocation.caller_env)
         caller_user_context = caller_resource_user_context(caller_context)
         command, shell_command, has_command = _resolve_task_command(
             args,
@@ -4355,9 +4540,11 @@ def cmd_task_add(args):
                     help_command="vibe task add --help",
                     code="cwd_not_found",
                     label="task",
+                    invocation_cwd=invocation.cwd,
+                    invocation_home=invocation.home,
                 )
                 if raw_cwd
-                else os.getcwd()
+                else _invocation_directory(invocation.cwd, help_command="vibe task add --help")
             )
             session_workdir = None
         else:
@@ -4403,6 +4590,8 @@ def cmd_task_add(args):
                 scoped_session=_has_modern_scope_target(args),
                 has_command=has_command,
                 help_command="vibe task add --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
             session_workdir = cwd
             cwd = _command_definition_spawn_cwd(
@@ -4411,12 +4600,15 @@ def cmd_task_add(args):
                 session_policy=session_policy,
                 explicit_cwd=getattr(args, "cwd", None),
                 help_command="vibe task add --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
             agent_resolution = _resolve_agent_target(
                 agent_name=getattr(args, "agent", None),
                 session_id=session_id,
                 session_key=session_key or scope_key or "",
                 help_command="vibe task add --help",
+                agent_store=stores.agent_store,
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
@@ -4447,6 +4639,7 @@ def cmd_task_add(args):
                     help_command="vibe task add --help",
                     require_enabled_agent=expected_enabled_agent_id is not None,
                     expected_reference_agent_id=expected_reference_agent_id,
+                    agent_store=stores.agent_store,
                 )
                 reserved_session_id = session_id
             session_target, delivery_target = _validate_definition_delivery_target(
@@ -4470,7 +4663,8 @@ def cmd_task_add(args):
         )
         if has_command:
             metadata["on_failure"] = effective_on_failure
-        timezone_name = args.timezone or _default_timezone_name()
+        # The invoking client's own local zone, as when it resolved this itself.
+        timezone_name = args.timezone or getattr(args, "invocation_timezone", None) or _default_timezone_name()
         try:
             timezone = ZoneInfo(timezone_name)
         except Exception as exc:
@@ -4482,7 +4676,7 @@ def cmd_task_add(args):
                 help_command="vibe task add --help",
                 details={"timezone": timezone_name},
             ) from exc
-        store = _task_store()
+        store = stores.task_store
 
         if args.cron:
             _validate_task_cron(args.cron, timezone, help_command="vibe task add --help")
@@ -4538,17 +4732,15 @@ def cmd_task_add(args):
             )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_mutation_payload(task)
-        _print_definition_payload(task_payload, warnings=warnings)
-        return 0
-    except Exception as exc:
+        task_payload = _task_mutation_payload(task, stores.definition_reader)
+        return _definition_payload(task_payload, warnings=warnings)
+    except Exception:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task creation failed before its Session reservation was adopted",
             )
-        _print_task_error(exc, help_command="vibe task add --help")
-        return 1
+        raise
 
 
 def cmd_task_list(
@@ -4591,66 +4783,60 @@ def cmd_task_show(task_id: str, *, brief: bool = False):
 
 
 def cmd_task_set_enabled(task_id: str, enabled: bool):
+    return _control_command("task.resume" if enabled else "task.pause", argparse.Namespace(task_id=task_id))
+
+
+def _task_set_enabled(task_id: str, enabled: bool, invocation: _ServiceInvocation) -> dict:
     from storage.background import DefinitionWriteConflict, TaskResumeBlocked, TaskScheduleRetired
 
-    store = _task_store()
+    stores = invocation.stores
+    store = stores.task_store
     task = store.get_task(task_id)
     if task is None:
         action = "resume" if enabled else "pause"
-        _print_task_error(_missing_definition_error("scheduled", task_id, action=action))
-        return 1
+        raise _missing_definition_error("scheduled", task_id, action=action, reader=stores.definition_reader)
     try:
         updated = store.set_enabled(task_id, enabled)
     except TaskResumeBlocked as exc:
-        _print_task_error(
-            TaskCliError(
-                i18n_t("error.taskOwnerUnavailable.message"),
-                code=exc.code,
-                hint=i18n_t("error.taskOwnerUnavailable.hint", id=task_id),
-                help_command=f"vibe task remove {task_id}",
-                details={
-                    "task_id": task_id,
-                    "owner_session_id": exc.owner_session_id,
-                },
-            )
-        )
-        return 1
+        raise TaskCliError(
+            i18n_t("error.taskOwnerUnavailable.message"),
+            code=exc.code,
+            hint=i18n_t("error.taskOwnerUnavailable.hint", id=task_id),
+            help_command=f"vibe task remove {task_id}",
+            details={
+                "task_id": task_id,
+                "owner_session_id": exc.owner_session_id,
+            },
+        ) from exc
     except TaskScheduleRetired as exc:
-        _print_task_error(
-            TaskCliError(
-                i18n_t("error.taskScheduleRetired.message"),
-                code=exc.code,
-                hint=i18n_t("error.taskScheduleRetired.hint", id=task_id),
-                help_command=f"vibe task update {task_id} --help",
-                details={"task_id": task_id},
-            )
-        )
-        return 1
+        raise TaskCliError(
+            i18n_t("error.taskScheduleRetired.message"),
+            code=exc.code,
+            hint=i18n_t("error.taskScheduleRetired.hint", id=task_id),
+            help_command=f"vibe task update {task_id} --help",
+            details={"task_id": task_id},
+        ) from exc
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie
         # about a row this command did not write.
-        _print_task_error(
-            _definition_conflict_cli_error(
-                exc,
-                help_command="vibe task list",
-                details={"task_id": task_id},
-            )
-        )
-        return 1
-    task_payload = _task_mutation_payload(updated)
-    _print_definition_payload(task_payload)
-    return 0
+        raise _definition_conflict_cli_error(
+            exc,
+            help_command="vibe task list",
+            details={"task_id": task_id},
+        ) from exc
+    return _definition_payload(_task_mutation_payload(updated, stores.definition_reader))
 
 
 def cmd_task_remove(task_id: str):
-    store = _task_store()
-    removed = store.remove_task(task_id)
-    if not removed:
-        _print_task_error(_missing_definition_error("scheduled", task_id, action="remove"))
-        return 1
-    _print_cli_payload("run_definition", removed_id=task_id)
-    return 0
+    return _control_command("task.remove", argparse.Namespace(task_id=task_id))
+
+
+def _task_remove(task_id: str, invocation: _ServiceInvocation) -> dict:
+    stores = invocation.stores
+    if not stores.task_store.remove_task(task_id):
+        raise _missing_definition_error("scheduled", task_id, action="remove", reader=stores.definition_reader)
+    return _cli_payload("run_definition", removed_id=task_id)
 
 
 def _explicit_task_command_update_flags(args) -> list[str]:
@@ -4788,7 +4974,7 @@ def _merge_task_command_update(
     return shell_command, command, timeout_seconds
 
 
-def _cmd_task_update_pure_command(args, store, task) -> int:
+def _task_update_pure_command(args, store, task, invocation: _ServiceInvocation) -> dict:
     """Update a command task that has no Session, Agent, or delivery target.
 
     Kept off the main update path on purpose: that path resolves an Agent, defaults a
@@ -4812,7 +4998,14 @@ def _cmd_task_update_pure_command(args, store, task) -> int:
     )
     raw_cwd = (getattr(args, "cwd", None) or "").strip()
     cwd = (
-        _resolve_existing_cwd(raw_cwd, help_command=help_command, code="cwd_not_found", label="task")
+        _resolve_existing_cwd(
+            raw_cwd,
+            help_command=help_command,
+            code="cwd_not_found",
+            label="task",
+            invocation_cwd=invocation.cwd,
+            invocation_home=invocation.home,
+        )
         if raw_cwd
         else task.cwd
     )
@@ -4875,20 +5068,24 @@ def _cmd_task_update_pure_command(args, store, task) -> int:
         update_command_fields=True,
         metadata=metadata,
     )
-    _print_definition_payload(_task_mutation_payload(updated))
-    return 0
+    return _definition_payload(_task_mutation_payload(updated, invocation.stores.definition_reader))
 
 
 def cmd_task_update(args):
+    return _control_command("task.update", args)
+
+
+def _task_update(args, invocation: _ServiceInvocation) -> dict:
     from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
     from storage.background import DefinitionWriteConflict
 
+    stores = invocation.stores
     reserved_session_id: Optional[str] = None
     try:
-        store = _task_store()
+        store = stores.task_store
         task = store.get_task(args.task_id)
         if task is None:
-            raise _missing_definition_error("scheduled", args.task_id, action="update")
+            raise _missing_definition_error("scheduled", args.task_id, action="update", reader=stores.definition_reader)
 
         # A definition is either a scheduled Agent message or a scheduled command, and
         # the two shapes are not convertible in place: switching would leave the other
@@ -4935,7 +5132,7 @@ def cmd_task_update(args):
                 },
             )
         if task.has_command and task.on_failure == "none":
-            return _cmd_task_update_pure_command(args, store, task)
+            return _task_update_pure_command(args, store, task, invocation)
 
         if getattr(args, "reset_delivery", False) and (
             getattr(args, "scope_id", None) is not None
@@ -4947,7 +5144,7 @@ def cmd_task_update(args):
                 hint="Pass --reset-delivery to clear delivery overrides, or pass --scope-id/--same-scope to replace placement.",
                 help_command="vibe task update --help",
             )
-        caller_context = caller_context_from_env()
+        caller_context = caller_context_from_env(invocation.caller_env)
         caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
@@ -5011,7 +5208,7 @@ def cmd_task_update(args):
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
-            agent_name = _validate_agent_name_arg(args.agent)
+            agent_name = _validate_agent_name_arg(args.agent, agent_store=stores.agent_store)
         else:
             agent_name = task.agent_name
 
@@ -5100,6 +5297,8 @@ def cmd_task_update(args):
                 explicit_cwd,
                 stored_cwd=task.cwd,
                 help_command="vibe task update --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
         elif session_policy == "existing":
             cwd = _resolve_definition_session_cwd(
@@ -5108,6 +5307,8 @@ def cmd_task_update(args):
                 session_policy=session_policy,
                 has_command=task.has_command,
                 help_command="vibe task update --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
         elif explicit_cwd is not None:
             cwd = _resolve_definition_session_cwd(
@@ -5116,6 +5317,8 @@ def cmd_task_update(args):
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args),
                 help_command="vibe task update --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
         elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
             cwd = _resolve_definition_session_cwd(
@@ -5124,6 +5327,8 @@ def cmd_task_update(args):
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
                 help_command="vibe task update --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
         else:
             # Nothing in this edit asks about directories, so each half carries forward
@@ -5145,6 +5350,8 @@ def cmd_task_update(args):
                 explicit_cwd=explicit_cwd,
                 stored_cwd=task.cwd,
                 help_command="vibe task update --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
         if session_policy == "create_once" and not scope_key:
@@ -5173,6 +5380,7 @@ def cmd_task_update(args):
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe task update --help",
+                agent_store=stores.agent_store,
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
@@ -5183,6 +5391,7 @@ def cmd_task_update(args):
                 session_key=session_key,
                 help_command="vibe task update --help",
                 existing_agent_reference=not explicit_agent_requested,
+                agent_store=stores.agent_store,
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
@@ -5219,6 +5428,7 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
                 expected_reference_agent_id=expected_reference_agent_id,
+                agent_store=stores.agent_store,
             )
             reserved_session_id = session_id
             session_key = ""
@@ -5329,42 +5539,40 @@ def cmd_task_update(args):
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_mutation_payload(updated)
-        _print_definition_payload(task_payload, warnings=warnings)
-        return 0
+        task_payload = _task_mutation_payload(updated, stores.definition_reader)
+        return _definition_payload(task_payload, warnings=warnings)
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task update failed before its Session reservation was adopted",
             )
-        _print_task_error(
-            _definition_conflict_cli_error(
-                exc,
-                help_command="vibe task update --help",
-                details={"task_id": getattr(args, "task_id", exc.definition_id)},
-            )
-        )
-        return 1
-    except Exception as exc:
+        raise _definition_conflict_cli_error(
+            exc,
+            help_command="vibe task update --help",
+            details={"task_id": getattr(args, "task_id", exc.definition_id)},
+        ) from exc
+    except Exception:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="task update failed before its Session reservation was adopted",
             )
-        _print_task_error(exc, help_command="vibe task update --help")
-        return 1
+        raise
 
 
 def cmd_task_run(task_id: str):
-    store = _task_store()
-    task = store.get_task(task_id)
+    return _control_command("task.run", argparse.Namespace(task_id=task_id))
+
+
+def _task_run(task_id: str, invocation: _ServiceInvocation) -> dict:
+    stores = invocation.stores
+    task = stores.task_store.get_task(task_id)
     if task is None:
-        _print_task_error(_missing_definition_error("scheduled", task_id, action="run"))
-        return 1
-    request = _task_request_store().enqueue_task_run(task.id, task=task)
+        raise _missing_definition_error("scheduled", task_id, action="run", reader=stores.definition_reader)
+    request = stores.request_store.enqueue_task_run(task.id, task=task)
     # The same one ``run`` object ``vibe agent run`` answers with.
-    _print_cli_payload(
+    return _cli_payload(
         "agent_run",
         run=_present_fields(
             {
@@ -5377,7 +5585,6 @@ def cmd_task_run(task_id: str):
             }
         ),
     )
-    return 0
 
 
 def _read_optional_text(path: str | None, *, field_name: str) -> str | None:
@@ -6263,6 +6470,7 @@ def _resolve_run_cwd(
     scoped_session: bool = False,
     invocation_cwd_default: bool = False,
     invocation_cwd: str | None = None,
+    invocation_home: str | None = None,
     help_command: str,
 ) -> Optional[str]:
     """Working directory for a session this run RESERVES.
@@ -6284,7 +6492,7 @@ def _resolve_run_cwd(
             )
         return None
     if raw:
-        expanded = os.path.expanduser(raw)
+        expanded = str(_caller_home_path(raw, invocation_home) or os.path.expanduser(raw))
         if not os.path.isabs(expanded) and invocation_cwd == "":
             raise TaskCliError("The invocation working directory is unavailable", code="cwd_not_found", help_command=help_command)
         resolved = os.path.abspath(os.path.join(invocation_cwd or os.getcwd(), expanded))
@@ -6311,6 +6519,8 @@ def _resolve_definition_session_cwd(
     scoped_session: bool = False,
     has_command: bool = False,
     help_command: str,
+    invocation_cwd: Optional[str] = None,
+    invocation_home: Optional[str] = None,
 ) -> Optional[str]:
     """Where a Session this definition CREATES should run. Never the command's answer.
 
@@ -6338,14 +6548,21 @@ def _resolve_definition_session_cwd(
             )
         return None
     if raw:
-        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+        return _resolve_existing_cwd(
+            raw,
+            help_command=help_command,
+            code="cwd_not_found",
+            label="task",
+            invocation_cwd=invocation_cwd,
+            invocation_home=invocation_home,
+        )
     if existing_cwd:
         return existing_cwd
     if scoped_session:
         return None
     if session_policy == "create_per_run":
         return None
-    return os.getcwd()
+    return _invocation_directory(invocation_cwd, help_command=help_command)
 
 
 def _command_definition_spawn_cwd(
@@ -6356,6 +6573,8 @@ def _command_definition_spawn_cwd(
     explicit_cwd: Optional[str] = None,
     stored_cwd: Optional[str] = None,
     help_command: str = "vibe task add --help",
+    invocation_cwd: Optional[str] = None,
+    invocation_home: Optional[str] = None,
 ) -> Optional[str]:
     """Where this definition's COMMAND runs, given where its Session would run.
 
@@ -6410,7 +6629,14 @@ def _command_definition_spawn_cwd(
         # resolving it again here returns the same path; an ``existing`` binding answers
         # its Session question ``None`` on purpose, and this is the only place the flag
         # can be picked up at all.
-        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+        return _resolve_existing_cwd(
+            raw,
+            help_command=help_command,
+            code="cwd_not_found",
+            label="task",
+            invocation_cwd=invocation_cwd,
+            invocation_home=invocation_home,
+        )
     if stored_cwd:
         # Before ``session_cwd``, because the two can legitimately differ and only one of
         # them is an answer to this question. Once ``--cwd`` moves a bound command to B
@@ -6422,7 +6648,7 @@ def _command_definition_spawn_cwd(
     if session_cwd:
         return session_cwd
     if session_policy == "create_per_run":
-        return os.getcwd()
+        return _invocation_directory(invocation_cwd, help_command=help_command)
     return None
 
 
@@ -6431,6 +6657,8 @@ def _resolve_command_only_cwd(
     *,
     stored_cwd: Optional[str],
     help_command: str,
+    invocation_cwd: Optional[str] = None,
+    invocation_home: Optional[str] = None,
 ) -> Optional[str]:
     """``--cwd`` for an edit that answers the command question and nothing else.
 
@@ -6442,7 +6670,14 @@ def _resolve_command_only_cwd(
 
     raw = (explicit_cwd or "").strip()
     if raw:
-        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+        return _resolve_existing_cwd(
+            raw,
+            help_command=help_command,
+            code="cwd_not_found",
+            label="task",
+            invocation_cwd=invocation_cwd,
+            invocation_home=invocation_home,
+        )
     return stored_cwd
 
 
@@ -6675,6 +6910,7 @@ def _reserve_definition_session(
     workdir: Optional[str] = None,
     require_enabled_agent: bool = False,
     expected_reference_agent_id: Optional[str] = None,
+    agent_store: VibeAgentStore | None = None,
 ) -> str:
     from core.services import sessions as sessions_service
 
@@ -6687,6 +6923,7 @@ def _reserve_definition_session(
         agent_id=agent_id,
         deliver_key=deliver_key,
         help_command=help_command,
+        agent_store=agent_store,
     )
     if agent is None:
         raise TaskCliError(
@@ -6975,6 +7212,9 @@ def cmd_agent_run(args):
         except Exception as exc:
             arguments["message_input_error"] = _task_error_payload(exc, help_command="vibe agent run --help")
         arguments["message_file"] = None
+    home = _invocation_home(args)
+    if home is not None:
+        arguments["invocation_home"] = home
     request = new_request("agent.run", arguments)
     wait = getattr(args, "wait_timeout", None)
     wait = wait if isinstance(wait, (int, float)) and math.isfinite(wait) else 1800.0
@@ -7074,6 +7314,7 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             scoped_session=_has_modern_scope_target(args),
             invocation_cwd_default=has_resolved_caller_placement and not _has_modern_scope_target(args),
             invocation_cwd=invocation_cwd,
+            invocation_home=getattr(args, "invocation_home", None),
             help_command="vibe agent run --help",
         )
         agent = agent_store.require_enabled(agent_name) if agent_name else None
@@ -7575,35 +7816,61 @@ def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
     return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
 
 
-async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
+async def _call_session_owner(turns, call: Callable[[Any], Any], status_code: Callable[[dict], int]) -> dict:
+    """The live Session owner's answer, as ``{status_code, body}`` its HTTP adapter gave.
+
+    Called in the controller rather than through a self HTTP round trip. Shielded,
+    so a dropped request never interrupts an ownership transition the owner has
+    begun; the bound, and its ``InternalServerUnavailable`` reading, are the ones
+    the HTTP client had.
+    """
+    from core.control_requests import LIVE_OWNER_SECONDS
     from vibe import internal_client
 
-    return await internal_client.cancel_dispatch(session_id, run_id=run_id)
+    if turns is None:
+        raise internal_client.InternalServerUnavailable("the live Session owner is unavailable")
+    owner_call = asyncio.ensure_future(call(turns))
+    owner_call.add_done_callback(lambda done: done.cancelled() or done.exception())
+    try:
+        body = await asyncio.wait_for(asyncio.shield(owner_call), LIVE_OWNER_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise internal_client.InternalServerUnavailable("the live Session owner did not answer in time") from exc
+    return {"status_code": status_code(body), "body": body}
 
 
-def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
-    from storage.background import normalize_run_status
+async def _cancel_live_agent_run(store: TaskExecutionStore, run: dict, turns) -> dict:
+    from core.internal_server import cancel_status_code
 
     session_id = _run_session_id(run)
     run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
     try:
-        controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
+        controller_result = await _call_session_owner(
+            turns, lambda owner: owner.cancel(session_id, agent_run_id=run_id), cancel_status_code
+        )
     except internal_client.InternalServerUnavailable as exc:
-        return _record_live_cancel_fallback(
+        return await asyncio.to_thread(
+            _record_live_cancel_fallback,
             store,
             run_id,
             reason_code="internal_unavailable",
             detail=str(exc),
         )
     except Exception as exc:  # noqa: BLE001
-        return _record_live_cancel_fallback(
+        return await asyncio.to_thread(
+            _record_live_cancel_fallback,
             store,
             run_id,
             reason_code="live_cancel_failed",
             detail=str(exc),
         )
+    return await asyncio.to_thread(_settle_live_cancel, store, run_id, controller_result)
+
+
+def _settle_live_cancel(store: TaskExecutionStore, run_id: str, controller_result: dict) -> dict:
+    """Classify the owner's answer and record the durable half, as the Stop it answered."""
+    from storage.background import normalize_run_status
 
     status_code = controller_result.get("status_code")
     try:
@@ -7668,28 +7935,48 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
 
 
 def cmd_runs_cancel(args):
-    store = _task_request_store()
-    existing = store.get_run(args.run_id)
+    return _control_command("runs.cancel", args)
+
+
+def _runs_cancel(args, invocation: _ServiceInvocation):
+    store = invocation.stores.request_store
+    run_id = args.run_id
+
+    def payload(cancel_result: dict) -> dict:
+        run = store.get_run(run_id)
+        return _cli_payload(
+            "agent_run",
+            cancel_requested=True,
+            cancel_code=cancel_result["code"],
+            cancel_result=cancel_result,
+            run=_run_payload(run or {"id": run_id}),
+        )
+
+    existing = store.get_run(run_id)
     if existing is None:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-        return 1
+        raise TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id})
     if _should_attempt_live_run_cancel(existing):
-        cancel_result = _cancel_live_agent_run(store, existing)
-    else:
-        canceled = store.cancel_run(args.run_id)
-        if not canceled:
-            _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-            return 1
-        cancel_result = _initial_cancel_result(existing)
-    run = store.get_run(args.run_id)
-    _print_cli_payload(
-        "agent_run",
-        cancel_requested=True,
-        cancel_code=cancel_result["code"],
-        cancel_result=cancel_result,
-        run=_run_payload(run or {"id": args.run_id}),
-    )
-    return 0
+        turns = invocation.stores.session_turns
+
+        async def cancel_live() -> dict:
+            from core.runtime_work import answer_caught_cancellation, land_step
+
+            async def stop_and_settle() -> dict:
+                cancel_result = await _cancel_live_agent_run(store, existing, turns)
+                return await asyncio.to_thread(payload, cancel_result)
+
+            # Once the owner is asked, this command still owns the durable half --
+            # terminalizing, or recording the fallback -- so a dropped request waits
+            # for that bounded step to land before its cancellation is answered.
+            landed, cancelled = await land_step(stop_and_settle())
+            if cancelled:
+                answer_caught_cancellation(landed)
+            return landed.result()
+
+        return cancel_live
+    if not store.cancel_run(run_id):
+        raise TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id})
+    return payload(_initial_cancel_result(existing))
 
 
 def _format_byte_size(size: int) -> str:
@@ -8159,46 +8446,58 @@ def cmd_session_get(args):
 def cmd_session_send_now(args):
     """Promote a Session's exact FIFO head without adding work."""
 
+    return _control_command("session.send-now", args)
+
+
+def _session_send_now(args, invocation: _ServiceInvocation):
     from core.services import sessions as sessions_service
-    from vibe import internal_client
 
     session_id = None
     try:
         session_id = _resolve_caller_session_id(
             args,
             help_command="vibe session send-now --help",
+            caller_env=invocation.caller_env,
         )
-        engine = _open_session_engine()
-        with engine.connect() as conn:
-            # Promotion is chat work, so it is authorized before the controller
-            # is asked to act — the IPC hop carries no caller identity.
+        with invocation.stores.session_engine.connect() as conn:
+            # Promotion is chat work, so it is authorized before the owner is
+            # asked to act under this request's authority.
             sessions_service.require_session_chat_access(conn, session_id)
-        controller_result = asyncio.run(internal_client.send_now(session_id))
-    except LookupError:
-        _print_task_error(
-            TaskCliError(
-                f"session '{session_id}' not found",
-                code="session_not_found",
-                details={"session_id": session_id},
-            ),
-            help_command="vibe session send-now --help",
-        )
-        return 1
-    except internal_client.InternalServerUnavailable as exc:
-        _print_task_error(
-            TaskCliError(
+    except LookupError as exc:
+        raise _session_not_found(session_id) from exc
+    turns = invocation.stores.session_turns
+
+    async def promote() -> dict:
+        from core.internal_server import send_now_status_code
+        from vibe import internal_client
+
+        try:
+            controller_result = await _call_session_owner(
+                turns, lambda owner: owner.send_now(session_id), send_now_status_code
+            )
+        except LookupError as exc:
+            raise _session_not_found(session_id) from exc
+        except internal_client.InternalServerUnavailable as exc:
+            raise TaskCliError(
                 "the live Session controller is unavailable",
                 code="internal_unavailable",
                 hint="Keep the queued messages intact and retry after the Avibe service is reachable.",
                 details={"session_id": session_id, "detail": str(exc)},
-            ),
-            help_command="vibe session send-now --help",
-        )
-        return 1
-    except Exception as exc:
-        _print_task_error(exc, help_command="vibe session send-now --help")
-        return 1
+            ) from exc
+        return _session_send_now_payload(session_id, controller_result)
 
+    return promote
+
+
+def _session_not_found(session_id: Optional[str]) -> TaskCliError:
+    return TaskCliError(
+        f"session '{session_id}' not found",
+        code="session_not_found",
+        details={"session_id": session_id},
+    )
+
+
+def _session_send_now_payload(session_id: str, controller_result: dict) -> dict:
     raw_status_code = controller_result.get("status_code")
     try:
         status_code = int(raw_status_code)
@@ -8209,28 +8508,22 @@ def cmd_session_send_now(args):
     if not 200 <= status_code < 300 or result.get("ok") is False:
         code = str(result.get("code") or result.get("status") or "send_now_failed")
         detail = str(result.get("detail") or result.get("message") or code)
-        _print_task_error(
-            TaskCliError(
-                detail,
-                code=code,
-                hint="The active turn and durable queue were left intact; retry or let the turn finish normally.",
-                details={
-                    "session_id": session_id,
-                    "controller_status_code": status_code,
-                    "controller_response": result,
-                },
-            ),
-            help_command="vibe session send-now --help",
+        raise TaskCliError(
+            detail,
+            code=code,
+            hint="The active turn and durable queue were left intact; retry or let the turn finish normally.",
+            details={
+                "session_id": session_id,
+                "controller_status_code": status_code,
+                "controller_response": result,
+            },
         )
-        return 1
-
-    _print_cli_payload(
+    return _cli_payload(
         "session_send_now",
         session_id=session_id,
         status=str(result.get("status") or "unknown"),
         result=result,
     )
-    return 0
 
 
 def _queued_agent_run_id(row: dict) -> str | None:
@@ -8329,6 +8622,10 @@ def cmd_session_queue_list(args):
 
 
 def cmd_session_queue_remove(args):
+    return _control_command("session.queue.remove", args)
+
+
+def _session_queue_remove(args, invocation: _ServiceInvocation):
     from core.scheduled_tasks import resolve_session_id_target
     from core.services import sessions as sessions_service
     from storage import message_deliveries
@@ -8340,9 +8637,9 @@ def cmd_session_queue_remove(args):
         session_id = _resolve_caller_session_id(
             args,
             help_command="vibe session queue remove --help",
+            caller_env=invocation.caller_env,
         )
-        engine = _open_session_engine()
-        with run_update_event_transaction(engine) as conn:
+        with run_update_event_transaction(invocation.stores.session_engine) as conn:
             from storage.agent_session_rows import reserve_write_lock
 
             reserve_write_lock(conn)
@@ -8364,37 +8661,37 @@ def cmd_session_queue_remove(args):
                 session_id,
                 message_id,
             )
-    except LookupError:
-        _print_task_error(
-            TaskCliError(
-                f"session '{session_id}' not found",
-                code="session_not_found",
-                details={"session_id": session_id},
-            ),
-            help_command="vibe session queue remove --help",
-        )
-        return 1
-    except Exception as exc:
-        _print_task_error(exc, help_command="vibe session queue remove --help")
-        return 1
+    except LookupError as exc:
+        raise _session_not_found(session_id) from exc
 
-    if removed:
-        _post_session_queue_updated_to_live_ui(session_id)
-    _print_cli_payload(
+    payload = _cli_payload(
         "session_queue_remove",
         session_id=session_id,
         message_id=message_id,
         removed=removed,
         status="removed" if removed else "not_found",
     )
-    return 0
+    if not removed:
+        return payload
+
+    async def notify_live_ui() -> dict:
+        # Best-effort and bounded, off the runtime-work executor, before the answer.
+        await asyncio.to_thread(_post_session_queue_updated_to_live_ui, session_id)
+        return payload
+
+    return notify_live_ui
 
 
 def cmd_session_update(args):
+    return _control_command("session.update", args)
+
+
+def _session_update(args, invocation: _ServiceInvocation):
     from core.services import sessions as sessions_service
     from storage.agent_session_rows import reserve_write_lock
     from storage.workbench_sessions_service import DELIBERATE_TITLE_SOURCES
 
+    session_id = None
     try:
         if_untitled = bool(getattr(args, "if_untitled", False))
         if if_untitled and (
@@ -8435,9 +8732,9 @@ def cmd_session_update(args):
         session_id = _resolve_caller_session_id(
             args,
             help_command="vibe session update --help",
+            caller_env=invocation.caller_env,
         )
-        engine = _open_session_engine()
-        with engine.begin() as conn:
+        with invocation.stores.session_engine.begin() as conn:
             # Hold the write lock from before the read, so a rename committed by the
             # Web UI cannot land between the --if-untitled check and this write.
             reserve_write_lock(conn)
@@ -8451,33 +8748,28 @@ def cmd_session_update(args):
                 if updated
                 else previous_session
             )
-    except LookupError:
-        _print_task_error(
-            TaskCliError(
-                f"session '{session_id}' not found",
-                code="session_not_found",
-                details={"session_id": session_id},
-            ),
-            help_command="vibe session update --help",
-        )
-        return 1
-    except Exception as exc:
-        _print_task_error(exc, help_command="vibe session update --help")
-        return 1
-    # The DB write is committed above; ping a running UI so the rename shows live
-    # (best-effort — never affects this command's result).
-    if updated:
-        _post_session_activity_to_live_ui(
-            session_id,
-            previous_scope_id=previous_session.get("scope_id"),
-            previous_visibility=previous_session.get("visibility"),
-        )
-    _print_cli_payload(
+    except LookupError as exc:
+        raise _session_not_found(session_id) from exc
+    response = _cli_payload(
         "agent_session",
         updated=updated,
         session=_session_row(payload, brief=False),
     )
-    return 0
+    if not updated:
+        return response
+
+    async def notify_live_ui() -> dict:
+        # The DB write is committed above; ping a running UI so the rename shows
+        # live (best-effort, bounded, off the executor; never affects the result).
+        await asyncio.to_thread(
+            _post_session_activity_to_live_ui,
+            session_id,
+            previous_scope_id=previous_session.get("scope_id"),
+            previous_visibility=previous_session.get("visibility"),
+        )
+        return response
+
+    return notify_live_ui
 
 
 # ----- vault: secret management (design: docs/plans/vaults.md) -----
@@ -11651,9 +11943,16 @@ def cmd_vault_key_import(args):
 
 
 def cmd_watch_add(args):
+    return _control_command("watch.add", args)
+
+
+def _watch_add(args, invocation: _ServiceInvocation):
+    """Create the Watch, then hand back its startup confirmation to await."""
+
+    stores = invocation.stores
     reserved_session_id: Optional[str] = None
     try:
-        caller_context = caller_context_from_env()
+        caller_context = caller_context_from_env(invocation.caller_env)
         caller_user_context = caller_resource_user_context(caller_context)
         # The defaulted target is the definition's ``session_id``; no notice repeats it.
         _apply_caller_session_default(args, caller_context)
@@ -11683,13 +11982,20 @@ def cmd_watch_add(args):
             session_id=session_id,
             session_key=session_key or scope_key or "",
             help_command="vibe watch add --help",
+            agent_store=stores.agent_store,
         )
         agent = agent_resolution.agent
         agent_name = agent.name if agent else None
         expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
             agent_resolution
         )
-        cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
+        cwd = _resolve_watch_cwd(
+            args.cwd,
+            help_command="vibe watch add --help",
+            default_to_invocation=True,
+            invocation_cwd=invocation.cwd,
+            invocation_home=invocation.home,
+        )
         session_workdir = (
             _resolve_definition_session_cwd(
                 explicit_cwd=getattr(args, "cwd", None),
@@ -11697,6 +12003,8 @@ def cmd_watch_add(args):
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args),
                 help_command="vibe watch add --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
             if session_policy != "existing"
             else None
@@ -11718,6 +12026,7 @@ def cmd_watch_add(args):
                 help_command="vibe watch add --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
                 expected_reference_agent_id=expected_reference_agent_id,
+                agent_store=stores.agent_store,
             )
             reserved_session_id = session_id
         session_target, delivery_target = _validate_definition_delivery_target(
@@ -11744,7 +12053,7 @@ def cmd_watch_add(args):
         )
 
         retry_exit_codes = sorted(set(args.retry_exit_code or [DEFAULT_RETRY_EXIT_CODE]))
-        store = _watch_store()
+        store = stores.watch_store
         watch = store.add_watch(
             name=_normalize_watch_name(getattr(args, "name", None)),
             session_key=session_key,
@@ -11769,20 +12078,31 @@ def cmd_watch_add(args):
             user_context=caller_user_context,
         )
         reserved_session_id = None
-        runtime_store = _watch_runtime_store()
-        watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
-        warnings = _collect_target_warnings(session_target, delivery_target)
-        watch_payload = _watch_mutation_payload(watch, runtime_entry)
-        _print_definition_payload(watch_payload, warnings=warnings)
-        return 0
-    except Exception as exc:
+    except Exception:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch creation failed before its Session reservation was adopted",
             )
-        _print_task_error(exc, help_command="vibe watch add --help")
-        return 1
+        raise
+    runtime_store = stores.watch_runtime_store
+    # Lent here, in the worker: opening the reader is SQLite work the loop must not do.
+    reader = stores.definition_reader
+
+    async def confirm_startup() -> dict:
+        # The Watch exists from here on: a failed or unconfirmed startup is a
+        # completed command reporting an error, never an unexecuted one. The wait
+        # keeps its whole computed bound, however many waiters are recovering.
+        started, runtime_entry = await _wait_for_watch_startup(store, runtime_store, watch.id, reader=reader)
+
+        def payload() -> dict:
+            warnings = _collect_target_warnings(session_target, delivery_target)
+            watch_payload = _watch_mutation_payload(started, runtime_entry, reader)
+            return _definition_payload(watch_payload, warnings=warnings)
+
+        return await asyncio.to_thread(payload)
+
+    return confirm_startup
 
 
 def cmd_watch_list(
@@ -11825,53 +12145,54 @@ def cmd_watch_show(watch_id: str, *, brief: bool = False):
 
 
 def cmd_watch_set_enabled(watch_id: str, enabled: bool):
+    return _control_command("watch.resume" if enabled else "watch.pause", argparse.Namespace(watch_id=watch_id))
+
+
+def _watch_set_enabled(watch_id: str, enabled: bool, invocation: _ServiceInvocation) -> dict:
     from storage.background import DefinitionWriteConflict, JobWatchResumeRefused
 
-    store = _watch_store()
+    stores = invocation.stores
+    store = stores.watch_store
     watch = store.get_watch(watch_id)
     if watch is None:
         action = "resume" if enabled else "pause"
-        _print_task_error(_missing_definition_error("watch", watch_id, action=action))
-        return 1
+        raise _missing_definition_error("watch", watch_id, action=action, reader=stores.definition_reader)
     try:
         updated = store.set_enabled(watch_id, enabled)
     except JobWatchResumeRefused as exc:
-        _print_task_error(
-            TaskCliError(
-                i18n_t("error.jobWatchResumeRefused.message"),
-                code=exc.code,
-                hint=i18n_t("error.jobWatchResumeRefused.hint", id=watch_id),
-                help_command=f"vibe watch remove {watch_id}",
-                details={"watch_id": watch_id},
-            )
-        )
-        return 1
+        raise TaskCliError(
+            i18n_t("error.jobWatchResumeRefused.message"),
+            code=exc.code,
+            hint=i18n_t("error.jobWatchResumeRefused.hint", id=watch_id),
+            help_command=f"vibe watch remove {watch_id}",
+            details={"watch_id": watch_id},
+        ) from exc
     except DefinitionWriteConflict as exc:
-        _print_task_error(
-            _definition_conflict_cli_error(
-                exc,
-                help_command="vibe watch list",
-                details={"watch_id": watch_id},
-            )
-        )
-        return 1
-    runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
-    watch_payload = _watch_mutation_payload(updated, runtime_entry)
-    _print_definition_payload(watch_payload)
-    return 0
+        raise _definition_conflict_cli_error(
+            exc,
+            help_command="vibe watch list",
+            details={"watch_id": watch_id},
+        ) from exc
+    runtime_entry = stores.watch_runtime_store.load().get("watches", {}).get(updated.id)
+    return _definition_payload(_watch_mutation_payload(updated, runtime_entry, stores.definition_reader))
 
 
 def cmd_watch_update(args):
+    return _control_command("watch.update", args)
+
+
+def _watch_update(args, invocation: _ServiceInvocation) -> dict:
     from core.scheduled_tasks import BINDING_FOLLOWS_SESSION_METADATA_KEY
     from core.watches import JobWatchUpdateRefused
     from storage.background import DefinitionWriteConflict
 
+    stores = invocation.stores
     reserved_session_id: Optional[str] = None
     try:
-        store = _watch_store()
+        store = stores.watch_store
         watch = store.get_watch(args.watch_id)
         if watch is None:
-            raise _missing_definition_error("watch", args.watch_id, action="update")
+            raise _missing_definition_error("watch", args.watch_id, action="update", reader=stores.definition_reader)
 
         if getattr(args, "reset_delivery", False) and (
             getattr(args, "scope_id", None) is not None
@@ -11883,7 +12204,7 @@ def cmd_watch_update(args):
                 hint="Pass --reset-delivery to clear delivery overrides, or pass --scope-id/--same-scope to replace placement.",
                 help_command="vibe watch update --help",
             )
-        caller_context = caller_context_from_env()
+        caller_context = caller_context_from_env(invocation.caller_env)
         caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
@@ -11978,7 +12299,7 @@ def cmd_watch_update(args):
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
-            agent_name = _validate_agent_name_arg(args.agent)
+            agent_name = _validate_agent_name_arg(args.agent, agent_store=stores.agent_store)
         else:
             agent_name = watch.agent_name
 
@@ -11995,7 +12316,12 @@ def cmd_watch_update(args):
             None
             if getattr(args, "clear_cwd", False)
             else (
-                _resolve_watch_cwd(getattr(args, "cwd", None), help_command="vibe watch update --help")
+                _resolve_watch_cwd(
+                    getattr(args, "cwd", None),
+                    help_command="vibe watch update --help",
+                    invocation_cwd=invocation.cwd,
+                    invocation_home=invocation.home,
+                )
                 if getattr(args, "cwd", None) is not None
                 else watch.cwd
             )
@@ -12055,6 +12381,8 @@ def cmd_watch_update(args):
                 session_policy=session_policy,
                 scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
                 help_command="vibe watch update --help",
+                invocation_cwd=invocation.cwd,
+                invocation_home=invocation.home,
             )
             if creates_future_session
             else None
@@ -12085,6 +12413,7 @@ def cmd_watch_update(args):
                 session_id=None,
                 session_key=scope_key,
                 help_command="vibe watch update --help",
+                agent_store=stores.agent_store,
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
@@ -12095,6 +12424,7 @@ def cmd_watch_update(args):
                 session_key=session_key,
                 help_command="vibe watch update --help",
                 existing_agent_reference=not explicit_agent_requested,
+                agent_store=stores.agent_store,
             )
             agent = agent_resolution.agent
             agent_name = agent.name if agent else None
@@ -12125,6 +12455,7 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
                 require_enabled_agent=expected_enabled_agent_id is not None,
                 expected_reference_agent_id=expected_reference_agent_id,
+                agent_store=stores.agent_store,
             )
             reserved_session_id = session_id
             session_key = ""
@@ -12199,59 +12530,52 @@ def cmd_watch_update(args):
             user_context=caller_user_context,
         )
         reserved_session_id = None
-        runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
+        runtime_entry = stores.watch_runtime_store.load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
-        watch_payload = _watch_mutation_payload(updated, runtime_entry)
-        _print_definition_payload(watch_payload, warnings=warnings)
-        return 0
+        watch_payload = _watch_mutation_payload(updated, runtime_entry, stores.definition_reader)
+        return _definition_payload(watch_payload, warnings=warnings)
     except JobWatchUpdateRefused as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch update failed before its Session reservation was adopted",
             )
-        _print_task_error(
-            TaskCliError(
-                "This Watch waits on a command that is already running, so only its name, message, and lifetime can be changed.",
-                code=exc.code,
-                hint=f"Its Session, Agent, delivery, and command were fixed when the command was handed over. Change the name, message, or lifetime with `vibe watch update {exc.watch_id}`.",
-                help_command="vibe watch update --help",
-                details={"watch_id": exc.watch_id},
-            )
-        )
-        return 1
+        raise TaskCliError(
+            "This Watch waits on a command that is already running, so only its name, message, and lifetime can be changed.",
+            code=exc.code,
+            hint=f"Its Session, Agent, delivery, and command were fixed when the command was handed over. Change the name, message, or lifetime with `vibe watch update {exc.watch_id}`.",
+            help_command="vibe watch update --help",
+            details={"watch_id": exc.watch_id},
+        ) from exc
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch update failed before its Session reservation was adopted",
             )
-        _print_task_error(
-            _definition_conflict_cli_error(
-                exc,
-                help_command="vibe watch update --help",
-                details={"watch_id": getattr(args, "watch_id", exc.definition_id)},
-            )
-        )
-        return 1
-    except Exception as exc:
+        raise _definition_conflict_cli_error(
+            exc,
+            help_command="vibe watch update --help",
+            details={"watch_id": getattr(args, "watch_id", exc.definition_id)},
+        ) from exc
+    except Exception:
         if reserved_session_id:
             _release_cli_session_reservation(
                 reserved_session_id,
                 reason="watch update failed before its Session reservation was adopted",
             )
-        _print_task_error(exc, help_command="vibe watch update --help")
-        return 1
+        raise
 
 
 def cmd_watch_remove(watch_id: str):
-    store = _watch_store()
-    removed = store.remove_watch(watch_id)
-    if not removed:
-        _print_task_error(_missing_definition_error("watch", watch_id, action="remove"))
-        return 1
-    _print_cli_payload("run_definition", removed_id=watch_id)
-    return 0
+    return _control_command("watch.remove", argparse.Namespace(watch_id=watch_id))
+
+
+def _watch_remove(watch_id: str, invocation: _ServiceInvocation) -> dict:
+    stores = invocation.stores
+    if not stores.watch_store.remove_watch(watch_id):
+        raise _missing_definition_error("watch", watch_id, action="remove", reader=stores.definition_reader)
+    return _cli_payload("run_definition", removed_id=watch_id)
 
 
 def _add_dependency_download_failure(
@@ -20076,6 +20400,28 @@ def _require_internal_activation_admission(command: str) -> None:
         sys.exit(1)
 
 
+#: Each named mutation's existing semantics, run by the warm service for one
+#: invocation. A result is the payload, or a coroutine function to await when the
+#: command must still wait on other work; failures raise the command's error.
+_SERVICE_COMMANDS: dict[str, Callable[[Any, _ServiceInvocation], Any]] = {
+    "task.add": _task_add,
+    "task.update": _task_update,
+    "task.pause": lambda args, invocation: _task_set_enabled(args.task_id, False, invocation),
+    "task.resume": lambda args, invocation: _task_set_enabled(args.task_id, True, invocation),
+    "task.remove": lambda args, invocation: _task_remove(args.task_id, invocation),
+    "task.run": lambda args, invocation: _task_run(args.task_id, invocation),
+    "watch.add": _watch_add,
+    "watch.update": _watch_update,
+    "watch.pause": lambda args, invocation: _watch_set_enabled(args.watch_id, False, invocation),
+    "watch.resume": lambda args, invocation: _watch_set_enabled(args.watch_id, True, invocation),
+    "watch.remove": lambda args, invocation: _watch_remove(args.watch_id, invocation),
+    "session.update": _session_update,
+    "session.send-now": _session_send_now,
+    "session.queue.remove": _session_queue_remove,
+    "runs.cancel": _runs_cancel,
+}
+
+
 def main():
     """Parse static public arguments before loading the executing command's authority.
 
@@ -20094,10 +20440,12 @@ def main():
             sys.exit(cmd_version(args))
         if args.command == "show" and args.show_command is None:
             sys.exit(cmd_show(args))
-        if args.command == "agent" and args.agent_command == "run":
-            # The service resolves and checks this invocation's authority. Doing
+        from core.control_requests import OPERATIONS
+
+        if _dispatch_path(parser, args)[0] in OPERATIONS.values():
+            # The service resolves and checks a named mutation's authority. Doing
             # it here would open SQLite in every otherwise thin CLI process.
-            sys.exit(cmd_agent_run(args))
+            _dispatch_parsed_command(parser, args)
 
     from vibe.authorization import invocation_authority
 

@@ -1214,10 +1214,15 @@ jobs:
           if (-not $wheel) {
             throw "Missing wheel artifact"
           }
-          python -m pip install $wheel pytest
+          python -m pip install $wheel pytest pytest-asyncio
 
       - name: Verify Windows Controller control IPC
         run: python -m pytest tests/test_control_ipc.py -q
+
+      # Task, Watch, Session and Run changes are applied by the service from the
+      # caller's own cwd and inputs, over the Windows descriptor endpoint.
+      - name: Verify CLI mutations over Windows control IPC
+        run: python -m pytest tests/test_cli_mutation_control_requests.py -q -ra
 
       # Windows reports 0o777/0o666 whatever the access rules are, so the Model
       # Hub's engine state and takeover journal are owner-private only through

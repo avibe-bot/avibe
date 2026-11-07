@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import core.scheduled_tasks as scheduled_tasks
 import core.vibe_agents as vibe_agents
 import core.watches as watches
@@ -24,6 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import watches
 from core.watches import ManagedWatchStore, WatchRuntimeStateStore
 from vibe import cli
+from tests.cli_control_support import lent
+
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 
 
 def _configured_v2(platforms: set[str]):
@@ -130,8 +134,8 @@ def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys)
         args = _parse_watch_update([watch.id, "--name", "Renamed watch"])
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-            patch("vibe.cli._watch_store", return_value=store),
-            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch.object(lent, "watch_store", store),
+            patch.object(lent, "watch_runtime_store", runtime_store),
             patch(
                 "vibe.cli._agent_store",
                 side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
@@ -145,8 +149,8 @@ def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys)
         explicit = _parse_watch_update([watch.id, "--agent", archived.archived_name])
         with (
             patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-            patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
-            patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+            patch.object(lent, "watch_store", ManagedWatchStore()),
+            patch.object(lent, "watch_runtime_store", runtime_store),
             patch(
                 "vibe.cli._agent_store",
                 side_effect=lambda: vibe_agents.VibeAgentStore(db_path),
@@ -221,8 +225,8 @@ def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch(
             "vibe.cli._wait_for_watch_startup",
             side_effect=lambda *values, **kwargs: _startup_ok(
@@ -312,8 +316,8 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch.object(store, "add_watch", side_effect=add_watch),
         patch(
             "vibe.cli._wait_for_watch_startup",
@@ -360,12 +364,14 @@ def test_watch_add_releases_create_once_session_when_definition_write_fails(
         patch("vibe.cli._resolve_definition_session_cwd", return_value=str(tmp_path)),
         patch("vibe.cli._reserve_definition_session", return_value="ses-reserved-watch"),
         patch("vibe.cli._validate_definition_delivery_target", return_value=(None, None)),
-        patch(
-            "vibe.cli._watch_store",
-            return_value=SimpleNamespace(
+        patch.object(
+            lent,
+            "watch_store",
+            SimpleNamespace(
+                maybe_reload=lambda: False,
                 add_watch=lambda **_kwargs: (_ for _ in ()).throw(
                     ValueError("agent 'pm' was archived before the write")
-                )
+                ),
             ),
         ),
         patch(
@@ -404,8 +410,8 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -425,7 +431,34 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
     tmp_path: Path,
     capsys,
 ) -> None:
-    session_id = _create_bare_agent_session(workdir=tmp_path)
+    from storage import project_access_service, projects_service
+    from storage.importer import ensure_sqlite_state
+    from storage.workbench_sessions_service import create_session
+    from tests.scenarios.permissions.test_cli_invocation_authority import _pair_instance, _snapshot
+
+    # Admitted as every command is: a real pairing, and a target Session in a
+    # Project this Editor may chat in.
+    _pair_instance()
+    ensure_sqlite_state()
+    engine = storage.db.create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            project = projects_service.create_project(conn, str(tmp_path), display_name="Editor project")
+            project_access_service.apply_project_access_intent(
+                conn,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "organization_id": "org-1",
+                    "bindings": [
+                        {"principal_kind": "email", "principal_value": "editor@example.com", "access_role": "editor"}
+                    ],
+                },
+            )
+            session_id = create_session(conn, scope_id=project["scope_id"], agent_backend="codex")["id"]
+    finally:
+        engine.dispose()
     store_path = tmp_path / "watches.json"
     runtime_path = tmp_path / "watch_runtime.json"
     store = ManagedWatchStore(store_path)
@@ -445,16 +478,7 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
         "AVIBE_CALLER_BACKEND": "opencode",
         "AVIBE_NATIVE_SESSION_ID": "native-opencode-1",
         "AVIBE_CALLER_REMOTE": "1",
-        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(
-            {
-                "sub": "remote-editor",
-                "vibe_instance_role": "editor",
-                "vibe_instance_access_source": "email",
-                "vibe_group_ids": [],
-                "claims_issued_at": 1_900_000_000,
-                "authorization_expires_at": 1_900_043_200,
-            }
-        ),
+        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(_snapshot("editor")),
         "AVIBE_CALLER_PLATFORM": "",
         "AVIBE_CALLER_USER_ID": "",
         "AVIBE_CALLER_CHANNEL_ID": "",
@@ -472,8 +496,8 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
     with (
         patch.dict(os.environ, caller_env, clear=False),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=successful_startup),
     ):
         result = cli.cmd_watch_add(args)
@@ -538,8 +562,8 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -573,8 +597,8 @@ def test_watch_add_create_per_run_without_scope_records_standalone_definition(tm
     with (
         patch.dict(os.environ, {"AVIBE_SESSION_ID": ""}, clear=False),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch(
             "vibe.cli._wait_for_watch_startup",
             side_effect=lambda *items, **kwargs: _startup_ok(store, runtime_store, items[2]),
@@ -641,8 +665,8 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -694,8 +718,8 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -725,8 +749,8 @@ def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -764,8 +788,8 @@ def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -806,8 +830,8 @@ def test_watch_add_timeout_round_trips_through_persisted_read(
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch(
             "vibe.cli._wait_for_watch_startup",
             side_effect=lambda *args, **kwargs: _startup_ok(
@@ -852,8 +876,8 @@ def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: py
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
     ):
         result = cli.cmd_watch_add(args)
@@ -878,8 +902,8 @@ def test_watch_add_returns_structured_error_when_startup_fails(tmp_path: Path) -
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch(
             "vibe.cli._wait_for_watch_startup",
             side_effect=cli.TaskCliError(
@@ -933,13 +957,15 @@ def test_wait_for_watch_startup_accepts_stably_running_watch(tmp_path: Path) -> 
         }
     )
 
-    resolved_watch, runtime_entry = cli._wait_for_watch_startup(
-        store,
-        runtime_store,
-        watch.id,
-        timeout_seconds=0.2,
-        poll_interval_seconds=0.01,
-        stable_running_seconds=1.5,
+    resolved_watch, runtime_entry = asyncio.run(
+        cli._wait_for_watch_startup(
+            store,
+            runtime_store,
+            watch.id,
+            timeout_seconds=0.2,
+            poll_interval_seconds=0.01,
+            stable_running_seconds=1.5,
+        )
     )
 
     assert resolved_watch.id == watch.id
@@ -1012,9 +1038,7 @@ def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tm
         }
     )
 
-    monotonic_values = iter([0.0, 0.05, 0.1, 0.15, 0.2])
-
-    def _fail_watch(_seconds: float) -> None:
+    async def _fail_watch(_seconds: float) -> None:
         failed = store.get_watch(watch.id)
         assert failed is not None
         failed.enabled = False
@@ -1023,18 +1047,17 @@ def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tm
         store.upsert_watch(failed)
         runtime_store.write({"watches": {}})
 
-    with (
-        patch("vibe.cli.time.monotonic", side_effect=lambda: next(monotonic_values)),
-        patch("vibe.cli.time.sleep", side_effect=_fail_watch),
-    ):
+    with patch("vibe.cli.asyncio.sleep", new=_fail_watch):
         with pytest.raises(cli.TaskCliError) as exc:
-            cli._wait_for_watch_startup(
-                store,
-                runtime_store,
-                watch.id,
-                timeout_seconds=0.2,
-                poll_interval_seconds=0.01,
-                stable_running_seconds=1.5,
+            asyncio.run(
+                cli._wait_for_watch_startup(
+                    store,
+                    runtime_store,
+                    watch.id,
+                    timeout_seconds=5,
+                    poll_interval_seconds=0.01,
+                    stable_running_seconds=1.5,
+                )
             )
 
     assert exc.value.code == "watch_startup_failed"
@@ -1085,8 +1108,8 @@ def test_watch_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> 
     )
 
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
@@ -1121,8 +1144,8 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
     store.mark_cycle_result(failed_forever.id, exit_code=1, error="failed", disable=True)
 
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
@@ -1145,8 +1168,8 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
     store.set_enabled(watch.id, False)
 
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         assert cli.cmd_watch_list(scope=cli.SessionListScope()) == 0
 
@@ -1168,8 +1191,8 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         assert cli.cmd_watch_update(args) == 0
 
@@ -1184,8 +1207,8 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
 
     capsys.readouterr()
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         assert cli.cmd_watch_list(scope=cli.SessionListScope()) == 0
 
@@ -1201,8 +1224,8 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         _add_test_watch(store, name=f"Watch {index:02d}")
 
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
@@ -1232,8 +1255,8 @@ def test_watch_list_cli_dispatches_pagination_flags(
 
     monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--global", "--limit", "2"])
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         pytest.raises(SystemExit) as exc,
     ):
         cli.main()
@@ -1252,8 +1275,8 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
         store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
 
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_list(
             scope=cli.SessionListScope(),
@@ -1331,8 +1354,8 @@ def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> N
     )
 
     with (
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         assert cli.cmd_watch_set_enabled(watch.id, False) == 0
         paused = json.loads(capsys.readouterr().out)
@@ -1393,8 +1416,8 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_update(args)
 
@@ -1435,8 +1458,8 @@ def test_watch_update_accepts_zero_timeout(tmp_path: Path, capsys) -> None:
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_update(args)
 
@@ -1477,8 +1500,8 @@ def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path:
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_update(args)
 
@@ -1512,8 +1535,8 @@ def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_update(args)
 
@@ -1544,7 +1567,7 @@ def test_watch_update_no_changes_returns_structured_error(tmp_path: Path) -> Non
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
+        patch.object(lent, "watch_store", store),
     ):
         result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
 
@@ -1574,7 +1597,7 @@ def test_watch_update_rejects_scope_without_session_creation(tmp_path: Path) -> 
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
-        patch("vibe.cli._watch_store", return_value=store),
+        patch.object(lent, "watch_store", store),
     ):
         result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
 
@@ -1656,7 +1679,7 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
+        patch.object(lent, "watch_store", store),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
     ):
         result = cli.cmd_watch_update(args)
@@ -1734,8 +1757,8 @@ def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) ->
                 patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
                 patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
                 patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-                patch("vibe.cli._watch_store", return_value=store),
-                patch("vibe.cli._watch_runtime_store", return_value=WatchRuntimeStateStore(tmp_path / "watch_runtime.json")),
+                patch.object(lent, "watch_store", store),
+                patch.object(lent, "watch_runtime_store", WatchRuntimeStateStore(tmp_path / "watch_runtime.json")),
                 patch("vibe.cli._agent_store", return_value=cli_agent_store),
                 redirect_stderr(stderr),
             ):
@@ -1856,8 +1879,8 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
     with (
         redirect_stderr(stderr),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
     ):
         result = cli.cmd_watch_update(args)
 
@@ -2021,8 +2044,8 @@ def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=_spy_startup),
     ):
         result, stderr_text = _capture_stderr_text(cli.cmd_watch_add, args)
@@ -2075,8 +2098,8 @@ def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch.object(lent, "watch_store", store),
+        patch.object(lent, "watch_runtime_store", runtime_store),
         patch("vibe.cli._wait_for_watch_startup", side_effect=_spy_startup),
     ):
         assert cli.cmd_watch_add(ok_args) == 0

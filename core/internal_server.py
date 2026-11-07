@@ -273,7 +273,14 @@ def create_app(
     async def _control_request(request: Request) -> Any:
         from core.handlers.cli_requests import handle_control_request
 
-        return await handle_control_request(controller, await _safe_json(request), run_sync=_run_store_step)
+        # A request or answer can carry a whole message: both codecs run off the
+        # loop. The answer is encoded as the CLI prints it -- non-finite numbers
+        # included -- for this private Python client, not normalized by FastAPI.
+        body = await request.body()
+        payload = await asyncio.to_thread(_json_object, body)
+        response = await handle_control_request(controller, payload, run_sync=_run_store_step)
+        content = await asyncio.to_thread(_json_bytes, response)
+        return Response(content=content, media_type="application/json")
 
     async def _off_loop(operation: Callable[[], Any]) -> tuple["asyncio.Future[Any]", bool]:
         """Run one scheduled-turn store step on the runtime-work executor, the door the
@@ -1905,14 +1912,8 @@ def create_app(
         409. ``session_id`` is the dispatch key the turn registered under, so the UI
         Stop button works with just the URL it already has."""
         result = await manager.cancel(session_id, agent_run_id=run_id)
-        code = result.get("code")
-        if code == "not_in_flight":
-            return JSONResponse(status_code=404, content=result)
-        if code == "invalid_run_id":
-            return JSONResponse(status_code=400, content=result)
-        if code in {"stop_failed", "stop_unknown"}:
-            return JSONResponse(status_code=409, content=result)
-        return result
+        status_code = cancel_status_code(result)
+        return result if status_code == 200 else JSONResponse(status_code=status_code, content=result)
 
     @app.post("/internal/send-now/{session_id}")
     async def _send_now(
@@ -1925,12 +1926,8 @@ def create_app(
             session_id,
             expected_delivery_id=expected_delivery_id,
         )
-        code = result.get("code")
-        if code in {"stop_failed", "stale_head", "ordering_fence"}:
-            return JSONResponse(status_code=409, content=result)
-        if code == "flush_failed":
-            return JSONResponse(status_code=503, content=result)
-        return result
+        status_code = send_now_status_code(result)
+        return result if status_code == 200 else JSONResponse(status_code=status_code, content=result)
 
     # Expose the per-session turn gate to in-process callers (the scheduler)
     # WITHOUT going through the HTTP surface: ``ScheduledTaskService`` runs on the
@@ -1945,6 +1942,28 @@ def create_app(
     )
 
     return app
+
+
+def cancel_status_code(result: dict) -> int:
+    """The status Stop's answer is reported with, over HTTP or the CLI control channel."""
+    code = result.get("code")
+    if code == "not_in_flight":
+        return 404
+    if code == "invalid_run_id":
+        return 400
+    if code in {"stop_failed", "stop_unknown"}:
+        return 409
+    return 200
+
+
+def send_now_status_code(result: dict) -> int:
+    """The status send-now's answer is reported with; typed failures stay failures."""
+    code = result.get("code")
+    if code in {"stop_failed", "stale_head", "ordering_fence"}:
+        return 409
+    if code == "flush_failed":
+        return 503
+    return 200
 
 
 async def serve(
@@ -2102,6 +2121,23 @@ def note_stopped() -> None:
 
 
 # --- Internals --------------------------------------------------------
+
+
+def _json_bytes(value: Any) -> bytes:
+    try:
+        return json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        # Match the CLI's escape fallback for undecodable filesystem/argv bytes.
+        # A typed error containing a surrogate must still reach its caller.
+        return json.dumps(value).encode("utf-8")
+
+
+def _json_object(body: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def _safe_json(request: Request) -> dict[str, Any]:

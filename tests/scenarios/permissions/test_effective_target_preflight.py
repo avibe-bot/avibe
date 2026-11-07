@@ -210,14 +210,10 @@ def run_cli(monkeypatch, capsys):
     # No waiter process runs in a hermetic test, so startup would never be
     # confirmed. Observe the definition the command actually stored instead of
     # waiting for it: the write still has to have happened for this to answer.
-    monkeypatch.setattr(
-        cli,
-        "_wait_for_watch_startup",
-        lambda store, runtime_store, watch_id, **kwargs: (
-            store.get_watch(watch_id),
-            runtime_store.load().get("watches", {}).get(watch_id),
-        ),
-    )
+    async def stored_watch(store, runtime_store, watch_id, **kwargs):
+        return store.get_watch(watch_id), runtime_store.load().get("watches", {}).get(watch_id)
+
+    monkeypatch.setattr(cli, "_wait_for_watch_startup", stored_watch)
 
     def run(argv, *, role="editor", kind="organization", caller_session=None):
         for name in CALLER_CONTEXT_ENV_NAMES:

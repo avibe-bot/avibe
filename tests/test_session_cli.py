@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,9 @@ from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages
 from storage.settings_service import upsert_scope
 from vibe import cli
+from tests.cli_control_support import lent
+
+pytestmark = pytest.mark.usefixtures("in_process_cli_control")
 
 
 def _setup(monkeypatch, tmp_path):
@@ -219,8 +223,6 @@ def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
     tmp_path,
     capsys,
 ):
-    from vibe import internal_client
-
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa")
     called: list[str] = []
@@ -228,15 +230,12 @@ def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
     async def _send_now(session_id):
         called.append(session_id)
         return {
-            "status_code": 200,
-            "body": {
-                "ok": True,
-                "session_id": session_id,
-                "status": "flushed",
-            },
+            "ok": True,
+            "session_id": session_id,
+            "status": "flushed",
         }
 
-    monkeypatch.setattr(internal_client, "send_now", _send_now)
+    monkeypatch.setattr(lent, "session_turns", SimpleNamespace(send_now=_send_now))
 
     code, payload = _run(
         cli.cmd_session_send_now,
@@ -261,23 +260,18 @@ def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
 
 
 def test_send_now_surfaces_a_typed_steer_refusal(monkeypatch, tmp_path, capsys):
-    from vibe import internal_client
-
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa")
 
     async def _send_now(session_id):
         return {
-            "status_code": 409,
-            "body": {
-                "ok": False,
-                "session_id": session_id,
-                "code": "send_now_refused",
-                "detail": "backend refused steering",
-            },
+            "ok": False,
+            "session_id": session_id,
+            "code": "stop_failed",
+            "detail": "backend refused steering",
         }
 
-    monkeypatch.setattr(internal_client, "send_now", _send_now)
+    monkeypatch.setattr(lent, "session_turns", SimpleNamespace(send_now=_send_now))
 
     code, payload = _run(
         cli.cmd_session_send_now,
@@ -286,29 +280,24 @@ def test_send_now_surfaces_a_typed_steer_refusal(monkeypatch, tmp_path, capsys):
     )
 
     assert code == 1
-    assert payload["code"] == "send_now_refused"
+    assert payload["code"] == "stop_failed"
     assert payload["error"] == "backend refused steering"
     assert payload["details"]["session_id"] == "sesaaa"
     assert payload["details"]["controller_status_code"] == 409
 
 
 def test_send_now_surfaces_an_idle_flush_failure(monkeypatch, tmp_path, capsys):
-    from vibe import internal_client
-
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa")
 
     async def _send_now(session_id):
         return {
-            "status_code": 503,
-            "body": {
-                "ok": False,
-                "session_id": session_id,
-                "code": "flush_failed",
-            },
+            "ok": False,
+            "session_id": session_id,
+            "code": "flush_failed",
         }
 
-    monkeypatch.setattr(internal_client, "send_now", _send_now)
+    monkeypatch.setattr(lent, "session_turns", SimpleNamespace(send_now=_send_now))
 
     code, payload = _run(
         cli.cmd_session_send_now,
@@ -327,15 +316,13 @@ def test_send_now_rejects_an_archived_session_before_controller_call(
     tmp_path,
     capsys,
 ):
-    from vibe import internal_client
-
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesarch", status="archived")
 
     async def _send_now(_session_id):
-        raise AssertionError("archived Session must not reach the live controller")
+        raise AssertionError("archived Session must not reach the live Session owner")
 
-    monkeypatch.setattr(internal_client, "send_now", _send_now)
+    monkeypatch.setattr(lent, "session_turns", SimpleNamespace(send_now=_send_now))
 
     code, payload = _run(
         cli.cmd_session_send_now,
@@ -352,22 +339,17 @@ def test_send_now_accepts_im_while_queue_management_remains_workbench_only(
     tmp_path,
     capsys,
 ):
-    from vibe import internal_client
-
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesim", platform="slack", native="C123")
 
     async def _send_now(session_id):
         return {
-            "status_code": 200,
-            "body": {
-                "ok": True,
-                "session_id": session_id,
-                "status": "accepted",
-            },
+            "ok": True,
+            "session_id": session_id,
+            "status": "accepted",
         }
 
-    monkeypatch.setattr(internal_client, "send_now", _send_now)
+    monkeypatch.setattr(lent, "session_turns", SimpleNamespace(send_now=_send_now))
 
     send_code, send_payload = _run(
         cli.cmd_session_send_now,

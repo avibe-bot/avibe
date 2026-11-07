@@ -564,6 +564,7 @@ def test_cli_writes_literal_routes_for_a_pull_request_and_full_for_its_push(
 @pytest.mark.parametrize(("path", "selected"), [
     ("core/managed_skills.py", True),
     ("tests/test_managed_skills.py", True),
+    ("core/handlers/cli_requests.py", True),
     ("core/controller.py", False),
     ("tests/test_control_ipc.py", False),
 ])

@@ -24,6 +24,7 @@ from modules.agents.catalog import AGENT_BACKENDS
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.scheduled_tasks as scheduled_tasks
+from tests.cli_control_support import lent
 from core import command_runner
 from config import paths
 from config.v2_settings import make_thread_native_id
@@ -14428,6 +14429,7 @@ _REBOUND_AGENT_SYSTEM_PROMPT = "You are the rebound session's Agent. Answer ters
 _SUCCESSOR_AGENT_SYSTEM_PROMPT = "You are the NEW scope default. Answer at length."
 
 
+@pytest.mark.usefixtures("in_process_cli_control")
 def test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -14540,7 +14542,7 @@ def test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority(
         try:
             with (
                 patch("vibe.cli._ensure_config", return_value=None),
-                patch("vibe.cli._task_store", return_value=cli_store),
+                patch.object(lent, "task_store", cli_store),
                 patch("vibe.cli._agent_store", return_value=cli_agent_store),
             ):
                 assert cli.cmd_task_update(args) == 0, capsys.readouterr().err
@@ -14620,6 +14622,7 @@ def test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority(
     )
 
 
+@pytest.mark.usefixtures("in_process_cli_control")
 def test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -14741,7 +14744,7 @@ def test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves(
     try:
         with (
             patch("vibe.cli._ensure_config", return_value=None),
-            patch("vibe.cli._task_store", return_value=cli_store),
+            patch.object(lent, "task_store", cli_store),
             patch("vibe.cli._agent_store", return_value=cli_agent_store),
         ):
             assert cli.cmd_task_update(args) == 0, capsys.readouterr().err
@@ -14810,6 +14813,7 @@ def test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves(
 _WATCH_SESSION_AGENT_SYSTEM_PROMPT = "You are the watch session's Agent. Answer tersely."
 
 
+@pytest.mark.usefixtures("in_process_cli_control")
 def test_unrelated_watch_update_keeps_the_follow_session_agent_authority(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
@@ -14901,7 +14905,7 @@ def test_unrelated_watch_update_keeps_the_follow_session_agent_authority(
         try:
             with (
                 patch("vibe.cli._ensure_config", return_value=None),
-                patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
+                patch.object(lent, "watch_store", ManagedWatchStore()),
                 patch("vibe.cli._agent_store", return_value=cli_agent_store),
             ):
                 assert cli.cmd_watch_update(args) == 0, capsys.readouterr().err

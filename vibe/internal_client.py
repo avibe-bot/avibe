@@ -319,10 +319,14 @@ def publish_event_sync(
 def control_request_sync(
     payload: dict[str, Any],
     *,
-    timeout: float,
+    timeout: Optional[float],
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Submit once. Only a failed connection or explicit rejection proves no execution."""
+    """Submit once. Only a failed connection or explicit rejection proves no execution.
+
+    ``timeout`` bounds the exchange after connecting; ``None`` waits for the
+    service's own bound. Connecting is always bounded.
+    """
     from core.control_requests import failure, validate_result
 
     try:
