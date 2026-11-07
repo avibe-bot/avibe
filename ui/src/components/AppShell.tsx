@@ -242,10 +242,9 @@ export const AppShell: React.FC = () => {
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
   }, [location.pathname]);
-  // The shell is up: fetch the other routed pages in idle time.
-  useEffect(() => {
-    prefetchRoutePages();
-  }, []);
+  // The shell is up: fetch the other routed pages in idle time, and stop when
+  // it goes, so nothing it scheduled runs after it.
+  useEffect(() => prefetchRoutePages(), []);
   const [config, setConfig] = useState<any>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
