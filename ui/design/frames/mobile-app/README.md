@@ -174,9 +174,10 @@ production services, accounts, credentials or auth configuration were changed.
 The prior read-only backend source assessment was pinned to `88a2592`; it is
 historical flow evidence, not a live authentication test.
 
-## Two-step verification — proposed
+## Two-step verification — approved
 
-Status: **proposed**. Plan: `docs/plans/2026-11-07-mobile-two-factor.md`.
+Status: **approved** by the owner on 2026-11-07 at 21:39 Asia/Shanghai, with the
+three decisions in the plan. Plan: `docs/plans/2026-11-07-mobile-two-factor.md`.
 After the email code, an account with avibe.bot two-step verification confirms
 it is the account owner. The page uses the same A composition (`CloudScreen`,
 `Brand`, `Primary`, the six-cell `CodeInput`) and adds no tokens or assets.
@@ -185,6 +186,8 @@ it is the account owner. The page uses the same A composition (`CloudScreen`,
 | File / surface | States |
 | --- | --- |
 | `two-factor` | `passkey`, `passkey-waiting`, `passkey-failed`, `totp`, `totp-partial`, `totp-verifying`, `totp-invalid`, `totp-rate-limited`, `totp-network`, `totp-only`, `recovery`, `recovery-invalid`, `setup-required`, `totp-small` (375 × 667, long email) |
+
+**28 approved frames / 56 theme captures** (14 states × zh/en × light/dark).
 
 The page offers a passkey first when the account has one. The authenticator
 code and a recovery code are alternatives, and "Sign in with a different

@@ -1,7 +1,7 @@
 # Mobile two-step verification
 
-Status: proposed. The design frames are `mobile-app/two-factor/*`. The
-implementation follows the owner's approval of this plan and those frames.
+Status: approved by the owner on 2026-11-07, with the three decisions below.
+The design frames are `mobile-app/two-factor/*`.
 
 ## Background
 
@@ -88,7 +88,7 @@ and native code only.
   `com.apple.developer.associated-domains` entitlement with
   `webcredentials:avibe.bot`.
 
-## Decisions for the owner
+## Owner decisions (approved)
 
 1. Accounts that must turn on two-step verification set it up on avibe.bot
    (Safari), not in the app.

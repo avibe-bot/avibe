@@ -30,6 +30,6 @@ const states: { name: string; title: string; fixture: MobileSecondFactorFixture;
 ];
 
 const designFrames = frames(states.flatMap(({ name, title, fixture, size }) =>
-  bilingual(name, title, () => <SecondFactorPage fixture={fixture} />, size).map(frame => ({ ...frame, status: 'proposed' as const }))));
+  bilingual(name, title, () => <SecondFactorPage fixture={fixture} />, size)));
 
 export default designFrames;
