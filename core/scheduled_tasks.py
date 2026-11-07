@@ -2560,6 +2560,10 @@ class TaskExecutionStore:
         """
 
         payload = request.to_dict()
+        # ``prompt`` is the durable source of truth for queued runs. Readers from
+        # v3.2.4 onward reconstruct ``message`` from it when the legacy duplicate
+        # column is NULL, while hook execution requires ``prompt`` itself.
+        payload["message"] = None
         payload["status"] = "queued"
         payload["updated_at"] = request.created_at
         return payload
@@ -2585,7 +2589,7 @@ class TaskExecutionStore:
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
-        write_atomic(path, json.dumps(request.to_dict(), indent=2))
+        write_atomic(path, json.dumps(self.queued_run_payload(request), indent=2))
         return request
 
     def _enqueue_identified_run(

@@ -3347,7 +3347,13 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
     existing_backend = str((existing or {}).get("agent_backend") or "").strip()
     values["agent_backend"] = existing_backend or _capture_run_backend(conn, values)
     if existing:
-        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
+        # Existing rows may still carry the legacy duplicate. New-write
+        # normalization uses NULL for ``message``, but an upsert must not rewrite
+        # that historical value while settling or refreshing the row.
+        update_values = dict(values)
+        if update_values.get("message") is None:
+            update_values.pop("message", None)
+        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**update_values))
     else:
         conn.execute(insert(agent_runs).values(**values))
     _defer_run_ids_updated_from_connection(conn, [values["id"]])
@@ -4423,7 +4429,9 @@ class SQLiteBackgroundTaskStore:
                     post_to=definition["post_to"],
                     deliver_key=definition["deliver_key"],
                     prompt=definition["prompt"] or message,
-                    message=message,
+                    # ``prompt`` is the durable source of truth. Older readers
+                    # reconstruct the legacy ``message`` field from it when NULL.
+                    message=None,
                     message_payload_json=definition["message_payload_json"],
                     metadata_json=_json_dumps(metadata),
                 )
@@ -9179,7 +9187,9 @@ class SQLiteBackgroundTaskStore:
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
             "prompt": payload.get("prompt") or message,
-            "message": message,
+            # ``prompt`` is canonical for new rows. Read paths already fall back
+            # from a NULL legacy duplicate to it.
+            "message": None,
             "message_payload_json": self._message_payload_json(payload),
             "result_text": payload.get("result_text"),
             "result_payload_json": self._payload_json(payload, "result_payload", "result_payload_json"),
