@@ -13,11 +13,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
-from storage.db import retry_sqlite_write
 from storage.models import runtime_records
 
 
@@ -62,7 +61,7 @@ class SQLiteSessionActivityStore:
     def connection_key(*, backend: str, runtime_key: str) -> str:
         return _record_key(backend, runtime_key)
 
-    def _activity_values(self, activity: dict[str, Any], *, phase: str) -> dict[str, Any]:
+    def _activity_upsert(self, activity: dict[str, Any], *, phase: str):
         backend = str(activity.get("backend") or "")
         runtime_key = str(activity.get("runtime_key") or "")
         activity_id = str(activity.get("id") or "")
@@ -74,7 +73,7 @@ class SQLiteSessionActivityStore:
             runtime_key=runtime_key,
             activity_id=activity_id,
         )
-        return {
+        values = {
             "id": f"runtime::{ACTIVITY_RECORD_TYPE}::{record_key}",
             "record_type": ACTIVITY_RECORD_TYPE,
             "record_key": record_key,
@@ -92,9 +91,6 @@ class SQLiteSessionActivityStore:
             "created_at": now,
             "updated_at": now,
         }
-
-    def _activity_upsert(self, activity: dict[str, Any], *, phase: str):
-        values = self._activity_values(activity, phase=phase)
         stmt = sqlite_insert(runtime_records).values(**values)
         return stmt.on_conflict_do_update(
             index_elements=[runtime_records.c.record_type, runtime_records.c.record_key],
@@ -109,73 +105,6 @@ class SQLiteSessionActivityStore:
         stmt = self._activity_upsert(activity, phase=phase)
         with self.engine.begin() as conn:
             conn.execute(stmt)
-
-    def commit_activity_completion(
-        self,
-        *,
-        expected: dict[str, Any],
-        expected_phase: str,
-        replacement: dict[str, Any] | None,
-        phase: str | None,
-    ) -> bool:
-        """CAS one frozen completion/compensation, on a worker only.
-
-        Unlike the synchronous lifecycle methods, this operation retries a whole
-        transaction. It never inserts a missing owner: teardown or replacement
-        wins over a delayed completion. Compensation compares the exact receipt
-        (including its unique completion token), so it cannot undo a later write.
-        """
-
-        record_key = self.activity_key(
-            backend=expected["backend"],
-            runtime_key=expected["runtime_key"],
-            activity_id=expected["id"],
-        )
-        predicate = (
-            (runtime_records.c.record_type == ACTIVITY_RECORD_TYPE)
-            & (runtime_records.c.record_key == record_key)
-            & (runtime_records.c.payload_json == _json_dumps({
-                "version": 1, "phase": expected_phase, "activity": expected,
-            }))
-        )
-        if replacement is None:
-            stmt = delete(runtime_records).where(predicate)
-        else:
-            if phase is None:
-                raise ValueError("Activity completion replacement requires a phase")
-            stmt = update(runtime_records).where(predicate).values(
-                session_anchor=replacement.get("session_id"),
-                payload_json=_json_dumps({
-                    "version": 1, "phase": phase, "activity": replacement,
-                }),
-                updated_at=_utc_now_iso(),
-            )
-
-        def commit() -> bool:
-            with self.engine.begin() as conn:
-                return conn.execute(stmt).rowcount == 1
-
-        return retry_sqlite_write(commit)
-
-    def restore_activity_if_missing(
-        self,
-        activity: dict[str, Any],
-        *,
-        phase: str,
-    ) -> bool:
-        """Restore a frozen terminal snapshot only when its row is absent."""
-
-        stmt = sqlite_insert(runtime_records).values(
-            **self._activity_values(activity, phase=phase),
-        ).on_conflict_do_nothing(
-            index_elements=[runtime_records.c.record_type, runtime_records.c.record_key],
-        )
-
-        def restore() -> bool:
-            with self.engine.begin() as conn:
-                return conn.execute(stmt).rowcount == 1
-
-        return retry_sqlite_write(restore)
 
     def upsert_activities(
         self,

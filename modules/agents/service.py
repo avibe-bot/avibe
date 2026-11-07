@@ -361,27 +361,6 @@ class AgentService:
             )
             return False
 
-    async def on_activity_terminal_async(self, activity: Any) -> bool:
-        """Land live completion notification; retry failures in the existing idle sweep."""
-        if (getattr(activity, "metadata", None) or {}).get("provenance_pending"):
-            return False
-        service = getattr(self.controller, "scheduled_task_service", None)
-        settle = getattr(service, "settle_activity_runs_async", None)
-        if not callable(settle):
-            return False
-        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
-
-        async def finish() -> None:
-            await settle(activity)
-            await self.activities.ack_recovered_terminal_async(
-                activity, run_sync=getattr(supervisor, "run_sync", None),
-            )
-
-        return await self.run_until_done(
-            f"activity-terminal:{activity.backend}:{activity.runtime_key}:{activity.id}",
-            finish,
-        )
-
     def end_activity_runtime(
         self,
         backend: str,

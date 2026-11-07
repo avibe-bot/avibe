@@ -3378,7 +3378,7 @@ def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
 
 
 def _runs_blocked_by_live_activities(
-    conn: Any, run_ids: Sequence[str], session_ids: Iterable[str], *, include_pending_output: bool = False,
+    conn: Any, run_ids: Sequence[str], session_ids: Iterable[str]
 ) -> set[str]:
     """The Runs among ``run_ids`` that a durable, still-active, attached Activity owns.
 
@@ -3410,11 +3410,7 @@ def _runs_blocked_by_live_activities(
             if not isinstance(payload, dict):
                 continue
             activity = payload.get("activity")
-            phase = payload.get("phase")
-            blocks = phase == "active" and not (isinstance(activity, dict) and activity.get("detached_from_run"))
-            if include_pending_output and phase == "awaiting_output":
-                blocks = True
-            if not blocks or not isinstance(activity, dict):
+            if payload.get("phase") != "active" or not isinstance(activity, dict) or activity.get("detached_from_run"):
                 continue
             owners = {str(activity.get("run_id") or "").strip()}
             metadata = activity.get("metadata")
@@ -7116,7 +7112,6 @@ class SQLiteBackgroundTaskStore:
         interrupt_reason: Optional[str] = None,
         cancellation_error: Optional[str] = None,
         updated_at: Optional[str] = None,
-        activity_session_id: Optional[str] = None,
     ) -> bool:
         """Apply one stored terminal intent after owned Activities become terminal.
 
@@ -7141,13 +7136,6 @@ class SQLiteBackgroundTaskStore:
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
             if not row:
-                return False
-            if activity_session_id is not None and _runs_blocked_by_live_activities(
-                conn, [run_id], [activity_session_id, str(row.get("session_id") or "")],
-                include_pending_output=True,
-            ):
-                # A live async completion yielded after its registry check. A
-                # sibling admitted meanwhile must still block the terminal CAS.
                 return False
             # A deferred failure is still subordinate to Stop. Re-decide once when
             # the cancellation CAS loses so a running row becomes canceled instead

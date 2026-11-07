@@ -8,22 +8,18 @@ their own persistence aggregates.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 import time
 import uuid
 from bisect import bisect_left, bisect_right, insort
 from collections import defaultdict, deque
-from collections.abc import Awaitable
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from core.message_output import MessageOutput
 from core.runtime_activation import RuntimeActivationIdentity, RuntimeActivationRegistry
-from core.runtime_work import answer_caught_cancellation, land_step, rearm_caught_cancellation
 
 
 logger = logging.getLogger(__name__)
@@ -102,44 +98,6 @@ class SessionActivity:
             updated_at=str(payload.get("updated_at") or _now_iso()),
             completed_at=(str(payload["completed_at"]) if payload.get("completed_at") else None),
         )
-
-
-@dataclass
-class _PendingActivityCompletion:
-    """Loop-owned intent; only detached dictionaries reach the store worker."""
-
-    key: tuple[str, str, str]
-    incarnation: object
-    activation_identity: RuntimeActivationIdentity | None
-    status: str
-    metadata: dict[str, Any]
-    expects_output: bool
-    retain_terminal_snapshot: bool
-    completed_at: str
-    token: str = field(default_factory=lambda: uuid.uuid4().hex)
-    written: SessionActivity | None = None
-    finished: bool = False
-    inflight: bool = False
-    error: str | None = None
-
-    @property
-    def phase(self) -> str:
-        return "awaiting_output" if self.expects_output else TERMINAL_SNAPSHOT_PHASE
-
-
-@dataclass
-class _PendingRecoveredTerminalAck:
-    """Loop-owned terminal acknowledgement with worker-only CAS persistence."""
-
-    key: tuple[str, str, str]
-    expected: SessionActivity
-    token: str = field(default_factory=lambda: uuid.uuid4().hex)
-    deleted: bool = False
-    replacement: SessionActivity | None = None
-    restored: SessionActivity | None = None
-    restored_inserted: bool = False
-    inflight: bool = False
-    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -291,14 +249,6 @@ class SessionActivityRegistry:
         self._activation_registry = activation_registry
         self._output_settled_callback: Callable[[SessionActivity], None] | None = None
         self._active: dict[tuple[str, str, str], SessionActivity] = {}
-        self._active_incarnations: dict[tuple[str, str, str], object] = {}
-        # Classification may advance memory even when its write fails. Keep the
-        # last committed active image for the completion CAS, not that newer view.
-        self._persisted_active: dict[tuple[str, str, str], SessionActivity] = {}
-        self._pending_completions: dict[str, _PendingActivityCompletion] = {}
-        self._pending_terminal_acks: dict[
-            tuple[str, str, str], _PendingRecoveredTerminalAck
-        ] = {}
         self._active_identities: dict[
             tuple[str, str, str], RuntimeActivationIdentity
         ] = {}
@@ -461,11 +411,6 @@ class SessionActivityRegistry:
             except Exception:
                 logger.warning("Failed to persist Activity %s", activity.id, exc_info=True)
                 raise
-        key = self._activity_key(activity)
-        if phase == "active":
-            self._persisted_active[key] = replace(activity, metadata=deepcopy(activity.metadata))
-        else:
-            self._persisted_active.pop(key, None)
         # Any successful later write supersedes an older failed provenance
         # attempt, including a transition to output or terminal ownership.
         self._clear_provenance_persistence_recovery(activity)
@@ -548,7 +493,6 @@ class SessionActivityRegistry:
             except Exception:
                 logger.warning("Failed to delete Activity snapshot %s", activity.id, exc_info=True)
                 raise
-        self._persisted_active.pop(self._activity_key(activity), None)
         self._clear_provenance_persistence_recovery(activity)
 
     def _persist_connection(
@@ -876,8 +820,6 @@ class SessionActivityRegistry:
                 completed_at=None,
             )
         self._persist_activity(activity, phase="active")
-        if existing is None:
-            self._active_incarnations[key] = object()
         self._active[key] = activity
         if activation_identity is not None:
             self._active_identities[key] = activation_identity
@@ -936,300 +878,6 @@ class SessionActivityRegistry:
             commit=complete_current,
         )
 
-    async def complete_async(
-        self,
-        *,
-        backend: str,
-        runtime_key: str,
-        activity_id: str,
-        status: str,
-        metadata: dict[str, Any] | None = None,
-        expects_output: bool = False,
-        retain_terminal_snapshot: bool = False,
-        activation_identity: RuntimeActivationIdentity | None = None,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None = None,
-    ) -> SessionActivity | None:
-        """Complete live work without waiting for SQLite on the owning loop.
-
-        The intent precedes the worker, survives exhaustion, and is retried by
-        ``retry_pending_completions`` without replaying a native event. Only the
-        caller that actually publishes the transition receives the completion;
-        it owns terminal notification and output-flush wakeups on this loop.
-        Synchronous ``complete`` remains the offline/teardown compatibility path.
-        """
-
-        key = self._key(backend, runtime_key, activity_id)
-
-        def prepare() -> _PendingActivityCompletion | None:
-            with self._lock:
-                if key not in self._active or (
-                    self._activation_registry is not None
-                    and self._active_identities.get(key) is not activation_identity
-                ):
-                    return None
-                incarnation = self._active_incarnations[key]
-                for pending in self._pending_completions.values():
-                    if pending.key == key and pending.incarnation is incarnation and not pending.finished:
-                        return pending
-                pending = _PendingActivityCompletion(
-                    key=key,
-                    incarnation=incarnation,
-                    activation_identity=activation_identity,
-                    status=status if status in TERMINAL_ACTIVITY_STATUSES else "completed",
-                    metadata=deepcopy(metadata or {}),
-                    expects_output=expects_output,
-                    retain_terminal_snapshot=retain_terminal_snapshot,
-                    completed_at=_now_iso(),
-                )
-                self._pending_completions[pending.token] = pending
-                return pending
-
-        pending = self._commit_activation_write(
-            backend=backend,
-            activation_identity=activation_identity,
-            operation="Activity completion preparation",
-            commit=prepare,
-        )
-        if pending is None:
-            return None
-        return await self._run_pending_completion(pending, run_sync=run_sync)
-
-    def scan_pending_completion_runtimes(
-        self, *, limit: int, cursor: str | None = None,
-    ) -> tuple[list[tuple[str, str]], bool]:
-        """Bounded keyset page of live persistence work, including cleanup.
-
-        Use ``backend + '\\x1f' + runtime_key`` as the next cursor. The existing
-        Activity recovery lane owns retries; this scan creates no tasks or I/O.
-        """
-
-        with self._lock:
-            keys = sorted({pending.key[:2] for pending in self._pending_completions.values()})
-        start = bisect_right(keys, tuple(cursor.split("\x1f", 1))) if cursor and "\x1f" in cursor else 0
-        end = start + max(1, int(limit))
-        return keys[start:end], end < len(keys)
-
-    def completion_persistence_recovery(self, backend: str, runtime_key: str) -> dict[str, str]:
-        """Visible diagnostics for exact intents still owned by reconciliation."""
-
-        with self._lock:
-            return {
-                pending.token: pending.error or ("in_flight" if pending.inflight else "pending")
-                for pending in self._pending_completions.values()
-                if pending.key[:2] == (str(backend), str(runtime_key))
-            }
-
-    async def retry_pending_completions(
-        self,
-        backend: str,
-        runtime_key: str,
-        *,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None = None,
-    ) -> list[SessionActivity]:
-        """Retry only this runtime's retained writes; return newly completed work.
-
-        The caller must notify terminal owners/flush output for returned entries,
-        just as after ``complete_async``. Failure stays visible and pending; a
-        cleanup or stale-generation compensation never returns a completion.
-        """
-
-        with self._lock:
-            pending = [
-                item for item in self._pending_completions.values()
-                if item.key[:2] == (str(backend), str(runtime_key))
-            ]
-        async def retry_all() -> list[SessionActivity]:
-            completed: list[SessionActivity] = []
-            for item in pending:
-                try:
-                    activity = await self._run_pending_completion(item, run_sync=run_sync, recover_output=True)
-                except Exception:
-                    continue  # The exact intent and diagnostic remain registered.
-                if activity is not None:
-                    completed.append(activity)
-            return completed
-
-        step, cancelled = await land_step(retry_all())
-        if cancelled and (step.cancelled() or step.exception() is not None):
-            answer_caught_cancellation(step)
-        completed = step.result()
-        if cancelled:
-            rearm_caught_cancellation()
-        return completed
-
-    def _completion_is_current(self, pending: _PendingActivityCompletion) -> bool:
-        if self._active_incarnations.get(pending.key) is not pending.incarnation:
-            return False
-        identity = pending.activation_identity
-        return self._activation_registry is None or (
-            identity is not None
-            and self._active_identities.get(pending.key) is identity
-            and self._activation_registry.is_current(identity)
-        )
-
-    async def _run_pending_completion(
-        self,
-        pending: _PendingActivityCompletion,
-        *,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-        recover_output: bool = False,
-    ) -> SessionActivity | None:
-        with self._lock:
-            if self._pending_completions.get(pending.token) is not pending or pending.inflight:
-                return None
-            pending.inflight = True
-        # Land the store result AND its short loop-owned tail before answering
-        # cancellation. No network or native event replay is inside this unit.
-        step, cancelled = await land_step(
-            self._finish_pending_completion(pending, run_sync, recover_output=recover_output)
-        )
-        try:
-            if cancelled and (step.cancelled() or step.exception() is not None):
-                answer_caught_cancellation(step)
-            result = step.result()
-        finally:
-            pending.inflight = False
-        if cancelled:
-            rearm_caught_cancellation()
-        return result
-
-    async def _completion_store_step(
-        self,
-        expected: SessionActivity,
-        expected_phase: str,
-        replacement: SessionActivity | None,
-        phase: str | None,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-    ) -> bool:
-        commit = getattr(self._store, "commit_activity_completion", None)
-        if not callable(commit):
-            if self._store is None:
-                return True
-            raise RuntimeError("Durable Activity store does not support conditional completion")
-        # No registry, generation lock, callback, or mutable context in the worker.
-        args = dict(
-            expected=deepcopy(expected.to_dict()),
-            expected_phase=expected_phase,
-            replacement=deepcopy(replacement.to_dict()) if replacement is not None else None,
-            phase=phase,
-        )
-        operation = lambda: commit(**args)
-        return await (run_sync(operation) if run_sync is not None else asyncio.to_thread(operation))
-
-    async def _undo_unpublished_completion(
-        self,
-        pending: _PendingActivityCompletion,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-    ) -> None:
-        with self._lock:
-            restore = self._persisted_active.get(pending.key)
-        assert pending.written is not None
-        await self._completion_store_step(
-            pending.written, pending.phase, restore, "active" if restore is not None else None, run_sync,
-        )
-        pending.written = None
-        if not self._completion_is_current(pending):
-            self._pending_completions.pop(pending.token, None)
-
-    async def _finish_pending_completion(
-        self,
-        pending: _PendingActivityCompletion,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-        *,
-        recover_output: bool = False,
-    ) -> SessionActivity | None:
-        try:
-            if pending.written is not None:
-                if pending.finished:
-                    await self._completion_store_step(pending.written, pending.phase, None, None, run_sync)
-                    self._pending_completions.pop(pending.token, None)
-                else:
-                    await self._undo_unpublished_completion(pending, run_sync)
-                return None
-            with self._lock:
-                if not self._completion_is_current(pending):
-                    self._pending_completions.pop(pending.token, None)
-                    return None
-                source = self._active[pending.key]
-                expected = self._persisted_active[pending.key]
-                completion_metadata = deepcopy(pending.metadata)
-                if any(source.metadata.get(marker) for marker in (
-                    "provenance_human", "provenance_detached",
-                    "provenance_generation_ended", "provenance_unresolved",
-                )):
-                    # Result classification owns this whole provenance group.
-                    # Frozen native facts must not resurrect provisional flags
-                    # or owner hints removed while persistence was pending.
-                    completion_metadata = {
-                        key: value for key, value in completion_metadata.items()
-                        if not key.startswith("provenance_")
-                        and key not in {"run_ids", "delivery_key_external"}
-                    }
-                completed = replace(
-                    source,
-                    status=pending.status,
-                    metadata={
-                        **deepcopy(source.metadata), **completion_metadata,
-                        "_completion_write_id": pending.token,
-                    },
-                    updated_at=pending.completed_at,
-                    completed_at=pending.completed_at,
-                )
-            written = await self._completion_store_step(expected, "active", completed, pending.phase, run_sync)
-            if not written:
-                if not self._completion_is_current(pending):
-                    self._pending_completions.pop(pending.token, None)
-                    return None
-                if self._active.get(pending.key) is not source:
-                    return None  # A live update won; rebase the same intent next pass.
-                raise RuntimeError("Activity completion lost its durable active snapshot")
-            pending.written = completed
-
-            def publish() -> bool:
-                with self._lock:
-                    if not self._completion_is_current(pending) or self._active.get(pending.key) is not source:
-                        return False
-                    self._publish_completion_locked(
-                        pending.key, completed,
-                        expects_output=pending.expects_output,
-                        retain_terminal_snapshot=pending.retain_terminal_snapshot,
-                        activation_identity=pending.activation_identity,
-                    )
-                    if recover_output and pending.expects_output:
-                        # The native event already failed, so its receiver never
-                        # scheduled the ordinary flush. The existing output lane
-                        # must own this receipt if no later native event claims it.
-                        self._add_recovered_output_id(pending.key, completed)
-                    pending.finished = True
-                    return True
-
-            published = self._commit_activation_write(
-                backend=pending.key[0],
-                activation_identity=pending.activation_identity,
-                operation="Activity completion confirmation",
-                commit=publish,
-            )
-            if not published:
-                await self._undo_unpublished_completion(pending, run_sync)
-                return None
-            if pending.expects_output or pending.retain_terminal_snapshot:
-                self._pending_completions.pop(pending.token, None)
-            else:
-                # Stage a terminal marker rather than deleting before confirmation:
-                # compensation must never reinsert an owner teardown already removed.
-                try:
-                    await self._completion_store_step(completed, pending.phase, None, None, run_sync)
-                except Exception as error:
-                    pending.error = f"terminal cleanup: {type(error).__name__}: {error}"
-                    logger.warning("Activity completion cleanup remains pending: %s", completed.id, exc_info=True)
-                else:
-                    self._pending_completions.pop(pending.token, None)
-            return completed
-        except Exception as error:
-            pending.error = f"{type(error).__name__}: {error}"
-            logger.warning("Activity completion remains pending: %s", pending.key, exc_info=True)
-            raise
-
     def _complete_locked(
         self,
         *,
@@ -1240,6 +888,7 @@ class SessionActivityRegistry:
         retain_terminal_snapshot: bool,
         activation_identity: RuntimeActivationIdentity | None = None,
     ) -> SessionActivity | None:
+        backend, runtime_key, _activity_id = key
         now = _now_iso()
         existing = self._active.get(key)
         if existing is None:
@@ -1255,38 +904,24 @@ class SessionActivityRegistry:
         )
         if expects_output:
             self._persist_activity(completed, phase="awaiting_output")
+            self._active.pop(key, None)
+            self._active_identities.pop(key, None)
+            self._completed_outputs[(backend, runtime_key)].append(
+                self._new_completed_output_entry(completed)
+            )
         elif retain_terminal_snapshot:
             self._persist_activity(completed, phase=TERMINAL_SNAPSHOT_PHASE)
-        else:
-            self._delete_activity(completed)
-        self._publish_completion_locked(
-            key, completed,
-            expects_output=expects_output,
-            retain_terminal_snapshot=retain_terminal_snapshot,
-            activation_identity=activation_identity,
-        )
-        return completed
-
-    def _publish_completion_locked(
-        self,
-        key: tuple[str, str, str],
-        completed: SessionActivity,
-        *,
-        expects_output: bool,
-        retain_terminal_snapshot: bool,
-        activation_identity: RuntimeActivationIdentity | None,
-    ) -> None:
-        identity = self._active_identities.pop(key, None) or activation_identity
-        self._active.pop(key, None)
-        self._active_incarnations.pop(key, None)
-        self._persisted_active.pop(key, None)
-        self._clear_provenance_persistence_recovery(completed)
-        if expects_output:
-            self._completed_outputs[key[:2]].append(self._new_completed_output_entry(completed))
-        elif retain_terminal_snapshot:
-            self._terminal_snapshots[key[:2]][completed.id] = completed
+            identity = self._active_identities.get(key) or activation_identity
+            self._active.pop(key, None)
+            self._active_identities.pop(key, None)
+            self._terminal_snapshots[(backend, runtime_key)][completed.id] = completed
             if identity is not None:
                 self._terminal_snapshot_identities[key] = identity
+        else:
+            self._delete_activity(completed)
+            self._active.pop(key, None)
+            self._active_identities.pop(key, None)
+        return completed
 
     def _finalize_generation_ended_snapshot_locked(
         self,
@@ -2644,178 +2279,6 @@ class SessionActivityRegistry:
         with self._lock:
             self._retry_provenance_persistence_locked((backend, runtime_key))
             return list(self._terminal_snapshots.get((backend, runtime_key), {}).values())
-
-    async def _restore_terminal_store_step(
-        self,
-        activity: SessionActivity,
-        phase: str,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-    ) -> bool:
-        restore = getattr(self._store, "restore_activity_if_missing", None)
-        if self._store is None:
-            return True
-        if not callable(restore):
-            raise RuntimeError("Durable Activity store does not support terminal compensation")
-        args = {"activity": deepcopy(activity.to_dict()), "phase": phase}
-        operation = lambda: restore(**args)
-        return await (run_sync(operation) if run_sync is not None else asyncio.to_thread(operation))
-
-    async def ack_recovered_terminal_async(
-        self,
-        activity: SessionActivity,
-        *,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None = None,
-    ) -> bool:
-        """Acknowledge one terminal snapshot without blocking the owning loop.
-
-        The frozen terminal row is deleted by the worker with an exact CAS. If
-        loop-owned classification changes the snapshot while that worker runs,
-        a worker-only insert-if-missing compensation restores the newer image;
-        the loop never performs a synchronous snapshot delete or upsert.
-        """
-
-        key = self._activity_key(activity)
-        with self._lock:
-            pending = self._pending_terminal_acks.get(key)
-            if pending is None or not pending.deleted:
-                current = self._terminal_snapshots.get(key[:2], {}).get(key[2])
-                if current is None or current.metadata.get("provenance_pending"):
-                    return False
-                if pending is None or pending.expected is not current:
-                    pending = _PendingRecoveredTerminalAck(key=key, expected=current)
-                    self._pending_terminal_acks[key] = pending
-            # A committed deletion/restore still owns compensation after the
-            # loop snapshot changes or disappears.
-        return await self._run_pending_terminal_ack(pending, run_sync=run_sync)
-
-    async def _run_pending_terminal_ack(
-        self,
-        pending: _PendingRecoveredTerminalAck,
-        *,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-    ) -> bool:
-        with self._lock:
-            if self._pending_terminal_acks.get(pending.key) is not pending or pending.inflight:
-                return False
-            pending.inflight = True
-        step, cancelled = await land_step(
-            self._finish_pending_terminal_ack(pending, run_sync),
-        )
-        try:
-            if cancelled and (step.cancelled() or step.exception() is not None):
-                answer_caught_cancellation(step)
-            result = step.result()
-        finally:
-            pending.inflight = False
-        if cancelled:
-            rearm_caught_cancellation()
-        return result
-
-    async def _finish_pending_terminal_ack(
-        self,
-        pending: _PendingRecoveredTerminalAck,
-        run_sync: Callable[[Callable[[], bool]], Awaitable[bool]] | None,
-    ) -> bool:
-        try:
-            if not pending.deleted:
-                deleted = await self._completion_store_step(
-                    pending.expected,
-                    TERMINAL_SNAPSHOT_PHASE,
-                    None,
-                    None,
-                    run_sync,
-                )
-                if not deleted:
-                    with self._lock:
-                        current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
-                        if current is not pending.expected:
-                            self._pending_terminal_acks.pop(pending.key, None)
-                            return False
-                    raise RuntimeError("Recovered terminal snapshot changed or disappeared")
-                pending.deleted = True
-
-            if not pending.restored_inserted:
-                with self._lock:
-                    current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
-                    if current is pending.expected or current is None:
-                        self._remove_recovered_terminal_locked(pending.key)
-                        self._pending_terminal_acks.pop(pending.key, None)
-                        return True
-                    pending.replacement = current
-                    pending.restored = replace(
-                        current,
-                        metadata={
-                            **deepcopy(current.metadata),
-                            "_terminal_ack_restore_id": pending.token,
-                        },
-                    )
-
-                pending.restored_inserted = await self._restore_terminal_store_step(
-                    pending.restored,
-                    TERMINAL_SNAPSHOT_PHASE,
-                    run_sync,
-                )
-            # Keep the exact last committed payload across a later BUSY. Repeating
-            # insert-if-missing would return False and discard our restoration.
-
-            with self._lock:
-                current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
-                replacement = pending.replacement
-            if current is replacement:
-                if pending.restored_inserted and pending.restored is not replacement:
-                    updated = await self._completion_store_step(
-                        pending.restored,
-                        TERMINAL_SNAPSHOT_PHASE,
-                        replacement,
-                        TERMINAL_SNAPSHOT_PHASE,
-                        run_sync,
-                    )
-                    if not updated:
-                        # A successful CAS refusal (unlike BUSY exhaustion) means
-                        # another writer replaced our tagged row. Recheck insert
-                        # ownership next pass without overwriting that winner.
-                        pending.restored_inserted = False
-                        raise RuntimeError("Terminal snapshot compensation lost its owner")
-                    pending.restored = replacement
-                    pending.restored_inserted = True
-                    with self._lock:
-                        current = self._terminal_snapshots.get(pending.key[:2], {}).get(pending.key[2])
-                    if current is not replacement:
-                        await self._completion_store_step(
-                            replacement,
-                            TERMINAL_SNAPSHOT_PHASE,
-                            None,
-                            None,
-                            run_sync,
-                        )
-                with self._lock:
-                    self._pending_terminal_acks.pop(pending.key, None)
-                return False
-
-            if pending.restored_inserted:
-                await self._completion_store_step(
-                    pending.restored,
-                    TERMINAL_SNAPSHOT_PHASE,
-                    None,
-                    None,
-                    run_sync,
-                )
-            with self._lock:
-                self._pending_terminal_acks.pop(pending.key, None)
-            return False
-        except Exception as error:
-            pending.error = f"{type(error).__name__}: {error}"
-            logger.warning("Recovered terminal acknowledgement remains pending: %s", pending.key, exc_info=True)
-            raise
-
-    def _remove_recovered_terminal_locked(self, key: tuple[str, str, str]) -> None:
-        snapshots = self._terminal_snapshots.get(key[:2])
-        if snapshots is None:
-            return
-        snapshots.pop(key[2], None)
-        self._terminal_snapshot_identities.pop(key, None)
-        if not snapshots:
-            self._terminal_snapshots.pop(key[:2], None)
 
     def ack_recovered_terminal(self, activity: SessionActivity) -> None:
         """Delete a recovered live snapshot only after its Run policy settles."""

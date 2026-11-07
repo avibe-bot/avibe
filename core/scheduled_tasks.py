@@ -3214,7 +3214,6 @@ class TaskExecutionStore:
         error: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
         cancellation_error: Optional[str] = None,
-        activity_session_id: Optional[str] = None,
     ) -> bool:
         if self._sqlite is None:
             return False
@@ -3224,7 +3223,6 @@ class TaskExecutionStore:
             error=error,
             interrupt_reason=interrupt_reason,
             cancellation_error=cancellation_error,
-            activity_session_id=activity_session_id,
         )
 
     def record_skip_reason(self, run_id: str, *, reason: str) -> bool:
@@ -3867,25 +3865,10 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
             registry = self.service._activity_registry()
             if registry is None:
                 return [], False
-            pending_items: list[RuntimeWorkItem] = []
-            pending_scan = getattr(registry, "scan_pending_completion_runtimes", None)
-            if callable(pending_scan) and (cursor is None or cursor.startswith("!")):
-                pending, _pending_more = pending_scan(
-                    limit=limit, cursor=cursor[1:] if cursor else None,
-                )
-                pending_items = [
-                    RuntimeWorkItem(
-                        f"{backend}\x1f{runtime_key}", (backend, runtime_key),
-                        cursor_key=f"!{backend}\x1f{runtime_key}",
-                    )
-                    for backend, runtime_key in pending
-                ]
-                if len(pending_items) >= limit:
-                    return pending_items, True
             runtimes, has_more, retry_after, scanned_cursor = (
                 registry.scan_recovered_output_runtimes(
-                    limit=limit - len(pending_items),
-                    cursor=None if cursor and cursor.startswith("!") else cursor,
+                    limit=limit,
+                    cursor=cursor,
                     grace_seconds=self.service._activity_output_grace_seconds,
                 )
             )
@@ -3894,7 +3877,7 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
                     RuntimeWorkLane.ACTIVITY_OUTPUTS,
                     retry_after,
                 )
-            items = pending_items + [
+            items = [
                 RuntimeWorkItem(
                     f"{backend}\x1f{runtime_key}",
                     (backend, runtime_key),
@@ -4956,48 +4939,6 @@ class ScheduledTaskService:
         claim = getattr(registry, "claim_completed_output", None)
         if registry is None or not callable(claim):
             return True
-        retry = getattr(registry, "retry_pending_completions", None)
-        if callable(retry):
-            supervisor = getattr(self.controller, "runtime_work_supervisor", None)
-            completed = await retry(
-                backend, runtime_key,
-                run_sync=supervisor.run_sync if isinstance(supervisor, RuntimeWorkSupervisor) else None,
-            )
-            agent_service = getattr(self.controller, "agent_service", None)
-            agent = (getattr(agent_service, "agents", None) or {}).get(backend)
-            notify = getattr(agent, "on_activity_completed", None)
-
-            async def notify_completions() -> None:
-                for activity in completed:
-                    try:
-                        if callable(notify):
-                            await notify(activity)
-                        else:
-                            terminal = getattr(agent_service, "on_activity_terminal_async", None)
-                            if callable(terminal):
-                                await terminal(activity)
-                    except Exception:
-                        # One backend notification bug must not strand other
-                        # already-published completions in this landed batch.
-                        logger.exception("Failed to notify reconciled Activity %s", getattr(activity, "id", ""))
-
-            # retry_pending_completions can land a whole batch under cancellation.
-            # Hand every committed member to its owner before answering Stop.
-            notified, cancelled = await land_step(notify_completions())
-            if cancelled:
-                answer_caught_cancellation(notified)
-            notified.result()
-            if registry.completion_persistence_recovery(backend, runtime_key):
-                return False
-            delay_for_output = getattr(registry, "recovered_output_delay_seconds", None)
-            if completed and callable(delay_for_output):
-                delay = delay_for_output(
-                    backend, runtime_key,
-                    grace_seconds=self._activity_output_grace_seconds(backend),
-                )
-                if delay is not None and delay > 0:
-                    self._schedule_runtime_work_wake(RuntimeWorkLane.ACTIVITY_OUTPUTS, delay)
-                    return True
         activity = claim(backend, runtime_key, recovered_only=True)
         if activity is None:
             self._settle_pending_recovered_activity_terminals()
@@ -7837,8 +7778,8 @@ class ScheduledTaskService:
                 lines.extend(self._deleted_definition_lines(run_id))
         return "\n".join(lines)
 
-    def _activity_terminal_arguments(self, activity: Any, *, recovered: bool = False):
-        """Prepare loop-owned policy for deferred Activity Run settlement.
+    def settle_activity_runs(self, activity: Any, *, recovered: bool = False) -> list[str]:
+        """Settle deferred Runs when a failed/stopped owned Activity is last.
 
         An Activity's own outcome counts only once its Run's Turn has recorded a
         terminal and the Run waits on that Activity. One that ends while the
@@ -7857,7 +7798,7 @@ class ScheduledTaskService:
         if activity_status == "completed":
             # A completed Claude task may still produce a user-visible follow-up;
             # that Message owns Run settlement so output and callback stay aligned.
-            return [], {}, {}
+            return []
         interrupt_reason = str((getattr(activity, "metadata", None) or {}).get("interrupt_reason") or "") or None
         if interrupt_reason:
             terminal_status = SETTLEMENT_TERMINAL_STATUS.get(interrupt_reason, "failed")
@@ -7875,6 +7816,10 @@ class ScheduledTaskService:
                 if run_id and run_id not in run_ids:
                     run_ids.append(run_id)
 
+        registry = getattr(getattr(self.controller, "agent_service", None), "activities", None)
+        has_blocker = getattr(registry, "has_blocking_run_activity", None)
+        has_pending_output = getattr(registry, "has_pending_run_output", None)
+        settled: list[str] = []
         # An Activity that failed on its own is the Run's cause even when a
         # sibling still blocks settlement; a later interruption must not
         # replace it.
@@ -7890,60 +7835,33 @@ class ScheduledTaskService:
             and not interrupt_reason
             and activity_status in {"failed", "stopped", "killed"}
         )
-        error = (
-            self._t(SETTLEMENT_I18N_KEYS.get(interrupt_reason, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT]))
-            if interrupt_reason
-            else f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
-        )
-        return run_ids, {
-            "terminal_status": terminal_status,
-            "amend_only": seen_by_turn,
-            **({"error": own_failure} if own_failure else {}),
-        }, {
-            "error": error,
-            **({
-                "interrupt_reason": interrupt_reason,
-                "cancellation_error": self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
-            } if interrupt_reason else {}),
-        }
-
-    def _activity_run_has_pending_work(self, run_id: str) -> bool:
-        registry = self._activity_registry()
-        return any(
-            callable(probe := getattr(registry, name, None)) and probe(run_id)
-            for name in ("has_blocking_run_activity", "has_pending_run_output")
-        )
-
-    def settle_activity_runs(self, activity: Any, *, recovered: bool = False) -> list[str]:
-        """Legacy synchronous lifecycle entry; no new retry waits are added here."""
-        run_ids, defer_args, settle_args = self._activity_terminal_arguments(activity, recovered=recovered)
-        settled: list[str] = []
         for run_id in run_ids:
-            self.request_store.defer_run_terminal(run_id, **defer_args)
-            if self._activity_run_has_pending_work(run_id):
-                continue
-            if self.request_store.settle_deferred_run(run_id, **settle_args):
-                settled.append(run_id)
-        if settled:
-            self._wake_runtime_work(
-                RuntimeWorkLane.REQUESTS,
-                RuntimeWorkLane.RUN_CALLBACKS,
-                RuntimeWorkLane.FAILURE_NOTICES,
+            self.request_store.defer_run_terminal(
+                run_id,
+                terminal_status=terminal_status,
+                amend_only=seen_by_turn,
+                **({"error": own_failure} if own_failure else {}),
             )
-        return settled
-
-    async def settle_activity_runs_async(self, activity: Any, *, recovered: bool = False) -> list[str]:
-        """Land live completion's pure Run writes off-loop, policy and wakeups on-loop."""
-        run_ids, defer_args, settle_args = self._activity_terminal_arguments(activity, recovered=recovered)
-        settled: list[str] = []
-        for run_id in run_ids:
-            await self._store_step(self.request_store.defer_run_terminal, run_id, **defer_args)
-            if self._activity_run_has_pending_work(run_id):
+            if callable(has_blocker) and has_blocker(run_id):
                 continue
-            if await self._store_step(
-                self.request_store.settle_deferred_run, run_id,
-                activity_session_id=str(getattr(activity, "session_id", "") or ""),
-                **settle_args,
+            if callable(has_pending_output) and has_pending_output(run_id):
+                continue
+            error = (
+                self._t(SETTLEMENT_I18N_KEYS.get(interrupt_reason, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT]))
+                if interrupt_reason
+                else f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
+            )
+            if self.request_store.settle_deferred_run(
+                run_id,
+                error=error,
+                **(
+                    {
+                        "interrupt_reason": interrupt_reason,
+                        "cancellation_error": self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
+                    }
+                    if interrupt_reason
+                    else {}
+                ),
             ):
                 settled.append(run_id)
         if settled:

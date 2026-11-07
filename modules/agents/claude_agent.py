@@ -2260,7 +2260,7 @@ class ClaudeAgent(BaseAgent):
                             )
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
 
-                    if await self._handle_activity_message(
+                    if self._handle_activity_message(
                         message,
                         composite_key,
                         context,
@@ -5111,7 +5111,7 @@ class ClaudeAgent(BaseAgent):
                     run_ids.append(run_id)
         return run_ids
 
-    async def _handle_activity_message(
+    def _handle_activity_message(
         self,
         message,
         composite_key: str,
@@ -5363,78 +5363,45 @@ class ClaudeAgent(BaseAgent):
                 metadata=metadata,
                 activation_identity=activation_identity,
             )
-        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
-        try:
-            completed = await registry.complete_async(
-                backend=self.name,
-                runtime_key=composite_key,
-                activity_id=task_id,
-                status=status,
-                metadata=metadata,
-                expects_output=status == "completed" and not foreground,
-                retain_terminal_snapshot=(
-                    status != "completed"
-                    and (not foreground or bool(metadata.get("provenance_pending")))
-                ) or (
-                    status == "completed" and foreground
-                    and bool(metadata.get("provenance_pending"))
-                ),
-                activation_identity=activation_identity,
-                run_sync=getattr(supervisor, "run_sync", None),
+        completed = registry.complete(
+            backend=self.name,
+            runtime_key=composite_key,
+            activity_id=task_id,
+            status=status,
+            metadata=metadata,
+            expects_output=(
+                status == "completed"
+                and not foreground
+            ),
+            retain_terminal_snapshot=(
+                status != "completed"
+                and (not foreground or bool(metadata.get("provenance_pending")))
             )
-        finally:
-            # Exhaustion is owned by Activity reconciliation, not native-event
-            # replay. The caller's loop wakes it even when completion raises.
-            if registry.completion_persistence_recovery(self.name, composite_key):
-                notify = getattr(supervisor, "notify", None)
-                if callable(notify):
-                    notify(RuntimeWorkLane.ACTIVITY_OUTPUTS, reset_cursor=True)
-        if completed is not None:
-            await self.on_activity_completed(completed)
-        return True
-
-    async def on_activity_completed(self, completed: SessionActivity) -> None:
-        """Publish one live or reconciled completion's loop-owned notifications."""
-
-        composite_key = completed.runtime_key
-        supervisor = getattr(self.controller, "runtime_work_supervisor", None)
-        if completed.status == "completed" and not completed.foreground:
+            or (
+                status == "completed"
+                and foreground
+                and bool(metadata.get("provenance_pending"))
+            ),
+            activation_identity=activation_identity,
+        )
+        if completed is not None and status == "completed" and not foreground:
+            supervisor = getattr(self.controller, "runtime_work_supervisor", None)
             notify = getattr(supervisor, "notify", None)
             if callable(notify):
                 notify(RuntimeWorkLane.ACTIVITY_OUTPUTS)
         service = getattr(self.controller, "agent_service", None)
-        on_terminal = getattr(service, "on_activity_terminal_async", None)
-        cancelled = False
-        terminal_step = None
-        if not bool((completed.metadata or {}).get("provenance_pending")):
-            if completed.foreground and service is not None:
-                # Result may classify the active step before a BUSY completion
-                # retry publishes its retained snapshot. Retire it without
-                # settling the Run, just as classification does for a terminal
-                # foreground step; keep ack exhaustion in the idle-sweep owner.
-                async def retire_foreground() -> None:
-                    await service.activities.ack_recovered_terminal_async(
-                        completed, run_sync=getattr(supervisor, "run_sync", None),
-                    )
-
-                terminal_step = service.run_until_done(
-                    f"activity-foreground:{completed.backend}:{composite_key}:{completed.id}",
-                    retire_foreground,
-                )
-            elif callable(on_terminal):
-                terminal_step = on_terminal(completed)
-        if terminal_step is not None:
-            from core.runtime_work import answer_caught_cancellation, land_step, rearm_caught_cancellation
-
-            step, cancelled = await land_step(terminal_step)
-            if cancelled and (step.cancelled() or step.exception() is not None):
-                answer_caught_cancellation(step)
-            step.result()
-        if completed.status != "completed" or completed.foreground:
+        on_terminal = getattr(service, "on_activity_terminal", None)
+        if (
+            completed is not None
+            and not foreground
+            and callable(on_terminal)
+            and not bool((completed.metadata or {}).get("provenance_pending"))
+        ):
+            on_terminal(completed)
+        if status != "completed" or foreground:
             self._mark_session_idle_if_runtime_free(composite_key)
             self._signal_activity_output_settled(composite_key)
-        if cancelled:
-            rearm_caught_cancellation()
+        return True
 
     @staticmethod
     def _activity_message_output(

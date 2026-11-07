@@ -21,11 +21,12 @@
   wait reports failure without breaking best-effort legacy dispatch; terminal-only
   link failures are logged on worker completion.
 
-## Ownership
+## Integration
 
-One eventual integration PR is owned by Session `sespzhunh64y2`. This slice does not
-push, open a PR, or merge. Claude caller replacements are supplied to that owner;
-`modules/agents/claude_agent.py` and `core/scheduled_tasks.py` are not edited here.
+The integrated change is covered by `offline-compaction-terminal-retries.md`.
+Claude's three failure-notice mirror callers use the async persistence API;
+command outcome/stamp recovery remains a separate boundary. Activity lifecycle
+retry is deferred and is not part of the mirror contract.
 
 ## Validation contracts
 

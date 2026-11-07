@@ -458,47 +458,6 @@ def test_agent_service_reports_missing_runtime_refresh_contract() -> None:
     assert asyncio.run(service.refresh_runtime_config("claude", object())) is False
 
 
-@pytest.mark.parametrize("failed_stage", ["run", "ack"])
-def test_live_activity_terminal_failure_uses_existing_idle_reconciliation(failed_stage, caplog) -> None:
-    activity = SimpleNamespace(backend="claude", runtime_key="runtime", id="task", metadata={})
-    attempts: list[str] = []
-    fail = True
-
-    async def settle(item):
-        assert item is activity
-        asyncio.get_running_loop()
-        attempts.append("run")
-        if fail and failed_stage == "run":
-            raise RuntimeError("terminal write exhausted")
-
-    async def ack(item, *, run_sync):
-        assert item is activity and run_sync is None
-        asyncio.get_running_loop()
-        attempts.append("ack")
-        if fail and failed_stage == "ack":
-            raise RuntimeError("terminal cleanup exhausted")
-
-    service = AgentService(
-        SimpleNamespace(scheduled_task_service=SimpleNamespace(settle_activity_runs_async=settle)),
-        activities=SimpleNamespace(ack_recovered_terminal_async=ack),
-    )
-
-    async def run():
-        nonlocal fail
-        assert not await service.on_activity_terminal_async(activity)
-        assert len(service._pending_operations) == 1
-        fail = False
-        await service.retry_pending()
-        assert not service._pending_operations
-        before = list(attempts)
-        await service.retry_pending()
-        assert attempts == before
-
-    asyncio.run(run())
-    assert attempts == (["run", "run", "ack"] if failed_stage == "run" else ["run", "ack", "run", "ack"])
-    assert "idle sweep retries it" in caplog.text
-
-
 def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() -> None:
     settle = Mock()
     controller = SimpleNamespace(
