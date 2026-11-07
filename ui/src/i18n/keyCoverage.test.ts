@@ -950,6 +950,7 @@ const NON_KEY_LITERALS = [
   'avibe.agents.tab.v1',
   'avibe.editor.fontSize.v1',
   'avibe.editor.recents.v1',
+  'avibe.pet.activityExpiry.v1',
   'avibe.pet.devBinding',
   'avibe.sidebar.sections.v1',
   'avibe.terminal.fontSize.v1',
