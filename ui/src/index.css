@@ -116,6 +116,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --motion-duration-fast: 160ms;
   --motion-duration-base: 240ms;
   --motion-duration-slow: 360ms;
+  /* A disclosure in the transcript: how long what it opens takes to show, and what it closes to leave.
+     LAB (lab/disclosure-variants): the lab switches variants by data-disclosure-variant on the root. */
+  --motion-disclose-open-duration: var(--motion-duration-fast);
+  --motion-disclose-close-duration: var(--motion-duration-instant);
   /* Between rows entering together; at most five rows are staggered. */
   --motion-stagger: 24ms;
 
@@ -1063,7 +1067,7 @@ pre,
 .motion-disclose-out-children > *,
 .motion-disclose-out-fade {
   pointer-events: none;
-  animation-duration: var(--motion-duration-instant);
+  animation-duration: var(--motion-disclose-close-duration);
   animation-timing-function: var(--motion-ease-exit);
   animation-fill-mode: forwards;
 }
@@ -1087,6 +1091,25 @@ pre,
   .motion-disclose-out-children > * { animation-name: none; }
   .motion-summary-in { animation-name: motion-fade-in; }
 }
+/* LAB (lab/disclosure-variants): the expand variants the disclosure lab switches between.
+   A is the shipped motion. B rises from 8px up and grows from --motion-scale-enter, and leaves the
+   same way back. C unfolds top to bottom (a clip-path reveal, transcriptMotion unfold) and folds back
+   up; D is C while the rows below make room. C and D leave by script, so their CSS exit is off. */
+:root[data-disclosure-variant="b"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: var(--motion-duration-fast); }
+:root[data-disclosure-variant="c"],
+:root[data-disclosure-variant="d"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 200ms; }
+@media (prefers-reduced-motion: no-preference) {
+  :root[data-disclosure-variant="b"] .motion-disclose-out { animation-name: motion-disclose-out-b; }
+  :root[data-disclosure-variant="b"] .motion-disclose-out-children > * { animation-name: motion-disclose-move-b; }
+  :root[data-disclosure-variant="c"] .motion-disclose-out,
+  :root[data-disclosure-variant="c"] .motion-disclose-out-children,
+  :root[data-disclosure-variant="c"] .motion-disclose-out-children > *,
+  :root[data-disclosure-variant="d"] .motion-disclose-out,
+  :root[data-disclosure-variant="d"] .motion-disclose-out-children,
+  :root[data-disclosure-variant="d"] .motion-disclose-out-children > * { animation-name: none; }
+}
+@keyframes motion-disclose-out-b { to { opacity: 0; translate: 0 calc(-1 * var(--motion-offset)); scale: var(--motion-scale-enter); } }
+@keyframes motion-disclose-move-b { to { translate: 0 calc(-1 * var(--motion-offset)); scale: var(--motion-scale-enter); } }
 
 /* Sheets, dialogs, popovers (docs/plans/web-ui-motion.md M6; src/lib/sheetDrag.ts;
    ui/design: motion/sheets/*). Keyed on the `data-state` Radix sets, which waits

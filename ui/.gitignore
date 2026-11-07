@@ -32,3 +32,4 @@ blob-report
 .playwright
 design/.shots/
 design/.dist/
+dist-lab

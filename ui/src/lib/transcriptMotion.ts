@@ -108,6 +108,11 @@ type Tokens = {
   scaleEnterSmall: number;
   beat: number;
   handover: number;
+  // LAB (lab/disclosure-variants): the variants' own timings.
+  discloseEnter: MotionTiming;
+  discloseMove: MotionTiming;
+  closeMove: MotionTiming;
+  closeExit: MotionTiming;
 };
 
 function readTokens(): Tokens {
@@ -127,6 +132,10 @@ function readTokens(): Tokens {
     scaleEnterSmall: readMotionNumber('--motion-scale-enter-sm', 0.98),
     beat: readMotionMs('--motion-beat'),
     handover: readMotionMs('--motion-handover-duration'),
+    discloseEnter: { duration: readMotionMs('--motion-disclose-open-duration'), easing: motionTiming('fast', 'enter').easing },
+    discloseMove: { duration: readMotionMs('--motion-disclose-open-duration'), easing: motionTiming('fast', 'move').easing },
+    closeMove: { duration: readMotionMs('--motion-disclose-close-duration'), easing: motionTiming('fast', 'move').easing },
+    closeExit: { duration: readMotionMs('--motion-disclose-close-duration'), easing: motionTiming('fast', 'exit').easing },
   };
 }
 
@@ -182,6 +191,170 @@ function laidOutBy(head: HTMLElement, item: HTMLElement): boolean {
   if (key.startsWith('harness-member:')) return (head.dataset.harnessMembers ?? '').split(' ').includes(key.slice('harness-member:'.length));
   if (key.startsWith('harness-collapse:')) return head.dataset.harnessGroup === key.slice('harness-collapse:'.length);
   return false;
+}
+
+// ----- LAB (lab/disclosure-variants): the expand variants the disclosure lab switches between. -----
+
+type Variant = 'a' | 'b' | 'c' | 'd';
+/** The lab's pick (`data-disclosure-variant` on the root); the shipped motion (A) without one. */
+const variantOf = (): Variant => {
+  const value = typeof document === 'undefined' ? undefined : document.documentElement.dataset.disclosureVariant;
+  return value === 'b' || value === 'c' || value === 'd' ? value : 'a';
+};
+/** How far a clip reaches past the box it clips: a member's rail reaches 12px up through the gap. */
+const CLIP_REACH = 16;
+/** How far past the content's bottom the unfolding edge travels, so its last row's shadow is never cut. */
+const EDGE_PAD = 8;
+
+/** B: what opened rises the last `--motion-offset` and grows from `--motion-scale-enter` at its top-left
+ *  corner while it fades in. An item it laid out fades as a whole while what it holds moves. */
+function rise(el: HTMLElement, tokens: Tokens, item: boolean) {
+  if (item) el.animate([{ opacity: 0 }, { opacity: 1 }], { ...tokens.discloseEnter, fill: 'backwards' });
+  for (const part of item ? Array.from(el.children) as HTMLElement[] : [el]) {
+    part.style.transformOrigin = 'top left';
+    const from = { translate: `0 ${-tokens.offset}px`, scale: String(tokens.scaleEnter) };
+    const moved = part.animate(
+      item ? [from, { translate: '0 0', scale: '1' }] : [{ ...from, opacity: 0 }, { translate: '0 0', scale: '1', opacity: 1 }],
+      { ...tokens.discloseEnter, fill: 'backwards' },
+    );
+    void moved.finished.then(() => { part.style.transformOrigin = ''; }, () => {});
+  }
+}
+
+/** The items after `after` in the column that a reader can see, now or within `reach` px below the screen. */
+function itemsBelow(after: Element, viewportBottom: number, reach: number): HTMLElement[] {
+  const rows: HTMLElement[] = [];
+  for (let el = after.nextElementSibling; el; el = el.nextElementSibling) {
+    if (!isItem(el)) continue;
+    if (el.getBoundingClientRect().top > viewportBottom + Math.abs(reach)) break;
+    rows.push(el);
+  }
+  return rows;
+}
+
+/** One clip edge moving across `nodes` (a span top to bottom): each node is cut at the same screen line,
+ *  from `from` px below the span's top to `to`, on `timing`. A node's bottom inset is linear in the edge
+ *  until the edge is above its top; there the clip holds at nothing (top and bottom insets meeting, never
+ *  crossing: an inverted inset is drawn as no clip at all by Chrome's composited clip-path). Keyframe
+ *  offsets are in eased progress, so the bend lands where the edge passes the node's top. */
+function sweep(nodes: HTMLElement[], from: number, to: number, timing: MotionTiming, fill: FillMode): Animation[] {
+  const rects = nodes.map((node) => node.getBoundingClientRect());
+  const top = Math.min(...rects.map((rect) => rect.top));
+  return nodes.map((node, index) => {
+    const y = rects[index].top - top;
+    const h = rects[index].height;
+    const hidden = h + CLIP_REACH;
+    const bottom = (edge: number) => Math.min(hidden, h + y - edge);
+    const inset = (edge: number) => `inset(${-CLIP_REACH}px ${-CLIP_REACH}px ${bottom(edge)}px ${-CLIP_REACH}px)`;
+    const keyframes: Keyframe[] = [{ offset: 0, clipPath: inset(from) }];
+    // Where the edge crosses this node's top (less its reach), if it does on the way.
+    const cross = y - CLIP_REACH;
+    const at = (cross - from) / (to - from);
+    if (to !== from && at > 0 && at < 1) keyframes.push({ offset: at, clipPath: inset(cross) });
+    keyframes.push({ offset: 1, clipPath: inset(to) });
+    return node.animate(keyframes, { ...timing, fill });
+  });
+}
+
+/** C and D: what opened unfolds top to bottom (an edge moving down a clip), with a light fade. What was
+ *  already on screen there before (the pill the panel replaced, the folded card the members replaced)
+ *  is the part shown from the first frame, so the edge moves exactly as far as the layout grew. D: the
+ *  rows below start where they were and make room on the same curve. */
+function unfold(item: Element, nodes: HTMLElement[], growth: number, push: Element | null, viewportBottom: number, tokens: Tokens) {
+  const rects = nodes.map((node) => node.getBoundingClientRect());
+  const height = Math.max(...rects.map((rect) => rect.bottom)) - Math.min(...rects.map((rect) => rect.top));
+  // What was there before it opened takes this much of the room it opens into; closing gives it back.
+  summaries.set(item, height - growth);
+  const start = Math.max(0, Math.min(height, height - growth));
+  sweep(nodes, start, height + EDGE_PAD, tokens.discloseMove, 'backwards');
+  for (const node of nodes) node.animate([{ opacity: 0.4 }, { opacity: 1 }], { ...tokens.discloseEnter, fill: 'backwards' });
+  if (!push || growth < 0.5) return;
+  for (const row of [push as HTMLElement, ...itemsBelow(push, viewportBottom, growth)]) {
+    if (!isItem(row)) continue;
+    row.animate([{ translate: `0 ${-growth}px` }, { translate: '0 0' }], { ...tokens.discloseMove, fill: 'backwards' });
+  }
+}
+
+/** The disclosure the reader is opening, as it was just before the commit that opens it: what follows
+ *  the tapped item, and how far from the tapped item's top that is (C and D measure how far it grew). */
+type Opening = { item: HTMLElement; next: HTMLElement | null; extent: number };
+
+/** The next item after `el` in the column. */
+function nextItem(el: Element): HTMLElement | null {
+  for (let next = el.nextElementSibling; next; next = next.nextElementSibling) if (isItem(next)) return next;
+  return null;
+}
+
+/** How much of an opened disclosure's room what stands for it closed takes (px, from its top): measured
+ *  when it opened (what was already there), so closing can fold to it. By the item that stays. */
+const summaries = new WeakMap<Element, number>();
+/** The animations a fold started, by what it folds: opened again before it left, they stop. */
+const folds = new WeakMap<Element, Animation[]>();
+
+/** How far down an element is drawn by its own `translate` (px). */
+function translatedY(el: Element): number {
+  const value = getComputedStyle(el).translate;
+  if (!value || value === 'none') return 0;
+  const [, y = '0'] = value.split(/\s+/);
+  return parseFloat(y) || 0;
+}
+
+/** C and D, closing: what closes folds back up, the clip's edge rising to where what stands for it closed
+ *  will end (the pill's height, the folded card's, none for a Harness row's body), and fades, while it
+ *  still holds its layout. D: the rows below rise with the edge, and once the layout lets go of the
+ *  content they are where it puts them; any difference left glides out. */
+function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, push: boolean, viewportBottom: () => number) {
+  const rects = nodes.map((node) => node.getBoundingClientRect());
+  const top = Math.min(...rects.map((rect) => rect.top));
+  const height = Math.max(...rects.map((rect) => rect.bottom)) - top;
+  const [first] = nodes;
+  // What stays (the item the content was in, or the group head above the members) and what follows.
+  let stays: Element | null = first;
+  while (stays && stays.parentElement !== column) stays = stays.parentElement;
+  if (stays && nodes.includes(stays as HTMLElement)) {
+    stays = stays.previousElementSibling;
+    while (stays && !isItem(stays)) stays = stays.previousElementSibling;
+  }
+  // Without a measure from its opening, a panel whose head carries the control that closes it keeps its head.
+  const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
+  const summary = (stays && summaries.get(stays)) ?? (head ? head.getBoundingClientRect().bottom - top : 0);
+  const keep = Math.max(0, Math.min(height, summary));
+  const swept = sweep(nodes, height + EDGE_PAD, keep, tokens.closeMove, 'forwards');
+  nodes.forEach((node, index) => {
+    folds.set(node, [swept[index], node.animate([{ opacity: 1 }, { opacity: 0 }], { ...tokens.closeExit, fill: 'forwards' })]);
+  });
+  if (!push) return;
+  const last = nodes[nodes.length - 1];
+  let after: Element | null = last;
+  while (after && after.parentElement !== column) after = after.parentElement;
+  const next = after ? nextItem(after) : null;
+  if (!stays || !next) return;
+  const anchor = stays;
+  const rise = height - summary;
+  const before = next.getBoundingClientRect().top - anchor.getBoundingClientRect().top;
+  const rows = [next, ...itemsBelow(next, viewportBottom(), rise)];
+  const rising = rows.map((row) => row.animate([{ translate: '0 0' }, { translate: `0 ${-rise}px` }], { ...tokens.closeMove, fill: 'forwards' }));
+  folds.set(first, [...(folds.get(first) ?? []), ...rising]);
+  const settle = new MutationObserver(() => {
+    if (nodes.some((node) => node.isConnected)) return;
+    settle.disconnect();
+    // Where each row is drawn now, then where the layout puts it: the rest of the way glides.
+    const drawn = rows.map(translatedY);
+    rising.forEach((animation) => animation.cancel());
+    if (!next.isConnected || !anchor.isConnected) return;
+    const shrink = before - (next.getBoundingClientRect().top - anchor.getBoundingClientRect().top);
+    rows.forEach((row, index) => {
+      const left = drawn[index] + shrink;
+      if (Math.abs(left) < 0.5 || !row.isConnected) return;
+      row.animate([{ translate: `0 ${left}px` }, { translate: '0 0' }], { ...tokens.discloseMove, fill: 'backwards' });
+    });
+  });
+  settle.observe(column, { childList: true, subtree: true });
+  window.setTimeout(() => {
+    if (!nodes.some((node) => node.isConnected)) return;
+    settle.disconnect();
+    rising.forEach((animation) => animation.cancel());
+  }, tokens.closeMove.duration + 2000);
 }
 
 /** The last item that stays put through a commit as far as the transcript knows: not the turn at work,
@@ -292,6 +465,10 @@ export function useTranscriptMotion({
   // an element shown again after it was gone counts as new).
   const disclosure = useRef<{ session: string; item: HTMLElement; at: number } | null>(null);
   const shownReveals = useRef(new Set<Element>());
+  // LAB: the disclosure being opened, measured before the commit that opens it; what the last commit
+  // showed closing.
+  const opening = useRef<Opening | null>(null);
+  const shownClosing = useRef(new Set<Element>());
 
   /** Call with the target of every click in the transcript: a tap that opens a disclosure control
    *  (anything with `aria-expanded="false"`) inside an item marks what the next commit opens there as
@@ -312,6 +489,15 @@ export function useTranscriptMotion({
     const column = columnRef.current;
     const row = el && column && pinnedRef.current === true ? lastSettled(column) : null;
     before.current = el && row ? { session: sessionId, row, top: row.getBoundingClientRect().top } : null;
+    // LAB: C and D measure how far the tapped item's room grows.
+    const pending = disclosure.current;
+    opening.current = null;
+    if (column && pending && pending.session === sessionId && pending.item.isConnected && variantOf() !== 'a'
+      && performance.now() - pending.at <= DISCLOSURE_WINDOW_MS) {
+      const next = nextItem(pending.item);
+      const box = pending.item.getBoundingClientRect();
+      opening.current = { item: pending.item, next, extent: (next ? next.getBoundingClientRect().top : box.bottom) - box.top };
+    }
   }, [scrollRef, columnRef, pinnedRef, sessionId]);
 
   const depart = useCallback((node: HTMLElement, kind: DepartureKind) => {
@@ -333,6 +519,16 @@ export function useTranscriptMotion({
     const reveals = column ? Array.from(column.querySelectorAll<HTMLElement>(`[${REVEAL_ATTRIBUTE}]`)) : [];
     const newReveals = reveals.filter((node) => !shownReveals.current.has(node));
     shownReveals.current = new Set(reveals);
+    // LAB: what this commit started closing (a disclosure leaving in place is aria-hidden while it does).
+    const closing = reveals.filter((node) => node.getAttribute('aria-hidden') === 'true');
+    const newClosing = closing.filter((node) => !shownClosing.current.has(node));
+    // Opened again before it left: whatever folding it had started stops.
+    for (const node of shownClosing.current) {
+      if (node.isConnected && !closing.includes(node as HTMLElement)) folds.get(node)?.forEach((animation) => animation.cancel());
+    }
+    shownClosing.current = new Set(closing);
+    const measured = opening.current;
+    opening.current = null;
     const leaving = departures.current.filter((departure) => !departure.node.isConnected);
     departures.current = [];
     const snapshot = before.current;
@@ -373,7 +569,9 @@ export function useTranscriptMotion({
       });
       if (revealing.length > 0) disclosure.current = null;
     }
-    if (!shouldGlide && leaving.length === 0 && entering.length === 0 && revealing.length === 0) return;
+    const variant = variantOf();
+    const folding = !reduced && (variant === 'c' || variant === 'd') ? newClosing : [];
+    if (!shouldGlide && leaving.length === 0 && entering.length === 0 && revealing.length === 0 && folding.length === 0) return;
     // Everything this commit's motion reads, before it writes anything.
     const tokens = readTokens();
     if (shouldGlide) {
@@ -398,7 +596,31 @@ export function useTranscriptMotion({
     fading.current = fading.current.filter(({ fade }) => fade.playState !== 'finished' && fade.playState !== 'idle');
     const handoff = Math.max(0, ...fading.current.map(({ fade, clearAt }) => clearAt - Number(fade.currentTime ?? 0)));
 
-    for (const { node, item } of revealing) reveal(node, reduced, tokens, item);
+    const viewportBottom = () => el.getBoundingClientRect().bottom;
+    if (reduced || variant === 'a') {
+      for (const { node, item } of revealing) reveal(node, reduced, tokens, item);
+    } else if (variant === 'b') {
+      for (const { node, item } of revealing) rise(node, tokens, item);
+    } else if (revealing.length > 0 && opened) {
+      // C and D: how far the tapped item's room grew, from just before this commit to now.
+      const nodes = revealing.map(({ node }) => node);
+      const box = opened.item.getBoundingClientRect();
+      const next = measured && measured.item === opened.item && measured.next?.parentElement === column ? measured.next : null;
+      const end = next ? next.getBoundingClientRect().top : Math.max(box.bottom, ...nodes.map((node) => node.getBoundingClientRect().bottom));
+      const growth = measured && measured.item === opened.item ? end - box.top - measured.extent : 0;
+      unfold(opened.item, nodes, growth, variant === 'd' ? next : null, viewportBottom(), tokens);
+    }
+    if (folding.length > 0) {
+      // Each disclosure closing here folds as one: the items a group laid out together, or one panel.
+      const runs: HTMLElement[][] = [];
+      for (const node of folding) {
+        const run = runs[runs.length - 1];
+        const prev = run?.[run.length - 1];
+        if (run && node.parentElement === column && prev?.parentElement === column && nextItem(prev) === node) run.push(node);
+        else runs.push([node]);
+      }
+      for (const run of runs) fold(column, run, tokens, variant === 'd', viewportBottom);
+    }
 
     const withMessage = entering.some((item) => !isWorking(item));
     for (const item of entering) {

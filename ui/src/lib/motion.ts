@@ -53,10 +53,10 @@ export function motionTiming(duration: MotionDuration, ease: MotionEase): Motion
 export function useDisclosure(open: boolean): { present: boolean; closing: boolean; closed: boolean } {
   const [phase, setPhase] = useState<'open' | 'closing' | 'closed' | 'rest'>(open ? 'open' : 'rest');
   if (open && phase !== 'open') setPhase('open');
-  if (!open && phase === 'open') setPhase(readMotionMs('--motion-duration-instant') > 0 ? 'closing' : 'rest');
+  if (!open && phase === 'open') setPhase(readMotionMs('--motion-disclose-close-duration') > 0 ? 'closing' : 'rest');
   useEffect(() => {
     if (phase !== 'closing') return undefined;
-    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-duration-instant'));
+    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-disclose-close-duration'));
     return () => window.clearTimeout(timer);
   }, [phase]);
   return { present: phase === 'open' || phase === 'closing', closing: phase === 'closing', closed: phase === 'closed' };
