@@ -86,7 +86,10 @@ def append(
     body: dict[str, Any] = {}
     if content:
         body.update(content)
-    if text is not None:
+    # Mirror tool traces keep their rendered text in the column, which released
+    # readers (including 3.2.4) prefer. Do not synthesize a second JSON copy;
+    # explicit content and every other event type/visibility remain unchanged.
+    if text is not None and not (event_type == "tool_call" and visibility == "trace"):
         body.setdefault("text", text)
     plain = text if text is not None else body.get("text") or None
 
