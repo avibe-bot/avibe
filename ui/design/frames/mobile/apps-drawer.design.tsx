@@ -2,13 +2,16 @@
 // The drawer ends at the tab bar's top edge. The main Bot's circle, which rises above that edge by
 // `--mobile-nav-center-rise`, always draws over the drawer, whole; the drawer's foot keeps that rise
 // plus 16px, so its last row (设置 / 账号 / 更多) is never under the circle (owner request,
-// 2026-11-07). The More and Account sheets and the long-press sheet cover the bar instead: they are
-// modal over everything, the bar included.
+// 2026-11-07). A take started by holding the circle with the drawer open draws its card and toast
+// above the drawer too. The More and Account sheets and the long-press sheet cover the bar instead:
+// they are modal over everything, the bar included.
 import { MobileDockDrawer } from '@/components/apps/MobileDockDrawer';
 import { InboxPage } from '@/components/workbench/InboxPage';
 import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { frames } from '../../frame';
+import { BotCenterTabBar, MainBotVoiceLayer, PhoneScreen } from '../../shell/PhoneScreen';
+import { spoken, teamFixtures } from '../../shell/teamFixtures';
 import { showPagesApi } from '../show-pages/fixtures';
 import { phoneShell, workbenchFixtures } from '../workbench/fixtures';
 
@@ -26,6 +29,21 @@ const member = workbenchFixtures(showPagesApi(), {
   bots: [],
   botStatus: {},
 });
+
+/** Holding the main Bot with the drawer open: the bar, the take, and the drawer in AppShell's order. */
+const holding = () => (
+  <PhoneScreen
+    tabBar={<BotCenterTabBar phase="recording" />}
+    overlay={
+      <>
+        <MainBotVoiceLayer hold={{ phase: 'recording', text: spoken.text, stash: spoken.stash, seconds: 6 }} />
+        <MobileDockDrawer open onClose={() => {}} />
+      </>
+    }
+  >
+    <InboxPage onOpenSearch={() => {}} />
+  </PhoneScreen>
+);
 
 const designFrames = frames([
   {
@@ -57,6 +75,16 @@ const designFrames = frames([
     route: '/inbox',
     fixtures: member,
     render: drawer,
+  },
+  {
+    name: 'hold',
+    title: '手机 · 应用抽屉开着时按住歪比说话：录音卡片在抽屉上面',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/inbox',
+    fixtures: workbenchFixtures({ ...teamFixtures.api, ...showPagesApi() }, teamFixtures),
+    render: holding,
   },
   {
     name: 'more',
