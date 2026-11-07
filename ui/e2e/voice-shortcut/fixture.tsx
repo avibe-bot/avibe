@@ -15,6 +15,7 @@ import type { Bot } from '../../src/lib/bots';
 import { setVoiceVocabulary } from '../../src/lib/voiceVocabulary';
 import i18n from '../../src/i18n';
 import '../../src/index.css';
+import { loadDeferredParts } from '../../src/components/deferredParts';
 
 void i18n.changeLanguage('en');
 
@@ -219,6 +220,8 @@ export function BotStripHarness() {
 }
 
 const surface = new URLSearchParams(location.search).get('surface');
+// The app loads these with the chat page and the first-screen prefetch.
+await loadDeferredParts();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ToastProvider>

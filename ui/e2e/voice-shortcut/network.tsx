@@ -5,6 +5,7 @@ import { ToastProvider } from '../../src/context/ToastProvider';
 import { setLocalSnapshotPrincipal } from '../../src/lib/localSnapshots';
 import i18n from '../../src/i18n';
 import '../../src/index.css';
+import { loadDeferredParts } from '../../src/components/deferredParts';
 
 // A composer whose network the test steers (`window.voiceNet`): the cloud token, the realtime
 // socket, avibe.bot's dictation route, and the local relay can each work, fail, or hang, and
@@ -222,6 +223,8 @@ class FakeRealtimeSocket {
 
 window.WebSocket = FakeRealtimeSocket as unknown as typeof WebSocket;
 
+// The app loads these with the chat page and the first-screen prefetch.
+await loadDeferredParts();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ToastProvider>

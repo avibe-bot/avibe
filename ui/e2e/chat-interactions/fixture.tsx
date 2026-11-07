@@ -12,6 +12,7 @@ import { ToastContext } from '../../src/context/ToastContext';
 import { DENIED_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
 import '../../src/i18n';
 import '../../src/index.css';
+import { loadDeferredParts } from '../../src/components/deferredParts';
 
 const session = { id: 'interaction-fixture', metadata: {} } as WorkbenchSession;
 const message = {
@@ -89,6 +90,8 @@ export function Fixture() {
   );
 }
 
+// The app loads these with the chat page and the first-screen prefetch.
+await loadDeferredParts();
 createRoot(document.getElementById('root')!).render(
   <MemoryRouter>
     <ToastContext.Provider value={{ showToast: noop }}>
