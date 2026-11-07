@@ -3424,8 +3424,8 @@ class SQLiteBackgroundTaskStore:
     def maybe_reload(self) -> bool:
         return self._probe.has_external_write()
 
-    def list_scheduled_tasks(self) -> list[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled").order_by(
+    def list_scheduled_tasks(self, *, include_retired: bool = True) -> list[dict[str, Any]]:
+        stmt = self._definitions_query("scheduled", include_retired=include_retired).order_by(
             run_definitions.c.created_at, run_definitions.c.id
         )
         with self.engine.connect() as conn:
@@ -3692,8 +3692,8 @@ class SQLiteBackgroundTaskStore:
             )
         return bool(result.rowcount)
 
-    def list_watches(self) -> list[dict[str, Any]]:
-        stmt = self._definitions_query("watch").order_by(
+    def list_watches(self, *, include_retired: bool = True) -> list[dict[str, Any]]:
+        stmt = self._definitions_query("watch", include_retired=include_retired).order_by(
             run_definitions.c.created_at, run_definitions.c.id
         )
         with self.engine.connect() as conn:
@@ -4985,6 +4985,7 @@ class SQLiteBackgroundTaskStore:
         session_id: Optional[str] = None,
         include_successful_finished: bool = True,
         include_removed: bool = False,
+        include_retired: bool = True,
         columns: Any = None,
     ):
         lifecycle = definition_lifecycle_expression(definition_type)
@@ -5007,6 +5008,11 @@ class SQLiteBackgroundTaskStore:
         stmt = stmt.where(run_definitions.c.definition_type == definition_type)
         if not include_removed:
             stmt = stmt.where(run_definitions.c.deleted_at.is_(None))
+        if not include_retired:
+            # Resident scheduler/supervisor mirrors need paused definitions too,
+            # but not retirement history. The partial resident index bounds this
+            # read before lifecycle projection and enrichment touch any Run rows.
+            stmt = stmt.where(run_definitions.c.retired_at.is_(None))
         # This Session filter powers the Harness "只看本会话" chip that the
         # background-work banner navigates into. Scheduled Tasks use creation
         # provenance as the authoritative owner: a create-per-run or pure command

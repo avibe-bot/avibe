@@ -313,6 +313,13 @@ run_definitions = Table(
         "enabled",
         sqlite_where=text("deleted_at is null"),
     ),
+    Index(
+        "ix_run_definitions_resident",
+        "definition_type",
+        "created_at",
+        "id",
+        sqlite_where=text("deleted_at is null and retired_at is null"),
+    ),
     Index("ix_run_definitions_session", "session_id"),
     Index("ix_run_definitions_agent", "agent_name"),
     Index("ix_run_definitions_updated", "updated_at"),

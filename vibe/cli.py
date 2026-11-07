@@ -4294,10 +4294,22 @@ async def _wait_for_watch_startup(
     projection included, through the lent ``reader`` -- runs off the loop.
     """
 
+    from core.watches import ManagedWatch
+
     async def projection(watch, runtime_entry) -> dict:
         return await asyncio.to_thread(_watch_mutation_payload, watch, runtime_entry, reader)
 
     def observe(*, with_runtime: bool):
+        backend = store.sqlite_backend
+        if backend is not None:
+            # Read this definition and its keyed runtime projection only. A busy
+            # database changes data_version every poll; refreshing the shared
+            # mirror here used to hydrate every historical Watch at 10 Hz.
+            row = (reader or backend).get_watch(watch_id)
+            if row is None:
+                return None, None
+            return ManagedWatch.from_dict(row), row.get("runtime")
+        # The legacy file backend has no by-id query.
         store.maybe_reload()
         watch = store.get_watch(watch_id)
         if watch is None and not with_runtime:

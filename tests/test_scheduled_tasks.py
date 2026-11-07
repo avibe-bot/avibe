@@ -1897,7 +1897,7 @@ def test_task_reload_and_scheduler_snapshot_share_one_mirror_lock(
             return self.probes == 1
 
         @staticmethod
-        def list_scheduled_tasks():
+        def list_scheduled_tasks(*, include_retired=True):
             load_started.set()
             assert release_load.wait(timeout=1)
             return [disabled.to_dict()]

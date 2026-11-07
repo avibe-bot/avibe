@@ -1332,7 +1332,7 @@ class ScheduledTaskStore:
         if self._sqlite is not None:
             self._tasks = {
                 item["id"]: ScheduledTask.from_dict(item)
-                for item in self._sqlite.list_scheduled_tasks()
+                for item in self._sqlite.list_scheduled_tasks(include_retired=False)
             }
             self._reload_required = False
             return
@@ -1457,12 +1457,19 @@ class ScheduledTaskStore:
         return generation, sorted(tasks.values(), key=lambda item: (item.created_at, item.id))
 
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
-        return self._tasks.get(task_id)
+        task = self._tasks.get(task_id)
+        if task is None and self._sqlite is not None and not self._reload_required:
+            # Retired definitions still own results, notices and user mutations.
+            # Read them by primary key without growing the scheduling mirror.
+            row = self._sqlite.get_scheduled_task(task_id)
+            if row is not None and row.get("retired_at") is not None:
+                return ScheduledTask.from_dict(row)
+        return task
 
     def _working_copy(self, task_id: str) -> Optional[ScheduledTask]:
         """A private copy of a published definition, for a writer to change."""
 
-        task = self._tasks.get(task_id)
+        task = self.get_task(task_id)
         return ScheduledTask.from_dict(task.to_dict()) if task is not None else None
 
     def _required_working_copy(self, task_id: str) -> ScheduledTask:
@@ -1472,7 +1479,10 @@ class ScheduledTaskStore:
         return task
 
     def _publish(self, task: ScheduledTask) -> None:
-        self._tasks = {**self._tasks, task.id: task}
+        if self._sqlite is not None and task.retired_at is not None:
+            self._unpublish(task.id)
+        else:
+            self._tasks = {**self._tasks, task.id: task}
 
     def _unpublish(self, task_id: str) -> None:
         if task_id in self._tasks:
@@ -1483,8 +1493,7 @@ class ScheduledTaskStore:
 
         with self._reload_lock:
             self._maybe_reload_unlocked()
-            task = self._tasks.get(task_id)
-            return ScheduledTask.from_dict(task.to_dict()) if task is not None else None
+            return self._working_copy(task_id)
 
     def get_watch_definition(self, definition_id: str) -> Optional[Dict[str, Any]]:
         """The watch row for *definition_id*, or ``None`` when it is not a watch.
@@ -1660,7 +1669,7 @@ class ScheduledTaskStore:
                 if expected_reference_agent_id is not None:
                     self.load()
                     _publish_task_definitions_updated()
-                    return self._tasks[task.id]
+                    return self._required_working_copy(task.id)
                 self._publish(task)
                 _publish_task_definitions_updated()
                 return task
@@ -1741,7 +1750,7 @@ class ScheduledTaskStore:
         was told could not be deleted just stops firing until the process restarts.
         """
 
-        if task_id not in self._tasks:
+        if self.get_task(task_id) is None:
             return False
         try:
             if self._sqlite is not None:
@@ -1889,7 +1898,7 @@ class ScheduledTaskStore:
             raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         if expected_reference_agent_id is not None:
             self.load()
-            return self._tasks[task_id]
+            return self._required_working_copy(task_id)
         return task
 
     @_serialize_task_mirror
@@ -1988,7 +1997,7 @@ class ScheduledTaskStore:
     def list_orphaned_reservations(self, task_id: str) -> list[dict[str, Any]]:
         """The reserved sessions recorded against ``task_id`` that were never given back."""
 
-        task = self._tasks.get(task_id)
+        task = self.get_task(task_id)
         if task is None or not isinstance(task.metadata, dict):
             return []
         entries = task.metadata.get(ORPHANED_RESERVATIONS_METADATA_KEY)
