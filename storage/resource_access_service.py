@@ -197,9 +197,11 @@ def current_resource_context(
         )
 
     try:
-        from vibe.ui_compat import g, has_request_context
+        from vibe.ui_request_context import has_request_context
 
         if has_request_context():
+            from vibe.ui_compat import g
+
             context = getattr(g, "authorization_context", None)
             return context if isinstance(context, AuthorizationContext) else AuthorizationContext(is_remote=True)
     except Exception:
@@ -221,7 +223,7 @@ def resolve_resource_access_context(
     if context.is_remote:
         return context
 
-    from vibe.ui_compat import has_request_context
+    from vibe.ui_request_context import has_request_context
 
     if has_request_context():
         return context
