@@ -252,8 +252,65 @@ function sweep(nodes: HTMLElement[], from: number, to: number, timing: MotionTim
     const at = (cross - from) / (to - from);
     if (to !== from && at > 0 && at < 1) keyframes.push({ offset: at, clipPath: inset(cross) });
     keyframes.push({ offset: 1, clipPath: inset(to) });
-    return node.animate(keyframes, { ...timing, fill });
+    return tagged(node.animate(inStep(keyframes), { ...timing, fill }));
   });
+}
+
+/** The edge (a clip, drawn by the main thread) and the rows that follow it (a translate, which the
+ *  compositor would otherwise run on its own clock) must land in the same frame, or for a frame the rows
+ *  run ahead of the edge and over the content it has not yet cut. A property the compositor cannot run,
+ *  held at a value that draws nothing (no outline is set), keeps both on the main thread's frames. */
+const inStep = (keyframes: Keyframe[]): Keyframe[] => keyframes.map((keyframe) => ({ ...keyframe, outlineOffset: '0px' }));
+
+/** Every Web Animation an unfold or a fold starts carries this id, so the next one can take over from it. */
+const DISCLOSE = 'transcript-disclose';
+const tagged = (animation: Animation) => {
+  animation.id = DISCLOSE;
+  return animation;
+};
+/** How opaque `el` is drawn now (an unfold's or a fold's fade included). */
+const opacityNow = (el: Element) => parseFloat(getComputedStyle(el).opacity) || 0;
+
+/** A disclosure unfolding or folding: its content, the rows below it that move with its edge, the
+ *  animations that move them (each with the direction of its playback that closes: an unfold closes played
+ *  backwards, a fold forwards), and its fades. Closing or opening again while it runs turns these round
+ *  where they are, never restarting them, so the edge and the rows stay in the same frame. */
+type Disclosing = {
+  nodes: HTMLElement[];
+  rows: HTMLElement[];
+  moves: { animation: Animation; closes: 1 | -1; row: boolean }[];
+  fades: Animation[];
+  watch?: MutationObserver;
+};
+/** By its first node. */
+const disclosing = new WeakMap<Element, Disclosing>();
+const running = (entry: Disclosing | undefined) => !!entry && entry.moves.some(({ animation }) => animation.playState === 'running');
+/** How long `animation` still has to go, played in the direction `sign`. */
+function timeLeft(animation: Animation, sign: 1 | -1): number {
+  const at = Number(animation.currentTime ?? 0);
+  const total = Number(animation.effect?.getComputedTiming().endTime ?? 0);
+  return sign > 0 ? Math.max(0, total - at) : Math.max(0, at);
+}
+/** Its moves turned to play toward `closing` (or opening), finishing within `within` ms. */
+function turn(entry: Disclosing, closing: boolean, within: number): number {
+  const left = Math.max(0, ...entry.moves.map(({ animation, closes }) => timeLeft(animation, (closing ? closes : -closes) as 1 | -1)));
+  const rate = Math.max(1, left / Math.max(1, within));
+  for (const { animation, closes } of entry.moves) {
+    animation.updatePlaybackRate((closing ? closes : -closes) * rate);
+    if (animation.playState === 'finished') animation.play();
+  }
+  return left / rate;
+}
+/** A fade of `nodes` from where it is to `to` over `duration`: down to 0 is below 10% by 70% of the way. */
+function refade(entry: Disclosing, to: number, duration: number, tokens: Tokens) {
+  const from = opacityNow(entry.nodes[0]);
+  entry.fades.forEach((fade) => fade.cancel());
+  entry.fades = entry.nodes.map((node) => tagged(node.animate(
+    to === 0
+      ? [{ opacity: from, offset: 0, easing: tokens.closeExit.easing }, { opacity: Math.min(from, 0.08), offset: 0.7 }, { opacity: 0, offset: 1 }]
+      : [{ opacity: from, easing: tokens.discloseEnter.easing }, { opacity: to }],
+    { duration: Math.max(1, duration), easing: 'linear', fill: to === 0 ? 'forwards' : 'backwards' },
+  )));
 }
 
 /** C and D: what opened unfolds top to bottom (an edge moving down a clip), with a light fade. What was
@@ -266,13 +323,18 @@ function unfold(item: Element, nodes: HTMLElement[], growth: number, push: Eleme
   // What was there before it opened takes this much of the room it opens into; closing gives it back.
   summaries.set(item, height - growth);
   const start = Math.max(0, Math.min(height, height - growth));
-  sweep(nodes, start, height + EDGE_PAD, tokens.discloseMove, 'backwards');
-  for (const node of nodes) node.animate([{ opacity: 0.4 }, { opacity: 1 }], { ...tokens.discloseEnter, fill: 'backwards' });
-  if (!push || growth < 0.5) return;
-  for (const row of [push as HTMLElement, ...itemsBelow(push, viewportBottom, growth)]) {
-    if (!isItem(row)) continue;
-    row.animate([{ translate: `0 ${-growth}px` }, { translate: '0 0' }], { ...tokens.discloseMove, fill: 'backwards' });
+  const entry: Disclosing = { nodes, rows: [], moves: [], fades: [] };
+  for (const animation of sweep(nodes, start, height + EDGE_PAD, tokens.discloseMove, 'backwards')) entry.moves.push({ animation, closes: -1, row: false });
+  entry.fades = nodes.map((node) => tagged(node.animate([{ opacity: 0.4 }, { opacity: 1 }], { ...tokens.discloseEnter, fill: 'backwards' })));
+  if (push && growth >= 0.5) {
+    for (const row of [push as HTMLElement, ...itemsBelow(push, viewportBottom, growth)]) {
+      if (!isItem(row)) continue;
+      entry.rows.push(row);
+      const animation = tagged(row.animate(inStep([{ translate: `0 ${-growth}px` }, { translate: '0 0' }]), { ...tokens.discloseMove, fill: 'backwards' }));
+      entry.moves.push({ animation, closes: -1, row: true });
+    }
   }
+  disclosing.set(nodes[0], entry);
 }
 
 /** The disclosure the reader is opening, as it was just before the commit that opens it: what follows
@@ -288,9 +350,6 @@ function nextItem(el: Element): HTMLElement | null {
 /** How much of an opened disclosure's room what stands for it closed takes (px, from its top): measured
  *  when it opened (what was already there), so closing can fold to it. By the item that stays. */
 const summaries = new WeakMap<Element, number>();
-/** The animations a fold started, by what it folds: opened again before it left, they stop. */
-const folds = new WeakMap<Element, Animation[]>();
-
 /** How far down an element is drawn by its own `translate` (px). */
 function translatedY(el: Element): number {
   const value = getComputedStyle(el).translate;
@@ -300,9 +359,10 @@ function translatedY(el: Element): number {
 }
 
 /** C and D, closing: what closes folds back up, the clip's edge rising to where what stands for it closed
- *  will end (the pill's height, the folded card's, none for a Harness row's body), and fades, while it
- *  still holds its layout. D: the rows below rise with the edge, and once the layout lets go of the
- *  content they are where it puts them; any difference left glides out. */
+ *  will end (the pill's height, the folded card's, none for a Harness row's body), and fades (below 10%
+ *  by 70% of the way), while it still holds its layout. D: the rows below rise with the edge, and once
+ *  the layout lets go of the content they are where it puts them; any difference left glides out. Closed
+ *  while it is still unfolding, the unfold plays back from where it is instead, within the fold's time. */
 function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, push: boolean, viewportBottom: () => number) {
   const rects = nodes.map((node) => node.getBoundingClientRect());
   const top = Math.min(...rects.map((rect) => rect.top));
@@ -315,46 +375,62 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, push: b
     stays = stays.previousElementSibling;
     while (stays && !isItem(stays)) stays = stays.previousElementSibling;
   }
-  // Without a measure from its opening, a panel whose head carries the control that closes it keeps its head.
-  const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
-  const summary = (stays && summaries.get(stays)) ?? (head ? head.getBoundingClientRect().bottom - top : 0);
-  const keep = Math.max(0, Math.min(height, summary));
-  const swept = sweep(nodes, height + EDGE_PAD, keep, tokens.closeMove, 'forwards');
-  nodes.forEach((node, index) => {
-    folds.set(node, [swept[index], node.animate([{ opacity: 1 }, { opacity: 0 }], { ...tokens.closeExit, fill: 'forwards' })]);
-  });
-  if (!push) return;
   const last = nodes[nodes.length - 1];
   let after: Element | null = last;
   while (after && after.parentElement !== column) after = after.parentElement;
-  const next = after ? nextItem(after) : null;
-  if (!stays || !next) return;
+  const next = push && stays ? (after ? nextItem(after) : null) : null;
+  let entry = disclosing.get(first);
+  if (running(entry) && entry!.nodes.length === nodes.length) {
+    // Still unfolding (or unfolding again): it plays back to where it started, the rows with it.
+    entry = entry!;
+    entry.watch?.disconnect();
+    refade(entry, 0, turn(entry, true, tokens.closeMove.duration), tokens);
+  } else {
+    // Without a measure from its opening, a panel whose head carries the control that closes it keeps its head.
+    const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
+    const summary = (stays && summaries.get(stays)) ?? (head ? head.getBoundingClientRect().bottom - top : 0);
+    const keep = Math.max(0, Math.min(height, summary));
+    const rise = height - summary;
+    entry = { nodes, rows: next ? [next, ...itemsBelow(next, viewportBottom(), rise)] : [], moves: [], fades: [] };
+    for (const animation of sweep(nodes, height + EDGE_PAD, keep, tokens.closeMove, 'forwards')) entry.moves.push({ animation, closes: 1, row: false });
+    for (const row of entry.rows) {
+      const animation = tagged(row.animate(inStep([{ translate: '0 0' }, { translate: `0 ${-rise}px` }]), { ...tokens.closeMove, fill: 'forwards' }));
+      entry.moves.push({ animation, closes: 1, row: true });
+    }
+    refade(entry, 0, tokens.closeMove.duration, tokens);
+    disclosing.set(first, entry);
+  }
+  const rows = entry.rows;
+  if (!next || !stays || rows.length === 0) return;
   const anchor = stays;
-  const rise = height - summary;
-  const before = next.getBoundingClientRect().top - anchor.getBoundingClientRect().top;
-  const rows = [next, ...itemsBelow(next, viewportBottom(), rise)];
-  const rising = rows.map((row) => row.animate([{ translate: '0 0' }, { translate: `0 ${-rise}px` }], { ...tokens.closeMove, fill: 'forwards' }));
-  folds.set(first, [...(folds.get(first) ?? []), ...rising]);
+  const moving = entry.moves.filter(({ row }) => row).map(({ animation }) => animation);
+  const before = next.getBoundingClientRect().top - anchor.getBoundingClientRect().top - translatedY(next);
   const settle = new MutationObserver(() => {
     if (nodes.some((node) => node.isConnected)) return;
     settle.disconnect();
     // Where each row is drawn now, then where the layout puts it: the rest of the way glides.
     const drawn = rows.map(translatedY);
-    rising.forEach((animation) => animation.cancel());
+    moving.forEach((animation) => animation.cancel());
     if (!next.isConnected || !anchor.isConnected) return;
     const shrink = before - (next.getBoundingClientRect().top - anchor.getBoundingClientRect().top);
     rows.forEach((row, index) => {
       const left = drawn[index] + shrink;
       if (Math.abs(left) < 0.5 || !row.isConnected) return;
-      row.animate([{ translate: `0 ${left}px` }, { translate: '0 0' }], { ...tokens.discloseMove, fill: 'backwards' });
+      tagged(row.animate(inStep([{ translate: `0 ${left}px` }, { translate: '0 0' }]), { ...tokens.discloseMove, fill: 'backwards' }));
     });
   });
   settle.observe(column, { childList: true, subtree: true });
-  window.setTimeout(() => {
-    if (!nodes.some((node) => node.isConnected)) return;
-    settle.disconnect();
-    rising.forEach((animation) => animation.cancel());
-  }, tokens.closeMove.duration + 2000);
+  entry.watch = settle;
+  window.setTimeout(() => settle.disconnect(), tokens.closeMove.duration + 2000);
+}
+
+/** C and D, opened again while it was folding: the fold plays back from where it is, the rows going back
+ *  down with the edge. */
+function refold(nodes: HTMLElement[], tokens: Tokens) {
+  const entry = disclosing.get(nodes[0]);
+  if (!entry) return;
+  entry.watch?.disconnect();
+  refade(entry, 1, turn(entry, false, tokens.discloseMove.duration), tokens);
 }
 
 /** The last item that stays put through a commit as far as the transcript knows: not the turn at work,
@@ -522,10 +598,8 @@ export function useTranscriptMotion({
     // LAB: what this commit started closing (a disclosure leaving in place is aria-hidden while it does).
     const closing = reveals.filter((node) => node.getAttribute('aria-hidden') === 'true');
     const newClosing = closing.filter((node) => !shownClosing.current.has(node));
-    // Opened again before it left: whatever folding it had started stops.
-    for (const node of shownClosing.current) {
-      if (node.isConnected && !closing.includes(node as HTMLElement)) folds.get(node)?.forEach((animation) => animation.cancel());
-    }
+    // Opened again before it left: it unfolds from where its fold had got to.
+    const reopened = [...shownClosing.current].filter((node): node is HTMLElement => node instanceof HTMLElement && node.isConnected && !closing.includes(node as HTMLElement));
     shownClosing.current = new Set(closing);
     const measured = opening.current;
     opening.current = null;
@@ -571,7 +645,7 @@ export function useTranscriptMotion({
     }
     const variant = variantOf();
     const folding = !reduced && (variant === 'c' || variant === 'd') ? newClosing : [];
-    if (!shouldGlide && leaving.length === 0 && entering.length === 0 && revealing.length === 0 && folding.length === 0) return;
+    if (!shouldGlide && leaving.length === 0 && entering.length === 0 && revealing.length === 0 && folding.length === 0 && reopened.length === 0) return;
     // Everything this commit's motion reads, before it writes anything.
     const tokens = readTokens();
     if (shouldGlide) {
@@ -609,6 +683,24 @@ export function useTranscriptMotion({
       const end = next ? next.getBoundingClientRect().top : Math.max(box.bottom, ...nodes.map((node) => node.getBoundingClientRect().bottom));
       const growth = measured && measured.item === opened.item ? end - box.top - measured.extent : 0;
       unfold(opened.item, nodes, growth, variant === 'd' ? next : null, viewportBottom(), tokens);
+    }
+    if (reopened.length > 0) {
+      if (!reduced && (variant === 'c' || variant === 'd')) {
+        const runs: HTMLElement[][] = [];
+        for (const node of reopened) {
+          const run = runs[runs.length - 1];
+          const prev = run?.[run.length - 1];
+          if (run && node.parentElement === column && prev?.parentElement === column && nextItem(prev) === node) run.push(node);
+          else runs.push([node]);
+        }
+        for (const run of runs) refold(run, tokens);
+      } else {
+        for (const node of reopened) {
+          const entry = disclosing.get(node);
+          entry?.moves.forEach(({ animation }) => animation.cancel());
+          entry?.fades.forEach((fade) => fade.cancel());
+        }
+      }
     }
     if (folding.length > 0) {
       // Each disclosure closing here folds as one: the items a group laid out together, or one panel.

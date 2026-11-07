@@ -3,7 +3,7 @@
 // of the header, the composer, and the transcript's taps.
 import { createPortal } from 'react-dom';
 
-import { type LabPrefs, type Variant } from './prefs';
+import { type LabPrefs, type Speed, type Variant } from './prefs';
 
 declare const __LAB_SOURCE__: { branch: string; head: string; built: string };
 
@@ -11,8 +11,16 @@ const VARIANTS: { id: Variant; name: string; hint: string }[] = [
   { id: 'a', name: 'A', hint: '现状：淡入 + 0.98 放大，160ms' },
   { id: 'b', name: 'B', hint: '更明显：淡入 + 下落 8px + 0.96 放大，220ms' },
   { id: 'c', name: 'C', hint: '展开：从上往下揭开 + 轻淡入，220ms' },
-  { id: 'd', name: 'D', hint: 'C + 下面的行跟着往下让开，220ms' },
+  { id: 'd', name: 'D', hint: 'C + 下面的行跟着往下让开；收起时跟着往上收' },
 ];
+
+/** D's speeds: opening, and closing (the fold, then the summary coming in), in ms (src/index.css). */
+const SPEEDS: { id: Speed; name: string; open: number; fold: number; summary: number }[] = [
+  { id: '1', name: '1×', open: 220, fold: 120, summary: 60 },
+  { id: '0.75', name: '0.75×', open: 290, fold: 170, summary: 70 },
+  { id: '0.5', name: '0.5×', open: 440, fold: 260, summary: 90 },
+];
+const seconds = (ms: number) => `${(ms / 1000).toFixed(2).replace(/0$/, '')}s`;
 
 function Segmented<T extends string>({ value, options, onChange }: { value: T; options: { id: T; name: string }[]; onChange: (value: T) => void }) {
   return (
@@ -62,7 +70,8 @@ export function Panel({
   onSettle: () => void;
 }) {
   const variant = VARIANTS.find((option) => option.id === prefs.variant) ?? VARIANTS[0];
-  const tab = `${variant.name}${prefs.slow ? ' · 0.25×' : ''}${prefs.reduced ? ' · 减弱' : ''}`;
+  const speed = SPEEDS.find((option) => option.id === prefs.speed) ?? SPEEDS[2];
+  const tab = `${variant.name}${prefs.variant === 'd' ? ` ${speed.name}` : ''}${prefs.slow ? ' · 慢放' : ''}${prefs.reduced ? ' · 减弱' : ''}`;
   return createPortal(
     <div
       className="fixed right-0 z-[1000] text-foreground"
@@ -87,6 +96,16 @@ export function Panel({
           <div className="mb-1 text-[11px] text-muted">展开方案</div>
           <Segmented value={prefs.variant} options={VARIANTS} onChange={(value) => onChange({ variant: value })} />
           <div className="mt-1 min-h-[28px] text-[10.5px] leading-snug text-muted">{variant.hint}</div>
+          {prefs.variant === 'd' && (
+            <>
+              <div className="mt-1 mb-1 text-[11px] text-muted">D 的速度</div>
+              <Segmented value={prefs.speed} options={SPEEDS} onChange={(value) => onChange({ speed: value })} />
+              <div className="mt-1 text-[10.5px] text-muted">
+                展开 {seconds(speed.open)} · 收起 {seconds(speed.fold + speed.summary)}
+                {prefs.slow ? '（慢放中再 ×4）' : ''}
+              </div>
+            </>
+          )}
           <div className="mt-2 mb-1 text-[11px] text-muted">外观</div>
           <Segmented
             value={prefs.theme}

@@ -7,9 +7,10 @@
 // - slow motion: every motion duration token at 4x, so CSS and scripted motion slow down together.
 
 export type Variant = 'a' | 'b' | 'c' | 'd';
-export type LabPrefs = { variant: Variant; theme: 'light' | 'dark'; reduced: boolean; slow: boolean; open: boolean };
+export type Speed = '1' | '0.75' | '0.5';
+export type LabPrefs = { variant: Variant; speed: Speed; theme: 'light' | 'dark'; reduced: boolean; slow: boolean; open: boolean };
 
-const KEY = 'avibe-lab-disclosure-v1';
+const KEY = 'avibe-lab-disclosure-v2';
 const storage: Storage | null = (() => {
   try {
     return window.localStorage;
@@ -19,7 +20,7 @@ const storage: Storage | null = (() => {
 })();
 
 const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-const defaults: LabPrefs = { variant: 'a', theme: systemDark ? 'dark' : 'light', reduced: false, slow: false, open: true };
+const defaults: LabPrefs = { variant: 'd', speed: '0.5', theme: systemDark ? 'dark' : 'light', reduced: false, slow: false, open: true };
 
 export function loadPrefs(): LabPrefs {
   try {
@@ -126,6 +127,7 @@ const DURATION_TOKENS = [
   '--motion-press-delay',
   '--motion-disclose-open-duration',
   '--motion-disclose-close-duration',
+  '--motion-disclose-summary-duration',
 ];
 export const SLOW_FACTOR = 4;
 
@@ -153,14 +155,15 @@ export function applyTheme(theme: 'light' | 'dark') {
   if (meta) meta.setAttribute('content', theme === 'dark' ? '#0b0d12' : '#ffffff');
 }
 
-export function applyVariant(variant: Variant) {
+export function applyVariant(variant: Variant, speed: Speed) {
   document.documentElement.dataset.disclosureVariant = variant;
+  document.documentElement.dataset.disclosureSpeed = speed;
 }
 
 /** Everything the saved settings say, on the page. */
 export function applyAll(prefs: LabPrefs) {
   applyTheme(prefs.theme);
-  applyVariant(prefs.variant);
+  applyVariant(prefs.variant, prefs.speed);
   setReduced(prefs.reduced);
   applySlow(prefs.slow);
 }

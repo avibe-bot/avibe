@@ -168,6 +168,14 @@ function run() {
   }, 1400);
 }
 
+/** A reply arriving over the stream, for scripted checks of the lab. */
+(window as unknown as { __lab: { reply: () => void } }).__lab = {
+  reply: () => {
+    if (running) settle();
+    else send('message.new', append(labAgent(replies[replyCount++ % replies.length])));
+  },
+};
+
 function Lab() {
   const [prefs, setPrefs] = useState<LabPrefs>(loadPrefs);
   const [isRunning, setRunning] = useState(running !== null);
@@ -181,9 +189,9 @@ function Lab() {
     setPrefs(merged);
     savePrefs(merged);
     if (next.theme) applyTheme(merged.theme);
-    if (next.variant) applyVariant(merged.variant);
+    if (next.variant || next.speed) applyVariant(merged.variant, merged.speed);
     if (next.reduced !== undefined) setReduced(merged.reduced);
-    if (next.variant || next.slow !== undefined) applySlow(merged.slow);
+    if (next.variant || next.speed || next.slow !== undefined) applySlow(merged.slow);
   };
   return (
     <>
@@ -217,6 +225,6 @@ function Lab() {
 // Before the first paint: the saved theme and variant (the stylesheet's rules follow once it is in).
 const initial = loadPrefs();
 applyTheme(initial.theme);
-applyVariant(initial.variant);
+applyVariant(initial.variant, initial.speed);
 applyReducedStyles();
 createRoot(document.getElementById('root')!).render(<Lab />);

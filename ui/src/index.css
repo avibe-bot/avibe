@@ -120,6 +120,7 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
      LAB (lab/disclosure-variants): the lab switches variants by data-disclosure-variant on the root. */
   --motion-disclose-open-duration: var(--motion-duration-fast);
   --motion-disclose-close-duration: var(--motion-duration-instant);
+  --motion-disclose-summary-duration: var(--motion-duration-instant);
   /* Between rows entering together; at most five rows are staggered. */
   --motion-stagger: 24ms;
 
@@ -1083,7 +1084,7 @@ pre,
    so nothing appears whole in one frame. */
 .motion-summary-in {
   transform-origin: top left;
-  animation: motion-summary-in var(--motion-duration-instant) var(--motion-ease-enter) backwards;
+  animation: motion-summary-in var(--motion-disclose-summary-duration) var(--motion-ease-enter) backwards;
 }
 @keyframes motion-summary-in { from { opacity: 0; scale: var(--motion-scale-enter-sm); } }
 @media (prefers-reduced-motion: reduce) {
@@ -1096,8 +1097,12 @@ pre,
    same way back. C unfolds top to bottom (a clip-path reveal, transcriptMotion unfold) and folds back
    up; D is C while the rows below make room. C and D leave by script, so their CSS exit is off. */
 :root[data-disclosure-variant="b"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: var(--motion-duration-fast); }
-:root[data-disclosure-variant="c"],
-:root[data-disclosure-variant="d"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 200ms; }
+:root[data-disclosure-variant="c"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 200ms; }
+/* D at the lab's speeds (data-disclosure-speed): closing (the fold, then the summary coming in) takes
+   about 0.8 of opening. */
+:root[data-disclosure-variant="d"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 120ms; --motion-disclose-summary-duration: 60ms; }
+:root[data-disclosure-variant="d"][data-disclosure-speed="0.75"] { --motion-disclose-open-duration: 290ms; --motion-disclose-close-duration: 170ms; --motion-disclose-summary-duration: 70ms; }
+:root[data-disclosure-variant="d"][data-disclosure-speed="0.5"] { --motion-disclose-open-duration: 440ms; --motion-disclose-close-duration: 260ms; --motion-disclose-summary-duration: 90ms; }
 @media (prefers-reduced-motion: no-preference) {
   :root[data-disclosure-variant="b"] .motion-disclose-out { animation-name: motion-disclose-out-b; }
   :root[data-disclosure-variant="b"] .motion-disclose-out-children > * { animation-name: motion-disclose-move-b; }
