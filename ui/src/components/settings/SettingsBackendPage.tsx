@@ -11,6 +11,8 @@ import { useBackendRuntime } from './shared/useBackendRuntime';
 import { BackendSupplyModeCard } from './models/BackendSupplyModeCard';
 import { hubSupplyBlocks, type HubSupplyBlock } from './models/featureFlags';
 import { useModelHubCapability } from './models/useModelHubCapability';
+// Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
+import './models/modelHubSurface.css';
 
 /** Shared settings body for backends whose runtime is owned by Avibe. */
 export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {

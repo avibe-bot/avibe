@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useToast } from '../context/ToastContext';
+import { APP_LANGUAGES } from '../i18n/options';
 import { setConfigField } from './configMutations';
 import { useLatestRef } from './useLatestRef';
 
@@ -226,8 +227,9 @@ export const useLanguageSelection = (): LanguageSelection => {
     },
   }), [i18n, latest]);
 
-  const codes = Object.keys(i18n.options.resources ?? {});
-  const languages = (codes.length ? codes : ['en']).map((code) => ({
+  // Every language the app ships, not only those this instance has loaded: the
+  // Web UI downloads one language's copy at a time (src/i18n/app.ts).
+  const languages = APP_LANGUAGES.map((code) => ({
     code,
     label: t(`language.${code}`, { defaultValue: code }),
   }));

@@ -34,6 +34,8 @@ import { serverText } from './serverCopy';
 import { VendorGlyph } from './vendorGlyph';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
 import type { AgentBackend, MigrationItem, NativeCliBackend } from './types';
+// Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
+import './modelHubSurface.css';
 
 // Older payloads cannot identify the exact file or store. Name only the
 // backend's configuration when the server supplies no file locators.

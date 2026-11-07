@@ -57,7 +57,8 @@ function connectionAllowsPrefetch(): boolean {
 
 const pageVisible = () => typeof document === 'undefined' || document.visibilityState === 'visible';
 
-function whenIdle(run: () => void): void {
+/** Run when the browser is idle, or after a short delay where it cannot say (Safari). */
+export function whenIdle(run: () => void): void {
   const idle = (globalThis as { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number })
     .requestIdleCallback;
   if (typeof idle === 'function') idle(run, { timeout: IDLE_TIMEOUT_MS });

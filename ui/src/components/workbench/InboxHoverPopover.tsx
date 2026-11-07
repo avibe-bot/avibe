@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, MessageSquareReply, RefreshCw } from 'lucide-react';
@@ -14,7 +14,6 @@ import { writeInboxFilter } from '../../lib/inboxFilterMemory';
 import { inboxCategory, isCategoryLoud, type InboxCategory } from '../../lib/notificationPreferences';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { BotAvatar } from '../ui/bot-avatar';
-import { InboxPreview } from './InboxPreview';
 import { PopoverContent } from '../ui/popover';
 import { NotificationMenu } from './NotificationMenu';
 import { useNotificationMode } from './useNotificationMode';
@@ -24,6 +23,11 @@ import { chatHref, useCardOpen } from './useCardOpen';
 import { InboxPopoverRowsSkeleton } from './listSkeletons';
 import { FlipList } from '../ui/flip-list';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
+import { lazyPage } from '../../lib/lazyPage';
+
+/** A reply's Markdown preview: the Markdown renderer loads with the chat page, not
+ *  the entry, and the first-screen prefetch (routePages.ts) has it ready before a hover. */
+export const DeferredInboxPreview = lazyPage(() => import('./InboxPreview').then((m) => m.InboxPreview));
 
 // How many rows the peek holds: five in one list, or three per section once the
 // caller has Bots. Named because two things depend on it: which rows are picked,
@@ -87,10 +91,12 @@ function InboxPeekRow({
     <MessageSquareReply className="size-3 shrink-0 text-cyan-ink" aria-label={t('workbench.inbox.replied')} />
   ) : null;
   const preview = s.preview_text ? (
-    <InboxPreview
-      text={s.preview_text}
-      className={clsx('line-clamp-2 text-[11.5px] leading-relaxed', unread > 0 ? 'text-foreground' : 'text-muted')}
-    />
+    <Suspense fallback={null}>
+      <DeferredInboxPreview
+        text={s.preview_text}
+        className={clsx('line-clamp-2 text-[11.5px] leading-relaxed', unread > 0 ? 'text-foreground' : 'text-muted')}
+      />
+    </Suspense>
   ) : null;
   // A surface under the pointer (M8): it sinks, and its fill steps to the one it hovers to.
   const shell = clsx(

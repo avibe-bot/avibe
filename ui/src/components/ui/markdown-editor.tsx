@@ -1,10 +1,10 @@
 import * as React from 'react';
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { SegmentedRadio } from './segmented';
 import { Textarea } from './textarea';
-import { Markdown } from './markdown';
+import { DeferredMarkdown } from './deferredMarkdown';
 
 type EditorMode = 'edit' | 'preview';
 
@@ -63,7 +63,7 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
         {showPreview ? (
           <div className="h-full overflow-auto rounded-lg border border-border bg-surface-2 px-4 py-3">
             {value.trim() ? (
-              <Markdown content={value} />
+              <Suspense fallback={null}><DeferredMarkdown content={value} /></Suspense>
             ) : (
               <span className="text-[12px] text-muted">{t('editor.previewEmpty')}</span>
             )}
