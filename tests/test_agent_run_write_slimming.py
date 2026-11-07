@@ -36,6 +36,15 @@ def test_queued_run_payload_keeps_prompt_and_drops_duplicate_message() -> None:
     assert payload["prompt"] == "run this instruction"
     assert payload["message"] is None
 
+    distinct = TaskExecutionRequest(
+        id="run-distinct",
+        request_type="scheduled",
+        prompt="execution prompt",
+        message="display message",
+    )
+
+    assert TaskExecutionStore.queued_run_payload(distinct)["message"] == "display message"
+
 
 def test_new_run_persists_prompt_only_and_readers_restore_message(
     tmp_path, sqlite_db_factory

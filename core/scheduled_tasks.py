@@ -2560,10 +2560,12 @@ class TaskExecutionStore:
         """
 
         payload = request.to_dict()
-        # ``prompt`` is the durable source of truth for queued runs. Readers from
-        # v3.2.4 onward reconstruct ``message`` from it when the legacy duplicate
-        # column is NULL, while hook execution requires ``prompt`` itself.
-        payload["message"] = None
+        # Only drop the legacy value when it is byte-for-byte the same text. A
+        # definition can legally carry distinct prompt/message values; preserving
+        # that pair is required for readers that display ``message`` while execution
+        # consumes ``prompt``.
+        if payload.get("message") == payload.get("prompt"):
+            payload["message"] = None
         payload["status"] = "queued"
         payload["updated_at"] = request.created_at
         return payload
@@ -2758,7 +2760,12 @@ class TaskExecutionStore:
             "message_payload",
             "metadata",
         ):
-            setattr(request, field_name, snapshot.get(field_name))
+            value = snapshot.get(field_name)
+            if field_name == "message":
+                # The stored legacy duplicate is NULL for new rows, but the
+                # in-memory request still exposes the same authoritative text.
+                value = snapshot.get("message") or snapshot.get("prompt")
+            setattr(request, field_name, value)
         return request
 
     def enqueue_hook_send(
