@@ -257,7 +257,6 @@ class SessionsStore:
         self._agent_session_lookup_lock = RLock()
         self._ensure_service()
         self.load()
-        self._service.has_external_write()
 
     def _ensure_service(self) -> None:
         target_db = Path(self.sessions_path).with_name("vibe.sqlite")
@@ -805,4 +804,3 @@ class SessionsStore:
     def save(self) -> None:
         self._ensure_service()
         self._service.save_state(self.state)
-        self._service.has_external_write()

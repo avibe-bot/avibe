@@ -91,7 +91,7 @@ def test_sessions_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
     store = SessionsStore(sessions_path)
     external = SQLiteSessionsService(tmp_path / "vibe.sqlite")
     try:
-        assert store.get_active_poll("oc-external") is None
+        assert store.state.active_polls.get("oc-external") is None
 
         external.save_state(
             SessionState(
@@ -115,6 +115,86 @@ def test_sessions_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
         assert poll is not None
         assert poll.platform == "slack"
         assert poll.channel_id == "C1"
+    finally:
+        external.close()
+        store.close()
+
+
+def test_sessions_store_preserves_write_during_initial_load_for_first_refresh(
+    tmp_path: Path,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    db_path = tmp_path / "vibe.sqlite"
+    external = SQLiteSessionsService(db_path)
+    store = None
+    original_load_state = SQLiteSessionsService.load_state
+    injected = False
+
+    def load_state_then_commit(service: SQLiteSessionsService) -> SessionState:
+        nonlocal injected
+        state = original_load_state(service)
+        if not injected:
+            injected = True
+            external.save_state(
+                SessionState(
+                    active_polls={
+                        "oc-during-load": ActivePollInfo(
+                            opencode_session_id="oc-during-load",
+                            base_session_id="base",
+                            channel_id="C1",
+                            thread_id="t1",
+                            settings_key="C1",
+                            working_path="/repo",
+                            platform="slack",
+                        ).to_dict()
+                    }
+                )
+            )
+        return state
+
+    try:
+        with patch.object(SQLiteSessionsService, "load_state", load_state_then_commit):
+            store = SessionsStore(sessions_path)
+        assert store.state.active_polls == {}
+
+        store.maybe_reload()
+
+        assert store.get_active_poll("oc-during-load") is not None
+    finally:
+        if store is not None:
+            store.close()
+        external.close()
+
+
+def test_sessions_store_save_preserves_pending_external_state_invalidation(
+    tmp_path: Path,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    external = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        external.save_state(
+            SessionState(
+                active_polls={
+                    "oc-before-save": ActivePollInfo(
+                        opencode_session_id="oc-before-save",
+                        base_session_id="base",
+                        channel_id="C1",
+                        thread_id="t1",
+                        settings_key="C1",
+                        working_path="/repo",
+                        platform="slack",
+                    ).to_dict()
+                }
+            )
+        )
+
+        # Saving the local mirror must not consume the external commit before
+        # the next maybe_reload gets a chance to rebuild that mirror.
+        store.save()
+        store.maybe_reload()
+
+        assert store.get_active_poll("oc-before-save") is not None
     finally:
         external.close()
         store.close()
@@ -147,17 +227,23 @@ def test_agent_session_lookup_reads_external_row_without_full_reload(tmp_path: P
         store.close()
 
 
-def test_point_lookup_invalidation_does_not_consume_bulk_state_invalidation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prime_before_write", [False, True], ids=["cold", "warm"])
+def test_point_lookup_invalidation_does_not_consume_bulk_state_invalidation(
+    tmp_path: Path, prime_before_write: bool
+) -> None:
     sessions_path = tmp_path / "sessions.json"
     store = SessionsStore(sessions_path)
     external = SQLiteSessionsService(tmp_path / "vibe.sqlite")
     try:
-        # Prime the separate point-lookup probe before the external commit.
-        assert store.lookup_agent_session_id(
-            "slack::channel::C1",
-            "claude",
-            "missing-anchor",
-        ) is None
+        # The point-lookup probe is independent from the bulk-state probe. Warm
+        # the former only in its explicit warm case; the cold case must still
+        # preserve the pending bulk invalidation after its first lookup.
+        if prime_before_write:
+            assert store.lookup_agent_session_id(
+                "slack::channel::C1",
+                "claude",
+                "missing-anchor",
+            ) is None
         external.save_state(
             SessionState(
                 active_polls={
