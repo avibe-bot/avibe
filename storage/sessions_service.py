@@ -357,6 +357,64 @@ class SQLiteSessionsService:
                 .limit(1)
             ).scalar_one_or_none()
 
+    def lookup_agent_session_id(
+        self,
+        *,
+        scope_key: str,
+        agent_name: str,
+        session_anchor: str,
+    ) -> Any | None:
+        """Read one mapping by the indexed ``(scope_id, session_anchor)`` key."""
+        with self.engine.connect() as conn:
+            scope_id = _lookup_scope_id(conn, str(scope_key))
+            if scope_id is None:
+                return None
+            native_session_id = conn.execute(
+                select(agent_sessions.c.native_session_id)
+                .where(agent_sessions.c.scope_id == scope_id)
+                .where(agent_sessions.c.agent_variant == (str(agent_name) or "default"))
+                .where(agent_sessions.c.session_anchor == str(session_anchor))
+                .limit(1)
+            ).scalar_one_or_none()
+            return decode_session_value(native_session_id)
+
+    def list_agent_session_mappings(
+        self,
+        *,
+        scope_key: str,
+        session_anchor_prefix: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read mappings for one scope, optionally limited to one anchor prefix."""
+        with self.engine.connect() as conn:
+            scope_id = _lookup_scope_id(conn, str(scope_key))
+            if scope_id is None:
+                return []
+            statement = (
+                select(
+                    agent_sessions.c.agent_variant,
+                    agent_sessions.c.session_anchor,
+                    agent_sessions.c.native_session_id,
+                )
+                .where(agent_sessions.c.scope_id == scope_id)
+                .order_by(agent_sessions.c.agent_variant, agent_sessions.c.session_anchor)
+            )
+            if session_anchor_prefix is not None:
+                prefix = str(session_anchor_prefix)
+                statement = statement.where(
+                    (agent_sessions.c.session_anchor == prefix)
+                    | agent_sessions.c.session_anchor.like(
+                        f"{_escape_sql_like(prefix)}:%", escape="\\"
+                    )
+                )
+            return [
+                {
+                    "agent_name": str(row["agent_variant"] or "default"),
+                    "session_anchor": str(row["session_anchor"]),
+                    "native_session_id": decode_session_value(row["native_session_id"]),
+                }
+                for row in conn.execute(statement).mappings()
+            ]
+
     def get_agent_session_by_id(self, session_id: str) -> dict[str, Any] | None:
         with self.engine.connect() as conn:
             row = conn.execute(
@@ -2360,6 +2418,14 @@ def _lookup_scope_id(conn: Connection, scope_key: str) -> str | None:
             .limit(1)
         ).scalar_one_or_none()
         return str(found) if found is not None else None
+    inferred_scope_id = make_scope_id(platform, _infer_scope_type(platform, native_id), native_id)
+    found = conn.execute(
+        select(scopes.c.id).where(scopes.c.id == inferred_scope_id).limit(1)
+    ).scalar_one_or_none()
+    if found is not None:
+        return str(found)
+    # Keep compatibility with old rows whose scope type did not match the
+    # platform/native-id inference used by current scope creation.
     found = conn.execute(
         select(scopes.c.id).where(scopes.c.platform == platform, scopes.c.native_id == native_id).limit(1)
     ).scalar_one_or_none()

@@ -55,6 +55,9 @@ class SessionsFacade:
         agent_name: str,
     ) -> Optional[str]:
         user_key = self._normalize_user_id(user_id)
+        getter = getattr(self.sessions_store, "lookup_agent_session_id", None)
+        if callable(getter):
+            return getter(user_key, agent_name, thread_id)
         agent_map = self.sessions_store.get_agent_map(user_key, agent_name)
         return agent_map.get(thread_id)
 
@@ -263,6 +266,13 @@ class SessionsFacade:
 
     def list_agent_sessions(self, user_id: Union[int, str], agent_name: str) -> Dict[str, str]:
         user_key = self._normalize_user_id(user_id)
+        rows = self._list_agent_session_mappings(user_key)
+        if rows is not None:
+            return {
+                str(row["session_anchor"]): row["native_session_id"]
+                for row in rows
+                if str(row["agent_name"]) == str(agent_name)
+            }
         agent_map = self.sessions_store.get_agent_map(user_key, agent_name)
         return dict(agent_map)
 
@@ -276,14 +286,40 @@ class SessionsFacade:
     def _matches_base_prefix(mapping_key: str, base_session_id: str) -> bool:
         return mapping_key == base_session_id or mapping_key.startswith(f"{base_session_id}:")
 
+    def _list_agent_session_mappings(
+        self,
+        user_key: str,
+        *,
+        session_anchor_prefix: str | None = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        getter = getattr(self.sessions_store, "list_agent_session_mappings", None)
+        if callable(getter):
+            return getter(user_key, session_anchor_prefix=session_anchor_prefix)
+        self.sessions_store._ensure_user_namespace(user_key)
+        rows: List[Dict[str, Any]] = []
+        for agent_name, agent_map in self.sessions_store.state.session_mappings.get(user_key, {}).items():
+            for session_anchor, native_session_id in agent_map.items():
+                if session_anchor_prefix is not None and not self._matches_base_prefix(
+                    session_anchor, session_anchor_prefix
+                ):
+                    continue
+                rows.append(
+                    {
+                        "agent_name": agent_name,
+                        "session_anchor": session_anchor,
+                        "native_session_id": native_session_id,
+                    }
+                )
+        return rows
+
     def has_any_agent_session_base(self, user_id: Union[int, str], base_session_id: str) -> bool:
         user_key = self._normalize_user_id(user_id)
-        self.sessions_store._ensure_user_namespace(user_key)
-        agent_maps = self.sessions_store.state.session_mappings.get(user_key, {})
-        for agent_map in agent_maps.values():
-            for mapping_key in agent_map.keys():
-                if self._matches_base_prefix(mapping_key, base_session_id):
-                    return True
+        rows = self._list_agent_session_mappings(
+            user_key,
+            session_anchor_prefix=base_session_id,
+        )
+        if rows is not None:
+            return bool(rows)
         return False
 
     def alias_session_base(
@@ -293,6 +329,44 @@ class SessionsFacade:
         alias_base_session_id: str,
     ) -> bool:
         user_key = self._normalize_user_id(user_id)
+        source_rows = self._list_agent_session_mappings(
+            user_key,
+            session_anchor_prefix=source_base_session_id,
+        )
+        if source_rows is not None:
+            target_rows = self._list_agent_session_mappings(
+                user_key,
+                session_anchor_prefix=alias_base_session_id,
+            ) or []
+            existing = {
+                (str(row["agent_name"]), str(row["session_anchor"]))
+                for row in target_rows
+            }
+            changed = False
+            for row in source_rows:
+                agent_name = str(row["agent_name"])
+                mapping_key = str(row["session_anchor"])
+                suffix = mapping_key[len(source_base_session_id) :]
+                alias_key = f"{alias_base_session_id}{suffix}"
+                if (agent_name, alias_key) in existing:
+                    continue
+                self.sessions_store.bind_agent_session(
+                    user_key,
+                    agent_name,
+                    alias_key,
+                    row["native_session_id"],
+                )
+                existing.add((agent_name, alias_key))
+                changed = True
+                logger.info(
+                    "Aliased %s session base for %s: %s -> %s",
+                    agent_name,
+                    user_key,
+                    source_base_session_id,
+                    alias_base_session_id,
+                )
+            return changed
+
         self.sessions_store._ensure_user_namespace(user_key)
         agent_maps = self.sessions_store.state.session_mappings.get(user_key, {})
         changed = False
@@ -335,6 +409,45 @@ class SessionsFacade:
     ) -> bool:
         source_key = self._normalize_user_id(source_user_id)
         target_key = self._normalize_user_id(target_user_id)
+        source_rows = self._list_agent_session_mappings(
+            source_key,
+            session_anchor_prefix=source_base_session_id,
+        )
+        if source_rows is not None:
+            target_rows = self._list_agent_session_mappings(
+                target_key,
+                session_anchor_prefix=alias_base_session_id,
+            ) or []
+            existing = {
+                (str(row["agent_name"]), str(row["session_anchor"]))
+                for row in target_rows
+            }
+            changed = False
+            for row in source_rows:
+                agent_name = str(row["agent_name"])
+                mapping_key = str(row["session_anchor"])
+                suffix = mapping_key[len(source_base_session_id) :]
+                alias_key = f"{alias_base_session_id}{suffix}"
+                if (agent_name, alias_key) in existing:
+                    continue
+                self.sessions_store.bind_agent_session(
+                    target_key,
+                    agent_name,
+                    alias_key,
+                    row["native_session_id"],
+                )
+                existing.add((agent_name, alias_key))
+                changed = True
+                logger.info(
+                    "Aliased %s session base across scopes: %s/%s -> %s/%s",
+                    agent_name,
+                    source_key,
+                    source_base_session_id,
+                    target_key,
+                    alias_base_session_id,
+                )
+            return changed
+
         self.sessions_store._ensure_user_namespace(source_key)
         self.sessions_store._ensure_user_namespace(target_key)
 

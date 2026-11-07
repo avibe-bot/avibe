@@ -237,7 +237,10 @@ class DiscordBot(BaseIMClient):
             return context
 
         reply_anchor_message_id = self._get_reference_message_id(message)
-        reply_anchor_base_session_id = self._get_reply_anchor_base(context.channel_id, reply_anchor_message_id)
+        reply_anchor_base_session_id = await self._get_reply_anchor_base(
+            context.channel_id,
+            reply_anchor_message_id,
+        )
         if reply_anchor_base_session_id:
             async def _reply_impl() -> MessageContext:
                 channel = await self._fetch_channel(context.channel_id)
@@ -302,12 +305,16 @@ class DiscordBot(BaseIMClient):
         message_id = getattr(reference, "message_id", None) if reference is not None else None
         return str(message_id) if message_id is not None else None
 
-    def _get_reply_anchor_base(self, channel_id: str, message_id: Optional[str]) -> Optional[str]:
+    async def _get_reply_anchor_base(self, channel_id: str, message_id: Optional[str]) -> Optional[str]:
         if not self.sessions or not channel_id or not message_id:
             return None
         session_key = f"discord::{channel_id}"
         base_session_id = f"discord_{message_id}"
-        if self.sessions.has_any_agent_session_base(session_key, base_session_id):
+        if await asyncio.to_thread(
+            self.sessions.has_any_agent_session_base,
+            session_key,
+            base_session_id,
+        ):
             return base_session_id
         return None
 
@@ -1073,7 +1080,10 @@ class DiscordBot(BaseIMClient):
 
         # Determine if this is a DM
         is_dm = isinstance(channel, discord.DMChannel)
-        referenced_anchor_base = None if is_dm else self._get_reply_anchor_base(channel_id, self._get_reference_message_id(message))
+        referenced_anchor_base = None if is_dm else await self._get_reply_anchor_base(
+            channel_id,
+            self._get_reference_message_id(message),
+        )
 
         mentioned_bot = bool(self.client.user and message.mentions and self.client.user in message.mentions)
 

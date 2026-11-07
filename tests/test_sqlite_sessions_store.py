@@ -120,6 +120,119 @@ def test_sessions_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
         store.close()
 
 
+def test_agent_session_lookup_reads_external_row_without_full_reload(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    external = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    facade = SessionsFacade(store)
+    try:
+        external.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::channel::C1": {
+                        "claude": {"slack_thread_old": "claude-native-old"},
+                    }
+                }
+            )
+        )
+
+        with patch.object(store, "load", side_effect=AssertionError("point lookup reloaded all sessions")):
+            assert facade.get_agent_session_id(
+                "slack::channel::C1",
+                "slack_thread_old",
+                "claude",
+            ) == "claude-native-old"
+    finally:
+        external.close()
+        store.close()
+
+
+def test_agent_session_lookup_uses_scope_anchor_index(tmp_path: Path) -> None:
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        session_id = service.ensure_agent_session_id(
+            scope_key="slack::channel::C1",
+            agent_name="claude",
+            session_anchor="slack_thread_indexed",
+        )
+        assert session_id is not None
+        with service.engine.connect() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+            plan = conn.exec_driver_sql(
+                "EXPLAIN QUERY PLAN "
+                "SELECT native_session_id FROM agent_sessions "
+                "WHERE scope_id = ? AND agent_variant = ? AND session_anchor = ? LIMIT 1",
+                (scope_id, "claude", "slack_thread_indexed"),
+            ).fetchall()
+        assert any(
+            "SEARCH agent_sessions USING INDEX uq_agent_sessions_scope_anchor" in str(row[-1])
+            for row in plan
+        )
+    finally:
+        service.close()
+
+
+def test_discord_reply_continuation_reads_archived_sessions_outside_the_cache(
+    tmp_path: Path,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    external = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    facade = SessionsFacade(store)
+    try:
+        external.save_state(
+            SessionState(
+                session_mappings={
+                    "discord::channel::C1": {
+                        "claude": {"discord_thread_old": "claude-native-old"},
+                    }
+                }
+            )
+        )
+        with external.engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.session_anchor == "discord_thread_old")
+                .values(status="archived")
+            )
+
+        assert facade.has_any_agent_session_base(
+            "discord::channel::C1",
+            "discord_thread_old",
+        )
+        assert facade.alias_session_base(
+            "discord::channel::C1",
+            "discord_thread_old",
+            "discord_thread_reply",
+        )
+        assert facade.get_agent_session_id(
+            "discord::channel::C1",
+            "discord_thread_reply",
+            "claude",
+        ) == "claude-native-old"
+    finally:
+        external.close()
+        store.close()
+
+
+def test_sessions_store_bind_by_id_does_not_reload_session_history(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        reserved_id = store.ensure_agent_session_id(
+            "slack::channel::C1",
+            "opencode",
+            "slack_thread_new",
+        )
+        assert reserved_id is not None
+        with patch.object(store, "load", side_effect=AssertionError("bind reloaded all sessions")):
+            assert store.bind_agent_session_by_id(reserved_id, "opencode-native") == reserved_id
+    finally:
+        store.close()
+
+
 def test_sessions_facade_preserves_active_poll_session_key(tmp_path: Path) -> None:
     sessions_path = tmp_path / "sessions.json"
     store = SessionsStore(sessions_path)

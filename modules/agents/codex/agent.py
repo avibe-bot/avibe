@@ -3779,7 +3779,8 @@ class CodexAgent(BaseAgent):
         # subagent (the namespaced base also has its own thread) — else the first
         # subagent turn would resume the MAIN thread. Falls back to the projection
         # for IM/CLI turns (no reserved target).
-        persisted = self.sessions.get_agent_session_id(
+        persisted = await asyncio.to_thread(
+            self.sessions.get_agent_session_id,
             request.session_key,
             request.base_session_id,
             self.name,
