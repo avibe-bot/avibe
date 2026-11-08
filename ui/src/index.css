@@ -1095,23 +1095,28 @@ pre,
 /* LAB (lab/disclosure-variants): the expand variants the disclosure lab switches between.
    A is the shipped motion. B rises from 8px up and grows from --motion-scale-enter, and leaves the
    same way back. C unfolds top to bottom (a clip-path reveal, transcriptMotion unfold) and folds back
-   up; D is C while the rows below make room. C and D leave by script, so their CSS exit is off. */
+   up; D is C while the rows below make room. C and D leave by script (reduced motion too), so their CSS
+   exit is off, and what stands for them closed (data-transcript-crossfade) comes in by the script's
+   cross-fade, so its CSS entrance is off. */
 :root[data-disclosure-variant="b"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: var(--motion-duration-fast); }
 :root[data-disclosure-variant="c"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 200ms; }
-/* D at the lab's speeds (data-disclosure-speed): closing (the fold, then the summary coming in) takes
-   about 0.8 of opening. */
-:root[data-disclosure-variant="d"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 120ms; --motion-disclose-summary-duration: 60ms; }
-:root[data-disclosure-variant="d"][data-disclosure-speed="0.75"] { --motion-disclose-open-duration: 290ms; --motion-disclose-close-duration: 170ms; --motion-disclose-summary-duration: 70ms; }
-:root[data-disclosure-variant="d"][data-disclosure-speed="0.5"] { --motion-disclose-open-duration: 440ms; --motion-disclose-close-duration: 260ms; --motion-disclose-summary-duration: 90ms; }
+/* D at the lab's speeds (data-disclosure-speed): closing (the fold, its cross-fade into the summary at the
+   end) takes about 0.8 of opening. The summary duration is only for what has no summary copy (the
+   running card's compact view), which still comes in after. */
+:root[data-disclosure-variant="d"] { --motion-disclose-open-duration: 220ms; --motion-disclose-close-duration: 180ms; --motion-disclose-summary-duration: 60ms; }
+:root[data-disclosure-variant="d"][data-disclosure-speed="0.75"] { --motion-disclose-open-duration: 290ms; --motion-disclose-close-duration: 230ms; --motion-disclose-summary-duration: 70ms; }
+:root[data-disclosure-variant="d"][data-disclosure-speed="0.5"] { --motion-disclose-open-duration: 440ms; --motion-disclose-close-duration: 350ms; --motion-disclose-summary-duration: 90ms; }
+:root[data-disclosure-variant="c"] .motion-disclose-out,
+:root[data-disclosure-variant="c"] .motion-disclose-out-children,
+:root[data-disclosure-variant="c"] .motion-disclose-out-children > *,
+:root[data-disclosure-variant="d"] .motion-disclose-out,
+:root[data-disclosure-variant="d"] .motion-disclose-out-children,
+:root[data-disclosure-variant="d"] .motion-disclose-out-children > *,
+:root[data-disclosure-variant="c"] [data-transcript-crossfade].motion-summary-in,
+:root[data-disclosure-variant="d"] [data-transcript-crossfade].motion-summary-in { animation-name: none; }
 @media (prefers-reduced-motion: no-preference) {
   :root[data-disclosure-variant="b"] .motion-disclose-out { animation-name: motion-disclose-out-b; }
   :root[data-disclosure-variant="b"] .motion-disclose-out-children > * { animation-name: motion-disclose-move-b; }
-  :root[data-disclosure-variant="c"] .motion-disclose-out,
-  :root[data-disclosure-variant="c"] .motion-disclose-out-children,
-  :root[data-disclosure-variant="c"] .motion-disclose-out-children > *,
-  :root[data-disclosure-variant="d"] .motion-disclose-out,
-  :root[data-disclosure-variant="d"] .motion-disclose-out-children,
-  :root[data-disclosure-variant="d"] .motion-disclose-out-children > * { animation-name: none; }
 }
 @keyframes motion-disclose-out-b { to { opacity: 0; translate: 0 calc(-1 * var(--motion-offset)); scale: var(--motion-scale-enter); } }
 @keyframes motion-disclose-move-b { to { translate: 0 calc(-1 * var(--motion-offset)); scale: var(--motion-scale-enter); } }

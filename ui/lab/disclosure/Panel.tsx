@@ -14,11 +14,11 @@ const VARIANTS: { id: Variant; name: string; hint: string }[] = [
   { id: 'd', name: 'D', hint: 'C + 下面的行跟着往下让开；收起时跟着往上收' },
 ];
 
-/** D's speeds: opening, and closing (the fold, then the summary coming in), in ms (src/index.css). */
-const SPEEDS: { id: Speed; name: string; open: number; fold: number; summary: number }[] = [
-  { id: '1', name: '1×', open: 220, fold: 120, summary: 60 },
-  { id: '0.75', name: '0.75×', open: 290, fold: 170, summary: 70 },
-  { id: '0.5', name: '0.5×', open: 440, fold: 260, summary: 90 },
+/** D's speeds: opening, and closing (the fold with its cross-fade into the summary), in ms (src/index.css). */
+const SPEEDS: { id: Speed; name: string; open: number; close: number }[] = [
+  { id: '1', name: '1×', open: 220, close: 180 },
+  { id: '0.75', name: '0.75×', open: 290, close: 230 },
+  { id: '0.5', name: '0.5×', open: 440, close: 350 },
 ];
 const seconds = (ms: number) => `${(ms / 1000).toFixed(2).replace(/0$/, '')}s`;
 
@@ -101,7 +101,7 @@ export function Panel({
               <div className="mt-1 mb-1 text-[11px] text-muted">D 的速度</div>
               <Segmented value={prefs.speed} options={SPEEDS} onChange={(value) => onChange({ speed: value })} />
               <div className="mt-1 text-[10.5px] text-muted">
-                展开 {seconds(speed.open)} · 收起 {seconds(speed.fold + speed.summary)}
+                展开 {seconds(speed.open)} · 收起 {seconds(speed.close)}
                 {prefs.slow ? '（慢放中再 ×4）' : ''}
               </div>
             </>

@@ -646,29 +646,41 @@ export const ActivityChip: React.FC<{
     <div className="px-1.5 py-2 text-[12px] text-muted">{t('chat.agentActivity.empty')}</div>
   );
 
+  // The pill: the chip closed. While the panel is open (and while it leaves) an inert copy of it waits,
+  // unseen, where the pill will be, so closing can cross-fade into it (lib/transcriptMotion, LAB D).
+  const pillClassName = clsx(
+    'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+    group.status === 'failed'
+      ? 'border-destructive/30 bg-destructive/[0.06] hover:bg-destructive/[0.1]'
+      : group.status === 'interrupted'
+        ? 'border-gold/30 bg-gold/[0.07] hover:bg-gold/[0.12]'
+        : 'border-mint/25 bg-mint/[0.07] hover:bg-mint/[0.12]',
+  );
+  const pillContent = (
+    <>
+      <StatusIcon data-transcript-shared="icon" className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
+      <span data-transcript-shared="label" className="min-w-0 truncate font-medium text-foreground/90">{label}</span>
+      <ChevronDown className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
+    </>
+  );
+
   return (
     <div {...itemAttributes} className="flex w-full justify-start">
-      <div className="flex w-full max-w-[min(92%,860px)] flex-col gap-1">
+      <div className="relative flex w-full max-w-[min(92%,860px)] flex-col gap-1">
         {!panel.present ? (
           <button
             type="button"
             onClick={onToggle}
             aria-expanded={false}
             title={t('chat.agentActivity.expand')}
+            data-transcript-crossfade=""
             className={clsx(
-              'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+              pillClassName,
               // Closed just now: the pill comes in where the panel left.
               panel.closed && 'motion-summary-in',
-              group.status === 'failed'
-                ? 'border-destructive/30 bg-destructive/[0.06] hover:bg-destructive/[0.1]'
-                : group.status === 'interrupted'
-                  ? 'border-gold/30 bg-gold/[0.07] hover:bg-gold/[0.12]'
-                  : 'border-mint/25 bg-mint/[0.07] hover:bg-mint/[0.12]',
             )}
           >
-            <StatusIcon className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
-            <span className="min-w-0 truncate font-medium text-foreground/90">{label}</span>
-            <ChevronDown className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
+            {pillContent}
           </button>
         ) : (
           // Expanded: a full panel card. Header bar carries the status/label (toggles
@@ -688,8 +700,8 @@ export const ActivityChip: React.FC<{
                 title={t('chat.agentActivity.collapse')}
                 className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
               >
-                <StatusIcon className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
-                <span className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
+                <StatusIcon data-transcript-shared="icon" className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
+                <span data-transcript-shared="label" className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
               </button>
               <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
               <button type="button" onClick={onToggle} aria-label={t('chat.agentActivity.collapse')}>
@@ -698,6 +710,11 @@ export const ActivityChip: React.FC<{
             </div>
             <div className={clsx('max-h-[60vh] overflow-y-auto px-1.5 py-1.5', phase.landed && !loading && 'motion-appear')}>{body}</div>
           </div>
+        )}
+        {panel.present && (
+          <span aria-hidden="true" inert data-transcript-summary="" className={clsx(pillClassName, 'pointer-events-none absolute left-0 top-0 z-[1] opacity-0')}>
+            {pillContent}
+          </span>
         )}
       </div>
     </div>
