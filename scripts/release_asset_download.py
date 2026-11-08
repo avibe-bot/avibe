@@ -19,8 +19,6 @@ _T = TypeVar("_T")
 _MAX_ATTEMPTS = 4
 _REQUEST_TIMEOUT = 10.0
 _RETRY_WINDOW = 45.0
-_RELEASE_ROOT = "https://github.com/avibe-bot/avibe/releases/download/"
-_API_ROOT = "https://api.github.com/repos/avibe-bot/avibe/releases"
 
 
 def _retryable(exc: Exception) -> bool:
@@ -71,19 +69,32 @@ def _authorize_api(request: urllib.request.Request) -> None:
         request.add_unredirected_header("Authorization", f"Bearer {token}")
 
 
+def _github_release(url: str) -> tuple[str, str, str] | None:
+    parsed = urllib.parse.urlparse(url)
+    parts = parsed.path.split("/")
+    if (parsed.scheme not in {"http", "https"} or parsed.netloc != "github.com"
+            or len(parts) != 7 or parts[3:5] != ["releases", "download"]
+            or not all(parts[1:]) or any(part in {".", ".."} for part in parts[1:3])):
+        return None
+    _, owner, repository, _, _, tag, name = parts
+    api_root = (
+        f"https://api.github.com/repos/{urllib.parse.quote(owner, safe='')}/"
+        f"{urllib.parse.quote(repository, safe='')}/releases"
+    )
+    return api_root, urllib.parse.unquote(tag), urllib.parse.unquote(name)
+
+
 def _asset_api_request(
     url: str,
     asset: Mapping[str, Any] | None,
     open_response: Callable[..., Any],
 ) -> urllib.request.Request | None:
-    if not url.startswith(_RELEASE_ROOT):
+    release_path = _github_release(url)
+    if release_path is None:
         return None
-    parts = url[len(_RELEASE_ROOT):].split("/")
-    if len(parts) != 2 or not all(parts):
-        return None
-    tag, name = (urllib.parse.unquote(part) for part in parts)
+    api_root, tag, name = release_path
     if asset is None:
-        lookup = _request(f"{_API_ROOT}/tags/{urllib.parse.quote(tag, safe='')}", accept="application/vnd.github+json")
+        lookup = _request(f"{api_root}/tags/{urllib.parse.quote(tag, safe='')}", accept="application/vnd.github+json")
         with open_response(lookup) as response:
             try:
                 release = json.loads(response.read())
@@ -104,7 +115,7 @@ def _asset_api_request(
         return None
     # Construct the API URL from a validated id, never trust a metadata-supplied
     # URL with a bearer token. All digest/size validation remains with callers.
-    return _request(f"{_API_ROOT}/assets/{asset_id}")
+    return _request(f"{api_root}/assets/{asset_id}")
 
 
 def _with_response(
@@ -118,7 +129,7 @@ def _with_response(
     _authorize_api(request)
     resolved_opener = opener or urllib.request.urlopen
     deadline = time.monotonic() + _RETRY_WINDOW
-    api_allowed = request.full_url.startswith(_RELEASE_ROOT)
+    api_allowed = _github_release(request.full_url) is not None
     api_request = None
 
     def open_response(candidate: urllib.request.Request):

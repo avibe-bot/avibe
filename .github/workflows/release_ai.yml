@@ -109,6 +109,8 @@ jobs:
 
       - name: Download and verify pinned Certum signer
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python scripts/certum_signing.py download --directory "$env:RUNNER_TEMP/certum-signer"
 

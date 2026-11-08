@@ -1295,6 +1295,8 @@ jobs:
       # copy of upstream's archive, and run them.
       - name: Verify the managed ripgrep installs from its Windows zip
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $env:AVIBE_TEST_RIPGREP_ZIPS = Join-Path $env:RUNNER_TEMP "ripgrep-zips"
           python -c "import json, os, pathlib; from scripts.release_asset_download import download_to_path; target = pathlib.Path(os.environ['AVIBE_TEST_RIPGREP_ZIPS']); target.mkdir(exist_ok=True); archives = json.load(open('vibe/ripgrep_runtime_manifest.json'))['archives']; [download_to_path(entry['url'], target / entry['name'], max_bytes=entry['size']) for tag, entry in archives.items() if tag.startswith('win32-')]"

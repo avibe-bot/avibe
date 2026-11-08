@@ -235,35 +235,49 @@ _API_ASSET = "/api/repos/avibe-bot/avibe/releases/assets/42"
 _BROWSER = f"/browser/avibe-bot/avibe/releases/download/{RELEASE_TAG}/show-runtime-manifest.json"
 
 
-def _api_routes(server, content=b"verified bytes"):
-    asset = {"id": 42, "name": "show-runtime-manifest.json", "browser_download_url": _OWN_URL,
+def _api_routes(server, content=b"verified bytes", *, url=_OWN_URL):
+    parts = urllib.parse.urlparse(url).path.split("/")
+    repository = "/".join(parts[1:3])
+    tag, name = (urllib.parse.unquote(part) for part in parts[5:])
+    lookup = f"/api/repos/{repository}/releases/tags/{parts[5]}"
+    api_asset = f"/api/repos/{repository}/releases/assets/42"
+    browser = "/browser" + urllib.parse.urlparse(url).path
+    asset = {"id": 42, "name": name, "browser_download_url": url,
              "digest": f"sha256:{hashlib.sha256(content).hexdigest()}"}
-    release = json.dumps({"tag_name": RELEASE_TAG, "assets": [asset]}).encode()
+    release = json.dumps({"tag_name": tag, "assets": [asset]}).encode()
     server.routes = {
-        _API_LOOKUP: [(200, release)],
-        _API_ASSET: [(200, content)],
-        _BROWSER: [(504, b"browser route persistently unavailable")],
+        lookup: [(200, release)],
+        api_asset: [(200, content)],
+        browser: [(504, b"browser route persistently unavailable")],
     }
     return asset
 
 
+@pytest.mark.parametrize("url", [
+    _OWN_URL,
+    "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+    "https://github.com/another/project/releases/download/release%2Fv1/tool%2Bwindows.zip",
+], ids=["owned", "ripgrep", "encoded"])
 @pytest.mark.parametrize("to_file", [False, True])
 @pytest.mark.parametrize("reuse_metadata", [False, True])
-def test_owned_release_resolves_api_asset_without_touching_broken_browser(
-    asset_server, retry_clock, tmp_path, monkeypatch, to_file, reuse_metadata,
+def test_github_release_resolves_api_asset_without_touching_broken_browser(
+    asset_server, retry_clock, tmp_path, monkeypatch, to_file, reuse_metadata, url,
 ):
-    asset = _api_routes(asset_server)
+    # A hardcoded repository prefix used to leave third-party GitHub releases
+    # on a persistently failing browser path despite a healthy asset API.
+    asset = _api_routes(asset_server, url=url)
+    lookup, api_asset, _ = asset_server.routes
     metadata = asset if reuse_metadata else None
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
     if to_file:
         monkeypatch.setattr(downloads.urllib.request, "urlopen", asset_server.opener)
         target = tmp_path / "asset"
-        downloads.download_to_path(_OWN_URL, target, release_asset=metadata)
+        downloads.download_to_path(url, target, release_asset=metadata)
         result = target.read_bytes()
     else:
-        result = downloads.read_bytes(_OWN_URL, opener=asset_server.opener, release_asset=metadata)
+        result = downloads.read_bytes(url, opener=asset_server.opener, release_asset=metadata)
     assert result == b"verified bytes"
-    assert asset_server.requests == ([_API_ASSET] if reuse_metadata else [_API_LOOKUP, _API_ASSET])
+    assert asset_server.requests == ([api_asset] if reuse_metadata else [lookup, api_asset])
     expected_accepts = ["application/octet-stream"] if reuse_metadata else [
         "application/vnd.github+json", "application/octet-stream",
     ]
@@ -342,21 +356,31 @@ def test_api_size_failure_does_not_fall_back(asset_server, retry_clock, monkeypa
     assert retry_clock.sleeps == []
 
 
-def test_api_credentials_are_not_forwarded_to_asset_storage(asset_server, monkeypatch):
-    _api_routes(asset_server)
+@pytest.mark.parametrize("url", [
+    _OWN_URL,
+    "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/tool.zip",
+], ids=["owned", "ripgrep"])
+def test_api_credentials_are_not_forwarded_to_asset_storage(asset_server, monkeypatch, url):
+    _api_routes(asset_server, url=url)
+    lookup, api_asset, _ = asset_server.routes
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    asset_server.routes[_API_ASSET] = [(302, b"", {"Location": asset_server.origin + "/storage"})]
+    asset_server.routes[api_asset] = [(302, b"", {"Location": asset_server.origin + "/storage"})]
     asset_server.routes["/storage"] = [(200, b"verified bytes")]
-    assert downloads.read_bytes(_OWN_URL, opener=asset_server.opener) == b"verified bytes"
-    assert asset_server.requests == [_API_LOOKUP, _API_ASSET, "/storage"]
+    assert downloads.read_bytes(url, opener=asset_server.opener) == b"verified bytes"
+    assert asset_server.requests == [lookup, api_asset, "/storage"]
     assert asset_server.headers[1]["Authorization"] == "Bearer test-github-token"
     assert "Authorization" not in asset_server.headers[2]
 
 
-def test_third_party_release_keeps_plain_retry_without_api_credentials(asset_server, retry_clock, monkeypatch):
+@pytest.mark.parametrize("url", [
+    "https://downloads.example/other/repo/releases/download/v1/tool.zip",
+    "https://github.com.example/other/repo/releases/download/v1/tool.zip",
+    "https://github.com@downloads.example/other/repo/releases/download/v1/tool.zip",
+    "https://github.com/other/repo/archive/refs/tags/v1.zip",
+])
+def test_other_urls_keep_plain_retry_without_api_credentials(asset_server, retry_clock, monkeypatch, url):
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
-    url = "https://github.com/other/repo/releases/download/v1/tool.zip"
-    path = "/browser/other/repo/releases/download/v1/tool.zip"
+    path = "/browser" + urllib.parse.urlparse(url).path
     asset_server.routes[path] = [(504, b"unavailable"), (200, b"verified bytes")]
     assert downloads.read_bytes(url, opener=asset_server.opener) == b"verified bytes"
     assert asset_server.requests == [path, path]
