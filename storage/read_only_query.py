@@ -14,6 +14,7 @@ from config import paths
 from storage.cache_metrics import CACHE_VIEWS, cache_observation
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import MESSAGE_TURN_ID_SQL
+from storage.tool_calls_query import TOOL_CALLS_VIEW, TOOL_CALL_FUNCTIONS
 from storage.query_policy import SCHEMA_PRAGMAS
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 
@@ -103,6 +104,7 @@ RECALL_VIEWS = {
     ),
 }
 RECALL_VIEWS.update(CACHE_VIEWS)
+RECALL_VIEWS["tool_calls"] = TOOL_CALLS_VIEW
 
 EXCERPT_DEFAULT_WIDTH = 300
 
@@ -214,6 +216,8 @@ def run_read_only_query(
         return 1 if steps > step_limit else 0
 
     try:
+        for name, arity, function in TOOL_CALL_FUNCTIONS:
+            conn.create_function(name, arity, reporting(name, function), deterministic=True)
         conn.create_function("excerpt", -1, reporting("excerpt", _excerpt), deterministic=True)
         conn.create_function("regexp", 2, reporting("regexp", _regexp), deterministic=True)
         conn.create_function("cache_observation", 8, reporting("cache_observation", cache_observation), deterministic=True)
@@ -268,7 +272,7 @@ def run_read_only_query(
         conn.set_progress_handler(None, 0)
         if function_errors:
             name, reason = function_errors[0]
-            raise ReadOnlyQueryError(f"{name}: {reason}", code=code, hint=_FUNCTION_HINTS[name]) from exc
+            raise ReadOnlyQueryError(f"{name}: {reason}", code=code, hint=_FUNCTION_HINTS.get(name, "Query the tool_calls view rather than calling its projection functions directly.")) from exc
         hint = _error_hint(conn, statement, message, denials)
         raise ReadOnlyQueryError(message, code=code, hint=hint) from exc
     finally:

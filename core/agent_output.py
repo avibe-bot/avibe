@@ -83,6 +83,7 @@ class ToolActivity:
     status_label: Optional[str] = None
     hosted: Optional[dict] = None
     citations: Optional[CitationBundle] = None
+    output: Optional[MessageOutput] = None
 
 
 @dataclass(frozen=True)
@@ -184,7 +185,7 @@ def dispatch_call(event: AgentOutputEvent) -> tuple[str, str, dict[str, Any]]:
     if isinstance(event, ToolActivity):
         return "toolcall", event.text, {
             "parse_mode": event.parse_mode,
-            **optional(status_label=event.status_label, hosted=event.hosted, citations=event.citations),
+            **optional(status_label=event.status_label, hosted=event.hosted, citations=event.citations, output=event.output),
         }
     if isinstance(event, TurnEnd):
         return "result", event.text, {

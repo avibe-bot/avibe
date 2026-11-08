@@ -91,7 +91,7 @@ def test_compatible_future_open_has_no_startup_mutation_or_receipt_adoption(brid
 
 
 @pytest.mark.parametrize("kind", OPENERS)
-@pytest.mark.parametrize("epoch", ["2", "true", '"1"', "null", "1.0", "-1", "not-json"])
+@pytest.mark.parametrize("epoch", ["3", "true", '"1"', "null", "1.0", "-1", "not-json"])
 def test_incompatible_epoch_refuses_every_opener_before_mutation(bridge_db, kind, epoch):
     _future(bridge_db, epoch=epoch)
     before = _snapshot(bridge_db)
@@ -234,7 +234,7 @@ def test_new_migrations_cannot_escape_the_schema_stamp_epoch_transaction(bridge_
     assert _snapshot(bridge_db)["database.sql"] == before
 
 
-@pytest.mark.parametrize("declared, written", [(2, 1), (None, 2), (2, 2)])
+@pytest.mark.parametrize("declared, written", [(2, 1), (None, 2), (3, 3)])
 def test_epoch_mismatch_or_unsupported_target_rolls_back_before_commit(bridge_db, tmp_path, monkeypatch, declared, written):
     _next_graph(
         tmp_path, monkeypatch,

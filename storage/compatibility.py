@@ -12,7 +12,10 @@ import sqlite3
 from sqlalchemy import Connection
 
 COMPATIBILITY_EPOCH_KEY = "compatibility_epoch"
-SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1})
+# Reserved for C-alt's canonical tool-step representation. Reader-first support
+# precedes activation: the bridge still writes 1 and compatibility traces remain.
+VIBEY_TOOL_PROJECTION_EPOCH = 2
+SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1, VIBEY_TOOL_PROJECTION_EPOCH})
 BRIDGE_REVISION = "20261108_0076"
 PRE_BRIDGE_REVISION = "20261107_0075"
 

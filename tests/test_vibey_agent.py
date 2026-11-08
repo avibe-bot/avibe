@@ -892,8 +892,9 @@ async def test_a_run_ended_by_design_still_answers_the_steer_its_turn_accepted(
     ]
 
 
+@pytest.mark.parametrize("platform", ["telegram", "avibe"])
 async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
-    engine, session, tmp_path, published
+    engine, session, tmp_path, published, monkeypatch, platform
 ) -> None:
     started = asyncio.Event()
     observed: list[bool] = []
@@ -904,7 +905,9 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
         observed.append(ctx.cancel.cancelled)
         return ToolResult((text("Command aborted"),), is_error=True)
 
-    harness = _Harness(engine, tmp_path, "telegram", _tool_turn(), tools=[FakeTool("echo", execute=wait_for_cancel)])
+    harness = _Harness(engine, tmp_path, platform, _tool_turn(), tools=[FakeTool("echo", execute=wait_for_cancel)])
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    harness.controller.session_turns.on_terminal_delivery_complete = lambda _context: published.append(("turn.end", {}))
     receipts: list[Optional[str]] = []
 
     async def finish(_request, *, terminal_emoji=None) -> None:
@@ -932,6 +935,13 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
         {"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}
     ]
     assert not any("❌" in sent for sent in harness.controller.im_client.sent)
+    if platform == "avibe":
+        # Recovery commits after RunEnded, without a ToolFinished. Publish its
+        # interrupted state before the terminal clears the browser's live rows.
+        activity = [(index, payload) for index, (topic, payload) in enumerate(published)
+                    if topic == "message.new" and payload.get("type") == "tool_call"]
+        assert activity[-1][1]["content"]["activity"]["status"] == "interrupted"
+        assert activity[-1][0] < next(index for index, (topic, _) in enumerate(published) if topic == "turn.end")
 
 
 async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the_next_call(
@@ -4151,7 +4161,8 @@ async def test_native_search_card_survives_the_delivery_policy(
     }
     assert json.loads(event["content_json"])["hosted"] == expected
     assert json.loads(event["metadata_json"])["precedes_message_id"] == final.row_id
-    [owner] = [detail for detail in details if any(row["id"] == event["id"] for row in detail["rows"])]
+    projected_id = f"tool:{final.row_id}:{USE['id']}"
+    [owner] = [detail for detail in details if any(row["id"] == projected_id for row in detail["rows"])]
     assert (owner["anchor_message_id"], owner["anchor_position"]) == (final.row_id, "before")
     assert owner["rows"][-1]["hosted"] == expected
 

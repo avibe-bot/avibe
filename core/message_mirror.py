@@ -45,7 +45,8 @@ from core.presentation import PRESENTATION_METADATA_KEY, PresentationDecision, p
 from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
 from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
-from storage import agent_events_service, message_deliveries, messages_service, settings_service
+from core.tool_activity import SOURCE_KEY, linked_step
+from storage import agent_events_service, message_deliveries, messages_service, settings_service, tool_activity_service
 from storage.db import get_cached_sqlite_engine, retry_sqlite_write
 from vibe.message_types import activity_role_for, spec_for
 
@@ -280,12 +281,11 @@ def _activity_streaming_enabled() -> bool:
 
 
 def _publish_activity_event(event_row: Optional[dict]) -> None:
-    """Publish a session-scoped ``message.new`` for a ``tool_call`` trace event.
+    """Publish a canonical step or legacy trace as a session-scoped ``message.new``.
 
-    Tool-call rows live in ``agent_events`` (never in ``messages`` / the transcript),
-    so synthesize a ``messages``-shaped payload the Chat activity group can render
-    live. Called only when ``show_agent_activity`` is on; the payload carries its own
-    display data (no read-after-announce), so the browser never re-queries the row.
+    A tool step is not a chat message, so synthesize the same ``messages``-shaped
+    payload for both sources. Called only when ``show_agent_activity`` is on;
+    the payload carries its own display data (no read-after-announce).
     """
     if not event_row or not event_row.get("session_id"):
         return
@@ -315,6 +315,51 @@ def _publish_activity_event(event_row: Optional[dict]) -> None:
         bus.publish("message.new", payload)
     except Exception:
         logger.debug("message_mirror: activity tool_call publish failed", exc_info=True)
+
+
+async def publish_tool_projection(
+    context: MessageContext, response_id: str, *, call_id: str | None = None,
+    facts: dict[str, Any] | None = None, publish: bool = True, unhosted_only: bool = False,
+) -> None:
+    """Land compact runtime evidence, then publish canonical steps on the caller loop.
+
+    ToolStarted/ToolFinished and response commit use this same projection as the
+    compatibility mirror and durable APIs. It never writes an extra tool trace.
+    Like mirror publication it is best effort, honors background/Activity gates,
+    and finishes before the backend can emit the Turn's terminal.
+    """
+    frozen = _snapshot_context(context)
+    spec = frozen.platform_specific or {}
+    session_id = spec.get("agent_session_id")
+    if not session_id:
+        return
+
+    def work() -> _MirrorCommit:
+        with get_cached_sqlite_engine().begin() as conn:
+            if facts is not None:
+                tool_activity_service.record_display_facts(
+                    conn, session_id=session_id, response_id=response_id, call_id=call_id, **facts,
+                )
+            steps = tool_activity_service.response_steps(conn, session_id=session_id, response_ids=(response_id,)) if publish else []
+            if call_id is not None:
+                steps = [step for step in steps if step["call_id"] == call_id]
+            if unhosted_only:
+                # Hosted completion has its own awaited ToolActivity emit. A fast
+                # tool may already have committed before its queued start is read;
+                # do not publish a half-decorated card ahead of that finish event.
+                steps = [step for step in steps if not step["content"].get("hosted")]
+            ranked = bool(steps) and workbench_sessions_service.touch_session_agent_activity(conn, session_id)
+        enabled = frozen.platform == "avibe" and not spec.get("suppress_delivery") and _activity_streaming_enabled()
+
+        def after_commit() -> None:
+            if ranked and frozen.platform == "avibe":
+                _publish_event("session.activity", {"session_id": session_id, "scope_id": steps[0].get("scope_id"), "event": "agent_activity"})
+            if enabled:
+                for step in steps:
+                    _publish_activity_event(step)
+        return _MirrorCommit(publish=after_commit)
+
+    await _land_mirror(work)
 
 
 def _hosted_card(conn, context: MessageContext, hosted: dict, *, scope_id, session_id) -> dict:
@@ -638,6 +683,7 @@ def _persist_agent_message_attempt(
                             else {}
                         ),
                         "canonical_type": canonical_type or "tool_call",
+                        **({SOURCE_KEY: metadata[SOURCE_KEY]} if metadata and SOURCE_KEY in metadata else {}),
                         # A native hosted call happened before the text of the response that
                         # carried it, though it is emitted after that row commits.
                         **(
@@ -651,6 +697,14 @@ def _persist_agent_message_attempt(
                     turn_id=turn_id,
                     run_id=run_id,
                 )
+                projected_id = linked_step(metadata)
+                if projected_id and row_session_id:
+                    projected = tool_activity_service.response_steps(
+                        conn, session_id=row_session_id, response_ids=(metadata[SOURCE_KEY]["response_id"],),
+                    )
+                    # The INSERT above remains the old reader's compatibility copy;
+                    # live readers receive the same canonical identity as reload.
+                    tool_event_row = next((step for step in projected if step["id"] == projected_id), tool_event_row)
             else:
                 # Workbench Chat only: rewrite ``file://`` links in the persisted copy
                 # to same-origin media-proxy URLs so the browser renders agent images
