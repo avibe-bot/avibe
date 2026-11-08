@@ -30,27 +30,15 @@
 
 :root:has([data-elevation-proposal]),
 :root:has([data-elevation-proposal]) [data-theme] {
-  --elevation-1: 0 1px 2px rgb(0 0 0 / 0.45);
-  --elevation-2: 0 2px 6px -2px rgb(0 0 0 / 0.5), 0 12px 32px -8px rgb(0 0 0 / 0.6);
-  --elevation-3: 0 4px 12px -4px rgb(0 0 0 / 0.5), 0 24px 64px -12px rgb(0 0 0 / 0.7);
-  /* A sheet rising from the bottom edge casts upward. */
-  --elevation-3-up: 0 -2px 8px -4px rgb(0 0 0 / 0.4), 0 -16px 40px -12px rgb(0 0 0 / 0.6);
   /* Dark floating fill: one step above --card (#11111c), below --nav-hover-bg (#1a1a26). */
   --popover: #161622;
-  /* Live glows, in the theme's own accent. */
-  --live-dot: 8px;
-  --live-alpha: 90%;
 }
 
 :root[data-theme='light']:has([data-elevation-proposal]),
 :root:has([data-elevation-proposal]) [data-theme='light'] {
-  --elevation-1: 0 1px 2px rgb(8 8 18 / 0.06), 0 1px 3px rgb(8 8 18 / 0.05);
-  --elevation-2: 0 2px 6px -2px rgb(8 8 18 / 0.08), 0 10px 28px -6px rgb(8 8 18 / 0.14);
-  --elevation-3: 0 4px 12px -4px rgb(8 8 18 / 0.1), 0 24px 56px -12px rgb(8 8 18 / 0.22);
-  --elevation-3-up: 0 -1px 4px -2px rgb(8 8 18 / 0.06), 0 -12px 32px -12px rgb(8 8 18 / 0.16);
   --popover: #ffffff;
-  --live-dot: 6px;
-  --live-alpha: 60%;
+  /* Light's focus ring, now the edge a borderless field has (owner, 2026-11-08). */
+  --ring: #10b981;
 }
 
 /* Precedence follows the families, not selector weight: a level, then the floating recipe, then
@@ -59,11 +47,6 @@
 @layer elevation-proposal.level, elevation-proposal.recipe, elevation-proposal.live, elevation-proposal.decor, elevation-proposal.state, elevation-proposal.hover;
 
 @layer elevation-proposal.level {
-/* The proposed utilities, as they would be generated from `--shadow-elevation-*`. */
-:root:has([data-elevation-proposal]) .shadow-elevation-1 { box-shadow: var(--elevation-1); }
-:root:has([data-elevation-proposal]) .shadow-elevation-2 { box-shadow: var(--elevation-2); }
-:root:has([data-elevation-proposal]) .shadow-elevation-3 { box-shadow: var(--elevation-3); }
-:root:has([data-elevation-proposal]) .shadow-elevation-3-up { box-shadow: var(--elevation-3-up); }
 :root:has([data-elevation-proposal]) .surface-floating {
   background-color: var(--popover);
   border-color: var(--border-strong);
@@ -193,13 +176,13 @@
  * Light: live glows in the theme's own accent; decorative glows only in Dark.
  * ---------------------------------------------------------------------------------------------- */
 :root:has([data-elevation-proposal]) [class~='shadow-glow-dot-mint'] {
-  --tw-shadow: 0 0 var(--live-dot) color-mix(in srgb, var(--mint) var(--live-alpha), transparent);
+  --tw-shadow: 0 0 var(--dot-glow-blur) color-mix(in srgb, var(--mint) var(--dot-glow-alpha), transparent);
 }
 :root:has([data-elevation-proposal]) [class~='shadow-glow-dot-gold'] {
-  --tw-shadow: 0 0 var(--live-dot) color-mix(in srgb, var(--gold) var(--live-alpha), transparent);
+  --tw-shadow: 0 0 var(--dot-glow-blur) color-mix(in srgb, var(--gold) var(--dot-glow-alpha), transparent);
 }
 :root:has([data-elevation-proposal]) [class~='shadow-glow-dot-destructive'] {
-  --tw-shadow: 0 0 var(--live-dot) color-mix(in srgb, var(--destructive) var(--live-alpha), transparent);
+  --tw-shadow: 0 0 var(--dot-glow-blur) color-mix(in srgb, var(--destructive) var(--dot-glow-alpha), transparent);
 }
 
 /* A live microphone (holding a Bot, the voice card, the main Bot's centre button) keeps its glow,
@@ -325,42 +308,6 @@
   initial-value: 0deg;
 }
 
-/* Tokens. Per theme, on the root and on any element that re-declares the theme (the frame root). */
-:root[data-theme='dark']:has([data-elevation-proposal]),
-:root:has([data-elevation-proposal]) [data-theme='dark'] {
-  --edge: rgb(255 255 255 / 0.06);
-  --edge-strong: rgb(255 255 255 / 0.1);
-  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 0.05);
-  --field: rgb(255 255 255 / 0.05);
-  --field-hover: rgb(255 255 255 / 0.075);
-  --edge-card: var(--edge-highlight), 0 0 0 1px var(--edge);
-  --elevation-1: var(--edge-highlight), 0 0 0 1px var(--edge), 0 1px 2px rgb(0 0 0 / 0.45);
-  --elevation-2: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 0 0 1px var(--edge-strong), 0 2px 6px -2px rgb(0 0 0 / 0.5), 0 12px 32px -8px rgb(0 0 0 / 0.6);
-  --elevation-3: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 0 0 1px var(--edge-strong), 0 4px 12px -4px rgb(0 0 0 / 0.5), 0 24px 64px -12px rgb(0 0 0 / 0.7);
-  --elevation-3-up: inset 0 1px 0 rgb(255 255 255 / 0.07), 0 -2px 8px -4px rgb(0 0 0 / 0.4), 0 -16px 40px -12px rgb(0 0 0 / 0.6);
-  --composer-edge: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px rgb(255 255 255 / 0.09), 0 10px 28px -12px rgb(0 0 0 / 0.7);
-  --composer-focus: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px color-mix(in srgb, var(--mint) 45%, transparent), 0 10px 28px -12px rgb(0 0 0 / 0.7);
-}
-:root[data-theme='light']:has([data-elevation-proposal]),
-:root:has([data-elevation-proposal]) [data-theme='light'] {
-  /* Focus is the edge a borderless field has: the brand mint, opaque (owner, 2026-11-08). */
-  --ring: #10b981;
-  /* The brand's deep teal (the light mint mixed into the ink): shadows take it instead of grey. */
-  --tint: 10 52 44;
-  --edge: rgb(8 8 18 / 0.04);
-  --edge-strong: rgb(8 8 18 / 0.07);
-  --edge-highlight: inset 0 1px 0 rgb(255 255 255 / 0.7);
-  --field: rgb(8 8 18 / 0.045);
-  --field-hover: rgb(8 8 18 / 0.07);
-  --edge-card: 0 0 0 1px var(--edge), 0 1px 2px rgb(var(--tint) / 0.05), 0 4px 14px -6px rgb(var(--tint) / 0.08);
-  --elevation-1: 0 0 0 1px var(--edge), 0 1px 3px rgb(var(--tint) / 0.08);
-  --elevation-2: 0 0 0 1px var(--edge-strong), 0 2px 6px -2px rgb(var(--tint) / 0.08), 0 12px 32px -8px rgb(var(--tint) / 0.16);
-  --elevation-3: 0 0 0 1px var(--edge-strong), 0 4px 12px -4px rgb(var(--tint) / 0.1), 0 28px 64px -16px rgb(var(--tint) / 0.24);
-  --elevation-3-up: 0 -1px 0 var(--edge-strong), 0 -12px 32px -12px rgb(var(--tint) / 0.16);
-  --composer-edge: 0 0 0 1px var(--edge), 0 1px 2px rgb(var(--tint) / 0.05), 0 10px 28px -12px rgb(var(--tint) / 0.18);
-  --composer-focus: 0 0 0 1px color-mix(in srgb, var(--mint) 50%, transparent), 0 1px 2px rgb(var(--tint) / 0.05), 0 10px 28px -12px color-mix(in srgb, var(--mint) 35%, transparent);
-  --brand-light: 0 10px 26px -12px color-mix(in srgb, var(--mint) 45%, transparent);
-}
 
 @layer elevation-proposal.edge, elevation-proposal.field, elevation-proposal.floating, elevation-proposal.hero, elevation-proposal.tinted;
 
@@ -370,7 +317,7 @@
 @layer elevation-proposal.edge {
   :root:has([data-elevation-proposal]) [class~='border']:is([class~='border-border'], [class~='border-border-strong'])[class*='rounded']:not([class~='border-dashed'], [class~='rounded-full'], [class*='shadow-']) {
     border-color: transparent;
-    --tw-shadow: var(--edge-card);
+    --tw-shadow: var(--elevation-0);
     box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
   }
   /* A card sits one step above what holds it: a card drawn on the page colour (a settings panel)
@@ -388,7 +335,7 @@
     [class~='shadow-[0_24px_48px_-30px_rgba(91,255,160,0.20)]']
   ) {
     border-color: transparent;
-    --tw-shadow: var(--edge-card);
+    --tw-shadow: var(--elevation-0);
   }
   /* Anything else with a neutral border and a level: the level's shadow carries the ring. */
   :root:has([data-elevation-proposal]) [class~='border']:is([class~='border-border'], [class~='border-border-strong'])[class*='shadow-']:not([class~='border-dashed']) {
@@ -474,11 +421,11 @@
     background:
       linear-gradient(var(--hairline-fill), var(--hairline-fill)) padding-box,
       linear-gradient(120deg, color-mix(in srgb, var(--mint) 60%, transparent), color-mix(in srgb, var(--cyan) 45%, transparent) 50%, color-mix(in srgb, var(--violet) 45%, transparent)) border-box;
-    --tw-shadow: var(--composer-edge);
+    --tw-shadow: var(--composer-shadow);
   }
   /* Focused: a mint ring outside the hairline. */
   :root:has([data-elevation-proposal]) [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]']:focus-within {
-    --tw-shadow: var(--composer-focus);
+    --tw-shadow: var(--composer-shadow-focus);
   }
   /* An Agent at work: light sweeps around the composer's edge. Reduced motion: it holds still. */
   :root:has([data-elevation-proposal]) [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]']:has(button[class~='bg-pink/15']) {
@@ -486,7 +433,7 @@
       linear-gradient(var(--hairline-fill), var(--hairline-fill)) padding-box,
       conic-gradient(from var(--elevation-sweep), transparent 0deg, color-mix(in srgb, var(--mint) 85%, transparent) 60deg, color-mix(in srgb, var(--cyan) 70%, transparent) 110deg, transparent 170deg, transparent 360deg) border-box,
       linear-gradient(color-mix(in srgb, var(--mint) 25%, transparent), color-mix(in srgb, var(--mint) 25%, transparent)) border-box;
-    --tw-shadow: var(--composer-focus);
+    --tw-shadow: var(--composer-shadow-focus);
     animation: elevation-sweep 2.8s linear infinite;
   }
   @media (prefers-reduced-motion: reduce) {
@@ -506,13 +453,13 @@
  * ---------------------------------------------------------------------------------------------- */
 @layer elevation-proposal.tinted {
   :root[data-theme='light']:has([data-elevation-proposal]) [class~='bg-mint/[0.05]'][class~='shadow-glow-md-mint'] {
-    --tw-shadow: var(--brand-light);
+    --tw-shadow: var(--unread-shadow);
   }
   :root[data-theme='light']:has([data-elevation-proposal]) :is(
     [class*='shadow-glow-sm-'][class*='text-'][class*='-ink']:not([class~='bg-mint-soft'][class~='border-mint/40']:not([class~='text-mint-ink'])),
     [class*='shadow-glow-md-'][class*='text-'][class*='-ink']:not([class~='border-mint'], [class~='border-mint/40'], [class~='border-mint/35'], [class~='border-mint/45'], [class~='border-mint/50'], [class~='ring-mint'])
   ) {
-    --tw-shadow: 0 6px 16px -8px color-mix(in srgb, currentColor 45%, transparent);
+    --tw-shadow: var(--glow-soft);
   }
 }
 

@@ -1,7 +1,7 @@
-// The proposed system on one sheet: four levels, the state treatments that replace shadows and
-// glows, and the glows that stay. Specimens are drawn with product tokens and shipped primitives;
-// the level utilities (`shadow-elevation-*`, `surface-floating`) come from ./elevation.css until
-// they move into src/index.css.
+// The approved system on one sheet: four levels, the state treatments that replace shadows and
+// glows, and the glows that stay. Specimens are drawn with product tokens (`shadow-elevation-*` from
+// src/index.css) and shipped primitives; `surface-floating` comes from ./elevation.css until the
+// floating surfaces ship.
 import { Bell, Bot, Check, Inbox, Mic, MoreHorizontal, Pencil, Sparkles, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';

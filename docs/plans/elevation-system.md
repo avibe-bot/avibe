@@ -1,9 +1,11 @@
 # Elevation, edges, state, and glow: one system for the Web UI
 
 Status: approved by the owner on 2026-11-08 (option C, no glass); being implemented.
-Frames: `ui/design/frames/system/elevation.design.tsx` (`system/elevation/*`, `approved`); the rules
-and tokens they render with: `ui/design/kit/elevation/elevation.css`, which empties as each part
-ships.
+Frames: `ui/design/frames/system/elevation.design.tsx` (`system/elevation/*`, `approved`). The new
+tokens (`--elevation-*`, `--edge-border`, `--field*`, `--composer-shadow*`, `--dot-glow-*`,
+`--glow-soft`, `--unread-shadow`) are in `ui/src/index.css`; the rules that apply them to today's
+components, and the two existing tokens the system moves (Dark `--popover`, Light `--ring`), are in
+`ui/design/kit/elevation/elevation.css`, which empties as each part ships.
 
 ## Background
 
@@ -109,8 +111,7 @@ Each part lands from the latest `master` with light/dark, desktop/phone screensh
 frames from `approved` to `shipped` (or deletes the ones that only repeat a shipped frame) and its
 rules out of the kit stylesheet.
 
-1. Tokens and primitives: elevation, edge, and field tokens per palette and their utilities; Dark
-   `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
+1. Primitives: Dark `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
    ResponsiveMenu, ContextMenu, Dialog, Toast, switch, segmented control, the composer.
 2. Call sites and state: hand-written `rounded + border-border + bg-surface` cards and bespoke
    shadow literals onto the primitives or tokens; state glows to fill/border; card washes to the
