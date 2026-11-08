@@ -87,7 +87,7 @@ exist; epoch-2 reader support alone was never permission to suppress writes.
 ## Stage 2: epoch-gated write suppression
 
 Authorized after the RC19 reader release on 2026-11-08. Breaking revision
-`20261108_0077` advances the database marker to `VIBEY_TOOL_PROJECTION_EPOCH = 2`
+`20261108_0080` advances the database marker to `VIBEY_TOOL_PROJECTION_EPOCH = 2`
 in the same transaction as its Alembic stamp. It changes no rows or tables beyond
 the marker/stamp. A populated upgrade keeps the normal fresh rollback snapshot;
 it is **not** an additive no-copy migration. Stop every writer before upgrading.

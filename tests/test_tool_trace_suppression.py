@@ -95,7 +95,7 @@ from pathlib import Path
 from sqlalchemy import Engine, event
 from storage import migrations
 def crash_before_commit(conn, cursor, statement, parameters, context, executemany):
-    if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0077' in statement:
+    if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0080' in statement:
         os._exit(71)
 event.listen(Engine, 'after_cursor_execute', crash_before_commit)
 migrations.run_migrations(Path(sys.argv[1]))
@@ -105,7 +105,7 @@ os._exit(72)
     with closing(sqlite3.connect(path)) as conn:
         epoch = conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()[0]
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert (epoch, stamp) == (("1", BRIDGE_REVISION) if crash == "before-commit" else ("2", "20261108_0077"))
+    assert (epoch, stamp) == (("1", BRIDGE_REVISION) if crash == "before-commit" else ("2", "20261108_0080"))
     [backup] = list((tmp_path / "backups").glob("*/vibe.sqlite"))
     assert _snapshot(backup)["database.sql"] == before
     if crash == "before-commit":
@@ -130,7 +130,7 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     (graph / "versions" / "20990101_9999_additive.py").write_text(
-        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0077'\n"
+        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0080'\n"
         "MIGRATION_COMPATIBILITY='additive'\n"
         "def upgrade():\n    op.create_index('ix_epoch_two_next', 'agents', ['description'], unique=False)\n"
     )
