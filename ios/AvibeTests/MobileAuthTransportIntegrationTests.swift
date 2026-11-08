@@ -422,6 +422,58 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         XCTAssertNil(cookie(named: "late_logout", in: cookies))
     }
 
+    func testOTPRequestAsksForTheAppsCodeOnlyEmail() async throws {
+        let state = HTTPFixtureState()
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                let baseURL = state.baseURL!
+                return .json(
+                    """
+                    {
+                      "supabase_url": "\(baseURL.absoluteString)",
+                      "supabase_anon_key": "fixture-anon"
+                    }
+                    """
+                )
+            case ("POST", "/auth/v1/otp"):
+                return .json("{}")
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let transport = MobileAuthTransport(
+            controlPlaneURL: baseURL,
+            websiteDataStore: .nonPersistent()
+        )
+
+        _ = try await transport.requestOTP(email: "alex@example.com")
+
+        let otpRequest = try XCTUnwrap(
+            state.requests().first(where: {
+                $0.method == "POST" && $0.path == "/auth/v1/otp"
+            })
+        )
+        // Production composes https://avibe.bot/auth/callback?source=ios-app,
+        // the exact redirect the Supabase templates answer with a code-only email.
+        var expected = try XCTUnwrap(
+            URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        )
+        expected.path = "/auth/callback"
+        expected.query = "source=ios-app"
+        XCTAssertEqual(
+            otpRequest.queryItems.filter { $0.name == "redirect_to" }
+                .map(\.value),
+            [try XCTUnwrap(expected.url).absoluteString]
+        )
+    }
+
     func testReadinessRejectsCrossOriginRedirect() async throws {
         let captureState = HTTPFixtureState()
         let captureServer = try LocalHTTPServer(address: .ipv6) { request in
@@ -1248,6 +1300,7 @@ private final class NavigationProbe: NSObject, WKNavigationDelegate {
 struct LocalHTTPRequest: Sendable {
     let method: String
     let path: String
+    let queryItems: [URLQueryItem]
     let headers: [String: String]
     let body: Data
 }
@@ -1551,10 +1604,11 @@ final class LocalHTTPServer: @unchecked Sendable {
             return nil
         }
         let rawTarget = String(requestLine[1])
-        let path = URLComponents(string: rawTarget)?.path ?? rawTarget
+        let target = URLComponents(string: rawTarget)
         return LocalHTTPRequest(
             method: String(requestLine[0]),
-            path: path,
+            path: target?.path ?? rawTarget,
+            queryItems: target?.queryItems ?? [],
             headers: headers,
             body: data.subdata(
                 in: bodyStart..<(bodyStart + contentLength)

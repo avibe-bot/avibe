@@ -222,6 +222,13 @@ no page bridge, and lifecycle separation from runtime WebViews. Access and
 refresh tokens are transient script arguments and are never returned to the
 bundled page or instance content.
 
+The app's sign-in email is code-only. The OTP request names
+`redirect_to=https://avibe.bot/auth/callback?source=ios-app`, and the
+production Supabase email templates show only the code for exactly that
+redirect; other control-plane origins, such as a Debug override, still receive
+the link-and-code email. A sign-in link in the email opened Safari, which
+consumed the one-time code the app was waiting for.
+
 Readiness navigation has a native 10-second deadline. Fixed account scripts
 share one `AbortController` deadline mechanism: OTP/session operations use 15
 seconds and best-effort current-device DELETE uses 5 seconds. Both navigation
@@ -538,8 +545,9 @@ download activity after the runtime is invalidated.
   failure mapping, bounded hanging
   readiness/GET/DELETE, cold selection ownership, bundled
   full-bleed/keyboard constraints, named-store failure/relaunch/orphan cleanup,
-  release of runtime primary and child WebViews before removal, and real WebKit
-  cookie behavior against a hermetic local server. Second-factor coverage
+  release of runtime primary and child WebViews before removal, the exact
+  code-only OTP `redirect_to`, and real WebKit cookie behavior against a
+  hermetic local server. Second-factor coverage
   reads the `403` gate after the email code and on a session read, posts codes
   and a passkey assertion with the trusted Origin, maps throttling and
   rejection, stores the re-issued cookie, keeps the store and selection until
