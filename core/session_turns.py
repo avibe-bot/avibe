@@ -76,11 +76,11 @@ from storage.db import get_cached_sqlite_engine
 from storage.background import (
     OWED_FAILURE_NOTICE_KEY,
     apply_live_agent_run_cancellation_in_connection,
-    has_agent_run_dispatch,
     normalize_run_status,
     run_update_event_transaction,
 )
 from storage.session_reclaim import reconcile_explicit_overrides
+from storage.session_delegations import has_dispatch_pair
 from storage.models import (
     agent_runs,
     agent_sessions,
@@ -2707,9 +2707,9 @@ class SessionTurnManager:
                 ):
                     hint_spec = {
                         **spec,
-                        "suppress_report_hint": has_agent_run_dispatch(
+                        "suppress_report_hint": has_dispatch_pair(
                             conn,
-                            dispatcher_session_id=receiver_session_id,
+                            sender_session_id=receiver_session_id,
                             recipient_session_id=str(spec.get("source_actor") or "").strip(),
                         ),
                     }

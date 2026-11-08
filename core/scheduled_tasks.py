@@ -128,7 +128,6 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     compute_next_run_at,
-    has_agent_run_dispatch,
     notice_write_expectation,
     owed_notice_eligible,
     require_task_resumable,
@@ -138,6 +137,7 @@ from storage.background import (
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+from storage.session_delegations import has_dispatch_pair
 from vibe import runtime
 from vibe.i18n import t as i18n_t
 
@@ -11713,7 +11713,7 @@ class ScheduledTaskService:
         source_kind = (metadata or {}).get("source_kind")
         source_actor = (metadata or {}).get("source_actor")
         suppress_report_hint = await self._store_step(
-            self._has_agent_run_dispatch,
+            self._has_dispatch_pair,
             source_kind=source_kind,
             dispatcher_session_id=session_id,
             recipient_session_id=source_actor,
@@ -11809,14 +11809,14 @@ class ScheduledTaskService:
             },
         )
 
-    def _has_agent_run_dispatch(
+    def _has_dispatch_pair(
         self,
         *,
         source_kind: Any,
         dispatcher_session_id: Optional[str],
         recipient_session_id: Optional[str],
     ) -> bool:
-        """Probe the indexed Run history for a reverse Session dispatch."""
+        """Probe the accepted dispatch ledger for a reverse Session pair."""
 
         dispatcher = str(dispatcher_session_id or "").strip()
         recipient = str(recipient_session_id or "").strip()
@@ -11828,9 +11828,9 @@ class ScheduledTaskService:
         if backend is None:
             return False
         with backend.engine.connect() as conn:
-            return has_agent_run_dispatch(
+            return has_dispatch_pair(
                 conn,
-                dispatcher_session_id=dispatcher,
+                sender_session_id=dispatcher,
                 recipient_session_id=recipient,
             )
 

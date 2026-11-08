@@ -369,32 +369,6 @@ DEFINITION_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
     "finished": ("finished",),
 }
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
-
-
-def has_agent_run_dispatch(
-    conn: Any,
-    *,
-    dispatcher_session_id: str,
-    recipient_session_id: str,
-) -> bool:
-    """Whether one Session has ever dispatched an Agent Run into another.
-
-    This is the pre-delegation-ledger fallback for the Harness report-hint decision.
-    The source-actor index bounds the lookup to the dispatcher's Runs; the recipient
-    Session is a residual predicate, and ``LIMIT 1`` keeps the probe one indexed seek.
-    """
-
-    dispatcher = str(dispatcher_session_id or "").strip()
-    recipient = str(recipient_session_id or "").strip()
-    if not dispatcher or not recipient or dispatcher == recipient:
-        return False
-    return conn.execute(
-        select(agent_runs.c.id)
-        .where(agent_runs.c.source_kind == "agent")
-        .where(agent_runs.c.source_actor == dispatcher)
-        .where(agent_runs.c.session_id == recipient)
-        .limit(1)
-    ).first() is not None
 # run_definitions.definition_type -> the user-facing kind the UI routes on.
 # The column says "scheduled"; every surface calls that thing a task.
 _DEFINITION_KINDS = {"scheduled": "task", "watch": "watch"}
