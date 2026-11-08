@@ -238,6 +238,9 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --shadow-elevation-2: var(--elevation-2);
   --shadow-elevation-3: var(--elevation-3);
   --shadow-elevation-3-up: var(--elevation-3-up);
+  /* The composer's own edge, at rest and when focused or working (`composer-edge`). */
+  --shadow-composer: var(--composer-shadow);
+  --shadow-composer-focus: var(--composer-shadow-focus);
   --color-ring: var(--ring);
   /* Each accent is four tokens: --X is the brand fill and the base every wash
      mixes from, --X-foreground is the label printed on that fill, --X-soft is
@@ -1761,7 +1764,9 @@ pre,
    violet) drawn as its border over a soft edge; focused, a mint ring outside it;
    while an Agent works (`data-working`), a light sweeps the hairline, one turn in
    2.8 s, and holds still under reduced motion. The fill is the composer's
-   surface, painted inside the border so the hairline shows around it. */
+   surface, painted inside the border so the hairline shows around it. The shadow
+   is the caller's: `shadow-composer`, and `shadow-composer-focus` while focused
+   or working. */
 @property --composer-sweep {
   syntax: "<angle>";
   inherits: false;
@@ -1778,11 +1783,6 @@ pre,
         color-mix(in srgb, var(--violet) 45%, transparent)
       )
       border-box;
-  --tw-shadow: var(--composer-shadow);
-  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
-  &:focus-within {
-    --tw-shadow: var(--composer-shadow-focus);
-  }
   &[data-working] {
     background:
       linear-gradient(var(--surface-2), var(--surface-2)) padding-box,
@@ -1796,7 +1796,6 @@ pre,
         )
         border-box,
       linear-gradient(color-mix(in srgb, var(--mint) 25%, transparent), color-mix(in srgb, var(--mint) 25%, transparent)) border-box;
-    --tw-shadow: var(--composer-shadow-focus);
     animation: composer-sweep 2.8s linear infinite;
   }
   @media (prefers-reduced-motion: reduce) {

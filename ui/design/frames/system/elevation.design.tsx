@@ -119,10 +119,6 @@ const designFrames = frames([
   after('agents-new', 'agents/dialogs', agentDialogs, 'new-agent'),
   after('dock', 'apps/dock', dock, 'open'),
   after('home', 'home/home', home, 'b-partial-desktop'),
-  after('menu', 'system/overlays', overlays, 'menu'),
-  after('context-menu', 'system/overlays', overlays, 'context-menu'),
-  after('popover', 'system/overlays', overlays, 'popover'),
-  after('dialog', 'system/overlays', overlays, 'dialog'),
   after('apps-library', 'apps/library', appsLibrary, 'apps'),
   after('settings-general', 'settings/general', settingsGeneral, 'default'),
   after('search-palette', 'search/search-palette', searchPalette, 'open'),
@@ -143,8 +139,6 @@ const designFrames = frames([
   after('phone-tabbar-member', 'mobile/workbench-tab', workbenchTab, 'member'),
   after('phone-tabbar-recording', 'mobile/workbench-tab', workbenchTab, 'hold-main-recording'),
   after('phone-apps-drawer', 'mobile/apps-drawer', appsDrawer, 'open'),
-  after('phone-menu', 'system/overlays', overlays, 'menu-phone'),
-  after('phone-dialog', 'system/overlays', overlays, 'dialog-phone'),
 
   ...reviewFrames,
 ]);

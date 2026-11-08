@@ -111,7 +111,7 @@ Each part lands from the latest `master` with light/dark, desktop/phone screensh
 frames from `approved` to `shipped` (or deletes the ones that only repeat a shipped frame) and its
 rules out of the kit stylesheet.
 
-1. Primitives: Dark `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
+1. Primitives (shipped): Dark `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
    ResponsiveMenu, ContextMenu, Dialog, Toast, switch, segmented control, the composer.
 2. Call sites and state: hand-written `rounded + border-border + bg-surface` cards and bespoke
    shadow literals onto the primitives or tokens; state glows to fill/border; card washes to the
