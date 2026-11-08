@@ -165,7 +165,7 @@ def crash_before_commit(conn, cursor, statement, parameters, context, executeman
     if sys.argv[3] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0076' in statement:
         os._exit(71)
 event.listen(Engine, 'after_cursor_execute', crash_before_commit)
-migrations.run_migrations(Path(sys.argv[1]))
+migrations.run_migrations(Path(sys.argv[1]), revision="20261108_0076")
 os._exit(72)
 """, str(path), str(graph), crash], check=False, capture_output=True, text=True)
     assert result.returncode == (71 if crash == "before-commit" else 72), result.stderr
@@ -182,9 +182,9 @@ os._exit(72)
 def _next_graph(tmp_path, monkeypatch, body, *, epoch=None):
     graph = tmp_path / "next-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
-    (graph / "versions" / "20261109_0077_next.py").write_text(
+    (graph / "versions" / "20261109_0078_next.py").write_text(
         "from alembic import op\nimport sqlalchemy as sa\n"
-        "revision = '20261109_0077'\ndown_revision = '20261108_0076'\n"
+        "revision = '20261109_0078'\ndown_revision = '20261108_0077'\n"
         "branch_labels = None\ndepends_on = None\nMIGRATION_COMPATIBILITY = 'breaking'\n"
         + (f"COMPATIBILITY_EPOCH = {epoch}\n" if epoch is not None else "")
         + "def upgrade():\n" + body + "\ndef downgrade():\n    pass\n"
@@ -261,7 +261,7 @@ def test_mutable_python_epoch_cannot_weaken_any_revision_commit(bridge_db, tmp_p
     if mutation == "inside-upgrade":
         body = '    globals()["COMPATIBILITY_EPOCH"] = 1\n' + body
     _next_graph(tmp_path, monkeypatch, body, epoch=2)
-    version = migrations.alembic_dir() / "versions" / "20261109_0077_next.py"
+    version = migrations.alembic_dir() / "versions" / "20261109_0078_next.py"
     source = version.read_text()
     if mutation == "annotation":
         source = source.replace("COMPATIBILITY_EPOCH = 2", 'COMPATIBILITY_EPOCH: globals().__setitem__("COMPATIBILITY_EPOCH", 1) = 2')
@@ -274,8 +274,8 @@ def test_mutable_python_epoch_cannot_weaken_any_revision_commit(bridge_db, tmp_p
         source += '\nglobals().update(COMPATIBILITY_EPOCH=1)\n'
     version.write_text(source)
     if intermediate:
-        (version.parent / "20261110_0078_after.py").write_text(
-            "from alembic import op\nrevision = '20261110_0078'\ndown_revision = '20261109_0077'\n"
+        (version.parent / "20261110_0079_after.py").write_text(
+            "from alembic import op\nrevision = '20261110_0079'\ndown_revision = '20261109_0078'\n"
             "MIGRATION_COMPATIBILITY = 'additive'\ndef upgrade():\n"
             '    op.create_index("ix_after_probe", "epoch_probe", ["value"])\n'
         )

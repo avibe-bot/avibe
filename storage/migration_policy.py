@@ -3,7 +3,10 @@
 The author's label is necessary, not sufficient. Only straight-line Alembic
 operations with literal arguments and a few SQLAlchemy constructors are
 interpreted. SQL, helpers, conditions, data rewrites and unknown constructs are
-breaking by default. Historical MIGRATION_SAFETY is not a compatibility proof.
+breaking by default. The one exact recovery-marker backfill is allowed because
+it only populates the new nullable-in-practice marker with conservative durable
+ownership; it does not change accepted writes. Historical MIGRATION_SAFETY is
+not a compatibility proof.
 """
 
 from __future__ import annotations
@@ -58,8 +61,34 @@ _OPERATION_KWARGS = {
     "create_index": {"schema", "unique", "if_not_exists"},
     "create_table": {"schema", "if_not_exists"},
     "add_column": {"schema"},
+    "execute": set(),
 }
 _LITERAL_SQL = re.compile(r"(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|'(?:[^']|'')*'|NULL)\Z", re.I | re.S)
+_RECOVERY_MARKER_BACKFILL = object()
+_RECOVERY_MARKER_BACKFILL_SQL = " ".join(
+    """
+    UPDATE session_turns AS interrupted
+    SET recovery_required = 1
+    WHERE interrupted.backend = 'vibey'
+      AND interrupted.state = 'terminal'
+      AND interrupted.terminal_outcome IN ('failed', 'canceled')
+      AND NOT EXISTS (
+          SELECT 1
+          FROM session_turns AS newer
+          WHERE newer.session_id = interrupted.session_id
+            AND newer.backend = 'vibey'
+            AND newer.state = 'terminal'
+            AND newer.terminal_outcome IN ('failed', 'canceled')
+            AND (
+                newer.terminal_at > interrupted.terminal_at
+                OR (
+                    newer.terminal_at = interrupted.terminal_at
+                    AND newer.id > interrupted.id
+                )
+            )
+      )
+    """.split()
+)
 
 
 @dataclass(frozen=True)
@@ -145,6 +174,10 @@ def _type_value(name: str, args: list, keywords: dict):
             # Numeric constructor is NOT proof that a string size is safe SQL.
             raise UnprovenMigration("type sizes must be integers; timezone must be boolean")
     return _TYPES[name](*args, **keywords)
+
+
+def _is_recovery_marker_backfill(value: object) -> bool:
+    return isinstance(value, sa.sql.elements.TextClause) and " ".join(value.text.split()) == _RECOVERY_MARKER_BACKFILL_SQL
 
 
 def _value(node: ast.AST):
@@ -301,6 +334,11 @@ def _emitted_operations(tree: ast.Module) -> list[ops.MigrateOperation]:
             and type(kwargs["if_not_exists"]) is not bool
         ):
             raise UnprovenMigration("if_not_exists must be a literal boolean")
+        if fn.attr == "execute":
+            if len(args) != 1 or kwargs or not _is_recovery_marker_backfill(args[0]):
+                raise UnprovenMigration("unclassified SQL operation")
+            emitted.append(_RECOVERY_MARKER_BACKFILL)
+            continue
         if fn.attr == "create_index":
             operation = ops.CreateIndexOp(*args, **kwargs)
         elif fn.attr == "add_column":
@@ -344,6 +382,8 @@ def _column_safe(column: object, *, independent: bool) -> bool:
 
 
 def _operation_safe(operation: ops.MigrateOperation) -> bool:
+    if operation is _RECOVERY_MARKER_BACKFILL:
+        return True
     if operation.schema is not None or type(operation.table_name) is not str or not operation.table_name:
         return False
     if isinstance(operation, ops.CreateIndexOp):

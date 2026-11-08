@@ -55,6 +55,7 @@ class SSEBroker:
         self._subscribers: dict[int, _Subscription] = {}
         self._next_id = 0
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._closed = False
         # ``subscribe`` / ``unsubscribe`` run on the event loop thread while
         # ``publish`` runs from any thread (sync REST routes, IM threads).
         # Plain ``list(dict.values())`` mid-mutation can raise
@@ -70,8 +71,14 @@ class SSEBroker:
         with self._lock:
             sub_id = self._next_id
             self._next_id += 1
-            self._subscribers[sub_id] = _Subscription(queue)
-            total = len(self._subscribers)
+            if self._closed:
+                subscription = _Subscription(queue)
+                subscription.closed = True
+                queue.put_nowait((SSE_BROKER_CLOSED_EVENT, ""))
+                total = len(self._subscribers)
+            else:
+                self._subscribers[sub_id] = _Subscription(queue)
+                total = len(self._subscribers)
         logger.debug("SSE subscriber %s connected (total=%s)", sub_id, total)
         return sub_id, queue
 
@@ -101,9 +108,11 @@ class SSEBroker:
         return subscription.dropped if subscription is not None else 0
 
     def close_all(self) -> None:
-        """Wake every subscriber so long-lived UI streams close before lifespan shutdown."""
+        """Wake every subscriber and reject late subscribers during shutdown."""
 
-        loop = self._loop
+        with self._lock:
+            self._closed = True
+            loop = self._loop
         if loop is None:
             return
         try:
@@ -142,7 +151,7 @@ class SSEBroker:
         # the event loop thread cannot mutate the dict mid-iteration.
         payload = json.dumps({"type": event_type, "data": data}, sort_keys=True, separators=(",", ":"))
         with self._lock:
-            if not self._subscribers:
+            if self._closed or not self._subscribers:
                 return
             subscriptions = list(self._subscribers.values())
         for subscription in subscriptions:

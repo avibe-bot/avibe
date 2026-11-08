@@ -330,6 +330,7 @@ def _owner_settled(engine, *requests) -> None:
                 state="terminal",
                 terminal_outcome="failed",
                 settled_by="no_terminal_result",
+                recovery_required=1,
                 terminal_at=NOW,
             )
         )
@@ -603,6 +604,12 @@ class _RecoveryProbe(SimpleNamespace):
     def _durable_recovery_turn_query(self, **kwargs):
         return VibeyAgent._durable_recovery_turn_query(self, **kwargs)
 
+    def _recovery_marker_sessions(self):
+        return VibeyAgent._recovery_marker_sessions(self)
+
+    def _clear_recovery_markers(self, session_ids):
+        return VibeyAgent._clear_recovery_markers(self, session_ids)
+
     def _durable_recovery_sessions(self):
         return VibeyAgent._durable_recovery_sessions(self)
 
@@ -638,6 +645,7 @@ def test_vibey_open_tail_candidates_cover_every_durable_restart_owner(engine, se
                 state="terminal",
                 terminal_outcome="canceled",
                 settled_by="stopped",
+                recovery_required=1,
                 terminal_at=NOW,
             )
         )
@@ -650,6 +658,7 @@ def test_vibey_open_tail_candidates_cover_every_durable_restart_owner(engine, se
                 state="terminal",
                 terminal_outcome="failed",
                 settled_by="terminal_result",
+                recovery_required=1,
                 terminal_at=NOW,
             )
         )
@@ -694,7 +703,8 @@ def test_vibey_recovery_candidate_query_plan_stays_on_durable_work_tables(engine
         ]
 
     assert any("ix_session_turns_recovery_owner" in detail for detail in turn_details)
-    assert any("message_deliveries" in detail for detail in details)
+    assert any("ix_session_turns_recovery_pending" in detail for detail in details)
+    assert any("ix_message_deliveries_recovery_owner" in detail for detail in details)
     assert any("agent_runs" in detail for detail in details)
     interrupted_compiled = probe._unsettled_interrupted_sessions_query().compile(
         engine, compile_kwargs={"literal_binds": True}
@@ -705,6 +715,8 @@ def test_vibey_recovery_candidate_query_plan_stays_on_durable_work_tables(engine
             for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {interrupted_compiled}")
         ]
 
+    assert any("ix_session_turns_recovery_pending" in detail for detail in interrupted_details)
+    assert not any("SCAN session_turns" in detail for detail in interrupted_details)
     assert not any("SCAN messages" in detail for detail in interrupted_details)
 
 
@@ -5908,6 +5920,7 @@ async def test_recovery_retries_a_session_it_could_not_settle(
                 state="terminal",
                 terminal_outcome="failed",
                 settled_by="no_terminal_result",
+                recovery_required=1,
                 terminal_at=NOW,
             )
         )

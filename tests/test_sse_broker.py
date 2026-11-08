@@ -71,6 +71,23 @@ def test_close_all_wakes_subscribers_for_prompt_shutdown():
     assert subscribers == 1
 
 
+def test_late_subscribers_close_immediately_after_shutdown():
+    broker = SSEBroker()
+    broker.close_all()
+
+    async def scenario():
+        sub_id, queue = broker.subscribe()
+        event_type, payload = await asyncio.wait_for(queue.get(), timeout=1)
+        return sub_id, event_type, payload, broker.subscriber_count()
+
+    sub_id, event_type, payload, subscribers = asyncio.run(scenario())
+
+    assert sub_id == 0
+    assert event_type == SSE_BROKER_CLOSED_EVENT
+    assert payload == ""
+    assert subscribers == 0
+
+
 def test_dropped_count_records_what_a_full_queue_discarded():
     """A subscriber that cannot keep up is a subscriber losing events.
 
