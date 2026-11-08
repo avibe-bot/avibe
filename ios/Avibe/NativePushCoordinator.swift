@@ -22,6 +22,66 @@ struct PushNotificationTap: Equatable {
     let url: String
 }
 
+struct PushNotificationCenterEntry {
+    let identifier: String
+    let userInfo: [AnyHashable: Any]
+}
+
+@MainActor
+protocol PushNotificationCentering: AnyObject {
+    func deliveredNotifications() async -> [PushNotificationCenterEntry]
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry]
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String])
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String])
+}
+
+@MainActor
+final class SystemPushNotificationCenter: PushNotificationCentering {
+    private let center: UNUserNotificationCenter
+
+    init(center: UNUserNotificationCenter = .current()) {
+        self.center = center
+    }
+
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        await withCheckedContinuation { continuation in
+            center.getDeliveredNotifications { notifications in
+                continuation.resume(
+                    returning: notifications.map {
+                        PushNotificationCenterEntry(
+                            identifier: $0.request.identifier,
+                            userInfo: $0.request.content.userInfo
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] {
+        await withCheckedContinuation { continuation in
+            center.getPendingNotificationRequests { requests in
+                continuation.resume(
+                    returning: requests.map {
+                        PushNotificationCenterEntry(
+                            identifier: $0.identifier,
+                            userInfo: $0.content.userInfo
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    }
+}
+
 enum NativePushError: Error, Equatable {
     case unavailable
     case permissionDenied
@@ -61,7 +121,6 @@ final class NativePushCoordinator {
     typealias TapHandler = @MainActor (PushNotificationTap) -> Void
     typealias TapRecoveryHandler = @MainActor () -> Void
     typealias RequestNotificationAuthorization = @MainActor () async throws -> Bool
-    typealias NotificationCleanup = @MainActor (String) async -> Void
 
     private static let publicBaseURL = "https://avibe.bot"
     private static let topic = "bot.avibe.ios"
@@ -82,7 +141,7 @@ final class NativePushCoordinator {
     private let onTap: TapHandler
     private let onTapRecovery: TapRecoveryHandler
     private let installationMarker: PushInstallationMarkerStoring
-    private let removeAccountNotifications: NotificationCleanup
+    private let notificationCenter: PushNotificationCentering
     private let tokenWaitSeconds: Double
 
     private var tokenWaiters: [UUID: TokenWaiter] = [:]
@@ -106,9 +165,7 @@ final class NativePushCoordinator {
         },
         installationMarker: PushInstallationMarkerStoring =
             UserDefaultsPushInstallationMarkerStore(),
-        removeAccountNotifications: @escaping NotificationCleanup = { accountID in
-            await NativePushCoordinator.removeNotifications(for: accountID)
-        },
+        notificationCenter: PushNotificationCentering? = nil,
         tokenWaitSeconds: Double = 15,
         onTap: @escaping TapHandler = { _ in },
         onTapRecovery: @escaping TapRecoveryHandler = {}
@@ -120,7 +177,8 @@ final class NativePushCoordinator {
         self.registerForRemoteNotifications = registerForRemoteNotifications
         self.requestNotificationAuthorization = requestNotificationAuthorization
         self.installationMarker = installationMarker
-        self.removeAccountNotifications = removeAccountNotifications
+        self.notificationCenter =
+            notificationCenter ?? SystemPushNotificationCenter()
         self.tokenWaitSeconds = tokenWaitSeconds
         self.onTap = onTap
         self.onTapRecovery = onTapRecovery
@@ -434,7 +492,12 @@ final class NativePushCoordinator {
         installation.pendingBulkRevokeThroughGeneration = throughBindGeneration
         try? keychain.saveInstallation(installation)
         advanceAccountGeneration()
-        let accountID = installation.accountID
+        let notificationKids = (try? keychain.listRecords())
+            .map {
+                $0.filter {
+                    $0.bindGeneration <= throughBindGeneration
+                }.map(\.kid)
+            } ?? []
 
         let createsReconciled =
             (try? await reconcileRegistrationCreates(
@@ -445,9 +508,10 @@ final class NativePushCoordinator {
         zeroAccountKeys(
             throughBindGeneration: throughBindGeneration
         )
-        if let accountID {
-            await removeAccountNotifications(accountID)
-        }
+        await Self.removeNotifications(
+            forKids: notificationKids,
+            center: notificationCenter
+        )
         try? keychain.saveInstallation(installation)
         guard createsReconciled else {
             return
@@ -718,25 +782,58 @@ final class NativePushCoordinator {
                     throw Self.managementError(response)
                 }
                 if response.statusCode == 409 {
-                    guard current.provider?.generation == provider.generation else {
-                        throw Self.managementError(response)
+                    guard let conflict = Self.providerConflict(response) else {
+                        throw NativePushError.invalidResponse
                     }
-                    let serverGeneration = Self.int64(
-                        response.body["provider_generation"]
-                    ) ?? provider.generation
-                    let nextGeneration = try Self.nextGeneration(
-                        after: max(current.providerGeneration, serverGeneration)
-                    )
-                    current.providerGeneration = nextGeneration
-                    current.provider = PushProviderState(
-                        deviceToken: provider.deviceToken,
-                        environment: provider.environment,
-                        topic: provider.topic,
-                        generation: nextGeneration
-                    )
-                    current.providerPatchPending = true
+
+                    guard let currentProvider = current.provider else {
+                        return
+                    }
+                    if currentProvider.generation != provider.generation {
+                        guard current.providerPatchPending else {
+                            return
+                        }
+                        let nextGeneration = try Self.nextGeneration(
+                            after: max(
+                                current.providerGeneration,
+                                conflict.providerGeneration
+                            )
+                        )
+                        current.providerGeneration = nextGeneration
+                        current.provider = PushProviderState(
+                            deviceToken: currentProvider.deviceToken,
+                            environment: currentProvider.environment,
+                            topic: currentProvider.topic,
+                            generation: nextGeneration
+                        )
+                        current.providerPatchPending = true
+                        try self.keychain.saveInstallation(current)
+                        continue
+                    }
+
+                    let localMatches = conflict.deviceTokenSHA256
+                        == Self.deviceTokenSHA256(provider.deviceToken)
+                        && conflict.environment == provider.environment
+                        && conflict.topic == provider.topic
+                    if localMatches {
+                        current.providerGeneration =
+                            conflict.providerGeneration
+                        current.provider = PushProviderState(
+                            deviceToken: provider.deviceToken,
+                            environment: provider.environment,
+                            topic: provider.topic,
+                            generation: conflict.providerGeneration
+                        )
+                    } else {
+                        current.providerGeneration = max(
+                            current.providerGeneration,
+                            conflict.providerGeneration
+                        )
+                        current.provider = nil
+                    }
+                    current.providerPatchPending = false
                     try self.keychain.saveInstallation(current)
-                    throw Self.managementError(response)
+                    return
                 }
                 throw Self.managementError(response)
             }
@@ -888,6 +985,7 @@ final class NativePushCoordinator {
                 guard let installation = try? self.loadOrCreateInstallation() else {
                     return
                 }
+                try? await self.reconcileProvider()
                 try? await self.reconcilePersistedBulkRevoke(for: installation)
                 try? await self.reconcilePendingRevokes(for: installation)
             }
@@ -1002,32 +1100,50 @@ final class NativePushCoordinator {
         }
     }
 
-    private static func removeNotifications(for accountID: String) async {
-        let center = UNUserNotificationCenter.current()
-        let delivered: [UNNotification] = await withCheckedContinuation { continuation in
-            center.getDeliveredNotifications { notifications in
-                continuation.resume(returning: notifications)
-            }
+    private static func removeNotifications(
+        forKids kids: [String],
+        center: PushNotificationCentering
+    ) async {
+        let kidSet = Set(kids)
+        guard !kidSet.isEmpty else {
+            return
         }
-        let pending: [UNNotificationRequest] = await withCheckedContinuation {
-            continuation in
-            center.getPendingNotificationRequests { requests in
-                continuation.resume(returning: requests)
-            }
-        }
-        let deliveredIDs = delivered.compactMap { notification in
-            notification.request.content.userInfo["account_id"] as? String
-                == accountID
-                ? notification.request.identifier
+        let delivered = await center.deliveredNotifications()
+        let pending = await center.pendingNotificationRequests()
+        let deliveredIDs = delivered.compactMap { entry in
+            containsCapturedKid(kidSet, in: entry.userInfo)
+                ? entry.identifier
                 : nil
         }
-        let pendingIDs = pending.compactMap { request in
-            request.content.userInfo["account_id"] as? String == accountID
-                ? request.identifier
+        let pendingIDs = pending.compactMap { entry in
+            containsCapturedKid(kidSet, in: entry.userInfo)
+                ? entry.identifier
                 : nil
         }
         center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
         center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
+    }
+
+    private static func containsCapturedKid(
+        _ kids: Set<String>,
+        in userInfo: [AnyHashable: Any]
+    ) -> Bool {
+        if let kid = userInfo["kid"] as? String, kids.contains(kid) {
+            return true
+        }
+        if let envelope = userInfo["avibe"] as? [AnyHashable: Any],
+           let kid = envelope["kid"] as? String,
+           kids.contains(kid)
+        {
+            return true
+        }
+        if let envelope = userInfo["avibe"] as? [String: Any],
+           let kid = envelope["kid"] as? String,
+           kids.contains(kid)
+        {
+            return true
+        }
+        return false
     }
 
     private func resumeTokenWaiters(with error: Error? = nil) {
@@ -1096,6 +1212,47 @@ final class NativePushCoordinator {
             return Int64(value)
         }
         return nil
+    }
+
+    private struct ProviderConflict {
+        let providerGeneration: Int64
+        let deviceTokenSHA256: String
+        let environment: String
+        let topic: String
+    }
+
+    private static func providerConflict(
+        _ response: PushManagementResponse
+    ) -> ProviderConflict? {
+        guard
+            let providerGeneration = int64(
+                response.body["provider_generation"]
+            ),
+            providerGeneration > 0,
+            let deviceTokenSHA256 = response.body[
+                "device_token_sha256"
+            ] as? String,
+            deviceTokenSHA256.count == 64,
+            deviceTokenSHA256.unicodeScalars.allSatisfy({
+                CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+            }),
+            let environment = response.body["environment"] as? String,
+            let topic = response.body["topic"] as? String
+        else {
+            return nil
+        }
+        return ProviderConflict(
+            providerGeneration: providerGeneration,
+            deviceTokenSHA256: deviceTokenSHA256,
+            environment: environment,
+            topic: topic
+        )
+    }
+
+    private static func deviceTokenSHA256(_ token: Data) -> String {
+        SHA256.hash(data: token)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private static func nextGeneration(after current: Int64) throws -> Int64 {

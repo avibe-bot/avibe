@@ -896,6 +896,77 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNil(otherAccount.restorableRuntime(from: otherState))
     }
 
+    func testSignedOutBootstrapPreparesPushLogoutBeforeStoreReplacement()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        var events: [String] = []
+        var coordinator: MobileSessionCoordinator!
+        transport.pushManagementHandler = { _ in
+            events.append("push.management")
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport, FakeMobileAuthTransport()],
+            onPrepareAccountTransition: {
+                events.append("account.transition")
+                return []
+            },
+            onPreparePushLogout: {
+                events.append("push.logout")
+                _ = try? await coordinator.pushManagementRequest(
+                    PushManagementRequest(
+                        method: "POST",
+                        path: "/api/push/apns/installations/revoke",
+                        headers: [:],
+                        body: nil
+                    )
+                )
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.bootstrap()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertEqual(
+            events,
+            ["push.logout", "push.management", "account.transition"]
+        )
+    }
+
+    func testOtherAccountBootstrapUsesTheSamePushLogoutPreparation()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let otherTransport = FakeMobileAuthTransport()
+        otherTransport.session = snapshot(accountID: "account-2")
+        var pushLogoutCalls = 0
+        let other = makeCoordinator(
+            defaults: defaults,
+            transports: [otherTransport, FakeMobileAuthTransport()],
+            onPreparePushLogout: {
+                pushLogoutCalls += 1
+            }
+        )
+        other.activateAccountSurface()
+
+        let state = try await other.bootstrap()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertEqual(pushLogoutCalls, 1)
+    }
+
     func testHiddenTransportStopsBeforeRuntimeAndRestartsOnlyForAccountSurface() async throws {
         let defaults = makeDefaults()
         var events: [String] = []
@@ -1935,7 +2006,8 @@ final class MobileOnboardingTests: XCTestCase {
         onOpen: @escaping (MobileRuntimeContext) -> Void = { _ in },
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
-        ] = { [] }
+        ] = { [] },
+        onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) -> MobileSessionCoordinator {
         var queue = transports
         return MobileSessionCoordinator(
@@ -1952,7 +2024,8 @@ final class MobileOnboardingTests: XCTestCase {
             },
             passkeyAuthenticator: passkeyAuthenticator ?? FakePasskeyAuthenticator(),
             onOpenRuntime: onOpen,
-            onPrepareAccountTransition: onPrepareAccountTransition
+            onPrepareAccountTransition: onPrepareAccountTransition,
+            onPreparePushLogout: onPreparePushLogout
         )
     }
 
