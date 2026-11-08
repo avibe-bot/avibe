@@ -165,7 +165,7 @@ def _validate_search_catalog(item: object, *, protocol: str, built_in: bool = Fa
     required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "outcomes", "billing", "tool_only"}
     if protocol != "search":
         required.add("auto_enroll")
-    if set(item) != required:
+    if set(item) - {"default_enabled"} != required or ("default_enabled" in item and type(item["default_enabled"]) is not bool):
         raise ValueError("api-key vendor search catalog is invalid")
     endpoint = normalize_model_hub_base_url(item.get("endpoint"))
     if endpoint is None or urlsplit(endpoint).scheme != "https":

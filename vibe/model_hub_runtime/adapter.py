@@ -20,6 +20,9 @@ import aiohttp
 import config.v2_config as model_hub_config
 from config.v2_config import (
     KEYLESS_EXA_SERVICE_ID,
+    PARALLEL_SOURCE_ID,
+    PARALLEL_SERVICE_ID,
+    PARALLEL_VENDOR_ID,
     KEYLESS_EXA_SOURCE_ID,
     normalize_model_hub_base_url,
 )
@@ -2274,6 +2277,11 @@ class CLIProxyEngineAdapter:
         *,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
+        if service_id == PARALLEL_SERVICE_ID:
+            if source_id != PARALLEL_SOURCE_ID or vendor != PARALLEL_VENDOR_ID or credential_ref is not None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            from vibe.model_hub_runtime.parallel_mcp import search_parallel
+            return await search_parallel(request, on_sent=on_sent)
         if service_id == KEYLESS_EXA_SERVICE_ID:
             if (
                 not model_hub_config.KEYLESS_EXA_ACTIVE

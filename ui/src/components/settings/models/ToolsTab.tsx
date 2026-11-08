@@ -276,7 +276,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                 const vendor = candidate.kind === 'service'
                   ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
                   : undefined;
-                const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
+                const keyless = candidate.kind === 'service' && vendor?.facts.built_in === true;
                 const name = candidateName(candidate);
                 const cooldown = candidate.kind === 'service' && candidate.cooldown_until !== null
                   ? cooldownTime(candidate.cooldown_until, i18n.language)

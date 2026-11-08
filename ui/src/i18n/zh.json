@@ -2845,6 +2845,7 @@
         "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
         "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可看到该连接的 IP。",
         "keylessEndpoint": "mcp.exa.ai",
+        "parallelCustody": "Parallel（免费）无需密钥。查询会发送至 mcp.parallel.ai，该服务可看到连接的 IP。仅在您希望使用此服务时启用。",
         "keylessCustody": "已添加服务的密钥由网关保管；Exa（免费）无需密钥，也不会把密钥交给模型或 Agent。",
         "queryDestination": "搜索词会发送给执行搜索的服务。",
         "queryVendor": "搜索词会发送给 {{vendor}}。",
@@ -5739,6 +5740,7 @@
     },
     "agentActivity": {
       "hosted": {
+        "keylessParallel": "Parallel (free)",
         "keylessExa": "Exa（免费）",
         "rateLimitSwitch": "{{sources}}限流，已改用 {{provider}}。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。",
         "fetchErrorCode": {

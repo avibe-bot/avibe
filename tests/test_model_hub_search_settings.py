@@ -519,7 +519,7 @@ def test_http_tools_put_and_read_preserve_patch_and_active_contract(tmp_path, mo
                     registry=_api_response_registry()).validate(written)
     web = written["hosted_tools"]["tools"][0]
     assert web["prefer_native"] is False and web["services"] == {TAVILY: {"results": 7, "enabled": False}}
-    assert {vendor["id"] for vendor in web["service_vendors"]} == {"deepseek", "tavily", "exa", "exa-mcp"}
+    assert {vendor["id"] for vendor in web["service_vendors"]} == {"deepseek", "tavily", "exa", "exa-mcp", "parallel-mcp"}
     assert [(row["source_id"], row["kind"]) for row in web["executor_candidates"]] == [
         (EXA, "service"), (DEEPSEEK, "service"), (KEYLESS_EXA_SOURCE_ID, "service"), (MODEL, "model"), (TAVILY, "service"),
     ]

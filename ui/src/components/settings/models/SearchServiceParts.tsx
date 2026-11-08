@@ -9,7 +9,7 @@ import { ToggleSwitch } from '../SettingsPrimitives';
 import { Field } from './dialogFields';
 import { atLeast, cooldownTime, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { KEYLESS_EXA_SOURCE_ID, candidateEnabled, serviceSettings } from './searchServices';
+import { candidateEnabled, serviceSettings } from './searchServices';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { usageHasNoPrice, type ServiceMonth } from './usageProjection';
 import { VendorGlyph } from './vendorGlyph';
@@ -63,7 +63,7 @@ export const SearchCandidateStatus: React.FC<{
   const { t, i18n } = useTranslation();
   const state = candidate.kind === 'service' ? candidate.state : source?.state;
   const success = tool.status.verified.find((row) => row.source_id === candidate.source_id && row.model_id === candidate.model_id);
-  const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
+  const keyless = candidate.kind === 'service' && tool.service_vendors?.some((row) => row.facts.built_in && row.source_ids.includes(candidate.source_id)) === true;
   let text: string | null = null;
   let tone = 'model-hub-status-mint';
   const until = candidate.kind === 'service' ? candidate.cooldown_until : null;
@@ -182,6 +182,6 @@ export const SearchServiceSettings: React.FC<{
     </Field>
     <p className="model-hub-tool-note">{t('settings.models.searchServices.settingsNote')}</p>
     <SearchServicePrice price={vendor.price} />
-    {month && <ServiceMonthLine month={month} keyless={source.id === KEYLESS_EXA_SOURCE_ID} onOpenUsage={onOpenUsage} />}
+    {month && <ServiceMonthLine month={month} keyless={vendor.facts.built_in === true} onOpenUsage={onOpenUsage} />}
   </section>;
 };

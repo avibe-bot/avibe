@@ -2,6 +2,7 @@ import type { HostedExecutorCandidate, HostedSearchServiceVendor, HostedToolsSta
 
 export const KEYLESS_EXA_SOURCE_ID = 'src_exakeyless';
 export const KEYLESS_EXA_VENDOR_ID = 'exa-mcp';
+export const PARALLEL_SOURCE_ID = 'src_parallelkeyless';
 
 export const keylessExaSource = (candidate?: HostedWebSearchToolStatus['executor_candidates'][number], vendor?: HostedSearchServiceVendor): Source => ({
   id: KEYLESS_EXA_SOURCE_ID,
@@ -18,6 +19,13 @@ export const keylessExaSource = (candidate?: HostedWebSearchToolStatus['executor
   credential_ref: null,
   masked_credential: null,
 });
+
+/** Catalog-owned keyless identities use the existing service settings panel. */
+export const builtinSearchSource = (sourceId: string | null): Source | null => {
+  if (sourceId === KEYLESS_EXA_SOURCE_ID) return keylessExaSource();
+  if (sourceId === PARALLEL_SOURCE_ID) return { ...keylessExaSource(), id: sourceId, vendor: 'parallel-mcp', display_name: 'Parallel (free)' };
+  return null;
+};
 
 /** One read signal across Tools, Sources and detail; S2b-2 activates service reads and execution together. */
 export const searchServicesActive = (tool: HostedWebSearchToolStatus | null | undefined): boolean =>
@@ -36,7 +44,7 @@ export const serviceSettings = (tool: HostedWebSearchToolStatus, vendor: HostedS
   // A search-capable Source can retain its model-executor role while search is off.
   // The catalog facts and saved overrides still describe its editable settings.
   return {
-    enabled: tool.services[sourceId]?.enabled ?? (vendor.facts.tool_only || vendor.facts.auto_enroll),
+    enabled: tool.services[sourceId]?.enabled ?? (sourceId !== PARALLEL_SOURCE_ID && (vendor.facts.tool_only || vendor.facts.auto_enroll)),
     results: tool.services[sourceId]?.results ?? Math.min(5, vendor.results_max),
   };
 };

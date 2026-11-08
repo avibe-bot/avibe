@@ -40,6 +40,7 @@ const SERVICE_RATE_LIMITED_REASON = ['reason', 'service_rate_limited'].join('.')
 
 const builtinKey = (sourceId: string | undefined): string | undefined => ({
   src_exakeyless: 'chat.agentActivity.hosted.keylessExa',
+  src_parallelkeyless: 'chat.agentActivity.hosted.keylessParallel',
   src_localfetch: 'chat.agentActivity.hosted.fetch.local',
   src_jinakeyless: 'chat.agentActivity.hosted.fetch.jina',
 })[sourceId ?? ''];

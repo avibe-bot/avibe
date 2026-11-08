@@ -12,12 +12,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from config.v2_config import (
-    KEYLESS_EXA_ACTIVE,
-    KEYLESS_EXA_SOURCE_ID,
     ModelHubSourceStateConfig,
-    is_keyless_exa_source,
-    model_hub_keyless_exa_source,
+    PARALLEL_SOURCE_ID,
     model_hub_search_service,
+    is_keyless_search_source,
+    model_hub_builtin_search_sources,
 )
 
 from .adapter import SearchResponse
@@ -71,11 +70,13 @@ class SearchChain:
         advances any fence. Runs on a worker over the final-admission snapshot.
         """
         owner = self.owner
-        source = (
-            model_hub_keyless_exa_source()
-            if slot.source_id == KEYLESS_EXA_SOURCE_ID and KEYLESS_EXA_ACTIVE
-            else next((s for s in config.sources if s.id == slot.source_id), None)
-        )
+        source = next((s for s in [*model_hub_builtin_search_sources(), *config.sources] if s.id == slot.source_id), None)
+        if slot.source_id == PARALLEL_SOURCE_ID:
+            # Never shadow a persisted credential/endpoint or blocked state
+            # with the anonymous catalog identity, including at final admission.
+            persisted = next((s for s in config.sources if s.id == PARALLEL_SOURCE_ID), None)
+            if persisted is not None:
+                source = persisted if is_keyless_search_source(persisted) else None
         fact = {"source_id": slot.source_id, "label": slot.label or slot.source_id, "kind": slot.kind, "outcome": "skipped"}
         unavailable = source is None or identity_digest(source) != slot.identity
         service = None
@@ -84,7 +85,7 @@ class SearchChain:
             if slot.kind == "service":
                 service = model_hub_search_service(source)
                 unavailable = service is None or service["service_id"] != slot.model_id or (
-                    not slot.source_id == KEYLESS_EXA_SOURCE_ID and not source.credential_ref
+                    not is_keyless_search_source(source) and not source.credential_ref
                 )
             else:
                 unavailable = owner._admitted_executor(slot, self.call.tool) is None
@@ -226,9 +227,9 @@ class SearchChain:
     async def service_attempt(self, slot, source, catalog):
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        budget = KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS if is_keyless_exa_source(source) else ATTEMPT_SECONDS
+        budget = KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS if is_keyless_search_source(source) else ATTEMPT_SECONDS
         attempt_deadline = loop.time() + max(0.0, min(budget, self.deadline - loop.time()))
-        if is_keyless_exa_source(source):
+        if is_keyless_search_source(source):
             remaining = max(0.0, attempt_deadline - loop.time())
             try:
                 await asyncio.wait_for(self.owner._keyless_exa_call_semaphore.acquire(), timeout=remaining)
@@ -285,7 +286,7 @@ class SearchChain:
                     health_generation = owner._latest_source_attempt_generation.get(source.id)
                     cooldown_generation = owner._service_cooldowns.generation(source, slot.model_id)
                 else:
-                    health_generation = None if is_keyless_exa_source(source) else owner._reserve_settlement_generation(source.id, source=source)
+                    health_generation = None if is_keyless_search_source(source) else owner._reserve_settlement_generation(source.id, source=source)
                     cooldown_generation = owner._service_cooldowns.advance(source, slot.model_id)
 
             async def on_sent():
@@ -394,7 +395,7 @@ class SearchChain:
             superseded = False
             async with owner._mutation_lock:
                 previous = await asyncio.to_thread(owner.store.load)
-                keyless_source = is_keyless_exa_source(source)
+                keyless_source = is_keyless_search_source(source)
                 current = source if keyless_source else next((s for s in previous.sources if s.id == source.id), None)
                 identity_current = keyless_source or (current is not None and source_identity(current) == source_identity(source))
                 health_current = not keyless_source and identity_current and owner._settlement_current(current, health_generation)

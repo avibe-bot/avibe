@@ -258,7 +258,8 @@ export const SourceDetailPanel: React.FC<{
   const fetchTool = webFetchTool(capabilityStatus);
   const fetchSettings = fetchTool && fetchVendorForSource(fetchTool, source.id) && onSaveFetch && onRetryFetch
     ? <ServiceMonthFetchSettings sourceId={source.id} tool={fetchTool} pending={busy || (hostedPending?.has('web_fetch') ?? false)} onSave={onSaveFetch} onRetry={onRetryFetch} onOpenUsage={onOpenUsage} /> : null;
-  const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID;
+  const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID || source.vendor === 'parallel-mcp';
+  const keylessEndpoint = source.vendor === 'parallel-mcp' ? 'mcp.parallel.ai' : t('settings.models.searchServices.keylessEndpoint');
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
   const serviceDetail = keylessExa || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
   // Usage, like the Tools rows, waits for the read to list this Source as a search service.
@@ -840,9 +841,9 @@ export const SourceDetailPanel: React.FC<{
         <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-4">
           <SearchVendorGlyph vendor={source.vendor} />
           <div className="flex min-w-0 flex-col gap-1">
-            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{keylessExa ? t('settings.models.searchServices.vendorName.exa-mcp') : source.display_name}</h2>
+            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{source.id === KEYLESS_EXA_SOURCE_ID ? t('settings.models.searchServices.vendorName.exa-mcp') : source.display_name}</h2>
             <p className="model-hub-tool-note">{t(source.protocol === 'search' ? fetchSettings ? 'settings.models.webFetch.noModels' : 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
-            {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
+            {keylessExa && <p className="model-hub-tool-note">{keylessEndpoint}</p>}
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -867,7 +868,7 @@ export const SourceDetailPanel: React.FC<{
           </section>
           {searchSettings}
           {fetchSettings}
-          <p className="model-hub-tool-note px-5 py-4">{t(keylessExa ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
+          <p className="model-hub-tool-note px-5 py-4">{t(source.vendor === 'parallel-mcp' ? 'settings.models.searchServices.parallelCustody' : keylessExa ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
         </div>
         {source.protocol === 'search' && !keylessExa && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
           <p className="model-hub-tool-note">{t('settings.models.searchServices.removeNote')}</p>
@@ -890,7 +891,7 @@ export const SourceDetailPanel: React.FC<{
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{keylessExa
-          ? t('settings.models.searchServices.keylessEndpoint')
+          ? keylessEndpoint
           : source.base_url
             ? <SourcePrivateValue value={source.base_url} />
             : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>

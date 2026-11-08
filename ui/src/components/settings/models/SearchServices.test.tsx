@@ -17,7 +17,7 @@ import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { readyRegion } from './regionRead';
 import { formatSmallUsd } from './format';
-import { keylessExaSource } from './searchServices';
+import { builtinSearchSource, keylessExaSource } from './searchServices';
 import { ACTIVE_SEARCH, KEYLESS_ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourcesCard } from './SourcesCard';
@@ -64,8 +64,9 @@ const addDialog = (tool = ACTIVE_SEARCH, lng = 'en') => {
   const onAdded = vi.fn();
   const onOpenSource = vi.fn();
   const onViewOrder = vi.fn();
-  render(wrap(<AddSearchServiceDialog tool={tool} pending={false} sourceReads={createSourceCollectionReadAuthority(modelsApi)} onClose={vi.fn()} onAdded={onAdded} onOpenSource={onOpenSource} onViewOrder={onViewOrder} />, lng));
-  return { onAdded, onOpenSource, onViewOrder };
+  const onEnableService = vi.fn();
+  render(wrap(<AddSearchServiceDialog onEnableService={onEnableService} tool={tool} pending={false} sourceReads={createSourceCollectionReadAuthority(modelsApi)} onClose={vi.fn()} onAdded={onAdded} onOpenSource={onOpenSource} onViewOrder={onViewOrder} />, lng));
+  return { onAdded, onOpenSource, onViewOrder, onEnableService };
 };
 const newVendors = (): HostedWebSearchToolStatus => ({
   ...ACTIVE_SEARCH, services: {}, executor_candidates: [],
@@ -426,4 +427,40 @@ describe('search service add dialog', () => {
     expect(create).toHaveBeenCalledOnce();
     expect(onAdded).toHaveBeenCalledWith(expect.objectContaining({ source: expect.objectContaining({ id: 'src_exa000001', client_nonce: nonce }) }));
   });
+});
+
+
+// MH-SEARCH-SERVICES-001: existing add tests cover credential setup, not a
+// disabled built-in provider's explicit election. This is a synthetic read.
+it('elects Parallel only after the user chooses Use for web search', async () => {
+  const base = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((row) => row.id === 'exa-mcp')!;
+  const tool: HostedWebSearchToolStatus = {
+    ...KEYLESS_ACTIVE_SEARCH,
+    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, {
+      ...base, id: 'parallel-mcp', name: 'Parallel (free)', source_ids: ['src_parallelkeyless'],
+    }],
+  };
+  const { onEnableService, onViewOrder } = addDialog(tool);
+  const row = screen.getByRole('region', { name: 'Parallel (free)' });
+  expect(row.textContent).toContain('mcp.parallel.ai');
+  expect(onEnableService).not.toHaveBeenCalled();
+  await userEvent.click(within(row).getByRole('button', { name: 'Use for web search' }));
+  expect(onEnableService).toHaveBeenCalledExactlyOnceWith('src_parallelkeyless');
+  expect(onViewOrder).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText('API key')).toBeNull();
+});
+
+// MH-SEARCH-SERVICES-001: a direct detail route must not present an unelected
+// service as enabled; the add-dialog election test cannot see that switch.
+it('shows unelected Parallel disabled in its service detail', () => {
+  const base = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((row) => row.id === 'exa-mcp')!;
+  const tool: HostedWebSearchToolStatus = {
+    ...KEYLESS_ACTIVE_SEARCH,
+    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, {
+      ...base, id: 'parallel-mcp', name: 'Parallel (free)', source_ids: ['src_parallelkeyless'],
+    }],
+  };
+  detail(builtinSearchSource('src_parallelkeyless')!, tool);
+  expect(screen.getByRole('switch', { name: 'Use for web search' }).getAttribute('aria-checked')).toBe('false');
+  expect(screen.queryByLabelText('API key')).toBeNull();
 });

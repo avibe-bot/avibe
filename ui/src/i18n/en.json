@@ -2845,6 +2845,7 @@
         "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
         "keylessQueryDestination": "Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa can see the connection's IP.",
         "keylessEndpoint": "mcp.exa.ai",
+        "parallelCustody": "Parallel (free) needs no key. Queries go to mcp.parallel.ai, which can see the connection IP. Enable it only if you want to use this service.",
         "keylessCustody": "Added-service keys stay in the gateway; Exa (free) needs no key, and no key is given to the model or Agent.",
         "queryDestination": "Queries are sent to the service that runs the search.",
         "queryVendor": "Search queries are sent to {{vendor}}.",
@@ -5739,6 +5740,7 @@
     },
     "agentActivity": {
       "hosted": {
+        "keylessParallel": "Parallel (free)",
         "keylessExa": "Exa (free)",
         "rateLimitSwitch": "Rate-limited: {{sources}}; switched to {{provider}}. Retry after the cooldown, or use Retry now in Models › Tools.",
         "fetchErrorCode": {

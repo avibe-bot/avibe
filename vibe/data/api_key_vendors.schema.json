@@ -32,6 +32,7 @@
         ],
         "additionalProperties": false,
         "properties": {
+          "default_enabled": {"type": "boolean"},
           "service_id": {"type": "string", "minLength": 1},
           "endpoint": {"type": "string", "format": "uri", "pattern": "^https://"},
           "auth": {"enum": ["bearer", "x-api-key", "none"]},

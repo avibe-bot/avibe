@@ -279,5 +279,55 @@
       "billing": {"nonempty_only": false, "unbilled_errors": []},
       "tool_only": true
     }
+  },
+  {
+    "id": "parallel-mcp",
+    "label": "Parallel (free)",
+    "official_base_url": "https://mcp.parallel.ai/mcp",
+    "protocol": "search",
+    "built_in": true,
+    "search": {
+      "service_id": "parallel/mcp",
+      "endpoint": "https://mcp.parallel.ai/mcp",
+      "auth": "none",
+      "request": {
+        "method": "POST",
+        "query": "objective",
+        "results": "max_results",
+        "defaults": {}
+      },
+      "result": {
+        "results": "results",
+        "url": "url",
+        "title": "title",
+        "snippet": "excerpts",
+        "page_age": "publish_date"
+      },
+      "limits": {
+        "results_min": 1,
+        "results_max": 10,
+        "query_max_chars": null
+      },
+      "price": {
+        "unit": "search",
+        "usd_per_1k": 0,
+        "extra": [],
+        "as_of": "2026-11-06",
+        "url": "https://docs.parallel.ai/integrations/mcp"
+      },
+      "free_check": null,
+      "service_refused_statuses": [],
+      "outcomes": {
+        "credential": [],
+        "balance": [],
+        "limit": []
+      },
+      "billing": {
+        "nonempty_only": false,
+        "unbilled_errors": []
+      },
+      "tool_only": true,
+      "default_enabled": false
+    }
   }
 ]

@@ -844,7 +844,7 @@ async def test_search_read_and_chain_activate_together(tmp_path, monkeypatch):
         (DEEPSEEK, "service"),
         (KEYLESS_EXA_SOURCE_ID, "service"),
     ]
-    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek", "exa-mcp"}
+    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek", "exa-mcp", "parallel-mcp"}
     answer = await run(service, turn=frozen)
     assert len(calls) == 1 and calls[0][0] == EXA
     assert answer["record"]["status"] == "completed"

@@ -30,6 +30,9 @@ from config.v2_config import (
     KEYLESS_EXA_SOURCE_ID,
     WEB_FETCH_ACTIVE,
     model_hub_builtin_sources,
+    model_hub_builtin_source,
+    model_hub_builtin_search_sources,
+    is_builtin_search_source_id,
     MODEL_HUB_HOSTED_TOOLS,
     MODEL_HUB_SEARCH_TOOLS,
     ModelHubConfig,
@@ -42,7 +45,6 @@ from config.v2_config import (
     is_model_hub_model_id,
     is_model_hub_source_id,
     model_hub_executor_order,
-    model_hub_keyless_exa_source,
     model_hub_search_service,
 )
 from vibe.backend_model_catalog import (
@@ -274,9 +276,9 @@ def _search_chain(
     }
     disabled: list[ExecutorCandidate] = []
     ordered = _vibey_order(config)
-    keyless = model_hub_keyless_exa_source() if KEYLESS_EXA_ACTIVE else None
-    if keyless is not None:
-        ordered.append(keyless)
+    builtins = [source for source in model_hub_builtin_search_sources()
+                if source.id == KEYLESS_EXA_SOURCE_ID or source.id in setting.services]
+    ordered.extend(builtins)
     by_id = {source.id: source for source in ordered}
     first = [by_id[sid] for sid in (setting.service_order or ()) if sid in by_id and by_id[sid].protocol == "search"]
     # Tool-only search Sources keep their saved/source order first. Official
@@ -286,7 +288,7 @@ def _search_chain(
     # search service still belongs before keyless Exa in the automatic chain.
     tool_services = [
         source for source in ordered
-        if source.protocol == "search" and source.id != KEYLESS_EXA_SOURCE_ID
+        if source.protocol == "search" and not is_builtin_search_source_id(source.id)
     ]
     auto_model_services = [
         source for source in ordered
@@ -301,8 +303,7 @@ def _search_chain(
     ]
     sources = first + [source for source in tool_services if source not in first]
     sources += auto_model_services
-    if keyless is not None:
-        sources.append(keyless)
+    sources += [source for source in builtins if source not in first]
     sources += model_sources
     for source in sources:
         service = model_hub_search_service(source)
@@ -628,14 +629,14 @@ def _service_vendors(config: ModelHubConfig) -> list[dict[str, Any]]:
     vendors: list[dict[str, Any]] = []
     for vendor in api_key_vendor_catalog():
         service = vendor.search
-        if service is None or (vendor.built_in and not KEYLESS_EXA_ACTIVE):
+        if service is None or (vendor.id == "exa-mcp" and not KEYLESS_EXA_ACTIVE):
             continue
         source_ids = [
             source.id for source in config.sources
             if source.vendor == vendor.id and model_hub_search_service(source) is not None
         ]
-        if vendor.built_in and KEYLESS_EXA_ACTIVE:
-            source_ids.append(KEYLESS_EXA_SOURCE_ID)
+        if vendor.built_in:
+            source_ids.extend(source.id for source in model_hub_builtin_search_sources() if source.vendor == vendor.id)
         vendors.append({
             "id": vendor.id,
             "name": vendor.label,
@@ -778,13 +779,13 @@ def hosted_tools_status(
                         source_id in sources
                         and (service := model_hub_search_service(sources[source_id])) is not None
                     ) or (
-                        source_id == KEYLESS_EXA_SOURCE_ID
-                        and (service := model_hub_search_service(model_hub_keyless_exa_source())) is not None
+                        is_builtin_search_source_id(source_id)
+                        and (service := model_hub_search_service(model_hub_builtin_source(source_id))) is not None
                     )
                 }
                 entry["service_order"] = [
                     source_id for source_id in (setting.service_order or ())
-                    if source_id in sources or source_id == KEYLESS_EXA_SOURCE_ID
+                    if source_id in sources or is_builtin_search_source_id(source_id)
                 ]
                 if SEARCH_SERVICES_ACTIVE:
                     entry["service_vendors"] = _service_vendors(config)
@@ -877,7 +878,7 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
         setting = fetch_order_roles(config, setting)
     if tool == "web_search" and "executor_order" in payload:
         live = {source.id: source for source in config.sources}
-        live[KEYLESS_EXA_SOURCE_ID] = model_hub_keyless_exa_source()
+        live.update({source.id: source for source in model_hub_builtin_search_sources()})
         setting = replace(setting, executor_order_kinds=(
             {source_id: search_executor_kind(live[source_id], setting)
              for source_id in setting.executor_order if source_id in live}
@@ -897,7 +898,7 @@ def _patch_search_services(config: ModelHubConfig, payload: object) -> dict[str,
         if patch is None:
             saved.pop(source_id, None)
             continue
-        source = live.get(source_id) or (model_hub_keyless_exa_source() if source_id == KEYLESS_EXA_SOURCE_ID else None)
+        source = live.get(source_id) or (model_hub_builtin_source(source_id) if is_builtin_search_source_id(source_id) else None)
         service = model_hub_search_service(source) if source is not None else None
         if service is None or not isinstance(patch, dict) or set(patch) - {"results", "enabled"}:
             raise ValueError("services must name a search-capable Source and known fields")

@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from config.v2_config import (
     KEYLESS_EXA_SERVICE_ID,
+    PARALLEL_SERVICE_ID,
     ModelHubConfig,
     ModelHubSourceConfig,
     model_hub_builtin_sources,
@@ -188,7 +189,7 @@ def map_response(
         except (ValueError, UnicodeError, RecursionError):
             pass
     status = response.http_status
-    keyless = service.get("service_id") == KEYLESS_EXA_SERVICE_ID
+    keyless = service.get("service_id") in {KEYLESS_EXA_SERVICE_ID, PARALLEL_SERVICE_ID}
     mcp_result: Mapping[str, Any] | None = None
     if keyless and isinstance(body, Mapping):
         body, mcp_result = _keyless_mcp_content(body)
@@ -210,7 +211,7 @@ def map_response(
             for field, bound in (("title", 300), ("snippet", 1000), ("page_age", 64)):
                 value = _path(row, mapping[field])
                 if field == "snippet" and isinstance(value, list):
-                    # Exa's highlights, in rank order, never its page text.
+                    # Provider excerpts/highlights, in rank order, never full page text.
                     value = ("\n\n" if keyless else "\n").join(
                         part[:bound] for part in value[:bound] if isinstance(part, str)
                     )
@@ -285,7 +286,7 @@ def map_response(
     billing = service["billing"]
     billable, uncertain = False, False
     if sent and keyless:
-        # Keyless Exa's service is free: attempts still enter usage.requests,
+        # Anonymous services are free: attempts still enter usage.requests,
         # but never become billable or carry a provider cost estimate.
         billable, uncertain = False, False
     elif sent:
