@@ -14,7 +14,8 @@ async function open(page: Page, query: string) {
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
   await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
-  await expect.poll(() => fromBottom(page)).toBeLessThan(1);
+  // A link to a message opens the chat there; otherwise it opens at its end.
+  if (!/(^|&)msg=/.test(query)) await expect.poll(() => fromBottom(page)).toBeLessThan(1);
   await page.waitForTimeout(300);
 }
 
@@ -694,6 +695,8 @@ type Disclosed = {
   lag: number | null;
   /** Read after the second tap (`then`), if there is one. */
   turned: boolean;
+  /** The tapped item is drawn moving by a disclosure's share (one above it is still opening). */
+  moving: boolean;
   /** The tapped item's top, and the top of the first item below what it opened. */
   tapped: number;
   next: number | null;
@@ -732,15 +735,14 @@ type Disclosed = {
 /** Taps `control` (the last match) and reads the frames that follow; `then`: after `after` ms, taps the last
  *  match of `control` again (the same disclosure, now pointing the other way). `summary` finds what stands
  *  for it closed inside the tapped item once its copy is gone. `before`: first taps the match of its control at
- *  `index` (from the end when negative), another disclosure, and `ms` later the one watched. */
-async function discloseAndWatch(page: Page, control: string, { summary = null, then = null, before = null, frames = 54 }: { summary?: string | null; then?: { control: string; after: number } | null; before?: { control: string; index: number; ms: number } | null; frames?: number } = {}) {
+ *  `index` (from the end when negative), another disclosure, and `frames` frames later the one watched. */
+async function discloseAndWatch(page: Page, control: string, { summary = null, then = null, before = null, frames = 54 }: { summary?: string | null; then?: { control: string; after: number } | null; before?: { control: string; index: number; frames: number } | null; frames?: number } = {}) {
   return page.evaluate(async ({ controlSelector, summarySelector, second, first, count }) => {
     const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
     const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
     if (first) {
       [...transcript.querySelectorAll<HTMLElement>(first.control)].at(first.index)!.click();
-      const tappedAt = performance.now();
-      while (performance.now() - tappedAt < first.ms) await new Promise((resolve) => requestAnimationFrame(resolve));
+      for (let frame = 0; frame < first.frames; frame += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     // How far an element is drawn down by its own translate and transform.
     const ownOffset = (el: Element) => {
@@ -804,6 +806,7 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         frame,
         lag: frame === null ? null : performance.now() - frame,
         turned: tapped,
+        moving: item.getAnimations().some((animation) => animation.id === 'transcript-disclose' && animation.playState === 'running'),
         tapped: item.getBoundingClientRect().top,
         next: next ? next.getBoundingClientRect().top : null,
         shown: visible.length > 0 ? Math.max(...visible.map(({ bottom }) => bottom!)) : null,
@@ -870,8 +873,9 @@ function expectRowsWithEdge(all: Disclosed[]) {
   const resting = frames.filter(({ next, shown, curtainAt }) => next !== null && shown !== null && curtainAt === null).map(({ next, shown }) => next! - shown!);
   if (resting.length > 0) expect(Math.max(...gaps)).toBeLessThanOrEqual(Math.max(...resting) + 8);
   const off = frames.filter(({ curtainAt }) => curtainAt !== null).map(({ curtainAt }) => Math.abs(curtainAt!));
-  // Within 2 px: an engine may measure the two a moment apart while the conversation glides.
-  expect(Math.max(0, ...off)).toBeLessThanOrEqual(2);
+  // Within 5 px: while what holds them moves fast (a glide, a disclosure above), WebKit can measure two boxes in
+  // it a moment apart; a curtain out of place is out by tens of px (the glide's offset, what opened above).
+  expect(Math.max(0, ...off)).toBeLessThanOrEqual(5);
   expect(Math.min(1, ...all.filter(({ curtainOpacity }) => curtainOpacity !== null).map(({ curtainOpacity }) => curtainOpacity!))).toBeGreaterThanOrEqual(0.99);
   expect(all.some(({ layout }) => layout)).toBe(false);
 }
@@ -999,6 +1003,19 @@ test('closing a Harness group with a member opened inside folds the group once, 
   expect(closing.at(-1)!.summary).toBe(1);
 });
 
+test('a Harness group a link opened folds back into its card when closed, rising once to where the layout puts the rows', async ({ page }) => {
+  // Opened by a link to one of its members, not by a tap: nothing was measured as it opened.
+  await open(page, 'delay=0&count=392&msg=msg_00373');
+  await expect(transcript(page).locator('[data-transcript-key^="harness-member:"]')).toHaveCount(4);
+  await page.waitForTimeout(800);
+  const closing = await discloseAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', { summary: GROUP_CARD });
+  expectInPlace(closing);
+  expectCovered(closing);
+  expect(rowPath(closing).turns).toBe(0);
+  expectLandsAsItGoes(closing);
+  expect(closing.at(-1)!.summary).toBe(1);
+});
+
 test('a Harness row opened while reading up the conversation unfolds its body in place, and folds it back', async ({ page }) => {
   await open(page, 'delay=0&count=392');
   // A Harness row of its own (not in a group), above the fold.
@@ -1088,15 +1105,15 @@ test('two disclosures opened a moment apart move the rows they share by both, an
   });
   expect(pair).not.toBeNull();
   await page.waitForTimeout(400);
-  // The chip first; 120 ms later, while it still moves the Harness row and everything under it, the row.
+  // The chip first; two frames later, while it still moves the Harness row and everything under it, the row.
   const frames = await discloseAndWatch(page, `[data-message-id="${pair!.row}"] button[aria-expanded="false"]`, {
-    before: { control: `[data-transcript-key="${pair!.chip}"] button[aria-expanded="false"]`, index: 0, ms: 120 },
+    before: { control: `[data-transcript-key="${pair!.chip}"] button[aria-expanded="false"]`, index: 0, frames: 2 },
     frames: 70,
   });
   expect(frames.some(({ curtainAt }) => curtainAt !== null)).toBe(true);
   // The row goes down with the chip's edge, and its own body unfolds from its own top while it does; the rows
   // under it go with its edge, down only, and come to rest.
-  expect(frames[0].tapped).toBeLessThan(frames.at(-1)!.tapped - 20);
+  expect(frames[0].moving).toBe(true);
   expectRowsWithEdge(frames);
   expect(rowPath(frames).turns).toBe(0);
   const tail = frames.slice(-10).map(({ next }) => next!);
@@ -1152,7 +1169,7 @@ test('the skeleton a loading chip opens to has a row for each step it counts', a
   await expect(skeleton.locator(':scope > div:not([aria-hidden])')).toHaveCount(10);
 });
 
-test('a reader who scrolls while a disclosure opens keeps their place: nothing writes the scroll position, and nothing jumps', async ({ page, browserName }) => {
+test('a reader who scrolls while a disclosure opens keeps their place: nothing writes the scroll position, and nothing jumps', async ({ page }) => {
   await open(page, 'delay=0&count=392');
   const box = (await transcript(page).boundingBox())!;
   const x = Math.round(box.x + box.width / 2);
@@ -1193,9 +1210,9 @@ test('a reader who scrolls while a disclosure opens keeps their place: nothing w
     };
     requestAnimationFrame(loop);
   });
-  // The reader drags the conversation on, and opens the row while it is moving under their finger (tapped from
-  // the page the moment it scrolls, so the drag goes on through the opening however slow the runner); a reply
-  // comes in during the drag too.
+  // The reader scrolls the conversation on, and opens the row while it moves (tapped from the page the moment it
+  // scrolls, so the scrolling goes on through the opening however slow the runner); a reply comes in during it
+  // too. The wheel, in both engines: a synthesized touch drag does not reach the page on every runner.
   const fingerY = Math.round(box.y + box.height * 0.75);
   const tapWhileScrolling = page.evaluate(async (selector) => {
     const scroller = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
@@ -1209,18 +1226,10 @@ test('a reader who scrolls while a disclosure opens keeps their place: nothing w
     window.setTimeout(() => window.__scrollLab.push('A reply while the reader drags.', 'agent'), 120);
   }, `[data-message-id="${rowId}"] button[aria-expanded="false"]`);
   const drag = (async () => {
-    if (browserName === 'chromium') {
-      const cdp = await page.context().newCDPSession(page);
-      await cdp.send('Input.synthesizeScrollGesture', {
-        x, y: fingerY, yDistance: -400, speed: 600, gestureSourceType: 'touch', preventFling: true,
-      });
-      await cdp.detach();
-    } else {
-      await page.mouse.move(x, fingerY);
-      for (let step = 0; step < 30; step += 1) {
-        await page.mouse.wheel(0, 14);
-        await page.waitForTimeout(16);
-      }
+    await page.mouse.move(x, fingerY);
+    for (let step = 0; step < 30; step += 1) {
+      await page.mouse.wheel(0, 14);
+      await page.waitForTimeout(16);
     }
   })();
   await Promise.all([tapWhileScrolling, drag]);

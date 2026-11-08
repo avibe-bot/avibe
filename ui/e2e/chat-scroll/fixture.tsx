@@ -11,7 +11,7 @@
 // sendDelay (ms the server takes to answer a sent message, 150), send=fail (it
 // refuses every send), records=1 (an execution-process group's rows load with the
 // steps it took, else it has none), activityDelay (ms a group's rows take to load,
-// 0).
+// 0), msg (opens the chat at that message, as a link to it does).
 import '../../design/shell/storage';
 
 import { createRoot } from 'react-dom/client';
@@ -249,7 +249,7 @@ if (params.get('record') === '1') recorder.start();
 const Phone = chatPhone;
 createRoot(document.getElementById('root')!).render(
   <div className="h-dvh">
-    <DesignShell fixtures={fixtures} route={`/chat/${LAB_SESSION_ID}`}>
+    <DesignShell fixtures={fixtures} route={`/chat/${LAB_SESSION_ID}${params.get('msg') ? `?msg=${params.get('msg')}` : ''}`}>
       <Phone />
     </DesignShell>
   </div>,

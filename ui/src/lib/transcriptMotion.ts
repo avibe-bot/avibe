@@ -688,13 +688,29 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     const rects = nodes.map((node) => node.getBoundingClientRect());
     const top = Math.min(...rects.map((rect) => rect.top));
     const height = Math.max(...rects.map((rect) => rect.bottom)) - top;
-    // Without a measure from its opening, a panel whose head carries the control that closes it keeps its head.
-    const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
     const measured = stays ? summaries.get(stays) : undefined;
-    const summary = measured?.keep ?? (head ? head.getBoundingClientRect().bottom - top : 0);
-    const keep = Math.max(0, Math.min(height, summary));
-    const rise = measured?.room != null && next && stays ? Math.max(0, layoutTop(next) - layoutTop(stays) - measured.room) : height - keep;
     const copy = stays?.querySelector<HTMLElement>(`[${SUMMARY_ATTRIBUTE}]`) ?? null;
+    let keep: number;
+    let rise: number;
+    if (measured) {
+      keep = Math.max(0, Math.min(height, measured.keep));
+      rise = measured.room != null && next && stays ? Math.max(0, layoutTop(next) - layoutTop(stays) - measured.room) : height - keep;
+    } else if (copy && stays) {
+      // Opened without a tap the transcript saw (a jump to a message opens its group): what stands for it closed
+      // is measured where its copy already lies. The edge stops at its bottom, and the rows below rise to where
+      // the item that stays, closed to it, leaves them.
+      const summaryBox = copy.getBoundingClientRect();
+      keep = Math.max(0, Math.min(height, summaryBox.bottom - top));
+      const room = summaryBox.bottom - stays.getBoundingClientRect().top + (parseFloat(getComputedStyle(column).rowGap) || 0);
+      rise = next ? Math.max(0, layoutTop(next) - layoutTop(stays) - room) : height - keep;
+    } else {
+      // Nothing stands in for it closed (a Harness row's body): a panel whose head carries the control that closes
+      // it keeps its head; the layout gives back the rest, and the gap its container leaves before it.
+      const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
+      keep = Math.max(0, Math.min(height, head ? head.getBoundingClientRect().bottom - top : 0));
+      const container = nodes.length === 1 && first.previousElementSibling && first.parentElement ? getComputedStyle(first.parentElement) : null;
+      rise = height - keep + (container && /flex|grid/.test(container.display) ? parseFloat(container.rowGap) || 0 : 0);
+    }
     entry = {
       column, nodes, rows: [...trail, ...(next ? [next, ...itemsBelow(next, viewportBottom(), rise)] : [])], trail, rise, keep, open: height + EDGE_PAD, copy,
       late: copy ? Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_LATE_ATTRIBUTE}]`)) : [],
