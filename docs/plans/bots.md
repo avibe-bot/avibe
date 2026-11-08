@@ -117,7 +117,8 @@ own. A Session has none of these; a Bot has all three.
   - *A failure always reaches the sender.* When the target run ends failed,
     cancelled, or interrupted, the sending Session gets a notice
     (`[Harness: agent run <run> did not complete in @<bot:x>]`) with the
-    reason. A completed run sends nothing unless a callback was asked for.
+    reason. A completed Run sends no eager result callback unless one was asked
+    for; D14 separately covers a Session that later goes idle without reporting.
   - *Requests are traceable.* The receiver's input names the sender and the
     run (`[Harness: agent run <run> from @<bot:main>]`), so a later report can
     refer to it.
@@ -497,6 +498,35 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
 - Bot records written before this keep their `position`; nothing reads or
   writes it any more, and no migration removes it. `PATCH /api/bots/{handle}`
   and `vibe bot update` no longer take a position.
+
+### D14. Idle-delegate safety net (phase 2, owner decision 2026-11-08)
+
+- A has an open delegation to B while A's latest accepted Harness message to B
+  is newer than B's latest accepted message to A. Any Agent-authored message
+  counts, including a progress report; Avibe does not attribute replies to turns.
+- When B is idle and no pending input, open delegate, armed Watch, or pending
+  Task will wake B, Avibe sends A one short Harness notice naming B's title and
+  Session id, a last-reply excerpt (up to 300 characters), and a follow-up command.
+  A visible Session asking its user a question is idle too: its question is useful
+  information for the dispatcher. Bots use their permanent Sessions under the same rule.
+- A newer accepted message from A re-arms the pair. Explicit return messages,
+  accepted callbacks, and failure notices suppress a redundant report. A runtime
+  notice is not a new delegation in the opposite direction. The queued notice
+  itself wakes the sender, so chains unwind one level at a time.
+- The shared acceptance transaction maintains `session_delegations`; a new
+  RuntimeWork lane checks its open pairs on queue/Run/definition events, with
+  startup and periodic reconciliation for missed events. The idle recheck, notice
+  outbox Run, and durable once marker commit together. Work stays off the controller
+  loop and uses indexed live-state/Session probes, not transcript scans.
+- This additive projection starts with messages accepted after upgrade; there is
+  no historical backfill or startup notice flood. Same-epoch binary rollback keeps
+  the newer table but does not maintain it; the feature resumes on new exchanges.
+  Paused, removed, or retired definitions are not pending wake-ups. Task/Watch
+  targets, not unrelated Tasks that happen to have been created by B, decide what
+  will wake B. A callback only queued to A defers the safety net; actual acceptance
+  answers the pair. A return that failed before acceptance can still need a notice.
+- No system prompt changes, mandatory callbacks, or long-silent-running-turn
+  timeout policy. The optional running-turn anomaly routing is deferred.
 
 ## Prompt drafts
 

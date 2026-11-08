@@ -91,6 +91,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "message_deliveries",
     "session_turns",
     "session_turn_replies",
+    "session_delegations",
     "agent_events",
     "session_digests",
     "skill_usage_daily",
@@ -186,6 +187,9 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "session_delegations": {
+        "sender_session_id", "recipient_session_id", "message_id", "run_id", "state", "notice_run_id", "updated_at",
+    },
     "vault_secrets": {"fields"},
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
     "show_page_access_entries": {

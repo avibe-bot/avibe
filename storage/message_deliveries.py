@@ -1492,6 +1492,9 @@ def _insert_message(
     }
     if existing is None:
         conn.execute(messages.insert().values(**values))
+        from storage.session_delegations import record_accepted_exchange
+
+        record_accepted_exchange(conn, message_id=message_id, snapshot=snapshot, at=normalized_accepted_at)
         return
     immutable = tuple(key for key in values if key not in {"updated_at", "delivered_at"})
     if any(existing[key] != values[key] for key in immutable):

@@ -5110,6 +5110,8 @@ class ScheduledTaskService:
             raise RuntimeError(
                 "scheduled task service runtime work generation is already registered"
             )
+        from core.handlers.delegation_safety_net import DelegationSafetyNet
+
         supervisor = self.controller.runtime_work_supervisor
         registered: list[RuntimeWorkRegistrationToken] = []
         try:
@@ -5120,10 +5122,15 @@ class ScheduledTaskService:
                 RuntimeWorkLane.VAULT_CALLBACKS,
                 RuntimeWorkLane.FAILURE_NOTICES,
                 RuntimeWorkLane.STALE_RUNS,
+                RuntimeWorkLane.DELEGATION_SAFETY_NET,
             ):
+                handler = (
+                    DelegationSafetyNet(self) if lane is RuntimeWorkLane.DELEGATION_SAFETY_NET
+                    else _ScheduledRuntimeWorkHandler(self, lane)
+                )
                 token = supervisor.register(
                     lane,
-                    _ScheduledRuntimeWorkHandler(self, lane),
+                    handler,
                 )
                 self._runtime_work_tokens[lane] = token
                 registered.append(token)
@@ -11707,6 +11714,7 @@ class ScheduledTaskService:
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
                 "source_session_id": (metadata or {}).get("source_session_id"),
+                "source_session_title": (metadata or {}).get("source_session_title"),
                 "vault_request_type": (metadata or {}).get("vault_request_type"),
                 "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
