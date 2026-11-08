@@ -81,9 +81,79 @@ final class MobileOnboardingTests: XCTestCase {
             constraints.contains {
                 $0.firstItem === webView
                     && $0.firstAttribute == .bottom
-                    && $0.secondItem === controller.view.safeAreaLayoutGuide
+                    && $0.secondItem === controller.view
                     && $0.secondAttribute == .bottom
             }
+        )
+    }
+
+    func testBundledPageReachesTheWindowEdgesAndPadsEachSafeAreaOnce() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            )
+        )
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: controller
+        )
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        controller.beginAppearanceTransition(true, animated: false)
+        controller.endAppearanceTransition()
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let loaded = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.body.textContent.includes("Personal Avibe")
+            """
+        }
+        XCTAssertTrue(loaded)
+
+        window.layoutIfNeeded()
+        let frame = webView.convert(webView.bounds, to: window)
+        XCTAssertEqual(frame.minY, window.bounds.minY, accuracy: 0.5)
+        XCTAssertEqual(frame.maxY, window.bounds.maxY, accuracy: 0.5)
+
+        // The page pads each edge with max(1.5rem, env(safe-area-inset-*)),
+        // so a second, native inset would show as a WebKit content inset.
+        let safeAreaInsets = window.safeAreaInsets
+        let paddedOnce = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const column = document.querySelector("main > div");
+              if (!column) return false;
+              const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+              const style = getComputedStyle(column);
+              return Math.abs(
+                  parseFloat(style.paddingTop) - Math.max(1.5 * rem, \(safeAreaInsets.top))
+                ) < 0.5
+                && Math.abs(
+                  parseFloat(style.paddingBottom) - Math.max(1.5 * rem, \(safeAreaInsets.bottom))
+                ) < 0.5;
+            })()
+            """
+        }
+        XCTAssertTrue(paddedOnce)
+        XCTAssertEqual(webView.scrollView.adjustedContentInset.top, 0)
+        XCTAssertEqual(webView.scrollView.adjustedContentInset.bottom, 0)
+
+        // The gradient viewport ends at the screen bottom, behind the Home
+        // indicator.
+        let viewportBottom = try await webView.evaluateJavaScript(
+            """
+            document.querySelector("main").getBoundingClientRect().bottom
+            """
+        ) as? Double
+        XCTAssertEqual(
+            try XCTUnwrap(viewportBottom),
+            Double(webView.bounds.height),
+            accuracy: 0.5
         )
     }
 

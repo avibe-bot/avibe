@@ -493,20 +493,28 @@ final class NavigationPolicyTests: XCTestCase {
         let primaryContainer = UIView()
         let childContainer = UIView()
 
-        let primaryConstraints = factory.install(primary, in: primaryContainer)
-        let childConstraints = factory.install(child, in: childContainer)
+        let primaryConstraints = factory.install(
+            primary,
+            in: primaryContainer,
+            bottomEdge: .container
+        )
+        let childConstraints = factory.install(
+            child,
+            in: childContainer,
+            bottomEdge: .safeArea
+        )
 
         XCTAssertTrue(factory.isManaging(primary))
         XCTAssertTrue(factory.isManaging(child))
-        assertSafeAreaBottomConstraint(
+        assertBottomConstraint(
             primaryConstraints,
             webView: primary,
-            containerView: primaryContainer
+            to: primaryContainer
         )
-        assertSafeAreaBottomConstraint(
+        assertBottomConstraint(
             childConstraints,
             webView: child,
-            containerView: childContainer
+            to: childContainer.safeAreaLayoutGuide
         )
         XCTAssertTrue(
             primary.configuration.userContentController
@@ -523,8 +531,21 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testKeyboardViewportUsesDockedFramesAndWillHideRestoresTheBaseline() {
-        let fixture = KeyboardViewportFixture()
+        for bottomEdge in [
+            KeyboardViewportLayoutController.BottomEdge.container,
+            .safeArea,
+        ] {
+            assertKeyboardViewportRows(bottomEdge: bottomEdge)
+        }
+    }
+
+    @MainActor
+    private func assertKeyboardViewportRows(
+        bottomEdge: KeyboardViewportLayoutController.BottomEdge
+    ) {
+        let fixture = KeyboardViewportFixture(bottomEdge: bottomEdge)
         let safeAreaBottom = fixture.safeAreaBottom
+        let restingBottom = fixture.restingBottom
         let keyboardTop = safeAreaBottom - 278
         let shortcutBarTop = safeAreaBottom - 48
         let rows: [
@@ -556,7 +577,7 @@ final class NavigationPolicyTests: XCTestCase {
                     width: 220,
                     height: 200
                 ),
-                safeAreaBottom
+                restingBottom
             ),
             (
                 "frame outside the horizontal safe area",
@@ -567,19 +588,19 @@ final class NavigationPolicyTests: XCTestCase {
                     width: 200,
                     height: fixture.containerView.bounds.maxY - keyboardTop
                 ),
-                safeAreaBottom
+                restingBottom
             ),
             (
                 "keyboard completely offscreen",
                 UIResponder.keyboardWillChangeFrameNotification,
                 fixture.offscreenKeyboardFrame(),
-                safeAreaBottom
+                restingBottom
             ),
             (
                 "willHide without didHide",
                 UIResponder.keyboardWillHideNotification,
                 fixture.offscreenKeyboardFrame(),
-                safeAreaBottom
+                restingBottom
             ),
         ]
 
@@ -592,14 +613,14 @@ final class NavigationPolicyTests: XCTestCase {
                 fixture.contentBottom,
                 row.expectedBottom,
                 accuracy: 0.5,
-                row.name
+                "\(row.name) (\(bottomEdge))"
             )
         }
     }
 
     @MainActor
     func testKeyboardViewportUsesTheUIKitAnimationPath() {
-        let fixture = KeyboardViewportFixture()
+        let fixture = KeyboardViewportFixture(bottomEdge: .container)
         let keyboardTop = fixture.safeAreaBottom - 278
 
         let animationsWereEnabled = UIView.areAnimationsEnabled
@@ -618,7 +639,19 @@ final class NavigationPolicyTests: XCTestCase {
 
     @MainActor
     func testKeyboardViewportRecalculatesAfterRotationAndBackgrounding() {
-        let fixture = KeyboardViewportFixture()
+        for bottomEdge in [
+            KeyboardViewportLayoutController.BottomEdge.container,
+            .safeArea,
+        ] {
+            assertKeyboardViewportRecalculation(bottomEdge: bottomEdge)
+        }
+    }
+
+    @MainActor
+    private func assertKeyboardViewportRecalculation(
+        bottomEdge: KeyboardViewportLayoutController.BottomEdge
+    ) {
+        let fixture = KeyboardViewportFixture(bottomEdge: bottomEdge)
         let portraitKeyboardTop = fixture.safeAreaBottom - 278
         fixture.postKeyboardFrame(
             fixture.dockedKeyboardFrame(top: portraitKeyboardTop)
@@ -642,7 +675,7 @@ final class NavigationPolicyTests: XCTestCase {
         fixture.layoutController.refreshForContainerGeometryChange()
         XCTAssertEqual(
             fixture.contentBottom,
-            fixture.safeAreaBottom,
+            fixture.restingBottom,
             accuracy: 0.5
         )
 
@@ -672,7 +705,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             fixture.contentBottom,
-            fixture.safeAreaBottom,
+            fixture.restingBottom,
             accuracy: 0.5
         )
 
@@ -682,7 +715,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             fixture.contentBottom,
-            fixture.safeAreaBottom,
+            fixture.restingBottom,
             accuracy: 0.5
         )
     }
@@ -701,15 +734,19 @@ final class NavigationPolicyTests: XCTestCase {
         )
         primary.scrollView.isScrollEnabled = true
         primary.scrollView.bounces = true
-        primary.scrollView.contentInsetAdjustmentBehavior = .automatic
         child.scrollView.isScrollEnabled = true
         child.scrollView.bounces = true
-        child.scrollView.contentInsetAdjustmentBehavior = .automatic
+        // WebKit keeps deriving the inset policy from viewport-fit only while
+        // nothing outside it sets the behavior.
+        let webKitInsetBehavior = primary.scrollView.contentInsetAdjustmentBehavior
 
         XCTAssertTrue(factory.setOuterScrollLocked(true, in: primary))
         XCTAssertFalse(primary.scrollView.isScrollEnabled)
         XCTAssertFalse(primary.scrollView.bounces)
-        XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .never)
+        XCTAssertEqual(
+            primary.scrollView.contentInsetAdjustmentBehavior,
+            webKitInsetBehavior
+        )
         XCTAssertEqual(primary.scrollView.contentOffset, .zero)
         XCTAssertTrue(child.scrollView.isScrollEnabled)
 
@@ -720,21 +757,310 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertTrue(factory.setOuterScrollLocked(true, in: child))
         XCTAssertFalse(child.scrollView.isScrollEnabled)
         XCTAssertFalse(child.scrollView.bounces)
-        XCTAssertEqual(child.scrollView.contentInsetAdjustmentBehavior, .never)
 
         factory.resetForNavigationCommit(in: child)
         XCTAssertFalse(primary.scrollView.isScrollEnabled)
         XCTAssertTrue(child.scrollView.isScrollEnabled)
         XCTAssertTrue(child.scrollView.bounces)
-        XCTAssertEqual(child.scrollView.contentInsetAdjustmentBehavior, .automatic)
 
         factory.resetForNavigationCommit(in: primary)
         XCTAssertTrue(primary.scrollView.isScrollEnabled)
         XCTAssertTrue(primary.scrollView.bounces)
-        XCTAssertEqual(primary.scrollView.contentInsetAdjustmentBehavior, .automatic)
+        XCTAssertEqual(
+            primary.scrollView.contentInsetAdjustmentBehavior,
+            webKitInsetBehavior
+        )
 
         XCTAssertFalse(
             factory.setOuterScrollLocked(true, in: WKWebView(frame: .zero))
+        )
+    }
+
+    @MainActor
+    func testFactoryRestsThePrimaryOnTheWindowBottomAndAChildOnTheSafeArea() async throws {
+        let rootViewController = UIViewController()
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: rootViewController
+        )
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
+        let delegate = WebViewDelegateProbe()
+        let primary = factory.makeWebView(delegate: delegate)
+        let child = factory.makeWebView(
+            configuration: primary.configuration,
+            delegate: delegate
+        )
+        let installations: [
+            (WKWebView, KeyboardViewportLayoutController.BottomEdge)
+        ] = [(primary, .container), (child, .safeArea)]
+        for (webView, bottomEdge) in installations {
+            let containerView = UIView(frame: rootViewController.view.bounds)
+            containerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            rootViewController.view.addSubview(containerView)
+            factory.install(webView, in: containerView, bottomEdge: bottomEdge)
+        }
+        let windowBottom = window.bounds.maxY
+        let safeAreaBottom = windowBottom - window.safeAreaInsets.bottom
+
+        XCTAssertEqual(bottom(of: primary, in: window), windowBottom, accuracy: 0.5)
+        XCTAssertEqual(bottom(of: child, in: window), safeAreaBottom, accuracy: 0.5)
+
+        let keyboardTop = safeAreaBottom - 291
+        postKeyboardFrame(
+            CGRect(
+                x: 0,
+                y: keyboardTop,
+                width: window.bounds.width,
+                height: windowBottom - keyboardTop
+            ),
+            in: window
+        )
+        XCTAssertEqual(bottom(of: primary, in: window), keyboardTop, accuracy: 0.5)
+        XCTAssertEqual(bottom(of: child, in: window), keyboardTop, accuracy: 0.5)
+
+        postKeyboardFrame(
+            CGRect(
+                x: 0,
+                y: windowBottom,
+                width: window.bounds.width,
+                height: 291
+            ),
+            in: window,
+            notification: UIResponder.keyboardWillHideNotification
+        )
+        XCTAssertEqual(bottom(of: primary, in: window), windowBottom, accuracy: 0.5)
+        XCTAssertEqual(bottom(of: child, in: window), safeAreaBottom, accuracy: 0.5)
+    }
+
+    @MainActor
+    func testWorkbenchPadsTheHomeIndicatorOnceAndOrdinaryDocumentsKeepTheAutomaticInset() async throws {
+        let instanceServer = try LocalHTTPServer { request in
+            switch request.path {
+            case "/ordinary":
+                return LocalHTTPResponse.html(
+                    FullBleedFixture.ordinaryDocument(title: "Instance page")
+                )
+            default:
+                return LocalHTTPResponse.html(FullBleedFixture.workbenchDocument)
+            }
+        }
+        let authServer = try LocalHTTPServer { _ in
+            LocalHTTPResponse.html(FullBleedFixture.ordinaryDocument(title: "Consent"))
+        }
+        let instanceBaseURL = try await instanceServer.start()
+        let authBaseURL = try await authServer.start()
+        defer {
+            instanceServer.stop()
+            authServer.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: instanceBaseURL, requiresHTTPS: false)
+        )
+        let authOrigin = try XCTUnwrap(
+            WebOrigin(url: authBaseURL, requiresHTTPS: false)
+        )
+        let controller = makeRuntimeController(
+            instanceOrigin: instanceOrigin,
+            navigationPolicy: NavigationPolicy(
+                instanceOrigins: [instanceOrigin],
+                authenticationOrigins: [authOrigin]
+            )
+        )
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: controller
+        )
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let homeIndicatorInset = window.safeAreaInsets.bottom
+        XCTAssertEqual(
+            bottom(of: webView, in: window),
+            window.bounds.maxY,
+            accuracy: 0.5
+        )
+
+        // The document locks its outer scroll as the Workbench AppShell does.
+        try await waitForTitle("Workbench", in: webView)
+        try await waitUntil {
+            let padding = await self.paddingBottom(of: "#tab-bar", in: webView)
+            return abs((padding ?? -1) - homeIndicatorInset) < 0.5
+                && webView.scrollView.adjustedContentInset.bottom == 0
+        }
+        XCTAssertEqual(webView.scrollView.contentInsetAdjustmentBehavior, .never)
+        let lockedResult = try await webView.evaluateJavaScript(
+            """
+            JSON.stringify({
+              tabBarBottom: document.querySelector("#tab-bar")
+                .getBoundingClientRect().bottom,
+              viewport: document.querySelector('meta[name="viewport"]')
+                .getAttribute("content")
+            })
+            """
+        )
+        let locked = try jsonObject(from: lockedResult)
+        // The tab bar's own background reaches the screen bottom.
+        XCTAssertEqual(
+            try XCTUnwrap(locked["tabBarBottom"] as? Double),
+            Double(webView.bounds.height),
+            accuracy: 0.5
+        )
+        XCTAssertEqual(
+            locked["viewport"] as? String,
+            FullBleedFixture.workbenchViewport + ", viewport-fit=cover"
+        )
+
+        // Unmounting the AppShell returns the same document to its declaration.
+        let unlockedViewport = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "viewport.setOuterScrollLocked",
+              {locked: false}
+            );
+            return document.querySelector('meta[name="viewport"]')
+              .getAttribute("content");
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(unlockedViewport, FullBleedFixture.workbenchViewport)
+        try await waitForAutomaticBottomInset(
+            homeIndicatorInset,
+            probe: "#tab-bar",
+            in: webView
+        )
+
+        // A remounted AppShell locks again; leaving the document releases it.
+        _ = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "viewport.setOuterScrollLocked",
+              {locked: true}
+            );
+            return true;
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        try await waitUntil {
+            webView.scrollView.adjustedContentInset.bottom == 0
+        }
+        webView.load(
+            URLRequest(url: authBaseURL.appendingPathComponent("consent"))
+        )
+        try await waitForTitle("Consent", in: webView)
+        try await waitForAutomaticBottomInset(
+            homeIndicatorInset,
+            probe: "#last",
+            in: webView
+        )
+
+        webView.load(
+            URLRequest(url: instanceBaseURL.appendingPathComponent("ordinary"))
+        )
+        try await waitForTitle("Instance page", in: webView)
+        try await waitForAutomaticBottomInset(
+            homeIndicatorInset,
+            probe: "#last",
+            in: webView
+        )
+    }
+
+    @MainActor
+    func testBrowserRouteLetsThePrimaryWebViewReachTheWindowBottom() async throws {
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                return .json(
+                    """
+                    {
+                      "account": {
+                        "id": "account",
+                        "email": "max@example.com"
+                      },
+                      "instances": [
+                        {
+                          "id": "instance",
+                          "name": "Unreachable",
+                          "host": "full-bleed.invalid",
+                          "url": "https://full-bleed.invalid",
+                          "relationship": "owner",
+                          "owner_email": "max@example.com",
+                          "available": true
+                        }
+                      ]
+                    }
+                    """
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let storeCleanup = NamedDataStoreCleanup()
+        addTeardownBlock {
+            _ = await storeCleanup.remove()
+        }
+
+        let appModel = AppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: baseURL
+            )
+        )
+        storeCleanup.identifier = appModel.websiteDataStore.identifier
+        try await waitUntil {
+            (
+                try? appModel.mobileSessionCoordinator.selectInstance(
+                    id: "instance"
+                )
+            ) != nil
+        }
+        let hostingController = UIHostingController(
+            rootView: RootView().environmentObject(appModel)
+        )
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: hostingController
+        )
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+
+        var runtimeWebView: WKWebView?
+        try await waitUntil {
+            runtimeWebView = self.primaryRuntimeWebView(in: hostingController.view)
+            return runtimeWebView != nil
+        }
+        let webView = try XCTUnwrap(runtimeWebView)
+        try await waitUntil {
+            abs(self.bottom(of: webView, in: window) - window.bounds.maxY) < 0.5
+        }
+        XCTAssertEqual(
+            bottom(of: webView, in: window),
+            window.bounds.maxY,
+            accuracy: 0.5
         )
     }
 
@@ -1866,27 +2192,215 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    private func assertSafeAreaBottomConstraint(
+    private func assertBottomConstraint(
         _ constraints: [NSLayoutConstraint],
         webView: WKWebView,
-        containerView: UIView,
+        to anchorOwner: AnyObject,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let hasSafeAreaBottomConstraint = constraints.contains { constraint in
-            guard
-                let firstItem = constraint.firstItem as? WKWebView,
-                let secondItem = constraint.secondItem as? UILayoutGuide
-            else {
-                return false
-            }
-            return firstItem === webView
+        let hasBottomConstraint = constraints.contains { constraint in
+            constraint.firstItem === webView
                 && constraint.firstAttribute == .bottom
-                && secondItem === containerView.safeAreaLayoutGuide
+                && constraint.secondItem === anchorOwner
                 && constraint.secondAttribute == .bottom
         }
-        XCTAssertTrue(hasSafeAreaBottomConstraint, file: file, line: line)
+        XCTAssertTrue(hasBottomConstraint, file: file, line: line)
     }
+
+    @MainActor
+    private func bottom(of view: UIView, in window: UIWindow) -> CGFloat {
+        window.layoutIfNeeded()
+        return view.convert(view.bounds, to: window).maxY
+    }
+
+    @MainActor
+    private func postKeyboardFrame(
+        _ frame: CGRect,
+        in window: UIWindow,
+        notification: Notification.Name =
+            UIResponder.keyboardWillChangeFrameNotification
+    ) {
+        postKeyboardNotification(
+            notification,
+            frameInScreenCoordinates: window.convert(
+                frame,
+                to: window.screen.coordinateSpace
+            )
+        )
+    }
+
+    @MainActor
+    private func paddingBottom(
+        of selector: String,
+        in webView: WKWebView
+    ) async -> CGFloat? {
+        let value = try? await webView.callAsyncJavaScript(
+            """
+            const element = document.querySelector(selector);
+            return element
+              ? parseFloat(getComputedStyle(element).paddingBottom)
+              : -1;
+            """,
+            arguments: ["selector": selector],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let number = value as? NSNumber, number.doubleValue >= 0 else {
+            return nil
+        }
+        return CGFloat(number.doubleValue)
+    }
+
+    /// An ordinary document keeps WebKit's automatic inset above the Home
+    /// indicator and reads no safe-area padding of its own.
+    @MainActor
+    private func waitForAutomaticBottomInset(
+        _ homeIndicatorInset: CGFloat,
+        probe selector: String,
+        in webView: WKWebView
+    ) async throws {
+        try await waitUntil {
+            let padding = await self.paddingBottom(of: selector, in: webView)
+            return padding == 0
+                && abs(
+                    webView.scrollView.adjustedContentInset.bottom
+                        - homeIndicatorInset
+                ) < 0.5
+        }
+    }
+
+    @MainActor
+    private func primaryRuntimeWebView(in view: UIView) -> WKWebView? {
+        for subview in view.subviews {
+            if let webView = subview as? WKWebView,
+               webView.superview?.next is WebViewController {
+                return webView
+            }
+            if let webView = primaryRuntimeWebView(in: subview) {
+                return webView
+            }
+        }
+        return nil
+    }
+}
+
+private enum FullBleedFixture {
+    /// The instance `ui/index.html` viewport declaration.
+    static let workbenchViewport =
+        "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+
+    static let workbenchDocument = """
+        <!doctype html>
+        <html>
+          <head>
+            <meta name="viewport" content="\(workbenchViewport)">
+            <title>Workbench</title>
+            <style>
+              html, body { margin: 0; height: 100%; overflow: hidden; }
+              #tab-bar {
+                position: fixed;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                height: 56px;
+                padding-bottom: env(safe-area-inset-bottom);
+                background: #0891b2;
+              }
+            </style>
+          </head>
+          <body>
+            <nav id="tab-bar"></nav>
+            <script>
+              window.avibeNative.call("viewport.setOuterScrollLocked", {locked: true});
+            </script>
+          </body>
+        </html>
+        """
+
+    static func ordinaryDocument(title: String) -> String {
+        """
+        <!doctype html>
+        <html>
+          <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>\(title)</title>
+          </head>
+          <body style="margin: 0">
+            <div style="height: 3000px"></div>
+            <p id="last" style="padding-bottom: env(safe-area-inset-bottom)">End</p>
+          </body>
+        </html>
+        """
+    }
+}
+
+private enum HomeIndicatorWindowError: Error {
+    case missingBottomInset
+}
+
+/// Hosts `rootViewController` in a key window that fills the app's scene, so
+/// its safe area is the simulated device's. A device without a bottom inset
+/// fails here instead of letting full-bleed checks pass vacuously.
+@MainActor
+func makeHomeIndicatorWindow(
+    rootViewController: UIViewController,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async throws -> UIWindow {
+    let windowScene = try XCTUnwrap(
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first,
+        "Full-bleed checks need the app's window scene.",
+        file: file,
+        line: line
+    )
+    let window = UIWindow(windowScene: windowScene)
+    window.frame = windowScene.screen.bounds
+    window.rootViewController = rootViewController
+    window.makeKeyAndVisible()
+    rootViewController.view.frame = window.bounds
+    window.layoutIfNeeded()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(5))
+    while window.safeAreaInsets.bottom <= 0, clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(50))
+        window.layoutIfNeeded()
+    }
+    guard window.safeAreaInsets.bottom > 0 else {
+        window.rootViewController = nil
+        window.isHidden = true
+        XCTFail(
+            """
+            The test device reports no bottom safe-area inset, so full-bleed \
+            behavior cannot be verified. Run on an iPhone with a Home indicator.
+            """,
+            file: file,
+            line: line
+        )
+        throw HomeIndicatorWindowError.missingBottomInset
+    }
+    return window
+}
+
+func postKeyboardNotification(
+    _ notification: Notification.Name,
+    frameInScreenCoordinates: CGRect,
+    duration: TimeInterval = 0,
+    curve: UIView.AnimationCurve = .easeInOut
+) {
+    NotificationCenter.default.post(
+        name: notification,
+        object: nil,
+        userInfo: [
+            UIResponder.keyboardFrameEndUserInfoKey: NSValue(
+                cgRect: frameInScreenCoordinates
+            ),
+            UIResponder.keyboardAnimationDurationUserInfoKey: duration,
+            UIResponder.keyboardAnimationCurveUserInfoKey: curve.rawValue,
+        ]
+    )
 }
 
 @MainActor
@@ -1895,10 +2409,21 @@ private final class KeyboardViewportFixture {
     let containerView: UIView
     let contentView = UIView()
     let layoutController: KeyboardViewportLayoutController
+    private let bottomEdge: KeyboardViewportLayoutController.BottomEdge
 
     var safeAreaBottom: CGFloat {
         containerView.layoutIfNeeded()
         return containerView.safeAreaLayoutGuide.layoutFrame.maxY
+    }
+
+    /// Where the content ends while no docked keyboard covers it.
+    var restingBottom: CGFloat {
+        switch bottomEdge {
+        case .container:
+            return containerView.bounds.maxY
+        case .safeArea:
+            return safeAreaBottom
+        }
     }
 
     var contentBottom: CGFloat {
@@ -1906,7 +2431,8 @@ private final class KeyboardViewportFixture {
         return contentView.frame.maxY
     }
 
-    init() {
+    init(bottomEdge: KeyboardViewportLayoutController.BottomEdge) {
+        self.bottomEdge = bottomEdge
         guard let windowScene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first
@@ -1928,7 +2454,8 @@ private final class KeyboardViewportFixture {
         containerView.addSubview(contentView)
         layoutController = KeyboardViewportLayoutController(
             contentView: contentView,
-            containerView: containerView
+            containerView: containerView,
+            bottomEdge: bottomEdge
         )
         NSLayoutConstraint.activate([
             contentView.topAnchor.constraint(equalTo: containerView.topAnchor),
@@ -1976,20 +2503,14 @@ private final class KeyboardViewportFixture {
             XCTFail("Keyboard viewport fixture is not attached to a window.")
             return
         }
-        let frameInScreenCoordinates = containerView.convert(
-            frame,
-            to: screen.coordinateSpace
-        )
-        NotificationCenter.default.post(
-            name: notification,
-            object: nil,
-            userInfo: [
-                UIResponder.keyboardFrameEndUserInfoKey: NSValue(
-                    cgRect: frameInScreenCoordinates
-                ),
-                UIResponder.keyboardAnimationDurationUserInfoKey: duration,
-                UIResponder.keyboardAnimationCurveUserInfoKey: curve.rawValue,
-            ]
+        postKeyboardNotification(
+            notification,
+            frameInScreenCoordinates: containerView.convert(
+                frame,
+                to: screen.coordinateSpace
+            ),
+            duration: duration,
+            curve: curve
         )
     }
 }

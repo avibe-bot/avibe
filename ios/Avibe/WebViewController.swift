@@ -2,12 +2,18 @@ import SafariServices
 import UIKit
 import WebKit
 
+/// Content inset adjustment stays with WebKit, which derives it from each
+/// document's `viewport-fit`: an ordinary document gets the automatic safe-area
+/// inset, and a `viewport-fit=cover` document gets none and reads the insets
+/// through `env(safe-area-inset-*)`. A locked Workbench document is a cover
+/// document because the bridge script declares it with the lock request.
+/// Setting `contentInsetAdjustmentBehavior` here would end WebKit's ownership
+/// for the rest of the WebView's life.
 @MainActor
 final class OuterScrollLockController {
     private struct UnlockedSettings {
         let isScrollEnabled: Bool
         let bounces: Bool
-        let contentInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior
     }
 
     private weak var webView: WKWebView?
@@ -48,13 +54,11 @@ final class OuterScrollLockController {
             if !isLocked {
                 unlockedSettings = UnlockedSettings(
                     isScrollEnabled: scrollView.isScrollEnabled,
-                    bounces: scrollView.bounces,
-                    contentInsetAdjustmentBehavior: scrollView.contentInsetAdjustmentBehavior
+                    bounces: scrollView.bounces
                 )
             }
             isLocked = true
             scrollView.bounces = false
-            scrollView.contentInsetAdjustmentBehavior = .never
             resetDocumentViewport(in: webView)
             scrollView.isScrollEnabled = false
             return
@@ -66,8 +70,6 @@ final class OuterScrollLockController {
         if let unlockedSettings {
             scrollView.isScrollEnabled = unlockedSettings.isScrollEnabled
             scrollView.bounces = unlockedSettings.bounces
-            scrollView.contentInsetAdjustmentBehavior =
-                unlockedSettings.contentInsetAdjustmentBehavior
         }
         unlockedSettings = nil
         isLocked = false
@@ -84,24 +86,44 @@ final class OuterScrollLockController {
 
 @MainActor
 final class KeyboardViewportLayoutController: NSObject {
+    /// The edge a WebView's bottom rests on while no docked keyboard covers it.
+    enum BottomEdge {
+        /// The container's bottom edge, so the page also covers the Home
+        /// indicator strip and reserves it through `env(safe-area-inset-bottom)`.
+        case container
+        /// The container's safe-area bottom, for content that is not expected
+        /// to reserve the Home indicator strip itself.
+        case safeArea
+    }
+
     private struct Animation {
         let duration: TimeInterval
         let options: UIView.AnimationOptions
     }
 
     private weak var containerView: UIView?
+    private let bottomEdge: BottomEdge
     let bottomConstraint: NSLayoutConstraint
     private var keyboardFrameInScreenCoordinates: CGRect?
     private var keyboardFrameWindowBounds: CGRect?
 
     init(
         contentView: UIView,
-        containerView: UIView
+        containerView: UIView,
+        bottomEdge: BottomEdge
     ) {
         self.containerView = containerView
-        bottomConstraint = contentView.bottomAnchor.constraint(
-            equalTo: containerView.safeAreaLayoutGuide.bottomAnchor
-        )
+        self.bottomEdge = bottomEdge
+        switch bottomEdge {
+        case .container:
+            bottomConstraint = contentView.bottomAnchor.constraint(
+                equalTo: containerView.bottomAnchor
+            )
+        case .safeArea:
+            bottomConstraint = contentView.bottomAnchor.constraint(
+                equalTo: containerView.safeAreaLayoutGuide.bottomAnchor
+            )
+        }
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -186,7 +208,8 @@ final class KeyboardViewportLayoutController: NSObject {
         let overlap = Self.dockedOverlap(
             keyboardFrame: convertedFrame,
             bounds: containerView.bounds,
-            safeAreaInsets: containerView.safeAreaInsets
+            safeAreaInsets: containerView.safeAreaInsets,
+            bottomEdge: bottomEdge
         )
         let constant = -overlap
         guard abs(bottomConstraint.constant - constant) > 0.5 else {
@@ -236,10 +259,15 @@ final class KeyboardViewportLayoutController: NSObject {
         )
     }
 
+    /// A frame counts as docked when it covers the safe-area bottom, whichever
+    /// edge the content rests on; floating and undocked frames never move it.
+    /// The overlap is measured from that resting edge, so a docked keyboard
+    /// always ends the content at the keyboard's top.
     private static func dockedOverlap(
         keyboardFrame: CGRect?,
         bounds: CGRect,
-        safeAreaInsets: UIEdgeInsets
+        safeAreaInsets: UIEdgeInsets,
+        bottomEdge: BottomEdge
     ) -> CGFloat {
         guard let keyboardFrame, !keyboardFrame.isNull else {
             return 0
@@ -255,9 +283,16 @@ final class KeyboardViewportLayoutController: NSObject {
         guard overlapsHorizontally, coversSafeAreaBottom else {
             return 0
         }
+        let restingBottom: CGFloat
+        switch bottomEdge {
+        case .container:
+            restingBottom = bounds.maxY
+        case .safeArea:
+            restingBottom = safeAreaBottom
+        }
         return min(
-            max(safeAreaBottom - keyboardFrame.minY, 0),
-            max(safeAreaBottom - safeAreaMinY, 0)
+            max(restingBottom - keyboardFrame.minY, 0),
+            max(restingBottom - safeAreaMinY, 0)
         )
     }
 }
@@ -319,14 +354,21 @@ final class WebViewFactory {
         return webView
     }
 
+    /// Pins `webView` to the container's safe area except at the bottom, where
+    /// it rests on `bottomEdge` and ends at a docked keyboard's top.
     @discardableResult
-    func install(_ webView: WKWebView, in containerView: UIView) -> [NSLayoutConstraint] {
+    func install(
+        _ webView: WKWebView,
+        in containerView: UIView,
+        bottomEdge: KeyboardViewportLayoutController.BottomEdge
+    ) -> [NSLayoutConstraint] {
         precondition(isManaging(webView))
         containerView.addSubview(webView)
         let keyboardViewportLayoutController =
             KeyboardViewportLayoutController(
                 contentView: webView,
-                containerView: containerView
+                containerView: containerView,
+                bottomEdge: bottomEdge
             )
         keyboardViewportLayoutControllers[ObjectIdentifier(webView)] =
             keyboardViewportLayoutController
@@ -534,7 +576,13 @@ final class WebViewController: UIViewController {
             return
         }
         let factory = makeWebViewFactory()
-        factory.install(makePrimaryWebView(), in: view)
+        // The instance page spans the Home indicator strip and reserves it
+        // through `env(safe-area-inset-bottom)`.
+        factory.install(
+            makePrimaryWebView(),
+            in: view,
+            bottomEdge: .container
+        )
 
         NotificationCenter.default.addObserver(
             self,
@@ -1958,7 +2006,9 @@ private final class PopupWebViewController: UIViewController {
         guard let webView, let webViewFactory else {
             return
         }
-        webViewFactory.install(webView, in: view)
+        // A child shows arbitrary origins under native chrome, so it keeps the
+        // Home indicator strip outside its page.
+        webViewFactory.install(webView, in: view, bottomEdge: .safeArea)
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: String(localized: "common.done"),
             style: .done,
