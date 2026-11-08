@@ -3018,6 +3018,7 @@ def apply_live_agent_run_cancellation_in_connection(
     *,
     session_id: str,
     detach: bool,
+    suppress_callback: bool = False,
     updated_at: Optional[str] = None,
 ) -> str:
     """Record one live Run cancellation inside the Turn owner's transaction.
@@ -3067,14 +3068,14 @@ def apply_live_agent_run_cancellation_in_connection(
             ):
                 _defer_queue_updated_from_connection(conn, normalized_session_id)
         values.update(status="canceled", completed_at=now)
-        callback_session_id = str(row["callback_session_id"] or "").strip()
-        callback_status = str(row["callback_status"] or "").strip()
-        if callback_session_id and callback_status not in {"sent", "skipped"}:
-            values.update(
-                callback_status="skipped",
-                callback_error=None,
-                callback_completed_at=now,
-            )
+    callback_session_id = str(row["callback_session_id"] or "").strip()
+    callback_status = str(row["callback_status"] or "").strip()
+    if (detach or suppress_callback) and callback_session_id and callback_status not in {"sent", "skipped"}:
+        values.update(
+            callback_status="skipped",
+            callback_error=None,
+            callback_completed_at=now,
+        )
     result = conn.execute(
         update(agent_runs)
         .where(agent_runs.c.id == normalized_run_id)

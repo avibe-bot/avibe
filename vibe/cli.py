@@ -7895,7 +7895,11 @@ async def _cancel_live_agent_run(
 
     try:
         controller_result = await _call_session_owner(
-            turns, lambda owner: owner.cancel(session_id, agent_run_id=run_id), cancel_status_code
+            turns, lambda owner: owner.cancel(
+                session_id,
+                agent_run_id=run_id,
+                suppress_callback=suppress_callback,
+            ), cancel_status_code
         )
     except internal_client.InternalServerUnavailable as exc:
         return await asyncio.to_thread(

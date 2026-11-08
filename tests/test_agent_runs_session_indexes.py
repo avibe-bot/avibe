@@ -102,7 +102,7 @@ def test_report_hint_reverse_dispatch_probe_uses_source_actor_index(tmp_path: Pa
                 statements[0][1],
             )
         ]
-    assert any("SEARCH agent_runs USING INDEX ix_agent_runs_source_actor" in detail for detail in plan), plan
+    assert any("SEARCH agent_runs USING INDEX ix_agent_runs_dispatch_probe" in detail for detail in plan), plan
     assert not any("SCAN agent_runs" in detail for detail in plan), plan
 
 
@@ -112,7 +112,7 @@ def test_session_run_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path)
     from tests.migration_helpers import downgrade_legacy_schema
 
     path = tmp_path / "upgrade.sqlite"
-    migrations.run_migrations(path, revision="20261107_0074")
+    migrations.run_migrations(path, revision="20261108_0076")
     with sqlite3.connect(path) as conn:
         conn.execute(
             "insert into agent_runs (id, run_type, status, session_id, callback_session_id, "
@@ -127,7 +127,12 @@ def test_session_run_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path)
         assert conn.execute("select * from agent_runs").fetchall() == before
         assert [row[2] for row in conn.execute("pragma index_info(ix_agent_runs_callback_session)")] == ["callback_session_id"]
         assert [row[2] for row in conn.execute("pragma index_info(ix_agent_runs_source_actor)")] == ["source_kind", "source_actor"]
-    downgrade_legacy_schema(migrations.alembic_config(path), "20261107_0074")
+        assert [row[2] for row in conn.execute("pragma index_info(ix_agent_runs_dispatch_probe)")] == [
+            "source_kind",
+            "source_actor",
+            "session_id",
+        ]
+    downgrade_legacy_schema(migrations.alembic_config(path), "20261108_0076")
     with sqlite3.connect(path) as conn:
         assert conn.execute("select * from agent_runs").fetchall() == before
         assert conn.execute("select name, sql from sqlite_master where type='index' order by name").fetchall() == before_indexes

@@ -608,6 +608,9 @@ class DeliveryRequest:
     # have reached it; an input still outside the Turn is canceled alone.
     # Checked under the P0 writer lock.
     cancel_agent_run_id: str | None = None
+    # A sender that cancels its own delegated Run already knows the outcome; persist
+    # callback suppression before the live owner is asked to stop.
+    suppress_agent_run_callback: bool = False
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -3818,6 +3821,7 @@ class SessionTurnManager:
                             cancel_run_id,
                             session_id=request.session_id,
                             detach=True,
+                            suppress_callback=request.suppress_agent_run_callback,
                         )
                         return DeliveryResult(
                             None,
@@ -3902,6 +3906,7 @@ class SessionTurnManager:
                         cancel_run_id,
                         session_id=request.session_id,
                         detach=not stops_turn,
+                        suppress_callback=request.suppress_agent_run_callback,
                     )
                     if replacement_terminalized and cancellation != "run_detached":
                         raise RuntimeError(
@@ -9487,6 +9492,7 @@ class SessionTurnManager:
         session_id: str,
         *,
         agent_run_id: str | None = None,
+        suppress_callback: bool = False,
     ) -> dict:
         """Cancel a Session Turn, or one exact Run.
 
@@ -9603,6 +9609,7 @@ class SessionTurnManager:
             content=None,
             expected_turn_id=(str(owner["id"]) if owner is not None else None),
             cancel_agent_run_id=normalized_agent_run_id,
+            suppress_agent_run_callback=suppress_callback,
         )
         context = turn.context if turn is not None else None
         result = await self.deliver(request, context=context)
