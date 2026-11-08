@@ -487,6 +487,6 @@ def test_a_run_a_restart_cuts_tells_its_sender_it_did_not_complete(
         if row.get("source_kind") == "callback" and row.get("parent_run_id") == run.id
     ]
     assert [(row["session_id"], row["message"]) for row in told] == [(caller, f"Error: {stored['error']}")]
-    marker = "notice" if mode else "terminal"
+    marker = "notice"
     assert told[0]["source_actor"] == f"{run.id}:{marker}:failed"
     assert request_store.get_run(run.id)["callback_status"] == "sent"

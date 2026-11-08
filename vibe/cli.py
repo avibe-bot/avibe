@@ -7893,13 +7893,15 @@ async def _cancel_live_agent_run(
     run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
+    async def _cancel_owner(owner):
+        kwargs = {"agent_run_id": run_id}
+        if suppress_callback:
+            kwargs["suppress_callback"] = True
+        return await owner.cancel(session_id, **kwargs)
+
     try:
         controller_result = await _call_session_owner(
-            turns, lambda owner: owner.cancel(
-                session_id,
-                agent_run_id=run_id,
-                suppress_callback=suppress_callback,
-            ), cancel_status_code
+            turns, _cancel_owner, cancel_status_code
         )
     except internal_client.InternalServerUnavailable as exc:
         return await asyncio.to_thread(
