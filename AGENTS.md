@@ -182,6 +182,7 @@ Persisted-shape rule:
 - a schema change must load older releases' files via migration or safe
   degradation (a broken optional-feature section disables that feature and
   warns; startup never fails), with load fixtures covering the released shapes
+- prefer additive expand/contract migrations (add, dual-write, remove in a later release); breaking rewrites must explain why. See `docs/maintenance/sqlite-compatibility.md` for the compatibility and verification contract.
 - Optional feature artifacts removed from the product must not be reintroduced through
   compatibility shims; preserve released data through ordinary schema migration
   and safe degradation where required.

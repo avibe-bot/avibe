@@ -322,6 +322,102 @@ def test_failed_restore_does_not_keep_an_old_expiry_clock(monkeypatch, tmp_path)
     assert backup.exists()
 
 
+@pytest.mark.parametrize("phase", ["migrating", "validating"])
+@pytest.mark.parametrize("wrong_revision", [False, True])
+def test_lifecycle_completion_checks_target_without_full_scan(tmp_path, monkeypatch, phase, wrong_revision):
+    # Expiry still needs an exact target and completed phases, not repeated
+    # physical scans of the live DB. Existing phase tests do not bound I/O.
+    db_path = _database(tmp_path)
+    backup = _attempt(db_path, phase=phase)
+    attempt = _manifest(backup)["expiry_lifecycle"]["attempt_id"]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("update alembic_version set version_num = ?", ("wrong" if wrong_revision else "new",))
+    connect = sqlite3.connect
+    checks = []
+
+    def no_scan_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+
+        def authorize(action, first, second, *_):
+            if action == sqlite3.SQLITE_PRAGMA and first.lower() in {"quick_check", "integrity_check"}:
+                checks.append(first)
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorize)
+        return conn
+
+    monkeypatch.setattr(backups.sqlite3, "connect", no_scan_connect)
+    complete = backups.complete_sqlite_backup_migration if phase == "migrating" else backups.complete_sqlite_backup_validation
+    if wrong_revision:
+        with pytest.raises(sqlite3.DatabaseError, match="recorded target revisions"):
+            complete(db_path, attempt)
+        assert _manifest(backup)["expiry_lifecycle"]["phase"] == phase
+    else:
+        complete(db_path, attempt)
+        assert _manifest(backup)["expiry_lifecycle"]["phase"] == ("migrated" if phase == "migrating" else "validated")
+    assert checks == []
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_restore_records_fresh_verification_without_reauthorizing_expiry(tmp_path, monkeypatch, corrupt):
+    # A prior pass is not permanent restore permission. Recheck the actual staged
+    # copy, persist this result, and retain all evidence on either outcome.
+    db_path = _database(tmp_path)
+    backup = _attempt(db_path)
+    backups.restore_sqlite_backup(backup, db_path)
+    assert _manifest(backup)["verification"]["status"] == "passed"
+    if corrupt:
+        (backup / "vibe.sqlite").write_bytes(b"damaged since previous verification")
+    before = db_path.read_bytes()
+    swap = backups._swap_live_database
+
+    def checked_swap(*args, **kwargs):
+        assert not corrupt
+        assert _manifest(backup)["verification"]["status"] == "passed"
+        assert _manifest(backup)["verification"]["stage"] == "restore"
+        return swap(*args, **kwargs)
+
+    monkeypatch.setattr(backups, "_swap_live_database", checked_swap)
+    if corrupt:
+        with pytest.raises(sqlite3.DatabaseError, match="Live database was not swapped"):
+            backups.restore_sqlite_backup(backup, db_path)
+        assert db_path.read_bytes() == before
+    else:
+        backups.restore_sqlite_backup(backup, db_path)
+    assert _manifest(backup)["verification"]["status"] == ("failed" if corrupt else "passed")
+    assert _manifest(backup)["expiry_lifecycle"]["phase"] == "restored"
+    assert backups.expire_sqlite_migration_backups(db_path, now=EXPIRES)["removed"] == []
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_restore_receipt_failure_prevents_swap(tmp_path, monkeypatch, corrupt):
+    # Publishing a pass is part of promotion: an I/O failure must leave both
+    # generations intact, not swap and then report an ambiguous failure.
+    db_path = _database(tmp_path)
+    backup = _attempt(db_path)
+    before = db_path.read_bytes()
+    if corrupt:
+        (backup / "vibe.sqlite").write_bytes(b"corrupt backup")
+    write = backups._write_backup_metadata
+
+    def fail_result(path, payload):
+        if payload.get("verification", {}).get("stage") == "restore":
+            raise OSError("receipt disk full")
+        write(path, payload)
+
+    monkeypatch.setattr(backups, "_write_backup_metadata", fail_result)
+    monkeypatch.setattr(backups, "_swap_live_database", lambda *a, **k: pytest.fail("swapped without receipt"))
+    with pytest.raises(sqlite3.DatabaseError if corrupt else OSError, match="receipt disk full") as caught:
+        backups.restore_sqlite_backup(backup, db_path)
+    if corrupt:
+        assert "Refusing SQLite rollback point" in str(caught.value)
+        assert "Could not record this verification result" in str(caught.value)
+    assert db_path.read_bytes() == before
+    assert not db_path.with_name(db_path.name + ".restoring").exists()
+    assert backups.expire_sqlite_migration_backups(db_path, now=EXPIRES)["removed"] == []
+
+
 def test_expiry_defers_when_migration_lock_is_owned_by_another_thread(tmp_path):
     db_path = _database(tmp_path)
     backup = _attempt(db_path)
