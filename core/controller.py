@@ -1176,11 +1176,12 @@ class Controller:
         await self.vibey_recovery.start()
 
     def _log_startup_phase(self, phase: str, started_at: float) -> None:
+        startup_started_at = getattr(self, "_startup_started_at", started_at)
         logger.info(
             "Startup phase=%s duration_ms=%d elapsed_ms=%d",
             phase,
             round((time.monotonic() - started_at) * 1000),
-            round((time.monotonic() - self._startup_started_at) * 1000),
+            round((time.monotonic() - startup_started_at) * 1000),
         )
 
     async def _on_im_ready(self, *, platform: str) -> None:
@@ -1265,7 +1266,10 @@ class Controller:
         # embedded and test paths that run a controller are unaffected.
         readiness_started_at = time.monotonic()
         self._publish_readiness_unless_im_runtime_failed()
-        self._log_startup_phase("ready", readiness_started_at)
+        try:
+            self._log_startup_phase("ready", readiness_started_at)
+        except Exception:
+            logger.exception("Failed to log startup readiness phase")
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:

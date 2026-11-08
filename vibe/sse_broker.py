@@ -139,6 +139,7 @@ class SSEBroker:
             try:
                 subscription.queue.put_nowait((SSE_BROKER_CLOSED_EVENT, ""))
             except asyncio.QueueFull:
+                subscription.dropped += 1
                 logger.debug("SSE subscriber close signal could not be queued")
 
     def publish(self, event_type: str, data: Any) -> None:

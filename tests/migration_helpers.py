@@ -37,6 +37,14 @@ def downgrade_legacy_schema(config: Config, revision: str) -> None:
     path = make_url(config.get_main_option("sqlalchemy.url")).database
     with closing(sqlite3.connect(path)) as conn, conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+        if stamp == [("20261108_0077",)]:
+            for index in (
+                "ix_session_turns_recovery_owner",
+                "ix_message_deliveries_recovery_owner",
+            ):
+                conn.execute(f'DROP INDEX IF EXISTS "{index}"')
+            conn.execute("UPDATE alembic_version SET version_num = '20261108_0076'")
+            stamp = [("20261108_0076",)]
         if stamp == [("20261108_0076",)]:
             assert conn.execute(
                 "SELECT value_json FROM state_meta WHERE key = 'compatibility_epoch'"
