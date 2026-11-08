@@ -2830,3 +2830,235 @@ final class FormAccessoryBarTests: XCTestCase {
         )
     }
 }
+
+// DIAGNOSTIC ONLY (draft PR, closed after reading): how the scene's status bar
+// style follows candidate mechanisms under UIKit and SwiftUI hosting roots.
+private final class DiagStyleController: UIViewController {
+    var style: UIStatusBarStyle
+    init(style: UIStatusBarStyle) {
+        self.style = style
+        super.init(nibName: nil, bundle: nil)
+    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+    override var preferredStatusBarStyle: UIStatusBarStyle { style }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+    }
+}
+
+private struct DiagChildRepresentable: UIViewControllerRepresentable {
+    let controller: UIViewController
+    func makeUIViewController(context: Context) -> UIViewController { controller }
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
+
+private final class DiagSchemeModel: ObservableObject {
+    @Published var scheme: ColorScheme?
+}
+
+private struct DiagPreferredSchemeRoot: View {
+    @ObservedObject var model: DiagSchemeModel
+    let child: UIViewController
+    var body: some View {
+        DiagChildRepresentable(controller: child)
+            .ignoresSafeArea()
+            .preferredColorScheme(model.scheme)
+    }
+}
+
+private final class DiagWebController: UIViewController {
+    let webView = WKWebView(frame: .zero)
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        webView.frame = view.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(webView)
+        webView.loadHTMLString(
+            "<html><head><meta name='color-scheme' content='light dark'></head><body>diag</body></html>",
+            baseURL: nil
+        )
+    }
+}
+
+final class StatusBarDiagnosticTests: XCTestCase {
+    @MainActor
+    func testDiagnoseStatusBarMechanisms() async throws {
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        func style() -> Int { scene.statusBarManager?.statusBarStyle.rawValue ?? -1 }
+        func log(_ text: String) { print("AVIBE_DIAG " + text) }
+        func settle(_ label: String, ms: Int = 1500) async {
+            let clock = ContinuousClock()
+            let start = clock.now
+            var states: [String] = []
+            var last = -2
+            while clock.now - start < .milliseconds(ms) {
+                let value = style()
+                if value != last {
+                    states.append("t=\(Int((clock.now - start) / .milliseconds(1)))ms s=\(value)")
+                    last = value
+                }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            log("\(label): " + states.joined(separator: " | "))
+        }
+        func name(_ object: AnyObject?) -> String {
+            object.map { String(describing: type(of: $0)) } ?? "nil"
+        }
+
+        log("scene ui=\(scene.traitCollection.userInterfaceStyle.rawValue) status=\(style())")
+        for existing in scene.windows {
+            let root = existing.rootViewController
+            log(
+                "existing \(name(existing)) root=\(name(root)) key=\(existing.isKeyWindow) hidden=\(existing.isHidden) " +
+                "level=\(existing.windowLevel.rawValue) winOverride=\(existing.overrideUserInterfaceStyle.rawValue) " +
+                "rootOverride=\(root?.overrideUserInterfaceStyle.rawValue ?? -1) rootPref=\(root?.preferredStatusBarStyle.rawValue ?? -1) " +
+                "childForStyle=\(name(root?.childForStatusBarStyle)) children=\(root?.children.map { name($0) } ?? [])"
+            )
+        }
+
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.screen.bounds
+
+        // 1. Calibration with a plain UIKit root.
+        let calibration = DiagStyleController(style: .lightContent)
+        window.rootViewController = calibration
+        window.makeKeyAndVisible()
+        await settle("1a uikit lightContent")
+        calibration.style = .darkContent
+        calibration.setNeedsStatusBarAppearanceUpdate()
+        await settle("1b uikit darkContent")
+        calibration.style = .default
+        calibration.setNeedsStatusBarAppearanceUpdate()
+        await settle("1c uikit default")
+        calibration.overrideUserInterfaceStyle = .dark
+        calibration.setNeedsStatusBarAppearanceUpdate()
+        await settle("1d uikit default + vc override dark")
+        calibration.overrideUserInterfaceStyle = .unspecified
+        window.overrideUserInterfaceStyle = .dark
+        calibration.setNeedsStatusBarAppearanceUpdate()
+        await settle("1e uikit default + window override dark")
+        window.overrideUserInterfaceStyle = .unspecified
+        scene.traitOverrides.userInterfaceStyle = .dark
+        calibration.setNeedsStatusBarAppearanceUpdate()
+        await settle("1f uikit default + scene override dark")
+        log("1f scene ui=\(scene.traitCollection.userInterfaceStyle.rawValue) window ui=\(window.traitCollection.userInterfaceStyle.rawValue)")
+        scene.traitOverrides.remove(UITraitUserInterfaceStyle.self)
+        await settle("1g scene override removed")
+        log("1g scene ui=\(scene.traitCollection.userInterfaceStyle.rawValue)")
+
+        // 2. SwiftUI hosting root with a representable child that prefers lightContent.
+        let child = DiagStyleController(style: .lightContent)
+        let childHosting = UIHostingController(
+            rootView: DiagChildRepresentable(controller: child).ignoresSafeArea()
+        )
+        window.rootViewController = childHosting
+        await settle("2a hosting + child lightContent")
+        log(
+            "2a hostingPref=\(childHosting.preferredStatusBarStyle.rawValue) " +
+            "childForStyle=\(name(childHosting.childForStatusBarStyle)) children=\(childHosting.children.map { name($0) })"
+        )
+        childHosting.overrideUserInterfaceStyle = .dark
+        childHosting.setNeedsStatusBarAppearanceUpdate()
+        await settle("2b hosting override dark (uikit)")
+        childHosting.overrideUserInterfaceStyle = .unspecified
+        childHosting.setNeedsStatusBarAppearanceUpdate()
+        await settle("2c hosting override cleared")
+
+        // 3. SwiftUI preferredColorScheme with a WebView controller below it.
+        let model = DiagSchemeModel()
+        let web = DiagWebController()
+        let schemeHosting = UIHostingController(
+            rootView: DiagPreferredSchemeRoot(model: model, child: web)
+        )
+        window.rootViewController = schemeHosting
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while clock.now < deadline {
+            if (try? await web.webView.evaluateJavaScript("document.readyState")) as? String == "complete" {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        func describe(_ label: String) async {
+            let dark = (try? await web.webView.evaluateJavaScript(
+                "matchMedia('(prefers-color-scheme: dark)').matches"
+            )) as? Bool
+            log(
+                "\(label) winOverride=\(window.overrideUserInterfaceStyle.rawValue) " +
+                "hostOverride=\(schemeHosting.overrideUserInterfaceStyle.rawValue) " +
+                "hostTraitsOverride=\(schemeHosting.traitOverrides.contains(UITraitUserInterfaceStyle.self)) " +
+                "winTraitsOverride=\(window.traitOverrides.contains(UITraitUserInterfaceStyle.self)) " +
+                "hostUI=\(schemeHosting.traitCollection.userInterfaceStyle.rawValue) " +
+                "hostPref=\(schemeHosting.preferredStatusBarStyle.rawValue) " +
+                "childForStyle=\(name(schemeHosting.childForStatusBarStyle)) " +
+                "webVCOverride=\(web.overrideUserInterfaceStyle.rawValue) webVCUI=\(web.traitCollection.userInterfaceStyle.rawValue) " +
+                "webViewUI=\(web.webView.traitCollection.userInterfaceStyle.rawValue) mqDark=\(dark.map { "\($0)" } ?? "nil") " +
+                "sceneUI=\(scene.traitCollection.userInterfaceStyle.rawValue)"
+            )
+        }
+        await settle("3a scheme nil")
+        await describe("3a")
+        model.scheme = .dark
+        await settle("3b scheme dark")
+        await describe("3b")
+        web.overrideUserInterfaceStyle = scene.traitCollection.userInterfaceStyle
+        await settle("3c scheme dark + web pinned to scene")
+        await describe("3c")
+        let presented = UIViewController()
+        presented.view.backgroundColor = .systemBackground
+        web.present(presented, animated: false)
+        try await Task.sleep(for: .milliseconds(500))
+        log("3d presented(pageSheet) UI=\(presented.traitCollection.userInterfaceStyle.rawValue) presentingIsWeb=\(presented.presentingViewController === web) presenter=\(name(presented.presentingViewController))")
+        await settle("3d with presented sheet")
+        presented.dismiss(animated: false)
+        let full = UIViewController()
+        full.modalPresentationStyle = .fullScreen
+        web.present(full, animated: false)
+        try await Task.sleep(for: .milliseconds(500))
+        log("3e presented(fullScreen) UI=\(full.traitCollection.userInterfaceStyle.rawValue) presenter=\(name(full.presentingViewController))")
+        await settle("3e with fullScreen presented")
+        full.dismiss(animated: false)
+        try await Task.sleep(for: .milliseconds(300))
+        model.scheme = .light
+        await settle("3f scheme light")
+        await describe("3f")
+        model.scheme = .dark
+        await settle("3g scheme dark again")
+        model.scheme = nil
+        await settle("3h scheme nil after dark")
+        await describe("3h")
+        // Simulated system dark at the scene, page explicit light.
+        web.overrideUserInterfaceStyle = .unspecified
+        scene.traitOverrides.userInterfaceStyle = .dark
+        await settle("3i scene dark, scheme nil")
+        await describe("3i")
+        model.scheme = .light
+        await settle("3j scene dark, scheme light")
+        await describe("3j")
+        web.overrideUserInterfaceStyle = scene.traitCollection.userInterfaceStyle
+        await settle("3k scene dark, scheme light, web pinned to scene")
+        await describe("3k")
+        scene.traitOverrides.remove(UITraitUserInterfaceStyle.self)
+        await settle("3l scene override removed (web still pinned dark)")
+        await describe("3l")
+        model.scheme = nil
+        web.overrideUserInterfaceStyle = .unspecified
+
+        // 4. SwiftUI root that sets the window override first, then a
+        // preferredColorScheme(.light) is applied and removed.
+        window.overrideUserInterfaceStyle = .dark
+        model.scheme = .light
+        await settle("4a window override dark, scheme light")
+        await describe("4a")
+        model.scheme = nil
+        await settle("4b window override dark, scheme nil")
+        await describe("4b")
+
+        window.rootViewController = nil
+        window.isHidden = true
+    }
+}

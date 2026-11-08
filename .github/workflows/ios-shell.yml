@@ -102,6 +102,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
+            -only-testing:AvibeTests/StatusBarDiagnosticTests \
             CODE_SIGNING_ALLOWED=NO \
             test
 
