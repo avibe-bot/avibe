@@ -5,9 +5,6 @@ name: ios-testflight
 # group. Internal testing needs no App Review. Started by hand only.
 on:
   workflow_dispatch:
-  # TEMPORARY: first end-to-end runs from this branch; removed before merge.
-  push:
-    branches: [ci/ios-testflight]
 
 concurrency:
   group: ios-testflight
@@ -21,7 +18,7 @@ env:
 
 jobs:
   testflight:
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ci/ios-testflight'
+    if: github.ref == 'refs/heads/master'
     runs-on: macos-26
     timeout-minutes: 120
     env:
