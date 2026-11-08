@@ -3,8 +3,17 @@
   "request_fixture": "tests/fixtures/push/instance-webpush-request.json",
   "request_sha256": "b99c30ffcf4990cd76966cfbc54b2fdc6c2e93419e8c7a4bfdf8bc8bb0ea3855",
   "request_body_sha256": "0669c7deb693ad80151362b223effcba80e83bb9a518fa9d4c41db5041e98b28",
+  "producer_commit": "ec7a4201078b4cbe5d2819f781edd7d2c57a0ec2",
+  "relay_fixture": "tests/fixtures/push/relay-apns-envelope.json",
+  "relay_commit": "587f31c2666cf26508143df893e6cbedd5cdc7a4",
+  "relay_sha256": "7ec1cf473186621b5b588b9c7d209da351d68a5aa86a0a7f41621159ece22d05",
   "receiver_private_key": "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94",
   "auth_secret": "BTBZMqHH6r4Tts7J_aSIgg",
+  "expected_native": {
+    "instance_origin": "https://instance-123.avibe.bot",
+    "account_id": "account-123",
+    "bind_generation": 1
+  },
   "expected": {
     "title": "任务完成",
     "body": "已完成：你好，世界 🌏",
