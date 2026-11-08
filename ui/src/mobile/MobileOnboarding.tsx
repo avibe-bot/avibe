@@ -1931,8 +1931,10 @@ export function MobileOnboarding() {
         password,
       );
       if (!ownsOperation(token)) return;
-      if (next.status !== 'signedOut' && weakPassword) {
-        pendingWeakPassword.current = weakPassword.reasons;
+      if (next.status !== 'signedOut') {
+        // A new password sign-in owes its own second factor.
+        secondFactorRetryAt.current = 0;
+        if (weakPassword) pendingWeakPassword.current = weakPassword.reasons;
       }
       applySession(token, next as MobileSessionState, false);
     } catch (rawError) {

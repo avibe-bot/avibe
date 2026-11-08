@@ -1698,6 +1698,38 @@ describe('mobile password sign-in', () => {
     expect(screen.queryByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeNull();
   });
 
+  it('gives a new password sign-in its own second-factor throttle window', async () => {
+    const user = userEvent.setup();
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'] }));
+    mobile.verifySecondFactor.mockRejectedValueOnce({
+      code: 'rate_limited',
+      message: 'slow down',
+      retry_after_seconds: 900,
+    });
+    render(<MobileOnboarding />);
+    await user.type(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), '287082');
+    expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.twoFactor.rateLimited:15');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
+
+    // The next account signs in with its password and owes its own second factor.
+    mobile.signInWithPassword.mockResolvedValueOnce(owed({ methods: ['totp'], email: 'sam@example.com' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+      target: { value: 'sam@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+    fireEvent.change(await screen.findByLabelText('mobileApp.password.label'), {
+      target: { value: 'correct-horse' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+
+    // Its sixth digit sends the code; the old account's window does not hold it.
+    await user.type(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), '123456');
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifySecondFactor).toHaveBeenCalledTimes(2);
+    expect(mobile.verifySecondFactor).toHaveBeenLastCalledWith('totp', '123456');
+  });
+
   it('drops a pending weak-password notice when the sign-in ends before the instances', async () => {
     mobile.signInWithPassword.mockResolvedValueOnce({
       ...owed({ methods: ['totp'] }),
