@@ -618,9 +618,12 @@ extension MobileAuthTransport: WKNavigationDelegate {
             return failed("configuration", 503, "Authentication is unavailable.");
           }
           const endpoint = new URL("/auth/v1/otp", config.supabase_url);
+          // The Supabase email templates send the app a code-only email for
+          // exactly this redirect (https://avibe.bot/auth/callback?source=ios-app):
+          // a sign-in link opened in Safari would consume the code the app awaits.
           endpoint.searchParams.set(
             "redirect_to",
-            new URL("/auth/callback", window.location.origin).toString()
+            new URL("/auth/callback?source=ios-app", window.location.origin).toString()
           );
           const response = await boundedFetch(endpoint, {
             method: "POST",

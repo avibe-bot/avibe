@@ -340,7 +340,14 @@ scenarios:
       The owning browser boundary is the bundled React page and its fixed
       avibeMobile contract. The collected Vitest case drives the approved
       Welcome, full-email, six-cell OTP, session discovery, and authorized
-      selection flow against deterministic bridge responses.
+      selection flow against deterministic bridge responses; the sixth code
+      digit sends the verification without a button press. The Python
+      auth_setup harness drives IM backend auth and cannot reach the bundled
+      page or WebKit, so this case is the iOS sign-in closed loop. Focused
+      cases in the same file own the send rule: a typed, pasted, or autofilled
+      code is sent once; a failed code again only after an edit or a button
+      press; nothing during an operation, a provider cooldown, or the
+      second-factor throttle; a recovery code only by the button.
   - id: AUTH-SETUP-149
     name: Mobile account failures preserve their owning screen and never silently start reauthentication
     status: covered
@@ -433,8 +440,9 @@ scenarios:
       The bundled page owns the approved two-factor screen and consumes the
       native twoFactorRequired state. The collected Vitest case drives the
       email code into an account that owes the second factor, a cancelled
-      passkey, the authenticator-code alternative, and authorized instance
-      selection. AUTH-SETUP-149 covers every second-factor failure code.
+      passkey, the authenticator-code alternative (sent by its sixth digit),
+      and authorized instance selection. AUTH-SETUP-149 covers every
+      second-factor failure code.
   - id: AUTH-SETUP-157
     name: Native second-factor transport and passkey assertion stay inside the account store
     status: partial

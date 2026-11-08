@@ -5,11 +5,47 @@ enum AppRoute: Equatable {
     case loading
     case onboarding(MobileOnboardingStartScreen)
     case browser(MobileRuntimeContext)
+    /// The bundled account page covers the runtime it was opened from. That
+    /// runtime keeps its document until an instance switch or an account
+    /// transition releases it.
+    case accountOverBrowser(MobileRuntimeContext)
+
+    /// The runtime the root keeps alive, shown or covered by Account.
+    var runtime: MobileRuntimeContext? {
+        switch self {
+        case .browser(let runtime), .accountOverBrowser(let runtime):
+            return runtime
+        case .loading, .onboarding:
+            return nil
+        }
+    }
+
+    /// The bundled page the root shows, above any covered runtime.
+    var onboardingStartScreen: MobileOnboardingStartScreen? {
+        switch self {
+        case .onboarding(let startScreen):
+            return startScreen
+        case .accountOverBrowser:
+            return .runtimeAccount
+        case .loading, .browser:
+            return nil
+        }
+    }
+
+    var coversRuntime: Bool {
+        if case .accountOverBrowser = self {
+            return true
+        }
+        return false
+    }
 }
 
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var route: AppRoute = .loading
+    /// Advances each time a runtime opens, so the root builds a new runtime
+    /// controller even when the same instance is selected again.
+    @Published private(set) var runtimeIdentity = 0
 
     let websiteDataStore: AccountWebsiteDataStore
 
@@ -82,9 +118,36 @@ final class AppModel: ObservableObject {
         pendingRuntimeReleaseBarriers.append(barrier)
     }
 
+    /// Covers the live runtime with the bundled account page, keeping its
+    /// document, history, and scroll position for `returnToRuntime()`.
     func showAccount() {
-        stopRuntime()
-        route = .onboarding(.account)
+        switch route {
+        case .accountOverBrowser:
+            return
+        case .browser(let runtime)
+            where runtimeController != nil
+                && sessionCoordinator.isCurrentRuntime(runtime):
+            runtimeController?.prepareForAccountCover()
+            route = .accountOverBrowser(runtime)
+        default:
+            stopRuntime()
+            route = .onboarding(.account)
+        }
+    }
+
+    /// Shows the runtime the account page covers again, unchanged. Returns
+    /// `false` once a switch or an account transition has released it.
+    func returnToRuntime() -> Bool {
+        guard
+            case .accountOverBrowser(let runtime) = route,
+            runtimeController != nil,
+            sessionCoordinator.isCurrentRuntime(runtime)
+        else {
+            return false
+        }
+        sessionCoordinator.deactivateAccountSurface()
+        route = .browser(runtime)
+        return true
     }
 
     func showInstancePicker() {
@@ -122,6 +185,7 @@ final class AppModel: ObservableObject {
             return
         }
         stopRuntime()
+        runtimeIdentity += 1
         route = .browser(runtime)
     }
 
@@ -129,8 +193,14 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         stopRuntime()
-        if case .browser = route {
+        switch route {
+        case .browser:
             route = .onboarding(.instances)
+        case .accountOverBrowser:
+            // The account page stays where it is; only the runtime goes.
+            route = .onboarding(.account)
+        case .loading, .onboarding:
+            break
         }
         let barriers = pendingRuntimeReleaseBarriers
         pendingRuntimeReleaseBarriers.removeAll()

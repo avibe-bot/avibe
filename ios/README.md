@@ -182,7 +182,7 @@ The PR 2 method surface is fixed:
 
 | Capability | Method | Result |
 | --- | --- | --- |
-| `accountPresentation: 1` | `app.showAccount()` | `null`; closes the runtime surface and opens the bundled account page |
+| `accountPresentation: 1` | `app.showAccount()` | `null`; covers the runtime with the bundled account page, closing child windows; the primary keeps its document for Account Back |
 | `accountPresentation: 2` | `app.setAccountActionAvailable({available})` | `null`; primary Workbench display hint used to suppress or restore the old-Web native fallback |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
@@ -192,6 +192,13 @@ The PR 2 method surface is fixed:
 | `keyboardResizesViewport: 1` | No method | Declares that UIKit shrinks this WebView to the docked keyboard frame and returns it to its resting edge (the screen bottom for the primary, the safe-area bottom for a child) when the keyboard leaves |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
+
+Covering the runtime instead of closing it did not change any capability
+number: `app.showAccount()` keeps its parameters and `null` result, and no Web
+UI decision depends on whether the runtime survives, so current and older Web
+UI both return to the same document without feature detection. The return path
+belongs to the bundled page, which ships with the shell and learns it from the
+`#runtime-account` start fragment; `#account` keeps the instance-list Back.
 
 Replies use `{ok: true, result}` or
 `{ok: false, error: {code, message}}`. The compiled errors are
@@ -211,10 +218,20 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.verifySecondFactor`, `auth.verifyPasskey`, `session.refresh`,
-`session.selectInstance`, `session.logout`, and the closed `app.openExternal`
-allowlist (the two install guides and avibe.bot's Account security page).
-Instance documents, child windows, Show Pages, and iframes do not receive these
-handlers.
+`session.selectInstance`, `session.logout`, `app.returnToInstance`, and the
+closed `app.openExternal` allowlist (the two install guides and avibe.bot's
+Account security page). Instance documents, child windows, Show Pages, and
+iframes do not receive these handlers.
+
+A complete six-digit email or authenticator code starts verification as soon
+as an edit completes it, whether typed, pasted, or offered above the keyboard
+through `autocomplete="one-time-code"`. One edit sends at most one request: the
+page's operation lock absorbs a duplicate input and change event, a re-render
+never resends an unchanged code, and a failed code is sent again only after an
+edit or a press of the button, which stays for retry. A code completed while
+another operation runs, during a provider cooldown, or inside avibe.bot's
+second-factor throttle window waits for the button. A recovery code is free
+text and always waits for the button.
 
 The bundled surface fills the container safe area so its gradient reaches the
 status bar and Home indicator. Its shared `h-dvh` viewport owns vertical
@@ -240,6 +257,13 @@ no page bridge, and lifecycle separation from runtime WebViews. Access and
 refresh tokens are transient script arguments and are never returned to the
 bundled page or instance content.
 
+The app's sign-in email is code-only. The OTP request names
+`redirect_to=https://avibe.bot/auth/callback?source=ios-app`, and the
+production Supabase email templates show only the code for exactly that
+redirect; other control-plane origins, such as a Debug override, still receive
+the link-and-code email. A sign-in link in the email opened Safari, which
+consumed the one-time code the app was waiting for.
+
 Readiness navigation has a native 10-second deadline. Fixed account scripts
 share one `AbortController` deadline mechanism: OTP/session operations use 15
 seconds and best-effort current-device DELETE uses 5 seconds. Both navigation
@@ -258,8 +282,23 @@ busy, stale, inactive, and unavailable failures remain network recovery.
 
 WebKit owns every persistent cookie. The account transport and runtime share one
 named store, but the account transport is invalidated before an instance opens.
-Returning to Account first stops the primary and child runtime WebViews; the
-hidden transport is created only when the bundled account controller appears.
+Account opened from an instance (`app.showAccount()` or the old-Web fallback
+bar) covers the runtime instead of stopping it: the root view keeps the
+primary WebView with its document, history, and scroll position, dismisses
+the keyboard, and closes child windows, which would otherwise sit above the
+account page as sheets.
+That bundled page starts with `#runtime-account` and creates no hidden
+transport. It reads the coordinator's session snapshot, and the first account
+transition (refresh or sign-out) releases the runtime before it creates the
+transport, so the two never overlap. Account Back calls `app.returnToInstance`,
+which shows the same runtime controller again while the coordinator still
+admits it. Selecting an instance (including the same one) and every account
+transition release the runtime as before; `app.returnToInstance` then answers
+`runtime_unavailable` and Back shows the instance list. The covered runtime
+keeps running and receives no touches or accessibility focus. A JavaScript
+dialog or finished download it raises meanwhile still uses the runtime's
+ordinary UIKit presentation, above the account page; that path grants no
+account operation.
 The native coordinator is the single runtime admission authority. Login,
 logout, refresh, account switch, and store rotation increment the generation,
 revoke the selectable snapshot, and detach any runtime before their first
@@ -466,7 +505,7 @@ pinned to Xcode 26.6.
 | PWA remote-auth deferral | Not reused. Automatic login follows the existing WebView authentication-origin flow. |
 | Haptics | Hold-to-talk start/release/cancel and accepted typed/attachment sends use bridge haptics. Browser contexts retain `navigator.vibrate` as the hold fallback. |
 | Voice permission probe | Hold-to-talk reads `voice.permission()` first in the native shell, then retains the browser Permissions API fallback elsewhere. |
-| Account presentation | `accountPresentation: 1` opens the bundled account surface. Capability 2 lets the trusted primary AppShell declare its own account action. Current Web UI renders the Account-style initial avatar in `MobileBrandHeader` and uses no native chrome; an older Web UI receives a 56-point WebView-external fallback bar after load, with the account initial and Account/Change Instance actions. |
+| Account presentation | `accountPresentation: 1` opens the bundled account surface over the runtime, and Account Back returns to the same document. Capability 2 lets the trusted primary AppShell declare its own account action. Current Web UI renders the Account-style initial avatar in `MobileBrandHeader` and uses no native chrome; an older Web UI receives a 56-point WebView-external fallback bar after load, with the account initial and Account/Change Instance actions. |
 | Runtime back gesture | The primary WebView traverses only selected-instance history. SPA `pushState` entries participate, including same-URL entries synchronized by the internal trusted-main-frame history signal. Authentication history disables the gesture, and forced cross-origin back-forward navigation is cancelled. |
 | Workbench outer-scroll lock | An AppShell in either primary or child requests the `viewport: 1` lock for its own WebView while mounted and releases it on unmount or `pagehide`. Authentication pages, Show Pages, shared pages, previews, errors, and other ordinary documents keep WebKit scrolling by default. |
 
@@ -500,7 +539,7 @@ bridge and do not run these Web UI branches.
 | Web Push surfaces | `isNativeShell()` | Setup gap, Settings toggle, and notification menu omit browser push. | Same. |
 | Haptics | `haptics: 1` | Native haptics for hold-to-talk and accepted sends. | Same. |
 | Voice permission probe | `voice: 1` | Reads native permission state before browser fallback. | Same. |
-| Account presentation | `accountPresentation: 1/2` | Capability 1 opens the bundled account surface. Capability 2 renders and registers the current AppShell header avatar, suppressing the native fallback; older Web UI gets the delayed fallback bar. | Capability 1 remains available, but capability-2 registration is rejected because child content cannot control primary chrome. |
+| Account presentation | `accountPresentation: 1/2` | Capability 1 opens the bundled account surface over the runtime. Capability 2 renders and registers the current AppShell header avatar, suppressing the native fallback; older Web UI gets the delayed fallback bar. | Capability 1 remains available, but capability-2 registration is rejected because child content cannot control primary chrome. |
 | `appLaunch` new-context suppression | `isNativeShell()` | iOS standalone suppression is disabled; `window.open` reaches native child creation. | Same for nested windows. |
 | `PwaLoopbackLinkGuard` | `isNativeShell()` | Loopback blocking remains; same-origin `_blank` rewriting is disabled. | Same. |
 | `downloadMedia` | `isNativeShell()` | PWA Web Share interception is disabled; admitted anchors reach `WKDownload`. | Same. |
@@ -526,20 +565,24 @@ transition invalidates a runtime controller, no callback may recreate or use
 its primary or child WebView. Delegate, bridge, KVO, observer, delayed-work,
 download, and popup paths use retained-only references and become no-ops or
 cancel their completion after invalidation. The AppModel transition regression
-drives this rule through a real `app.showAccount` bridge call before delivering
+drives this rule through an instance switch made from the account page that a
+real `app.showAccount` bridge call opened, before delivering
 late WebKit callbacks. Active downloads are cancelled and their temporary
 destinations are removed before runtime state is released. Behavioral WebKit
 tests drive late navigation, UI-delegate, bridge, observer, delayed-work, and
 download activity after the runtime is invalidated.
 
-- Native XCTest covers bridge policy, runtime `app.showAccount`, account
+- Native XCTest covers bridge policy, Account over the runtime (Back keeps the
+  same controller and document; a switch or sign-out releases it), the hidden
+  transport starting only after that release, account
   action registration and fallback timing, selected-instance SPA history,
   authentication-history rejection, transport lifecycle, stage-accurate
   failure mapping, bounded hanging
   readiness/GET/DELETE, cold selection ownership, bundled
   full-bleed/keyboard constraints, named-store failure/relaunch/orphan cleanup,
-  release of runtime primary and child WebViews before removal, and real WebKit
-  cookie behavior against a hermetic local server. Second-factor coverage
+  release of runtime primary and child WebViews before removal, the exact
+  code-only OTP `redirect_to`, and real WebKit cookie behavior against a
+  hermetic local server. Second-factor coverage
   reads the `403` gate after the email code and on a session read, posts codes
   and a passkey assertion with the trusted Origin, maps throttling and
   rejection, stores the re-issued cookie, keeps the store and selection until

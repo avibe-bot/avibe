@@ -12,6 +12,7 @@ const mobile = vi.hoisted(() => ({
   openExternal: vi.fn(),
   refresh: vi.fn<() => Promise<MobileSessionState>>(),
   requestOtp: vi.fn(),
+  returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
   verifyOtp: vi.fn<() => Promise<MobileSessionState>>(),
   verifyPasskey: vi.fn<() => Promise<MobileSessionState>>(),
@@ -25,6 +26,7 @@ vi.mock('./bridge', () => ({
   openMobileExternal: mobile.openExternal,
   refreshMobileSession: mobile.refresh,
   requestMobileOtp: mobile.requestOtp,
+  returnToMobileInstance: mobile.returnToInstance,
   selectMobileInstance: mobile.selectInstance,
   verifyMobileOtp: mobile.verifyOtp,
   verifyMobilePasskey: mobile.verifyPasskey,
@@ -106,6 +108,7 @@ const resetMobileMocks = () => {
   mobile.openExternal.mockReset();
   mobile.refresh.mockReset();
   mobile.requestOtp.mockReset();
+  mobile.returnToInstance.mockReset();
   mobile.selectInstance.mockReset();
   mobile.verifyOtp.mockReset();
   mobile.verifyPasskey.mockReset();
@@ -114,6 +117,7 @@ const resetMobileMocks = () => {
   mobile.logout.mockResolvedValue({ status: 'signedOut' });
   mobile.refresh.mockResolvedValue(signedIn());
   mobile.requestOtp.mockResolvedValue({ cooldown_seconds: 0 });
+  mobile.returnToInstance.mockResolvedValue(null);
   mobile.selectInstance.mockResolvedValue({ instance: signedIn().instances[0] });
   mobile.verifyOtp.mockResolvedValue(signedIn());
   mobile.verifyPasskey.mockResolvedValue(signedIn());
@@ -213,6 +217,33 @@ const expectedErrorKey = (
   return 'mobileApp.errors.network';
 };
 
+/** Sends the email code and returns its input. */
+const reachCode = async (): Promise<HTMLInputElement> => {
+  render(<MobileOnboarding />);
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+    target: { value: 'alex@example.com' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+  return await screen.findByLabelText('mobileApp.code.label') as HTMLInputElement;
+};
+
+/** Lets pending promise callbacks and re-renders run. */
+const settle = () => new Promise((resolve) => {
+  window.setTimeout(resolve, 20);
+});
+
+/** Opens the bundled account page the way native starts it. */
+const openAccount = async (hash: '#account' | '#runtime-account') => {
+  window.history.replaceState({}, '', `/${hash}`);
+  mobile.bootstrap.mockResolvedValueOnce({
+    ...signedIn(),
+    selected_instance_id: 'owned',
+  });
+  render(<MobileOnboarding />);
+  await screen.findByRole('heading', { name: 'mobileApp.account.title' });
+};
+
 /** Signs in with the email code into an account that owes the second factor. */
 const reachSecondFactor = async (state: SecondFactorState = owed()) => {
   mobile.verifyOtp.mockResolvedValueOnce(state);
@@ -225,7 +256,6 @@ const reachSecondFactor = async (state: SecondFactorState = owed()) => {
   fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
     target: { value: '123456' },
   });
-  fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
   await screen.findByRole('heading', {
     name: state.gate === 'enroll' ? 'mobileApp.twoFactor.setupTitle' : 'mobileApp.twoFactor.title',
   });
@@ -253,7 +283,6 @@ describe('mobile onboarding', () => {
 
     const code = await screen.findByLabelText('mobileApp.code.label');
     fireEvent.change(code, { target: { value: '123456' } });
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
 
     const instance = await screen.findByRole('button', { name: /Personal Avibe/ });
     fireEvent.click(instance);
@@ -334,7 +363,6 @@ describe('mobile onboarding', () => {
           fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
             target: { value: '123456' },
           });
-          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
           break;
         case 'passkey':
           mobile.bootstrap.mockResolvedValueOnce(owed());
@@ -356,12 +384,12 @@ describe('mobile onboarding', () => {
             fireEvent.change(screen.getByLabelText('mobileApp.twoFactor.recoveryLabel'), {
               target: { value: 'k7m2p-9xq4r' },
             });
+            fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
           } else {
             fireEvent.change(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), {
               target: { value: '287082' },
             });
           }
-          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
           break;
         case 'setupDone':
           mobile.bootstrap.mockResolvedValueOnce(owed({ gate: 'enroll', methods: [] }));
@@ -521,11 +549,11 @@ describe('mobile onboarding', () => {
         }
 
         const code = await screen.findByLabelText('mobileApp.code.label');
-        fireEvent.change(code, { target: { value: '123456' } });
         if (action === 'resend') {
           fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.resend' }));
         } else {
-          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+          // The sixth digit starts the verification.
+          fireEvent.change(code, { target: { value: '123456' } });
         }
 
         const verify = await screen.findByRole('button', {
@@ -539,6 +567,10 @@ describe('mobile onboarding', () => {
 
         fireEvent.click(verify);
         fireEvent.click(resend);
+        // A code completed during the cooldown waits for the button.
+        fireEvent.change(code, { target: { value: '65432' } });
+        fireEvent.change(code, { target: { value: '654321' } });
+        expect((code as HTMLInputElement).value).toBe('654321');
         expect(mobile.requestOtp).toHaveBeenCalledTimes(action === 'resend' ? 2 : 1);
         expect(mobile.verifyOtp).toHaveBeenCalledTimes(action === 'verify' ? 1 : 0);
       }
@@ -547,6 +579,7 @@ describe('mobile onboarding', () => {
 
   it('keeps successful send cooldowns scoped to another send', async () => {
     mobile.requestOtp.mockResolvedValueOnce({ cooldown_seconds: 9 });
+    mobile.verifyOtp.mockReturnValueOnce(deferred<MobileSessionState>().promise);
 
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', {
@@ -558,17 +591,20 @@ describe('mobile onboarding', () => {
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
     const code = await screen.findByLabelText('mobileApp.code.label');
-    fireEvent.change(code, { target: { value: '123456' } });
-
-    const verify = screen.getByRole('button', { name: 'mobileApp.code.verify' });
+    expect(
+      (screen.getByRole('button', { name: 'mobileApp.code.verify' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
     const resend = screen.getByRole('button', {
       name: 'mobileApp.code.resendIn:9',
     });
-    expect((verify as HTMLButtonElement).disabled).toBe(false);
     expect((resend as HTMLButtonElement).disabled).toBe(true);
 
-    fireEvent.click(verify);
+    // The send cooldown does not hold back a completed code.
+    fireEvent.change(code, { target: { value: '123456' } });
+    expect(screen.getByRole('button', { name: 'mobileApp.code.verifying' })).toBeTruthy();
     fireEvent.click(resend);
+    expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '123456');
     expect(mobile.verifyOtp).toHaveBeenCalledTimes(1);
     expect(mobile.requestOtp).toHaveBeenCalledTimes(1);
   });
@@ -632,7 +668,6 @@ describe('mobile onboarding', () => {
     fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
       target: { value: '123456' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
 
     expect((await screen.findByRole('alert')).textContent).toContain(
       'mobileApp.errors.network',
@@ -661,6 +696,7 @@ describe('mobile onboarding', () => {
 
   it('uses one OTP input, normalizes paste, and prevents duplicate sends', async () => {
     const user = userEvent.setup();
+    mobile.verifyOtp.mockReturnValueOnce(deferred<MobileSessionState>().promise);
     let finishSend: ((value: { cooldown_seconds: number }) => void) | undefined;
     mobile.requestOtp.mockReturnValueOnce(
       new Promise((resolve) => {
@@ -689,10 +725,7 @@ describe('mobile onboarding', () => {
     expect(
       code.parentElement?.querySelectorAll('.ring-2.ring-mint\\/30'),
     ).toHaveLength(0);
-    expect(
-      (screen.getByRole('button', { name: 'mobileApp.code.verify' }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(false);
+    expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '123456');
   });
 
   it('keeps the code and applies provider retry timing after an error', async () => {
@@ -709,7 +742,6 @@ describe('mobile onboarding', () => {
 
     const code = await screen.findByLabelText('mobileApp.code.label');
     await user.type(code, '123456');
-    await user.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
 
     expect((await screen.findByRole('alert')).textContent).toContain('mobileApp.code.invalid');
     expect((code as HTMLInputElement).value).toBe('123456');
@@ -864,10 +896,8 @@ describe('mobile onboarding', () => {
     await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
-    const code = await screen.findByLabelText('mobileApp.code.label');
-    await user.type(code, '123456');
     mobile.verifyOtp.mockReturnValueOnce(deferred<MobileSessionState>().promise);
-    await user.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+    await user.type(await screen.findByLabelText('mobileApp.code.label'), '123456');
     expectScreenLocked();
     cleanup();
 
@@ -927,7 +957,7 @@ describe('mobile onboarding', () => {
     const back = screen.getByRole('button', { name: 'common.back' });
     const changeEmail = screen.getByRole('button', { name: 'mobileApp.code.changeEmail' });
     const resend = screen.getByRole('button', { name: 'mobileApp.code.resend' });
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.verifying' }));
     fireEvent.click(resend);
     fireEvent.click(back);
     fireEvent.click(changeEmail);
@@ -952,7 +982,6 @@ describe('mobile onboarding', () => {
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     await user.type(await screen.findByLabelText('mobileApp.code.label'), '123456');
-    await user.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.changeEmail' }));
@@ -974,7 +1003,6 @@ describe('mobile onboarding', () => {
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     const code = await screen.findByLabelText('mobileApp.code.label');
     await user.type(code, '123456');
-    await user.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
 
     verification.reject({ code: 'network', message: 'Request timed out.' });
 
@@ -1012,7 +1040,6 @@ describe('mobile onboarding', () => {
     const code = screen.getByLabelText('mobileApp.twoFactor.totpLabel');
     fireEvent.change(code, { target: { value: '28 70a82' } });
     expect((code as HTMLInputElement).value).toBe('287082');
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
 
     fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
@@ -1053,13 +1080,16 @@ describe('mobile onboarding', () => {
     const code = await screen.findByLabelText('mobileApp.twoFactor.totpLabel');
     fireEvent.change(code, { target: { value: '287083' } });
 
-    for (const expected of [
+    for (const [attempt, expected] of [
       'mobileApp.twoFactor.codeInvalid',
       'mobileApp.twoFactor.rateLimited:15',
       'mobileApp.twoFactor.rateLimited:15',
       'mobileApp.errors.network',
-    ]) {
-      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+    ].entries()) {
+      // The sixth digit sent the first attempt; the button retries the same code.
+      if (attempt > 0) {
+        fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+      }
       expect((await screen.findByRole('alert')).textContent).toBe(expected);
       expect((code as HTMLInputElement).value).toBe('287083');
       expect(code.getAttribute('aria-invalid')).toBe(
@@ -1120,11 +1150,10 @@ describe('mobile onboarding', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.twoFactor.passkeyFailed');
 
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.useTotp' }));
+    mobile.verifySecondFactor.mockReturnValueOnce(deferred<MobileSessionState>().promise);
     fireEvent.change(screen.getByLabelText('mobileApp.twoFactor.totpLabel'), {
       target: { value: '287082' },
     });
-    mobile.verifySecondFactor.mockReturnValueOnce(deferred<MobileSessionState>().promise);
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
     expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.verifying' })).toBeTruthy();
     expectScreenLocked();
   });
@@ -1147,5 +1176,170 @@ describe('mobile onboarding', () => {
     expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
     expect(mobile.logout).toHaveBeenCalledTimes(1);
     expect(mobile.verifyPasskey).not.toHaveBeenCalled();
+  });
+
+  it('starts verification once when the last code digit is typed, pasted, or autofilled', async () => {
+    const user = userEvent.setup();
+    const verification = deferred<MobileSessionState>();
+    mobile.verifyOtp.mockReturnValueOnce(verification.promise);
+    const typed = await reachCode();
+
+    await user.type(typed, '12345');
+    expect(mobile.verifyOtp).not.toHaveBeenCalled();
+    await user.type(typed, '6');
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(1);
+    expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '123456');
+    verification.resolve(signedIn());
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    cleanup();
+
+    // Paste and one-time-code autofill deliver the whole code in one edit,
+    // which can arrive as both an input and a change event.
+    resetMobileMocks();
+    const pasted = await reachCode();
+    fireEvent.input(pasted, { target: { value: '654321' } });
+    fireEvent.change(pasted, { target: { value: '654321' } });
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(1);
+    expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '654321');
+  });
+
+  it('sends a failed code again only when it is edited or the button is pressed', async () => {
+    const user = userEvent.setup();
+    const expired = { code: 'invalid_or_expired', message: 'expired' };
+    mobile.verifyOtp.mockRejectedValueOnce(expired).mockRejectedValueOnce(expired);
+    const code = await reachCode();
+
+    await user.type(code, '123456');
+    expect((await screen.findByRole('alert')).textContent).toContain('mobileApp.code.invalid');
+    await settle();
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'mobileApp.code.verify' }));
+    await waitFor(() => expect(mobile.verifyOtp).toHaveBeenCalledTimes(2));
+    expect((await screen.findByRole('alert')).textContent).toContain('mobileApp.code.invalid');
+    await settle();
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(2);
+
+    await user.type(code, '{Backspace}');
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(2);
+    await user.type(code, '7');
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifyOtp).toHaveBeenCalledTimes(3);
+    expect(mobile.verifyOtp).toHaveBeenLastCalledWith('alex@example.com', '123457');
+  });
+
+  it('starts the authenticator check on its sixth digit but leaves a recovery code to the button', async () => {
+    const user = userEvent.setup();
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'] }));
+    mobile.verifySecondFactor.mockRejectedValueOnce({ code: 'invalid', message: 'invalid' });
+    render(<MobileOnboarding />);
+    const code = await screen.findByLabelText('mobileApp.twoFactor.totpLabel');
+
+    await user.type(code, '28708');
+    expect(mobile.verifySecondFactor).not.toHaveBeenCalled();
+    await user.type(code, '2');
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'mobileApp.twoFactor.codeInvalid',
+    );
+    await settle();
+    expect(mobile.verifySecondFactor).toHaveBeenCalledTimes(1);
+    expect(mobile.verifySecondFactor).toHaveBeenCalledWith('totp', '287082');
+
+    await user.type(code, '{Backspace}3');
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifySecondFactor).toHaveBeenCalledTimes(2);
+    expect(mobile.verifySecondFactor).toHaveBeenLastCalledWith('totp', '287083');
+    cleanup();
+
+    resetMobileMocks();
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'] }));
+    render(<MobileOnboarding />);
+    await user.click(await screen.findByRole('button', {
+      name: 'mobileApp.twoFactor.useRecovery',
+    }));
+    await user.type(screen.getByLabelText('mobileApp.twoFactor.recoveryLabel'), '123456');
+    await settle();
+    expect(mobile.verifySecondFactor).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+    expect(mobile.verifySecondFactor).toHaveBeenCalledWith('recovery', '123456');
+  });
+
+  it('holds a completed authenticator code while avibe.bot rate-limits the second factor', async () => {
+    const user = userEvent.setup();
+    mobile.bootstrap.mockResolvedValueOnce(owed({ methods: ['totp'] }));
+    mobile.verifySecondFactor.mockRejectedValueOnce({
+      code: 'rate_limited',
+      message: 'slow down',
+      retry_after_seconds: 900,
+    });
+    render(<MobileOnboarding />);
+    const code = await screen.findByLabelText('mobileApp.twoFactor.totpLabel');
+
+    await user.type(code, '287082');
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'mobileApp.twoFactor.rateLimited:15',
+    );
+    await user.type(code, '{Backspace}3');
+    await settle();
+    expect((code as HTMLInputElement).value).toBe('287083');
+    expect(mobile.verifySecondFactor).toHaveBeenCalledTimes(1);
+
+    // The button still sends it.
+    await user.click(screen.getByRole('button', { name: 'mobileApp.twoFactor.verify' }));
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifySecondFactor).toHaveBeenCalledTimes(2);
+    expect(mobile.verifySecondFactor).toHaveBeenLastCalledWith('totp', '287083');
+  });
+
+  it('returns Account Back to the instance it covers, and to the list when none is behind it', async () => {
+    await openAccount('#account');
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    expect(await screen.findByRole('heading', {
+      name: 'mobileApp.instances.switchTitle',
+    })).toBeTruthy();
+    expect(mobile.returnToInstance).not.toHaveBeenCalled();
+    cleanup();
+
+    resetMobileMocks();
+    await openAccount('#runtime-account');
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(1));
+    // Native removes this page; the list is not drawn underneath it.
+    expect(screen.getByRole('heading', { name: 'mobileApp.account.title' })).toBeTruthy();
+
+    // Looking at the list first still leaves the same instance behind Account.
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.title' }));
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(2));
+    expect(mobile.selectInstance).not.toHaveBeenCalled();
+  });
+
+  it('locks Account while returning and shows the list once the instance behind it closed', async () => {
+    const returning = deferred<null>();
+    mobile.returnToInstance.mockReturnValueOnce(returning.promise);
+    await openAccount('#runtime-account');
+
+    const back = screen.getByRole('button', { name: 'common.back' });
+    fireEvent.click(back);
+    expectScreenLocked();
+    fireEvent.click(back);
+    expect(mobile.returnToInstance).toHaveBeenCalledTimes(1);
+
+    returning.reject({
+      code: 'runtime_unavailable',
+      message: 'No instance is open behind the account page.',
+    });
+    expect(await screen.findByRole('heading', {
+      name: 'mobileApp.instances.switchTitle',
+    })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.title' }));
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    expect(await screen.findByRole('heading', {
+      name: 'mobileApp.instances.switchTitle',
+    })).toBeTruthy();
+    expect(mobile.returnToInstance).toHaveBeenCalledTimes(1);
   });
 });

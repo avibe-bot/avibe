@@ -61,6 +61,31 @@ shows the native fallback after the grace period. New app plus current Web UI
 uses the `MobileBrandHeader` Account avatar and shows no native bar. If native
 presentation rejects, the avatar falls back to the existing Web sign-out path.
 
+## Account Over The Runtime (2026-11-08)
+
+The account avatar used to stop the runtime and route to the bundled
+`#account` page, whose Back showed the instance list, so returning to the
+instance reloaded it. `app.showAccount()` now covers the runtime instead:
+
+- The root view keeps the runtime and account pages as separate layers.
+  Account covers the primary WebView, which keeps its document, history, and
+  scroll position; child windows close because they are sheets above the root.
+- The covering page starts with `#runtime-account`. Its Back calls the bundled
+  bridge's `app.returnToInstance`, which shows the same runtime controller
+  while the coordinator still admits it, and otherwise answers
+  `runtime_unavailable` so Back falls back to the instance list.
+- The covering page creates no hidden transport. The first account transition
+  releases the runtime and then creates it, so transport and runtime still
+  never overlap.
+- Selecting an instance (the same one included), refresh, and sign-out release
+  the runtime as before. Capability numbers are unchanged because the
+  instance-side method and result are unchanged.
+
+Evidence: XCTest drives the AppModel route through a real `app.showAccount`
+bridge call (Back keeps the controller and document; a switch and a sign-out
+each release the runtime) and the coordinator's deferred transport; Vitest
+covers the page's Back target and its fallback.
+
 ## Evidence
 
 - Focused Vitest covers capability negotiation and the AppShell registration

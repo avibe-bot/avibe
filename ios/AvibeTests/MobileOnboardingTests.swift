@@ -344,8 +344,10 @@ final class MobileOnboardingTests: XCTestCase {
             """
         }
         XCTAssertTrue(codeReady)
+        // One digit short: the sixth would send the code before the layout
+        // checks below.
         let enteredCode = try await replaceText(
-            "123456",
+            "12345",
             in: webView,
             selector: "#mobile-login-code"
         )
@@ -394,7 +396,7 @@ final class MobileOnboardingTests: XCTestCase {
             (() => {
               const viewport = document.querySelector("main");
               const target = document.querySelector("button.shadow-mint-card-sm");
-              if (!viewport || !target || target.disabled) return false;
+              if (!viewport || !target) return false;
               const viewportRect = viewport.getBoundingClientRect();
               const targetRect = target.getBoundingClientRect();
               return viewport.scrollTop > 0
@@ -405,12 +407,19 @@ final class MobileOnboardingTests: XCTestCase {
         }
         XCTAssertTrue(verifyVisible)
 
-        _ = try await webView.evaluateJavaScript(
+        let completedCode = try await webView.callAsyncJavaScript(
             """
-            document.querySelector("button.shadow-mint-card-sm")?.click();
-            true;
-            """
-        )
+            const input = document.querySelector("#mobile-login-code");
+            if (!(input instanceof HTMLInputElement)) return false;
+            input.focus();
+            input.setSelectionRange(input.value.length, input.value.length);
+            return document.execCommand("insertText", false, "6");
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? Bool
+        XCTAssertEqual(completedCode, true)
         let signedIn = try await waitForJavaScriptValue(in: webView) {
             """
             document.body.textContent.includes("Personal Avibe")
@@ -468,7 +477,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(object["bridge"], "object", details)
     }
 
-    func testBundledPagePassesAnAuthenticatorCodeThroughTheBridge() async throws {
+    func testBundledPageSendsACompletedAuthenticatorCodeThroughTheBridge() async throws {
         let transport = FakeMobileAuthTransport()
         transport.secondFactor = MobileSecondFactorRequirement(
             email: "alex@example.com",
@@ -508,26 +517,8 @@ final class MobileOnboardingTests: XCTestCase {
             selector: "#mobile-login-code"
         )
         XCTAssertTrue(entered)
-        let verifyReady = try await waitForJavaScriptValue(in: webView) {
-            """
-            (() => {
-              const button = document.querySelector(
-                "[data-mobile-code-actions] button.shadow-mint-card-sm"
-              );
-              return button instanceof HTMLButtonElement && !button.disabled;
-            })()
-            """
-        }
-        XCTAssertTrue(verifyReady)
-        _ = try await webView.evaluateJavaScript(
-            """
-            document.querySelector(
-              "[data-mobile-code-actions] button.shadow-mint-card-sm"
-            )?.click();
-            true;
-            """
-        )
 
+        // The sixth digit sends the code; no button press is needed.
         let signedIn = try await waitForJavaScriptValue(in: webView) {
             """
             document.body.textContent.includes("Personal Avibe")
@@ -552,6 +543,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "session.selectInstance",
                 "session.logout",
                 "app.openExternal",
+                "app.returnToInstance",
             ]
         )
         XCTAssertThrowsError(
@@ -792,6 +784,69 @@ final class MobileOnboardingTests: XCTestCase {
         coordinator.activateAccountSurface()
         XCTAssertTrue(coordinator.isAccountSurfaceActive)
         XCTAssertEqual(events.last, "transport.created")
+    }
+
+    func testAccountOverARuntimeStartsTheTransportOnlyAfterReleasingIt() async throws {
+        for operation in ["refresh", "logout"] {
+            let defaults = makeDefaults()
+            var events: [String] = []
+            let bootstrapTransport = FakeMobileAuthTransport()
+            bootstrapTransport.session = snapshot(accountID: "account-1")
+            let accountTransport = FakeMobileAuthTransport()
+            accountTransport.session = snapshot(accountID: "account-1")
+            accountTransport.logoutHandler = {
+                events.append("transport.logout")
+            }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                transports: [
+                    bootstrapTransport,
+                    accountTransport,
+                    FakeMobileAuthTransport(),
+                ],
+                onCreateTransport: {
+                    events.append("transport.created")
+                },
+                onPrepareAccountTransition: {
+                    events.append("runtime.released")
+                    return []
+                }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            events.removeAll()
+
+            // The account page over the runtime reads the session snapshot.
+            guard case .signedIn = try await coordinator.bootstrap() else {
+                return XCTFail("Expected the covered runtime's account")
+            }
+            XCTAssertFalse(coordinator.isAccountSurfaceActive, operation)
+            XCTAssertEqual(events, [], operation)
+
+            if operation == "refresh" {
+                _ = try await coordinator.refresh()
+                XCTAssertEqual(
+                    events,
+                    ["runtime.released", "transport.created"],
+                    operation
+                )
+            } else {
+                let state = try await coordinator.logout()
+                XCTAssertEqual(state, .signedOut)
+                XCTAssertEqual(
+                    events,
+                    [
+                        "runtime.released",
+                        "transport.created",
+                        "transport.logout",
+                        "transport.created",
+                    ],
+                    operation
+                )
+            }
+            XCTAssertTrue(coordinator.isAccountSurfaceActive, operation)
+        }
     }
 
     func testLogoutRevokesRuntimeAdmissionBeforeTheFirstSuspension() async throws {

@@ -198,6 +198,10 @@ struct MobileAccountError: Error, Equatable {
         code: "passkey_unavailable",
         message: "No passkey for this account is available on this device."
     )
+    static let runtimeUnavailable = MobileAccountError(
+        code: "runtime_unavailable",
+        message: "No instance is open behind the account page."
+    )
 }
 
 struct MobileControlPlaneConfiguration: Equatable {
@@ -839,6 +843,9 @@ final class MobileSessionCoordinator {
         pendingStoreReleaseBarriers.append(
             contentsOf: onPrepareAccountTransition()
         )
+        // An account page over a live runtime starts no transport; the
+        // runtime is released by now, so the transition's requests can run.
+        activateAccountSurface()
         return generation
     }
 
