@@ -10,7 +10,7 @@ from storage import message_deliveries
 from storage.background import attach_agent_run_delivery_in_connection
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages
+from storage.models import agent_runs, agent_sessions, messages, scopes, session_digests
 from storage.settings_service import upsert_scope
 from vibe import cli
 from tests.cli_control_support import lent
@@ -25,7 +25,7 @@ def _setup(monkeypatch, tmp_path):
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
-def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend="claude", status="active", title_source=None, last_active="2026-06-09T10:00:00Z"):
+def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend="claude", status="active", visibility="foreground", title_source=None, last_active="2026-06-09T10:00:00Z"):
     now = "2026-06-09T09:00:00Z"
     scope_type = "project" if platform == "avibe" else "channel"
     metadata = {"title_source": title_source} if title_source else {}
@@ -35,11 +35,39 @@ def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend=
             agent_sessions.insert().values(
                 id=sid, scope_id=scope_id, agent_id="agent_internal_" + sid, agent_name=backend,
                 agent_backend=backend, agent_variant="default", session_anchor="anc_" + sid,
-                native_session_id="nat_" + sid, title=title, status=status, agent_status="idle",
+                native_session_id="nat_" + sid, title=title, status=status, visibility=visibility, agent_status="idle",
                 metadata_json=json.dumps(metadata), created_at=now, updated_at=now, last_active_at=last_active,
             )
         )
     return scope_id
+
+
+def _agent_run(
+    engine,
+    run_id: str,
+    *,
+    session_id: str | None = None,
+    source_kind: str | None = None,
+    source_actor: str | None = None,
+    callback_session_id: str | None = None,
+    run_type: str = "agent_run",
+) -> None:
+    now = "2026-06-09T09:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                run_type=run_type,
+                status="succeeded",
+                source_kind=source_kind,
+                source_actor=source_actor,
+                session_id=session_id,
+                callback_session_id=callback_session_id,
+                created_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
 
 
 def _run(cmd, argv, capsys):
@@ -147,6 +175,230 @@ def test_list_invalid_type_errors(monkeypatch, tmp_path, capsys):
     assert code == 1
     assert payload["ok"] is False
     assert payload["code"] == "invalid_session_type"
+
+
+def test_list_row_has_status_from_digest_or_latest_reply(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesdigest", title="Digest", last_active="2026-06-09T12:00:00Z")
+    _seed(engine, "sesreply", title="Reply", native="proj_b", last_active="2026-06-09T11:00:00Z")
+    long_reply = "reply " + ("x" * 260)
+    with engine.begin() as conn:
+        conn.execute(
+            session_digests.insert().values(
+                session_id="sesdigest",
+                compaction_id="evt-1",
+                updated_at="2026-06-09T12:00:00Z",
+                mind=None,
+                memo=None,
+                now="# 6. Now\n- Verify the filter\n- Report the result",
+            )
+        )
+        conn.execute(
+            messages.insert().values(
+                id="msg-reply",
+                scope_id=None,
+                session_id="sesreply",
+                platform="avibe",
+                author="assistant",
+                type="result",
+                content_text=long_reply,
+                content_json="{}",
+                metadata_json="{}",
+                created_at="2026-06-09T11:00:00Z",
+                updated_at="2026-06-09T11:00:00Z",
+            )
+        )
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
+    rows = {row["id"]: row for row in payload["sessions"]}
+    assert rows["sesdigest"]["status"] == "- Verify the filter - Report the result"
+    assert rows["sesreply"]["status"].startswith("reply ")
+    assert len(rows["sesreply"]["status"]) == 200
+    assert rows["sesreply"]["status"].endswith("…")
+
+    with engine.begin() as conn:
+        # Even a newer reply never overrides nonempty checkpoint progress.
+        conn.execute(messages.insert().values(
+            id="msg-new", session_id="sesdigest", platform="avibe", author="agent", type="result",
+            content_text="new reply", content_json="{}", metadata_json="{}",
+            created_at="2026-06-09T13:00:00Z", updated_at="2026-06-09T13:00:00Z",
+        ))
+        conn.execute(session_digests.insert().values(
+            session_id="sesreply", compaction_id="evt-2", updated_at="2026-06-09T14:00:00Z", now="# 6. Now\n \t",
+        ))
+        for mid, kind, text in (("a", "result", "older tie"), ("b", "result", "Latest\treply\n  done"), ("c", "progress", "not a final reply")):
+            conn.execute(messages.insert().values(
+                id=mid, session_id="sesreply", platform="avibe", author="agent", type=kind,
+                content_text=text, content_json="{}", metadata_json="{}",
+                created_at="2026-06-09T14:00:00Z", updated_at="2026-06-09T14:00:00Z",
+            ))
+    _, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
+    rows = {row["id"]: row for row in payload["sessions"]}
+    assert rows["sesdigest"]["status"] == "- Verify the filter - Report the result"
+    assert rows["sesreply"]["status"] == "Latest reply done"
+
+
+def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
+    monkeypatch, tmp_path, capsys
+):
+    engine = _setup(monkeypatch, tmp_path)
+    for session_id, native in (
+        ("sescaller", "proj_caller"),
+        ("sestarget", "proj_target"),
+        ("sesincoming", "proj_incoming"),
+        ("sescallback", "proj_callback"),
+        ("sesexecution", "proj_execution"),
+        ("sesrecipient", "proj_recipient"),
+        ("sesharness", "proj_harness"),
+        ("sesunrelated", "proj_unrelated"),
+    ):
+        _seed(engine, session_id, native=native)
+    _agent_run(
+        engine,
+        "run-dispatched",
+        session_id="sestarget",
+        source_kind="agent",
+        source_actor="sescaller",
+    )
+    _agent_run(
+        engine,
+        "run-incoming",
+        session_id="sescaller",
+        source_kind="agent",
+        source_actor="sesincoming",
+    )
+    _agent_run(
+        engine,
+        "run-callback",
+        session_id="sescallback",
+        source_kind="agent",
+        source_actor="sesother",
+        callback_session_id="sescaller",
+    )
+    _agent_run(
+        engine,
+        "run-explicit-callback",
+        session_id="sesexecution",
+        source_kind="agent",
+        source_actor="sescaller",
+        callback_session_id="sesrecipient",
+    )
+    _agent_run(
+        engine,
+        "run-harness-child",
+        session_id="sesharness",
+        source_kind="callback",
+        source_actor="run-parent",
+        callback_session_id="sescaller",
+    )
+    _agent_run(
+        engine,
+        "run-unrelated",
+        session_id="sesunrelated",
+        source_kind="agent",
+        source_actor="sesother",
+    )
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sescaller")
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
+
+    assert {row["id"] for row in payload["sessions"]} == {
+        "sestarget",
+        "sesincoming",
+        "sescallback",
+        "sesexecution",
+    }
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesexecution")
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
+    assert {row["id"] for row in payload["sessions"]} == {"sescaller", "sesrecipient"}
+
+
+def test_list_mine_includes_background_workers_but_not_system_or_archived(
+    monkeypatch, tmp_path, capsys
+):
+    engine = _setup(monkeypatch, tmp_path)
+    for sid, visibility, status in (
+        ("caller", "foreground", "active"),
+        ("worker", "background", "active"),
+        ("retired", "background", "archived"),
+        ("system", "system", "active"),
+        ("ordinary", "foreground", "active"),
+    ):
+        _seed(engine, sid, visibility=visibility, status=status)
+        _agent_run(engine, "run-" + sid, source_kind="agent", source_actor="caller", session_id=sid)
+    # Duplicate dispatch and Watch/Task plumbing must not add rows or cause gaps.
+    _agent_run(engine, "again", source_kind="agent", source_actor="caller", session_id="worker")
+    _seed(engine, "watch-only", visibility="background")
+    _agent_run(engine, "watch-callback", source_kind="callback", source_actor="caller", session_id="watch-only")
+    _agent_run(engine, "watch-process", run_type="watch", source_kind="agent", source_actor="caller", session_id="watch-only")
+    _agent_run(engine, "task-process", run_type="scheduled", source_kind="agent", source_actor="caller", session_id="watch-only")
+    monkeypatch.setenv("AVIBE_SESSION_ID", "caller")
+
+    _, page1 = _run(cli.cmd_session_list, ["session", "list", "--mine", "--type", "avibe", "--limit", "1"], capsys)
+    assert [row["id"] for row in page1["sessions"]] == ["worker"]
+    assert page1["pagination"]["next_command"] == "vibe session list --type avibe --mine --page 2 --limit 1"
+    _, page2 = _run(cli.cmd_session_list, ["session", "list", "--mine", "--type", "avibe", "--limit", "1", "--page", "2"], capsys)
+    assert [row["id"] for row in page2["sessions"]] == ["ordinary"]
+    assert not page2["pagination"]["has_more"]
+
+
+def test_brief_session_row_never_confuses_lifecycle_with_digest_status():
+    assert cli._session_row({"id": "s", "status": "active"}, brief=True) == {"id": "s"}
+    assert cli._session_row({"id": "s", "status": "active", "status_line": "Reviewing tests"}, brief=True) == {
+        "id": "s", "status": "Reviewing tests"
+    }
+
+
+def test_list_mine_requires_the_injected_caller_session(monkeypatch, tmp_path, capsys):
+    _setup(monkeypatch, tmp_path)
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+    code, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
+
+    assert code == 1
+    assert payload["code"] == "missing_caller_session"
+
+
+def test_list_project_matches_shared_resolution_contract(monkeypatch, tmp_path, capsys):
+    """Name/id matching must agree with Agent-run routing, including legacy duplicates."""
+    from storage import projects_service
+
+    engine = _setup(monkeypatch, tmp_path)
+    alpha = _seed(engine, "sesalpha", native="proj_alpha")
+    beta = _seed(engine, "sesbeta", native="proj_beta")
+    with engine.begin() as conn:
+        # Deliberately reverse lexical id order and activity vs creation order.
+        conn.execute(scopes.update().where(scopes.c.id == alpha).values(
+            display_name="Alpha Project", first_seen_at="2026-06-10T09:00:00Z",
+        ))
+        conn.execute(scopes.update().where(scopes.c.id == beta).values(
+            display_name="Alpha Project", first_seen_at="2026-06-08T09:00:00Z",
+            last_seen_at="2026-06-08T09:00:00Z",
+        ))
+    for name, expected in (("Alpha Project", "sesbeta"), ("  Alpha \t Project  ", "sesbeta"), ("proj_alpha", "sesalpha")):
+        code, payload = _run(cli.cmd_session_list, ["session", "list", "--project", name], capsys)
+        assert code == 0
+        # These registered Projects have no working directory; listing still works.
+        assert [row["id"] for row in payload["sessions"]] == [expected]
+
+    for name, message in (("alpha project", "Project not found: alpha project"), ("", "Project name is required"), (" \t ", "Project name is required")):
+        code, payload = _run(cli.cmd_session_list, ["session", "list", "--project", name], capsys)
+        assert code == 1
+        assert payload["error"] == message
+
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, "proj_beta")
+    # Do not silently choose the later active duplicate when the first is disabled.
+    code, payload = _run(cli.cmd_session_list, ["session", "list", "--project", "Alpha Project"], capsys)
+    assert code == 1
+    assert payload["error"] == "Project is disabled: Alpha Project"
+
+
+def test_list_project_and_mine_are_mutually_exclusive():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["session", "list", "--mine", "--project", "alpha"])
 
 
 # ---------------------------------------------------------------------------- get

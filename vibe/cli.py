@@ -8381,6 +8381,7 @@ _SESSION_LIST_FIELDS = (
     "agent_name",
     "agent_status",
     "last_active_at",
+    "status",
 )
 # Detail (``get``) drops the lifecycle ``status`` (archived is never returned, so
 # it is always "active"), the internal resume ``session_anchor`` (Agents resume by
@@ -8390,8 +8391,58 @@ _SESSION_GET_OMIT = ("status", "session_anchor", "agent_id")
 
 def _session_row(payload: dict, *, brief: bool) -> dict:
     if brief:
-        return _present_fields({key: payload.get(key) for key in _SESSION_LIST_FIELDS})
+        # Storage's lifecycle status stays "active". The lean CLI row instead
+        # exposes the digest/reply projection, when there is one.
+        row = {key: payload.get(key) for key in _SESSION_LIST_FIELDS}
+        row["status"] = payload.get("status_line")
+        return _present_fields(row)
     return {key: value for key, value in payload.items() if key not in _SESSION_GET_OMIT}
+
+
+def _resolve_session_list_project(conn, value: str) -> str:
+    """Resolve a Project name (or id) for the session list's narrow filter.
+
+    The PROJECT lane owns the shared resolver. Until that contract lands on
+    master, use the existing visible-project projection with the same exact
+    name/id, whitespace, creation-order, and disabled-target semantics. Listing
+    Sessions does not require the Project to have a working directory.
+    """
+
+    from storage import projects_service
+
+    requested = " ".join(str(value or "").split())
+    if not requested:
+        raise TaskCliError(
+            "Project name is required",
+            code="invalid_project",
+            hint="Pass a Project name or id.",
+            help_command="vibe session list --help",
+        )
+    projects = projects_service.list_projects(conn, include_archived=True)
+    exact = [
+        project
+        for project in projects
+        if str(project.get("id") or "") == requested
+        or str(project.get("display_name") or "") == requested
+    ]
+    if not exact:
+        raise TaskCliError(
+            f"Project not found: {requested}",
+            code="project_not_found",
+            hint="Pass an existing Project name or id.",
+            help_command="vibe session list --help",
+            details={"project": requested},
+        )
+    project = min(exact, key=lambda item: (str(item["created_at"]), str(item["scope_id"])))
+    if project["archived"]:
+        raise TaskCliError(
+            f"Project is disabled: {requested}",
+            code="project_disabled",
+            hint="Enable the Project before listing its Sessions.",
+            help_command="vibe session list --help",
+            details={"project": requested},
+        )
+    return str(project["id"])
 
 
 def _validate_session_type(platform: str) -> None:
@@ -8421,19 +8472,36 @@ def cmd_session_list(args):
         platform = getattr(args, "type", None)
         if platform:
             _validate_session_type(platform)
+        mine_session_id = None
+        if getattr(args, "mine", False):
+            mine_session_id = _default_session_id_from_caller(caller_context_from_env())
+            if not mine_session_id:
+                raise TaskCliError(
+                    "--mine needs the caller Session from an Avibe Agent shell.",
+                    code="missing_caller_session",
+                    hint="Run it from an Avibe Agent shell, or omit --mine to list all visible Sessions.",
+                    help_command="vibe session list --help",
+                )
+        project_name = getattr(args, "project", None)
         page_request = _page_request_from_args(args, help_command="vibe session list --help")
         from core.services import sessions as sessions_service
 
         engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
+            project_id = _resolve_session_list_project(conn, project_name) if project_name is not None else None
             result = sessions_service.list_sessions_page(
                 conn,
                 platform=platform,
+                project_id=project_id,
+                mine_session_id=mine_session_id,
                 page=page_request.page,
                 limit=page_request.limit,
             )
         command = ["vibe", "session", "list"]
         _add_optional_arg(command, "--type", platform)
+        if getattr(args, "mine", False):
+            command.append("--mine")
+        _add_optional_arg(command, "--project", project_name)
         _print_cli_payload(
             "agent_sessions",
             sessions=[_session_row(row, brief=True) for row in result.items],
@@ -18759,6 +18827,17 @@ def build_parser():
     session_list_parser.add_argument(
         "--type",
         help="Filter by platform: avibe (Web/Workbench), slack, discord, telegram, lark, wechat.",
+    )
+    session_list_scope = session_list_parser.add_mutually_exclusive_group()
+    session_list_scope.add_argument(
+        "--mine",
+        action="store_true",
+        help="List Sessions this caller dispatched to or exchanged Agent Runs with.",
+    )
+    session_list_scope.add_argument(
+        "--project",
+        metavar="NAME",
+        help="List Sessions in the named Avibe Project (name or id).",
     )
     _add_pagination_args(session_list_parser, help_command="vibe session list --help")
     _add_json_noop(session_list_parser)

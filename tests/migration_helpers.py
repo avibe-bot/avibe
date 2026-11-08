@@ -5,6 +5,7 @@ import sqlite3
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy.engine import make_url
 
 
@@ -35,16 +36,17 @@ def downgrade_legacy_schema(config: Config, revision: str) -> None:
     is deliberately test-only: the product refuses cross-epoch downgrades.
     """
     path = make_url(config.get_main_option("sqlalchemy.url")).database
-    # First undo same-epoch additive extensions; the bridge itself deliberately
-    # has no downgrade. Reconstruct that frozen legacy fixture only below.
     with closing(sqlite3.connect(path)) as conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-    if stamp == [("20261108_0082",)]:
-        command.downgrade(config, "20261108_0079")
-    with closing(sqlite3.connect(path)) as conn:
-        stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-    if stamp == [("20261108_0079",)]:
-        command.downgrade(config, "20261108_0076")
+    bridge_revision = "20261108_0076"
+    if stamp != [(bridge_revision,)]:
+        # New additive migrations may sit above the non-downgradable bridge.
+        # Remove only those successors first; a pre-bridge stamp is already
+        # in the historical graph and must keep the previous behavior.
+        script = ScriptDirectory.from_config(config)
+        successors = {item.revision for item in script.walk_revisions(base=bridge_revision)}
+        if len(stamp) == 1 and stamp[0][0] in successors:
+            command.downgrade(config, bridge_revision)
     with closing(sqlite3.connect(path)) as conn, conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
         if stamp == [("20261108_0076",)]:
