@@ -247,8 +247,7 @@
     },
     "password": {
       "entry": "Sign in with password",
-      "title": "Enter your password.",
-      "signingInAs": "Signing in as",
+      "codeEntry": "Sign in with an email code",
       "label": "Password",
       "forgot": "Forgot password?",
       "show": "Show password",

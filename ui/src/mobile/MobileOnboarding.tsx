@@ -65,7 +65,6 @@ type Screen =
   | 'welcome'
   | 'email'
   | 'code'
-  | 'password'
   | 'forgot'
   | 'secondFactor'
   | 'weakPassword'
@@ -456,35 +455,89 @@ function Welcome({
   );
 }
 
+type EmailMode = 'code' | 'password';
+
+// ui/design: mobile-app/welcome, mobile-app/password
+/**
+ * The email step. Code mode sends a verification code; password mode turns the
+ * same form into email + password at once (the email is the saved login's
+ * username). The password lives only in this step's field state: switching back
+ * to code mode clears it, and leaving the step unmounts it.
+ */
 function EmailEntry({
+  mode,
   email,
   busy,
   locked,
   cooldown,
   errorKey,
+  retryIn,
   onBack,
   onEmailChange,
   onSubmit,
-  onPassword,
+  onMode,
+  onSignIn,
+  onPasswordEdit,
+  onForgot,
+  onUseCode,
 }: {
+  mode: EmailMode;
   email: string;
-  busy: boolean;
+  busy: BusyAction | null;
   locked: boolean;
   cooldown: number;
   errorKey: MobileErrorKey | null;
+  retryIn: number;
   onBack: () => void;
   onEmailChange: (value: string) => void;
   onSubmit: () => void;
-  onPassword: () => void;
+  onMode: (mode: EmailMode) => void;
+  onSignIn: (password: string) => void;
+  onPasswordEdit: () => void;
+  onForgot: () => void;
+  onUseCode: () => void;
 }) {
   const { t } = useTranslation();
+  const passwordMode = mode === 'password';
+  const emailField = useRef<HTMLInputElement>(null);
+  const passwordField = useRef<HTMLInputElement>(null);
+  const [password, setPassword] = useState('');
+  const [shown, setShown] = useState(false);
+  const { codeActionRegion: actionRegion, revealCodeActions: revealActions } =
+    useCodeActionReveal<HTMLFormElement>('mobile-login-password');
+  const emailInvalid = errorKey === 'mobileApp.email.invalid';
+  // In password mode the email slot shows only the email's own error.
+  const emailError = passwordMode ? (emailInvalid ? errorKey : null) : errorKey;
+  const passwordError = passwordMode && !emailInvalid ? errorKey : null;
+  const wrong = errorKey === 'mobileApp.password.invalid';
+  // The email code is the fix for these, so a way to send one appears; it stays
+  // while its request runs.
+  const codeFixes = wrong || errorKey === 'mobileApp.password.unconfirmed' || busy === 'send';
+  const signingIn = busy === 'signIn';
+
+  // Entering password mode focuses the field the person needs next.
+  useEffect(() => {
+    if (mode !== 'password') return;
+    const target = emailField.current?.value.trim() ? passwordField.current : emailField.current;
+    target?.focus();
+  }, [mode]);
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSubmit();
+    if (passwordMode) onSignIn(password);
+    else onSubmit();
   };
+  const switchMode = (next: EmailMode) => {
+    if (locked) return;
+    // Code mode keeps no password: it is cleared on the way out.
+    setPassword('');
+    setShown(false);
+    onMode(next);
+  };
+
   return (
     <CloudScreen>
-      <Brand back disabled={locked} onBack={onBack} />
+      <Brand back disabled={locked} onBack={passwordMode ? () => switchMode('code') : onBack} />
       <div className="flex flex-col items-center pt-8 pb-6">
         <img src={mailMascot} alt="" className="mb-5 size-28 object-contain" />
         <h1 className="text-center text-3xl font-semibold leading-tight">
@@ -494,65 +547,177 @@ function EmailEntry({
           {t('mobileApp.email.subtitle')}
         </p>
       </div>
+      {/* The page checks the email itself and shows its own copy, not WebKit's bubble. */}
       <form
+        ref={actionRegion}
+        noValidate
         onSubmit={submit}
-        className="rounded-3xl border border-border bg-surface/70 p-6 shadow-mint-card"
+        className="scroll-mb-4 rounded-3xl border border-border bg-surface/70 p-6 shadow-mint-card"
       >
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-3">
             <Label htmlFor="mobile-login-email">{t('mobileApp.email.label')}</Label>
             <Input
+              ref={emailField}
               id="mobile-login-email"
+              name={passwordMode ? 'username' : 'email'}
               type="email"
               inputMode="email"
-              autoComplete="email"
+              autoComplete={passwordMode ? 'username' : 'email'}
               autoCapitalize="none"
               spellCheck={false}
+              enterKeyHint={passwordMode ? 'next' : undefined}
               value={email}
               placeholder={t('mobileApp.email.placeholder')}
               disabled={locked}
-              aria-invalid={Boolean(errorKey) || undefined}
-              aria-describedby="mobile-login-email-hint mobile-login-email-feedback"
-              className="h-14 rounded-2xl bg-surface px-4 text-base shadow-sm"
+              aria-invalid={Boolean(emailError) || undefined}
+              aria-describedby={passwordMode
+                ? 'mobile-login-email-feedback'
+                : 'mobile-login-email-hint mobile-login-email-feedback'}
+              className={cn(
+                'h-14 rounded-2xl bg-surface px-4 text-base shadow-sm',
+                passwordMode && emailInvalid && 'border-destructive',
+              )}
               onChange={(event) => onEmailChange(event.target.value)}
+              onKeyDown={(event) => {
+                // Return moves on to the password instead of submitting.
+                if (!passwordMode || event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+                event.preventDefault();
+                passwordField.current?.focus();
+              }}
             />
-            <p id="mobile-login-email-hint" className="text-xs leading-6 text-muted">
-              {t('mobileApp.email.hint')}
-            </p>
-            <div id="mobile-login-email-feedback" className="min-h-6">
-              {errorKey ? (
+            {passwordMode ? null : (
+              <p id="mobile-login-email-hint" className="text-xs leading-6 text-muted">
+                {t('mobileApp.email.hint')}
+              </p>
+            )}
+            {/* Password mode reserves no space for the email's error until it has one. */}
+            <div
+              id="mobile-login-email-feedback"
+              className={cn(passwordMode ? !emailError && 'hidden' : 'min-h-6')}
+            >
+              {emailError ? (
                 <p role="alert" className="text-xs leading-6 text-destructive-ink">
-                  {t(errorKey as TranslationKey)}
+                  {t(emailError as TranslationKey)}
                 </p>
               ) : null}
             </div>
           </div>
-          <div className="flex flex-col gap-3">
-            <div aria-busy={busy}>
-              <Primary type="submit" disabled={locked || cooldown > 0}>
-                {busy
-                  ? t('mobileApp.email.sending')
-                  : cooldown > 0
-                    ? t('mobileApp.email.sendIn', { count: cooldown })
-                    : t('mobileApp.email.send')}
-              </Primary>
+          {passwordMode ? (
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="mobile-login-password">{t('mobileApp.password.label')}</Label>
+                <Button
+                  type="button"
+                  variant="link"
+                  size="compact"
+                  disabled={locked}
+                  className="h-auto px-0 text-sm text-muted underline"
+                  onClick={onForgot}
+                >
+                  {t('mobileApp.password.forgot')}
+                </Button>
+              </div>
+              <div className="relative">
+                <Input
+                  ref={passwordField}
+                  id="mobile-login-password"
+                  name="password"
+                  type={shown ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="go"
+                  value={password}
+                  disabled={locked}
+                  aria-invalid={wrong || undefined}
+                  aria-describedby="mobile-login-password-feedback"
+                  className={cn(
+                    'h-14 rounded-2xl bg-surface pr-14 pl-4 text-base shadow-sm',
+                    wrong && 'border-destructive',
+                  )}
+                  onFocus={revealActions}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    onPasswordEdit();
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={locked}
+                  aria-pressed={shown}
+                  aria-label={t('mobileApp.password.show')}
+                  className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted"
+                  onClick={() => setShown((value) => !value)}
+                >
+                  {shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
+                </Button>
+              </div>
+              <div id="mobile-login-password-feedback" className="min-h-6">
+                {passwordError ? (
+                  <p role="alert" className="text-xs leading-6 text-destructive-ink">
+                    {t(passwordError as TranslationKey)}
+                  </p>
+                ) : null}
+              </div>
             </div>
+          ) : null}
+          <div className="flex flex-col gap-3">
+            {passwordMode ? (
+              <div aria-busy={signingIn}>
+                <Primary type="submit" disabled={locked || password.length === 0 || retryIn > 0}>
+                  {signingIn
+                    ? t('mobileApp.password.signingIn')
+                    : retryIn > 0
+                      ? t('mobileApp.password.retryIn', { count: retryIn })
+                      : t('mobileApp.password.signIn')}
+                </Primary>
+              </div>
+            ) : (
+              <div aria-busy={busy === 'send'}>
+                <Primary type="submit" disabled={locked || cooldown > 0}>
+                  {busy === 'send'
+                    ? t('mobileApp.email.sending')
+                    : cooldown > 0
+                      ? t('mobileApp.email.sendIn', { count: cooldown })
+                      : t('mobileApp.email.send')}
+                </Primary>
+              </div>
+            )}
             <Button
               type="button"
               variant="link"
               size="compact"
               disabled={locked}
               className={cn(alternative, 'gap-2 self-center')}
-              onClick={onPassword}
+              onClick={() => switchMode(passwordMode ? 'code' : 'password')}
             >
-              <KeyRound className="size-4" />
-              {t('mobileApp.password.entry')}
+              {passwordMode ? <Mail className="size-4" /> : <KeyRound className="size-4" />}
+              {t(passwordMode ? 'mobileApp.password.codeEntry' : 'mobileApp.password.entry')}
             </Button>
           </div>
         </div>
       </form>
+      {passwordMode && codeFixes ? (
+        <div className="mt-6" aria-busy={busy === 'send'}>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            disabled={locked || cooldown > 0}
+            className="w-full gap-2 whitespace-normal rounded-full"
+            onClick={onUseCode}
+          >
+            <Mail className="size-4 shrink-0" />
+            {busy === 'send' ? t('mobileApp.email.sending') : t('mobileApp.password.useCode')}
+          </Button>
+        </div>
+      ) : null}
       <p className="mt-auto pt-8 pb-4 text-center text-xs leading-6 text-muted">
-        {t('mobileApp.email.footer')}
+        {t(passwordMode ? 'mobileApp.password.footer' : 'mobileApp.email.footer')}
       </p>
     </CloudScreen>
   );
@@ -971,197 +1136,6 @@ function SecondFactor({
           {t('mobileApp.twoFactor.differentAccount')}
         </Button>
       </div>
-    </CloudScreen>
-  );
-}
-
-// ui/design: mobile-app/password
-/**
- * Sign in with the avibe.bot password for the email from the email step. The
- * password lives only in this step's field state: leaving the step unmounts
- * it, and a hidden username field lets the system match a saved password.
- */
-function PasswordEntry({
-  email,
-  busy,
-  locked,
-  errorKey,
-  retryIn,
-  codeCooldown,
-  onBack,
-  onEdit,
-  onSubmit,
-  onForgot,
-  onUseCode,
-}: {
-  email: string;
-  busy: BusyAction | null;
-  locked: boolean;
-  errorKey: MobileErrorKey | null;
-  retryIn: number;
-  codeCooldown: boolean;
-  onBack: () => void;
-  onEdit: () => void;
-  onSubmit: (password: string) => void;
-  onForgot: () => void;
-  onUseCode: () => void;
-}) {
-  const { t } = useTranslation();
-  const [password, setPassword] = useState('');
-  const [shown, setShown] = useState(false);
-  const { codeActionRegion: actionRegion, revealCodeActions: revealActions } =
-    useCodeActionReveal<HTMLFormElement>('mobile-login-password');
-  const signingIn = busy === 'signIn';
-  const wrong = errorKey === 'mobileApp.password.invalid';
-  // The email code is the fix for these, so its way in becomes a button.
-  const codeFixes = wrong || errorKey === 'mobileApp.password.unconfirmed';
-  const useCodeLabel = busy === 'send' ? t('mobileApp.email.sending') : t('mobileApp.password.useCode');
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    onSubmit(password);
-  };
-
-  return (
-    <CloudScreen>
-      <Brand back disabled={locked} onBack={onBack} />
-      <div className="flex flex-col items-center pt-8 pb-6">
-        <PageMark>
-          <KeyRound className="size-7 text-mint-ink" />
-        </PageMark>
-        <h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">
-          {t('mobileApp.password.title')}
-        </h1>
-      </div>
-      <div className="pb-7 text-center">
-        <p className="text-sm leading-7 text-muted">{t('mobileApp.password.signingInAs')}</p>
-        <p className="break-all text-sm font-medium leading-6">{email}</p>
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked}
-          className="mt-1 px-0 text-muted underline"
-          onClick={onBack}
-        >
-          {t('mobileApp.code.changeEmail')}
-        </Button>
-      </div>
-      <form
-        ref={actionRegion}
-        className="scroll-mb-4 rounded-3xl border border-border bg-surface/70 p-6 shadow-mint-card"
-        onSubmit={submit}
-      >
-        <Input
-          type="email"
-          name="username"
-          autoComplete="username"
-          value={email}
-          readOnly
-          tabIndex={-1}
-          aria-hidden="true"
-          className="sr-only"
-        />
-        <div className="flex flex-col gap-6">
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="mobile-login-password">{t('mobileApp.password.label')}</Label>
-              <Button
-                type="button"
-                variant="link"
-                size="compact"
-                disabled={locked}
-                className="h-auto px-0 text-sm text-muted underline"
-                onClick={onForgot}
-              >
-                {t('mobileApp.password.forgot')}
-              </Button>
-            </div>
-            <div className="relative">
-              <Input
-                id="mobile-login-password"
-                name="password"
-                type={shown ? 'text' : 'password'}
-                autoComplete="current-password"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                enterKeyHint="go"
-                value={password}
-                disabled={locked}
-                aria-invalid={wrong || undefined}
-                aria-describedby="mobile-login-password-feedback"
-                className={cn(
-                  'h-14 rounded-2xl bg-surface pr-14 pl-4 text-base shadow-sm',
-                  wrong && 'border-destructive',
-                )}
-                onFocus={revealActions}
-                onChange={(event) => {
-                  setPassword(event.target.value);
-                  onEdit();
-                }}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                disabled={locked}
-                aria-pressed={shown}
-                aria-label={t('mobileApp.password.show')}
-                className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted"
-                onClick={() => setShown((value) => !value)}
-              >
-                {shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}
-              </Button>
-            </div>
-            <div id="mobile-login-password-feedback" className="min-h-6">
-              {errorKey ? (
-                <p role="alert" className="text-xs leading-6 text-destructive-ink">
-                  {t(errorKey as TranslationKey)}
-                </p>
-              ) : null}
-            </div>
-          </div>
-          <div aria-busy={signingIn}>
-            <Primary type="submit" disabled={locked || password.length === 0 || retryIn > 0}>
-              {signingIn
-                ? t('mobileApp.password.signingIn')
-                : retryIn > 0
-                  ? t('mobileApp.password.retryIn', { count: retryIn })
-                  : t('mobileApp.password.signIn')}
-            </Primary>
-          </div>
-        </div>
-      </form>
-      <div className="mt-6 flex flex-col items-center" aria-busy={busy === 'send'}>
-        {codeFixes ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            disabled={locked || codeCooldown}
-            className="w-full gap-2 whitespace-normal rounded-full"
-            onClick={onUseCode}
-          >
-            <Mail className="size-4 shrink-0" />
-            {useCodeLabel}
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            variant="link"
-            size="compact"
-            disabled={locked || codeCooldown}
-            className={cn(alternative, 'gap-2')}
-            onClick={onUseCode}
-          >
-            <Mail className="size-4" />
-            {useCodeLabel}
-          </Button>
-        )}
-      </div>
-      <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">
-        {t('mobileApp.password.footer')}
-      </p>
     </CloudScreen>
   );
 }
@@ -1724,6 +1698,7 @@ export function MobileOnboarding() {
   const [screen, setScreen] = useState<Screen>('boot');
   const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
   const [email, setEmail] = useState('');
+  const [emailMode, setEmailMode] = useState<EmailMode>('code');
   const [code, setCode] = useState('');
   const [errorKey, setErrorKey] = useState<MobileErrorKey | null>(null);
   const [cooldown, setCooldown] = useState(0);
@@ -1920,14 +1895,21 @@ export function MobileOnboarding() {
   };
 
   const signInWithPassword = async (password: string) => {
-    if (passwordRetry > 0 || password.length === 0) return;
+    if (isOperationLocked() || passwordRetry > 0 || password.length === 0) return;
+    // Switching to password mode never asks for the email; Sign in checks it.
+    const normalizedEmail = email.trim();
+    if (!EMAIL_PATTERN.test(normalizedEmail)) {
+      setErrorKey('mobileApp.email.invalid');
+      return;
+    }
     const token = beginOperation('signIn');
     if (token === null) return;
+    setEmail(normalizedEmail);
     setErrorKey(null);
     pendingWeakPassword.current = null;
     try {
       const { weak_password: weakPassword, ...next } = await signInMobileWithPassword(
-        email,
+        normalizedEmail,
         password,
       );
       if (!ownsOperation(token)) return;
@@ -2097,11 +2079,12 @@ export function MobileOnboarding() {
       setCooldownSource(null);
       setCooldownScope(null);
     }
+    setEmailMode('code');
     setScreen('email');
   };
 
-  /** Both ways in validate the email first. */
-  const showPassword = () => {
+  /** The forgot page names the account and sends its code, so it needs a valid email. */
+  const showForgot = () => {
     if (isOperationLocked()) return;
     const normalizedEmail = email.trim();
     if (!EMAIL_PATTERN.test(normalizedEmail)) {
@@ -2110,13 +2093,7 @@ export function MobileOnboarding() {
     }
     setEmail(normalizedEmail);
     setErrorKey(null);
-    setScreen('password');
-  };
-
-  const showPasswordStep = (next: 'password' | 'forgot') => {
-    if (isOperationLocked()) return;
-    setErrorKey(null);
-    setScreen(next);
+    setScreen('forgot');
   };
 
   const openGuide = () => {
@@ -2143,11 +2120,13 @@ export function MobileOnboarding() {
   if (screen === 'email') {
     return (
       <EmailEntry
+        mode={emailMode}
         email={email}
-        busy={busy === 'send'}
+        busy={busy}
         locked={locked}
         cooldown={cooldown}
         errorKey={errorKey}
+        retryIn={passwordRetry}
         onBack={() => {
           if (!isOperationLocked()) {
             setErrorKey(null);
@@ -2160,23 +2139,14 @@ export function MobileOnboarding() {
           setErrorKey(null);
         }}
         onSubmit={() => void requestOtp(false)}
-        onPassword={showPassword}
-      />
-    );
-  }
-  if (screen === 'password') {
-    return (
-      <PasswordEntry
-        email={email}
-        busy={busy}
-        locked={locked}
-        errorKey={errorKey}
-        retryIn={passwordRetry}
-        codeCooldown={cooldown > 0}
-        onBack={showEmail}
-        onEdit={() => setErrorKey(null)}
-        onSubmit={(password) => void signInWithPassword(password)}
-        onForgot={() => showPasswordStep('forgot')}
+        onMode={(next) => {
+          if (isOperationLocked()) return;
+          setErrorKey(null);
+          setEmailMode(next);
+        }}
+        onSignIn={(password) => void signInWithPassword(password)}
+        onPasswordEdit={() => setErrorKey(null)}
+        onForgot={showForgot}
         onUseCode={() => void requestOtp(false)}
       />
     );
@@ -2189,7 +2159,11 @@ export function MobileOnboarding() {
         locked={locked}
         cooldown={cooldown}
         errorKey={errorKey}
-        onBack={() => showPasswordStep('password')}
+        onBack={() => {
+          if (isOperationLocked()) return;
+          setErrorKey(null);
+          setScreen('email');
+        }}
         onSendCode={() => void requestOtp(false)}
         onOpenSecurity={openAccountSecurity}
       />

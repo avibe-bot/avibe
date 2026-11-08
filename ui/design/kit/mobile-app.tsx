@@ -36,17 +36,24 @@ export interface MobileSecondFactorFixture {
   error?: 'passkey-failed' | 'code-invalid' | 'rate-limited' | 'network';
   compact?: boolean;
 }
-/** Password sign-in, the alternative first factor for an account that set a password on avibe.bot. */
+/**
+ * Password sign-in, the alternative first factor for an account that set a password on avibe.bot:
+ * the email step's password mode, one form with the email and the password.
+ */
 export interface MobilePasswordFixture {
   email: string;
   password?: string;
   shown?: boolean;
-  /** The password field has focus (drawn statically: the keyboard-up composition). */
-  focused?: boolean;
+  /** The field with focus (drawn statically). */
+  focused?: 'email' | 'password';
   busy?: boolean;
-  error?: 'invalid-credentials' | 'email-not-confirmed' | 'rate-limited' | 'network';
+  error?: 'email-invalid' | 'invalid-credentials' | 'email-not-confirmed' | 'rate-limited' | 'network';
   /** Seconds before Sign in is offered again after `rate-limited`; static here. */
   wait?: number;
+  /**
+   * The region above the keyboard on a small phone: the page has scrolled the
+   * illustration and title away, so the form and its Sign in stay in view.
+   */
   compact?: boolean;
 }
 export type PickerState = 'own' | 'mixed' | 'current' | 'offline' | 'offline-tapped' | 'loading' | 'error' | 'pulling' | 'refreshing';
@@ -194,39 +201,39 @@ export function SecondFactorPage({ fixture }: { fixture: MobileSecondFactorFixtu
   </CloudScreen>;
 }
 
-/** The key tile that heads the password pages, the same raised tile as two-step verification. */
-function PageMark({ compact = false, warn = false }: { compact?: boolean; warn?: boolean }) {
-  return <span className={cn('grid place-items-center rounded-3xl border bg-surface/80 shadow-mint-card-sm', warn ? 'border-gold/40' : 'border-border', compact ? 'mb-3 size-14' : 'mb-5 size-16')}>{warn ? <AlertTriangle className="size-7 text-gold-ink" /> : <KeyRound className="size-7 text-mint-ink" />}</span>;
+/** The key tile that heads the forgot and weak-password pages, the same raised tile as two-step verification. */
+function PageMark({ warn = false }: { warn?: boolean }) {
+  return <span className={cn('mb-5 grid size-16 place-items-center rounded-3xl border bg-surface/80 shadow-mint-card-sm', warn ? 'border-gold/40' : 'border-border')}>{warn ? <AlertTriangle className="size-7 text-gold-ink" /> : <KeyRound className="size-7 text-mint-ink" />}</span>;
 }
 
 /**
- * Sign in with the avibe.bot password. The email comes from the email step and
- * shows complete, with Change email; a visually hidden username field carries it
- * so the system can match a saved password. Errors that the email code resolves
- * promote "Use an email code instead" to a button.
+ * The email step in password mode: one form with the email (the saved login's
+ * username) and the password. Switching never asks for the email first; Sign in
+ * checks it. Errors that the email code resolves add "Use an email code instead".
  */
 export function PasswordPage({ fixture }: { fixture: MobilePasswordFixture }) {
   const t = useCopy();
-  const { email, password = '', shown = false, focused = false, busy = false, error, wait, compact = false } = fixture;
+  const { email, password = '', shown = false, focused, busy = false, error, wait, compact = false } = fixture;
+  const emailInvalid = error === 'email-invalid';
   const wrong = error === 'invalid-credentials';
   const codeFixes = wrong || error === 'email-not-confirmed';
   const notice = wrong ? t('邮箱或密码不正确。还没设置过密码？请改用邮箱验证码登录。', 'Wrong email or password. Haven’t set a password? Use an email code instead.')
     : error === 'email-not-confirmed' ? t('这个邮箱还没有确认。用邮箱验证码登录，即可完成确认。', 'This email isn’t confirmed yet. Sign in with an email code to confirm it.')
       : error === 'rate-limited' ? t('尝试次数过多，请稍后再试。', 'Too many attempts. Please try again shortly.')
         : error === 'network' ? t('暂时连不上 avibe.bot。检查网络后重试。', 'Could not reach avibe.bot. Check your connection and retry.') : null;
-  const useCode = t('改用邮箱验证码登录', 'Use an email code instead');
-  return <CloudScreen><Brand back /><div className={cn('flex flex-col items-center', compact ? 'pt-3 pb-3' : 'pt-8 pb-6')}>{!compact && <PageMark />}<h1 className={cn('text-center font-semibold leading-tight tracking-tight', compact ? 'text-2xl' : 'text-3xl')}>{t('输入密码。', 'Enter your password.')}</h1></div>
-    <div className={cn('text-center', compact ? 'pb-4' : 'pb-7')}>{!compact && <p className="text-sm leading-7 text-muted">{t('登录账号', 'Signing in as')}</p>}<p className="break-all text-sm font-medium leading-6">{email}</p><Button variant="link" size="compact" disabled={busy} className="mt-1 px-0 text-muted underline">{t('修改邮箱', 'Change email')}</Button></div>
-    <form className={cn('rounded-3xl border border-border bg-surface/70 shadow-mint-card', compact ? 'p-5' : 'p-6')}>
-      <Input type="email" name="username" autoComplete="username" defaultValue={email} readOnly tabIndex={-1} aria-hidden="true" className="sr-only" />
-      <div className={cn('flex flex-col', compact ? 'gap-4' : 'gap-6')}><div className="flex flex-col gap-3">
+  const ring = 'border-ring ring-2 ring-ring';
+  return <CloudScreen><Brand back />{compact ? <div className="pt-3" /> : <div className="flex flex-col items-center pt-8 pb-6"><img src={mailMascot} alt="" className="mb-5 size-28 object-contain" /><h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">{t('从一封邮件开始。', 'It starts with an email.')}</h1><p className="mt-3 text-center text-sm leading-6 text-muted">{t('登录 / 注册你的 avibe.bot 账号', 'Sign in or create your avibe.bot account')}</p></div>}
+    <form className={cn('rounded-3xl border border-border bg-surface/70 shadow-mint-card', compact ? 'p-5' : 'p-6')}><div className={cn('flex flex-col', compact ? 'gap-4' : 'gap-6')}>
+      <div className="flex flex-col gap-3"><Label htmlFor="mobile-login-email">{t('邮箱', 'Email')}</Label><Input id="mobile-login-email" name="username" type="email" inputMode="email" autoComplete="username" autoCapitalize="none" spellCheck={false} enterKeyHint="next" defaultValue={email} placeholder="you@example.com" disabled={busy} aria-invalid={emailInvalid || undefined} aria-describedby="mobile-login-email-feedback" className={cn('h-14 rounded-2xl bg-surface px-4 text-base shadow-sm', emailInvalid && 'border-destructive', focused === 'email' && !emailInvalid && ring)} />{emailInvalid && <div id="mobile-login-email-feedback"><p role="alert" className="text-xs leading-6 text-destructive-ink">{t('请填写有效的邮箱。', 'Enter a valid email address.')}</p></div>}</div>
+      <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-3"><Label htmlFor="mobile-login-password">{t('密码', 'Password')}</Label><Button variant="link" size="compact" disabled={busy} className="h-auto px-0 text-sm text-muted underline">{t('忘记密码？', 'Forgot password?')}</Button></div>
-        <div className="relative"><Input id="mobile-login-password" name="password" type={shown ? 'text' : 'password'} autoComplete="current-password" autoCapitalize="none" spellCheck={false} enterKeyHint="go" defaultValue={password} disabled={busy} aria-invalid={wrong || undefined} aria-describedby="mobile-login-password-feedback" className={cn('h-14 rounded-2xl bg-surface pr-14 pl-4 text-base shadow-sm', wrong && 'border-destructive', focused && !wrong && 'border-ring ring-2 ring-ring')} /><Button type="button" variant="ghost" size="icon" disabled={busy} aria-pressed={shown} aria-label={t('显示密码', 'Show password')} className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted">{shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}</Button></div>
+        <div className="relative"><Input id="mobile-login-password" name="password" type={shown ? 'text' : 'password'} autoComplete="current-password" autoCapitalize="none" spellCheck={false} enterKeyHint="go" defaultValue={password} disabled={busy} aria-invalid={wrong || undefined} aria-describedby="mobile-login-password-feedback" className={cn('h-14 rounded-2xl bg-surface pr-14 pl-4 text-base shadow-sm', wrong && 'border-destructive', focused === 'password' && !wrong && ring)} /><Button type="button" variant="ghost" size="icon" disabled={busy} aria-pressed={shown} aria-label={t('显示密码', 'Show password')} className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted">{shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}</Button></div>
         <div id="mobile-login-password-feedback" className={cn(!compact && 'min-h-6')}>{notice && <p role="alert" className="text-xs leading-6 text-destructive-ink">{notice}</p>}</div>
-      </div><div aria-busy={busy}><Primary disabled={busy || !password || Boolean(wait)}>{busy ? t('登录中…', 'Signing in…') : wait ? t(`${wait} 秒后可重试`, `Try again in ${wait}s`) : t('登录', 'Sign in')}</Primary></div></div>
-    </form>
-    <div className="mt-6 flex flex-col items-center">{codeFixes ? <Button variant="outline" size="lg" disabled={busy} className="w-full gap-2 whitespace-normal rounded-full"><Mail className="size-4 shrink-0" />{useCode}</Button> : <Button variant="link" size="compact" disabled={busy} className={cn(alternative, 'gap-2')}><Mail className="size-4" />{useCode}</Button>}</div>
-    <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">{t('还没有密码？用邮箱验证码登录后，可以在 avibe.bot 的「账号安全」里设置。', 'No password yet? Sign in with an email code, then set one in Account security on avibe.bot.')}</p>
+      </div>
+      <div className="flex flex-col gap-3"><div aria-busy={busy}><Primary disabled={busy || !password || Boolean(wait)}>{busy ? t('登录中…', 'Signing in…') : wait ? t(`${wait} 秒后可重试`, `Try again in ${wait}s`) : t('登录', 'Sign in')}</Primary></div><Button variant="link" size="compact" disabled={busy} className={cn(alternative, 'gap-2 self-center')}><Mail className="size-4" />{t('使用验证码登录', 'Sign in with an email code')}</Button></div>
+    </div></form>
+    {codeFixes && <div className="mt-6"><Button variant="outline" size="lg" disabled={busy} className="w-full gap-2 whitespace-normal rounded-full"><Mail className="size-4 shrink-0" />{t('改用邮箱验证码登录', 'Use an email code instead')}</Button></div>}
+    {!compact && <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">{t('还没有密码？用邮箱验证码登录后，可以在 avibe.bot 的「账号安全」里设置。', 'No password yet? Sign in with an email code, then set one in Account security on avibe.bot.')}</p>}
   </CloudScreen>;
 }
 

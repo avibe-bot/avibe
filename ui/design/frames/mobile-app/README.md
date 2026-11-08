@@ -200,7 +200,9 @@ page behind it.
 ## Password sign-in — approved
 
 Status: **approved** by the owner on 2026-11-08 at 12:46 Asia/Shanghai, with
-the four decisions below. Plan:
+the four decisions below. On 2026-11-09 at 01:51 Asia/Shanghai the owner
+replaced decision 2 (identifier-first) with one form: "Sign in with password"
+turns the email step into email + password at once. Plan:
 `docs/plans/2026-11-08-mobile-password-sign-in.md`. An account that set a
 password on avibe.bot (Account security → Set or change password) can sign in
 with it instead of the email code. The email code stays the primary path and
@@ -208,15 +210,17 @@ the only way to create an account in the app. After either first factor, an
 account with two-step verification continues to `two-factor/*`; everyone else
 reaches the instance picker. The pages reuse the A composition (`CloudScreen`,
 `Brand`, `Primary`, the raised tile and card, the email card) and add no
-tokens or assets. `PasswordPage`, `ForgotPasswordPage` and `WeakPasswordNotice`
-live in `ui/design/kit/mobile-app.tsx`; the email step is `WelcomeIntro` with
-the `password` fixture flag, so the approved `welcome/*` frames are unchanged.
+tokens or assets. `PasswordPage` (the email step in password mode),
+`ForgotPasswordPage` and `WeakPasswordNotice` live in
+`ui/design/kit/mobile-app.tsx`; the email step in code mode is `WelcomeIntro`
+with the `password` fixture flag, so the approved `welcome/*` frames are
+unchanged.
 
 | File / surface | States |
 | --- | --- |
-| `password` | `email` (both ways offered), `email-invalid`, `default`, `filled`, `shown`, `signing-in`, `invalid`, `unconfirmed`, `rate-limited`, `network`, `forgot`, `weak`, `small` (375 × 667, long email + error), `keyboard` (375 × 407) |
+| `password` | `email` (both ways offered), `email-invalid` (Send verification code), `switched-empty` (password mode, no email typed yet), `default` (password mode, the typed email carried over), `filled`, `shown`, `signing-in`, `password-email-invalid` (Sign in with an invalid email), `invalid`, `unconfirmed`, `rate-limited`, `network`, `forgot`, `weak`, `small` (375 × 667, long email + error), `keyboard` (375 × 407) |
 
-**28 approved frames / 56 theme captures** (14 states × zh/en × light/dark).
+**32 approved frames / 64 theme captures** (16 states × zh/en × light/dark).
 `password/email` and `password/email-invalid` supersede the email entry of
 `welcome/default` and `welcome/email-invalid`.
 
@@ -235,28 +239,39 @@ copy no longer names the code.
 
 ### Interaction and accessibility handoff
 
-- Identifier-first: the password page shows the email from the email step,
-  complete and wrapped, with centered Change email (the approved code-step
-  pattern). Change email and Back return to the email step with the email kept
-  and the password cleared. The form carries the email in a visually hidden,
-  read-only `autocomplete="username"` field next to the password field
-  (`type=password`, `autocomplete="current-password"`, no autocapitalize or
-  spellcheck, `enterkeyhint="go"`), so iCloud Keychain can match the saved
-  avibe.bot login through the app's existing `webcredentials:avibe.bot`
-  association.
-- Sign in needs a non-empty password; there is no client minimum length,
-  because older passwords may predate avibe.bot's 8-character rule. Nothing
-  auto-submits. Return submits.
+- One form: "Sign in with password" switches the email step to password mode at
+  once and never asks for the email first. The header stays; the card holds
+  the same email field, now `autocomplete="username"` with
+  `enterkeyhint="next"` (typed text carried over; focused when empty, otherwise
+  the password is), then the password (`type=password`,
+  `autocomplete="current-password"`, no autocapitalize or spellcheck,
+  `enterkeyhint="go"`) with Forgot password? on its label row, then Sign in and
+  the link "Sign in with an email code". The visible email field is the saved
+  login's username, so iCloud Keychain can match the avibe.bot login through
+  the app's existing `webcredentials:avibe.bot` association; there is no
+  hidden field and no "Signing in as" step. The email hint (new emails create
+  an account) is code-mode copy and is left out here; the footer names how to
+  get a password.
+- "Sign in with an email code" and Back return to code mode with the email kept
+  and the password cleared. Editing the email keeps the password.
+- Return in the email field moves to the password; Return in the password field
+  submits. Nothing auto-submits.
+- Sign in checks the email (`password-email-invalid`: the existing "Enter a
+  valid email address." under the email field, which is marked) and needs a
+  non-empty password; there is no client minimum length, because older
+  passwords may predate avibe.bot's 8-character rule. Forgot password? and "Use
+  an email code instead" check the email the same way. The page shows its own
+  copy, not WebKit's validation bubble.
 - Show password is one toggle button with a stable label and `aria-pressed`,
   a 44pt target inside the field. Its icon changes. The field returns to hidden
   when the page is left.
 - Busy (`signing-in`) disables the field and every action, and sets `aria-busy`.
-- Errors render in the slot under the field (`role=alert`, linked with
-  `aria-describedby`). Email and password are kept. `invalid` also marks the
-  field. Supabase answers `invalid_credentials` for a wrong email, a wrong
-  password and an account with no password, so the copy covers all three. For
-  `invalid` and `unconfirmed`, where the email code is the fix, "Use an email
-  code instead" becomes an outline button; otherwise it stays a link.
+- Sign-in errors render in the slot under the password field (`role=alert`,
+  linked with `aria-describedby`). Email and password are kept. `invalid` also
+  marks the password field. Supabase answers `invalid_credentials` for a wrong
+  email, a wrong password and an account with no password, so the copy covers
+  all three. For `invalid` and `unconfirmed`, where the email code is the fix,
+  an outline "Use an email code instead" button appears under the card.
 - `rate-limited` disables Sign in for the provider's `Retry-After`, or 60s when
   none is given, and the label counts down. Editing stays allowed. As with the
   approved resend timer, the countdown does not promise that the server limit
@@ -281,8 +296,12 @@ copy no longer names the code.
 
 1. Entry: a "Sign in with password" link under Send verification code, rather
    than a segmented control or a second button.
-2. Identifier-first: the password page shows the email from the email step
-   with Change email, rather than a second editable email field.
+2. ~~Identifier-first: the password page shows the email from the email step
+   with Change email, rather than a second editable email field.~~ Replaced by
+   the owner on 2026-11-09 at 01:51 Asia/Shanghai, after using TestFlight build
+   0.1.0 (3): "Sign in with password" must not require the email first, and the
+   email and password belong on one screen. Password mode is one form with the
+   email and the password.
 3. Forgot password: an email code now, and a new password on avibe.bot's
    Account security page in Safari. No new avibe.bot reset page and no new
    allowlist entry.
