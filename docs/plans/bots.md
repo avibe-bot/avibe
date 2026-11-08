@@ -174,7 +174,9 @@ own. A Session has none of these; a Bot has all three.
   say, how to choose the model, how to bring a Session to the front, and how
   to follow up. The `use-avibe-harness` Skill (about 4k tokens) stays out of
   the Bot prompt, and a Bot loads it only to set a Task or Watch. The section
-  says a dispatched Session reports back and never asks for `--callback`.
+  says a dispatched Session reports back, that Avibe tells the Bot when one
+  goes idle without answering (D14), and that following up is the Bot's; it
+  never asks for `--callback`.
 
 ### D5. Web surfaces
 
@@ -384,8 +386,9 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
   already behaves (it inherits the Bot's directory and no scope). A brief
   matter gets no Project; a matter gets one only once it is really managed as
   a project.
-- **Finished matters** keep their folders where they are, because their
-  Sessions recorded that directory; they are only dropped from the index.
+- **Finished matters** get their outcome recorded in their file and keep
+  their folders where they are, because their Sessions recorded that
+  directory; they are only dropped from the index.
 - **Project notes.** For each Project the Bot works in, a note in `projects/`:
   what the Project is to the user, its standing Sessions and what each owns,
   and how work is handed out there. It is not the Project's own `AGENTS.md`,
@@ -604,10 +607,12 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   targets, not unrelated Tasks that happen to have been created by B, decide what
   will wake B. A callback only queued to A defers the safety net; actual acceptance
   answers the pair. A return that failed before acceptance can still need a notice.
-- No system prompt changes, mandatory callbacks, or long-silent-running-turn
-  timeout policy. The optional running-turn anomaly routing is deferred. Cycles
-  are not broken: an open delegate still blocks the upstream notice, even in a
-  cycle; recurring live definitions likewise keep their literal blocking rule.
+- The mechanism needs no system prompt change, mandatory callbacks, or
+  long-silent-running-turn timeout policy. Bots are told of it in one sentence
+  of "Handing out work" (follow-through, owner wording 2026-11-08). The
+  optional running-turn anomaly routing is deferred. Cycles are not broken:
+  an open delegate still blocks the upstream notice, even in a cycle;
+  recurring live definitions likewise keep their literal blocking rule.
 
 ## Prompt drafts
 
@@ -703,15 +708,17 @@ Your memory holds what the user entrusts to you: what they ask you to remember, 
 ### Handing out work (every Bot, after the main Bot's section)
 
 Put a fresh Session in a Project with `--cwd` until `vibe agent run --project`
-exists; then this example switches. The reporting sentence becomes the
-safety-net wording once Avibe notifies a dispatcher whose Session went idle
-without answering.
+exists; then this example switches. The reporting sentence is the owner's
+follow-through wording (2026-11-08): it holds because a dispatched Session is
+told how to report, and Avibe tells the dispatcher when one goes idle without
+answering or its run does not complete (D4, D14). It does not ask for
+`--callback`.
 
 ```markdown
 ## Handing out work
 `vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --cwd <dir>`, in the directory where the work lives). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
-A Session you dispatch is told how to report to you, and a run that does not complete always reports here. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch.
+The Sessions you dispatch report back to you; if one goes idle without answering, Avibe tells you, and following up is yours. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```
 
 ### The memory Bot
