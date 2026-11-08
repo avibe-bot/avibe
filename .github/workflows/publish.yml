@@ -184,6 +184,7 @@ jobs:
             scripts/release_package_version.py
             scripts/ci_scenario_evidence.py
             scripts/pytest_collection.py
+            .github/actions/sqlite-predecessor-contract/action.yml
             .github/workflows/publish.yml
             tests/scenarios/**/catalog.yaml
             tests/test_distribution_artifacts.py
@@ -286,14 +287,9 @@ jobs:
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
 
       - name: Verify the published predecessor before enabling SQLite no-copy
-        # Historical tags without this contract keep their original behavior.
-        if: hashFiles('scripts/sqlite_predecessor_contract.py') != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: |
-          python scripts/sqlite_predecessor_contract.py \
-            --repo "$GITHUB_REPOSITORY" --release-tag "$RELEASE_TAG" --activate
+        uses: ./release-automation/.github/actions/sqlite-predecessor-contract
+        with:
+          release-tag: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Build Python distributions
         run: |

@@ -21,6 +21,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         ] = [
             .requestOTP: [.request],
             .verifyOTP: [.verify, .callback, .session],
+            .signInWithPassword: [.token, .callback, .session],
             .fetchSession: [.session],
             .passkeyChallenge: [.challenge],
             .verifySecondFactor: [.secondFactor, .session],
@@ -162,6 +163,38 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             ("proved session failure", .verifySecondFactor, .session, 500, nil, "network"),
             ("proved session throttle", .verifySecondFactor, .session, 429, 9, "network"),
         ]
+        let passwordCases: [(String, MobileAuthTransportStage, Int, String?, Int?, String)] = [
+            ("wrong password", .token, 400, "invalid_credentials", nil, "invalid_credentials"),
+            ("unconfirmed email", .token, 400, "email_not_confirmed", nil, "email_not_confirmed"),
+            ("unconfirmed code on another status", .token, 422, "email_not_confirmed", nil, "invalid_credentials"),
+            ("grant rejection without a code", .token, 400, nil, nil, "invalid_credentials"),
+            ("other grant rejection", .token, 422, "validation_failed", nil, "invalid_credentials"),
+            ("grant throttle", .token, 429, "over_request_rate_limit", 42, "rate_limited"),
+            ("grant throttle without Retry-After", .token, 429, nil, nil, "rate_limited"),
+            ("grant server failure", .token, 500, nil, nil, "network"),
+            ("password callback failure", .callback, 502, nil, nil, "network"),
+            ("password callback rejection", .callback, 401, nil, nil, "network"),
+            ("password session signed out", .session, 401, nil, nil, "signed_out"),
+            ("password session failure", .session, 503, nil, nil, "network"),
+            ("password session throttle", .session, 429, nil, 9, "network"),
+        ]
+        for (name, stage, status, code, retryAfter, expectedCode) in passwordCases {
+            var response: [String: Any] = [
+                "stage": stage.rawValue,
+                "status": status,
+            ]
+            response["code"] = code
+            response["retryAfter"] = retryAfter
+            cases.append(
+                MappingCase(
+                    name: name,
+                    operation: .signInWithPassword,
+                    response: response,
+                    expectedCode: expectedCode,
+                    expectedRetryAfter: expectedCode == "rate_limited" ? retryAfter : nil
+                )
+            )
+        }
         for (name, operation, stage, status, retryAfter, expectedCode) in secondFactorCases {
             var response: [String: Any] = [
                 "stage": stage.rawValue,
@@ -979,6 +1012,399 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         )
     }
 
+    func testPasswordSignInSendsThePasswordOnlyInTheGrantAndPassesOnTheSecondFactor() async throws {
+        let password = "correct horse \"battery\" \(UUID().uuidString)"
+        let state = HTTPFixtureState()
+        let owed = """
+        {
+          "error": "two_factor_required",
+          "email": "alex@example.com",
+          "gate": "challenge",
+          "methods": ["totp"]
+        }
+        """
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json(
+                    """
+                    {
+                      "supabase_url": "\(state.baseURL!.absoluteString)",
+                      "supabase_anon_key": "fixture-anon"
+                    }
+                    """,
+                    headers: [
+                        ("Set-Cookie", "control_plane=seeded; Path=/; HttpOnly"),
+                    ]
+                )
+            case ("POST", "/auth/v1/token"):
+                return .json(
+                    """
+                    {
+                      "access_token": "fixture-access",
+                      "refresh_token": "fixture-refresh",
+                      "weak_password": {
+                        "message": "Password is known to be weak and easy to guess",
+                        "reasons": ["pwned", "mystery", "pwned"]
+                      }
+                    }
+                    """
+                )
+            case ("POST", "/auth/callback"):
+                return .json(
+                    "{}",
+                    headers: [
+                        ("Set-Cookie", "avibe_session=first-factor; Path=/; HttpOnly"),
+                    ]
+                )
+            case ("GET", "/api/mobile/session"):
+                return LocalHTTPResponse(
+                    status: 403,
+                    headers: [("Content-Type", "application/json")],
+                    body: Data(owed.utf8)
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let dataStore = WKWebsiteDataStore.nonPersistent()
+        let transport = MobileAuthTransport(
+            controlPlaneURL: baseURL,
+            websiteDataStore: dataStore
+        )
+
+        let result = try await transport.signInWithPassword(
+            email: "alex@example.com",
+            password: password
+        )
+
+        // The shared session read reports the second factor unchanged, and
+        // the weak-password reasons this app knows come with it.
+        XCTAssertEqual(
+            result,
+            MobilePasswordSignInDiscovery(
+                discovery: .secondFactorRequired(
+                    MobileSecondFactorRequirement(
+                        email: "alex@example.com",
+                        gate: .challenge,
+                        methods: [.totp]
+                    )
+                ),
+                weakPasswordReasons: [.pwned]
+            )
+        )
+        let requests = state.requests().filter { $0.path != "/favicon.ico" }
+        XCTAssertEqual(
+            requests.map { "\($0.method) \($0.path)" },
+            [
+                "GET /api/config/auth",
+                "POST /auth/v1/token",
+                "POST /auth/callback",
+                "GET /api/mobile/session",
+            ]
+        )
+        let grant = requests[1]
+        XCTAssertEqual(
+            grant.queryItems,
+            [URLQueryItem(name: "grant_type", value: "password")]
+        )
+        XCTAssertEqual(grant.headers["apikey"], "fixture-anon")
+        XCTAssertEqual(grant.headers["authorization"], "Bearer fixture-anon")
+        XCTAssertEqual(grant.headers["content-type"], "application/json")
+        // `credentials: "omit"`: the control-plane cookie stays off the grant.
+        XCTAssertNil(grant.headers["cookie"])
+        XCTAssertEqual(
+            try XCTUnwrap(
+                JSONSerialization.jsonObject(with: grant.body) as? [String: String]
+            ),
+            ["email": "alex@example.com", "password": password]
+        )
+        let callback = requests[2]
+        XCTAssertTrue(
+            (callback.headers["cookie"] ?? "").contains("control_plane=seeded")
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                JSONSerialization.jsonObject(with: callback.body) as? [String: String]
+            ),
+            ["access_token": "fixture-access", "refresh_token": "fixture-refresh"]
+        )
+        XCTAssertTrue(
+            (requests[3].headers["cookie"] ?? "").contains("avibe_session=first-factor")
+        )
+
+        // Everything the fixture captured, apart from the grant's body, and
+        // every rendering of the result are free of the password.
+        for (index, request) in requests.enumerated() {
+            var captured = [request.method, request.path]
+            captured += request.queryItems.map { "\($0.name)=\($0.value ?? "")" }
+            captured += request.headers.map { "\($0.key): \($0.value)" }
+            if index != 1 {
+                captured.append(String(decoding: request.body, as: UTF8.self))
+            }
+            XCTAssertFalse(
+                captured.contains { $0.contains(password) },
+                "\(request.method) \(request.path)"
+            )
+        }
+        var dumped = ""
+        dump(result, to: &dumped)
+        XCTAssertFalse(String(describing: result).contains(password))
+        XCTAssertFalse(dumped.contains(password))
+    }
+
+    func testPasswordSignInFailuresMapByStageWithoutEchoingThePassword() async throws {
+        let password = "hunter2-\(UUID().uuidString)"
+        let fixture = PasswordGrantFixture()
+        let state = HTTPFixtureState()
+        let sessionJSON = Self.sessionJSON
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json(
+                    """
+                    {
+                      "supabase_url": "\(state.baseURL!.absoluteString)",
+                      "supabase_anon_key": "fixture-anon"
+                    }
+                    """
+                )
+            case ("POST", "/auth/v1/token"):
+                return fixture.token
+            case ("POST", "/auth/callback"):
+                return fixture.callback
+            case ("GET", "/api/mobile/session"):
+                return fixture.session ?? .json(sessionJSON)
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let transport = MobileAuthTransport(
+            controlPlaneURL: baseURL,
+            websiteDataStore: .nonPersistent()
+        )
+        let granted = LocalHTTPResponse.json(
+            #"{"access_token":"fixture-access","refresh_token":"fixture-refresh"}"#
+        )
+        func status(
+            _ code: Int,
+            _ body: String,
+            headers: [(String, String)] = []
+        ) -> LocalHTTPResponse {
+            LocalHTTPResponse(
+                status: code,
+                headers: [("Content-Type", "application/json")] + headers,
+                body: Data(body.utf8)
+            )
+        }
+        struct FailureCase {
+            let name: String
+            let token: LocalHTTPResponse
+            var callback: LocalHTTPResponse = .json("{}")
+            var session: LocalHTTPResponse?
+            let expectedCode: String
+            var expectedRetryAfter: Int?
+            var reachesCallback = false
+        }
+        let cases = [
+            // A provider that echoed the password must not carry it further.
+            FailureCase(
+                name: "current error shape",
+                token: status(400, #"{"code":"invalid_credentials","message":"Invalid login credentials for \#(password)"}"#),
+                expectedCode: "invalid_credentials"
+            ),
+            FailureCase(
+                name: "older error shape",
+                token: status(400, #"{"code":400,"error_code":"email_not_confirmed","msg":"Email not confirmed"}"#),
+                expectedCode: "email_not_confirmed"
+            ),
+            FailureCase(
+                name: "OAuth error shape",
+                token: status(400, #"{"error":"invalid_grant","error_description":"Invalid login credentials"}"#),
+                expectedCode: "invalid_credentials"
+            ),
+            FailureCase(
+                name: "other client error",
+                token: status(422, #"{"code":"validation_failed","message":"\#(password)"}"#),
+                expectedCode: "invalid_credentials"
+            ),
+            FailureCase(
+                name: "throttle with Retry-After",
+                token: status(429, #"{"code":"over_request_rate_limit"}"#, headers: [("Retry-After", "42")]),
+                expectedCode: "rate_limited",
+                expectedRetryAfter: 42
+            ),
+            FailureCase(
+                name: "throttle without Retry-After",
+                token: status(429, "not json"),
+                expectedCode: "rate_limited"
+            ),
+            FailureCase(
+                name: "provider failure",
+                token: status(503, "{}"),
+                expectedCode: "network"
+            ),
+            FailureCase(
+                name: "grant without a session",
+                token: .json(#"{"user":{}}"#),
+                expectedCode: "network"
+            ),
+            FailureCase(
+                name: "malformed grant",
+                token: .html("<p>ok</p>"),
+                expectedCode: "network"
+            ),
+            FailureCase(
+                name: "callback failure",
+                token: granted,
+                callback: status(502, #"{"error":"bad gateway"}"#),
+                expectedCode: "network",
+                reachesCallback: true
+            ),
+            FailureCase(
+                name: "session signed out",
+                token: granted,
+                session: status(401, #"{"error":"unauthorized"}"#),
+                expectedCode: "signed_out",
+                reachesCallback: true
+            ),
+            FailureCase(
+                name: "session failure",
+                token: granted,
+                session: status(500, "{}"),
+                expectedCode: "network",
+                reachesCallback: true
+            ),
+        ]
+
+        for testCase in cases {
+            fixture.set(
+                token: testCase.token,
+                callback: testCase.callback,
+                session: testCase.session
+            )
+            let callbacksBefore = state.requests().filter {
+                $0.path == "/auth/callback"
+            }.count
+            do {
+                _ = try await transport.signInWithPassword(
+                    email: "alex@example.com",
+                    password: password
+                )
+                XCTFail("Expected \(testCase.name) to fail")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, testCase.expectedCode, testCase.name)
+                XCTAssertEqual(
+                    error.retryAfterSeconds,
+                    testCase.expectedRetryAfter,
+                    testCase.name
+                )
+                let rendered = [
+                    String(describing: error),
+                    String(reflecting: error),
+                    error.localizedDescription,
+                    String(
+                        decoding: try JSONSerialization.data(
+                            withJSONObject: error.jsonObject
+                        ),
+                        as: UTF8.self
+                    ),
+                ]
+                XCTAssertFalse(
+                    rendered.contains { $0.contains(password) },
+                    testCase.name
+                )
+            }
+            let callbacks = state.requests().filter {
+                $0.path == "/auth/callback"
+            }.count
+            XCTAssertEqual(
+                callbacks - callbacksBefore,
+                testCase.reachesCallback ? 1 : 0,
+                testCase.name
+            )
+        }
+    }
+
+    func testPasswordDoesNotFollowACrossOriginGrantRedirect() async throws {
+        let password = "hunter2-\(UUID().uuidString)"
+        let state = HTTPFixtureState()
+        let captureState = HTTPFixtureState()
+        let captureServer = try LocalHTTPServer(address: .ipv6) { request in
+            captureState.record(request)
+            return .json("{}")
+        }
+        let captureURL = try await captureServer.start()
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json(
+                    """
+                    {
+                      "supabase_url": "\(state.baseURL!.absoluteString)",
+                      "supabase_anon_key": "fixture-anon"
+                    }
+                    """
+                )
+            case ("POST", "/auth/v1/token"):
+                // A 307 would replay the POST body, password included.
+                return LocalHTTPResponse(
+                    status: 307,
+                    headers: [
+                        (
+                            "Location",
+                            captureURL.appending(path: "capture").absoluteString
+                        ),
+                    ],
+                    body: Data()
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+            captureServer.stop()
+        }
+        let transport = MobileAuthTransport(
+            controlPlaneURL: baseURL,
+            websiteDataStore: .nonPersistent()
+        )
+
+        let request = Task {
+            try await transport.signInWithPassword(
+                email: "alex@example.com",
+                password: password
+            )
+        }
+        await assertNetworkError(from: request)
+
+        XCTAssertTrue(
+            state.requests().contains(where: {
+                $0.method == "POST" && $0.path == "/auth/v1/token"
+            })
+        )
+        XCTAssertFalse(
+            state.requests().contains(where: { $0.path == "/auth/callback" })
+        )
+        XCTAssertTrue(captureState.requests().isEmpty)
+    }
+
     func testDelayedOldStoreResponseCannotRestoreCookiesAfterRotation() async throws {
         let state = HTTPFixtureState()
         let requestArrived = expectation(description: "old store request arrived")
@@ -1373,6 +1799,38 @@ final class FixtureEvent: @unchecked Sendable {
 
     func signal() {
         expectation.fulfill()
+    }
+}
+
+/// The password grant, callback, and session answers one failure case serves.
+private final class PasswordGrantFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedToken = LocalHTTPResponse.status(500)
+    private var storedCallback = LocalHTTPResponse.json("{}")
+    private var storedSession: LocalHTTPResponse?
+
+    var token: LocalHTTPResponse {
+        lock.withLock { storedToken }
+    }
+
+    var callback: LocalHTTPResponse {
+        lock.withLock { storedCallback }
+    }
+
+    var session: LocalHTTPResponse? {
+        lock.withLock { storedSession }
+    }
+
+    func set(
+        token: LocalHTTPResponse,
+        callback: LocalHTTPResponse,
+        session: LocalHTTPResponse?
+    ) {
+        lock.withLock {
+            storedToken = token
+            storedCallback = callback
+            storedSession = session
+        }
     }
 }
 

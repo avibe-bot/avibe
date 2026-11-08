@@ -91,6 +91,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "message_deliveries",
     "session_turns",
     "session_turn_replies",
+    "session_delegations",
     "agent_events",
     "session_digests",
     "skill_usage_daily",
@@ -186,6 +187,9 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "session_delegations": {
+        "sender_session_id", "recipient_session_id", "message_id", "run_id", "state", "notice_run_id", "updated_at",
+    },
     "vault_secrets": {"fields"},
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
     "show_page_access_entries": {
@@ -1020,6 +1024,9 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_status_created on agent_runs (status, created_at)')
     conn.execute('create index if not exists ix_agent_runs_type_status_created on agent_runs (run_type, status, created_at)')
     conn.execute('create index if not exists ix_agent_runs_session_created on agent_runs (session_id, created_at)')
+    conn.execute('create index if not exists ix_agent_runs_callback_session on agent_runs (callback_session_id)')
+    conn.execute('create index if not exists ix_agent_runs_source_actor on agent_runs (source_kind, source_actor)')
+    conn.execute('create index if not exists ix_agent_runs_source_session on agent_runs (source_kind, session_id, source_actor)')
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
@@ -1129,6 +1136,14 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         conn.execute(
             "create index if not exists ix_agent_sessions_visibility "
             "on agent_sessions (visibility)"
+        )
+        conn.execute(
+            "create index if not exists ix_agent_sessions_status_visibility_activity "
+            "on agent_sessions (status, visibility, last_active_at, created_at, id)"
+        )
+        conn.execute(
+            "create index if not exists ix_agent_sessions_scope_status_visibility_activity "
+            "on agent_sessions (scope_id, status, visibility, last_active_at, created_at, id)"
         )
         conn.execute(
             "create index if not exists ix_agent_sessions_scope_status_activity "

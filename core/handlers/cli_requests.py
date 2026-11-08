@@ -13,6 +13,7 @@ import math
 import threading
 from argparse import Namespace
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from core.control_requests import OPERATIONS, ControlRequest, failure, result
 
@@ -354,6 +355,18 @@ def _error_payload(cli, request: ControlRequest, exc: Exception, help_command) -
 
 
 async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dict[str, Any]:
+    if not args.sync_run:
+        return await _agent_run_request(controller, request, args, run_sync, sync_run_id=None)
+    service = controller.scheduled_task_service
+    sync_run_id = uuid4().hex[:12]
+    service.sync_waiting_run_ids = frozenset((*getattr(service, "sync_waiting_run_ids", ()), sync_run_id))
+    try:
+        return await _agent_run_request(controller, request, args, run_sync, sync_run_id=sync_run_id)
+    finally:
+        service.sync_waiting_run_ids = service.sync_waiting_run_ids - {sync_run_id}
+
+
+async def _agent_run_request(controller, request: ControlRequest, args, run_sync, *, sync_run_id: str | None) -> dict[str, Any]:
     # Admission, file access, configuration and SQLite all run off the loop. The
     # second deadline check is inside the worker, after any executor queue wait.
     def enqueue():
@@ -375,14 +388,25 @@ async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dic
                 request_store = controller.scheduled_task_service.request_store
                 response, callback_session_id = cli._enqueue_agent_run(
                     args, caller_env=request.caller_env, invocation_cwd=request.cwd,
-                    agent_store=agent_store, request_store=request_store,
+                    agent_store=agent_store, request_store=request_store, run_id=sync_run_id,
                 )
                 return result(response), (authority, request_store, callback_session_id)
         except Exception as exc:
             return result(cli._task_error_payload(exc, help_command="vibe agent run --help")), None
 
-    response, submission = await run_sync(enqueue)
+    from core.runtime_work import land_step
+
+    cancelled = False
+    if args.sync_run:
+        # The client can disappear during enqueue. Land that admission before
+        # handing off its callback, rather than orphaning a thread's committed Run.
+        landed, cancelled = await land_step(run_sync(enqueue))
+        response, submission = landed.result()
+    else:
+        response, submission = await run_sync(enqueue)
     if submission is None or not args.sync_run:
+        if cancelled:
+            raise asyncio.CancelledError
         return response
 
     from vibe import cli
@@ -390,15 +414,40 @@ async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dic
 
     authority, request_store, callback_session_id = submission
     run_id = response["payload"]["run"]["id"]
+    terminal_read = False
+
+    def on_terminal_read():
+        nonlocal terminal_read
+        terminal_read = True
+
     try:
         # A synchronous CLI waits on this same request, but never holds a worker
         # while sleeping, so it cannot starve the turns it is waiting to finish.
         with invocation_authority(authority):
-            run_payload = await cli._wait_for_run_result(request_store, run_id, wait_timeout=args.wait_timeout)
+            if cancelled:
+                raise asyncio.CancelledError
+            run_payload = await cli._wait_for_run_result(
+                request_store, run_id, wait_timeout=args.wait_timeout, on_terminal_read=on_terminal_read,
+            )
             if callback_session_id and cli._sync_run_detached(run_payload):
                 await asyncio.to_thread(request_store.mark_callback_pending, run_id)
                 run_payload["callback_status"] = "pending"
         response["payload"]["run"] = run_payload
         return response
+    except asyncio.CancelledError:
+        # A disconnected/cancelled waiter has detached just like a timeout. If
+        # it already read the terminal result, its receipt thread can still mark
+        # the pair answered: deliver that requested sync return even on success.
+        # Otherwise keep opt-in/failure-only routing. Cleanup must land despite
+        # another cancellation while the handoff write is in flight.
+        if callback_session_id:
+            landed, _ = await land_step(asyncio.to_thread(
+                request_store.mark_callback_pending, run_id, deliver_result=terminal_read,
+            ))
+            try:
+                landed.result()
+            except Exception:
+                logger.warning("Failed to hand off cancelled sync Run %s", run_id, exc_info=True)
+        raise
     except Exception as exc:
         return result(await asyncio.to_thread(cli._task_error_payload, exc, help_command="vibe agent run --help"))

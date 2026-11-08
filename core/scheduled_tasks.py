@@ -3134,6 +3134,12 @@ class TaskExecutionStore:
             count += 1
         return count
 
+    def record_sync_return(self, run_id: str) -> None:
+        if self._sqlite is not None:
+            from storage.session_delegations import acknowledge_sync_return
+
+            acknowledge_sync_return(self._sqlite.engine, run_id)
+
     def list_pending_callbacks(
         self,
         *,
@@ -3373,9 +3379,9 @@ class TaskExecutionStore:
             write_atomic(path, json.dumps(payload, indent=2))
             return
 
-    def mark_callback_pending(self, run_id: str) -> None:
+    def mark_callback_pending(self, run_id: str, *, deliver_result: bool = False) -> None:
         if self._sqlite is not None:
-            self._sqlite.mark_callback_pending(run_id)
+            self._sqlite.mark_callback_pending(run_id, deliver_result=deliver_result)
             return
         now = _utc_now_iso()
         for state in ("pending", "processing", "completed"):
@@ -3388,6 +3394,8 @@ class TaskExecutionStore:
                 payload = {"id": run_id}
             if not isinstance(payload, dict):
                 payload = {"id": run_id}
+            if deliver_result and isinstance(payload.get("metadata"), dict):
+                payload["metadata"].pop(AGENT_RUN_CALLBACK_MODE_METADATA_KEY, None)
             payload.update(
                 {
                     "callback_status": "pending",
@@ -4226,6 +4234,9 @@ class ScheduledTaskService:
         self.controller = controller
         self.store = store or ScheduledTaskStore()
         self.request_store = request_store or TaskExecutionStore()
+        # Controller CLI waiters publish immutable snapshots for off-loop scans.
+        # They vanish on shutdown; only a read terminal result answers the pair durably.
+        self.sync_waiting_run_ids: frozenset[str] = frozenset()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.scheduler.add_listener(
             self._on_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR
@@ -5110,6 +5121,8 @@ class ScheduledTaskService:
             raise RuntimeError(
                 "scheduled task service runtime work generation is already registered"
             )
+        from core.handlers.delegation_safety_net import DelegationSafetyNet
+
         supervisor = self.controller.runtime_work_supervisor
         registered: list[RuntimeWorkRegistrationToken] = []
         try:
@@ -5120,10 +5133,15 @@ class ScheduledTaskService:
                 RuntimeWorkLane.VAULT_CALLBACKS,
                 RuntimeWorkLane.FAILURE_NOTICES,
                 RuntimeWorkLane.STALE_RUNS,
+                RuntimeWorkLane.DELEGATION_SAFETY_NET,
             ):
+                handler = (
+                    DelegationSafetyNet(self) if lane is RuntimeWorkLane.DELEGATION_SAFETY_NET
+                    else _ScheduledRuntimeWorkHandler(self, lane)
+                )
                 token = supervisor.register(
                     lane,
-                    _ScheduledRuntimeWorkHandler(self, lane),
+                    handler,
                 )
                 self._runtime_work_tokens[lane] = token
                 registered.append(token)
@@ -11707,6 +11725,7 @@ class ScheduledTaskService:
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
                 "source_session_id": (metadata or {}).get("source_session_id"),
+                "source_session_title": (metadata or {}).get("source_session_title"),
                 "vault_request_type": (metadata or {}).get("vault_request_type"),
                 "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),

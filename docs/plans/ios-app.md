@@ -100,7 +100,7 @@ sit at least partly in WebKit's `contenteditable` handling, which every
 | Composer | `@` / `#` pickers, Agent and model menu, attachment previews and upload, draft persistence, voice pipeline | Text entry, send and stop, hold-to-talk button with haptics, attachments button, keyboard layout (section 5) |
 | Voice capture and dictation | `getUserMedia`, AudioWorklet, WAV segments, realtime socket (unchanged) | Answer the media-capture permission; `NSMicrophoneUsageDescription` |
 | Notifications | Inbox, categories, preferences UI | APNs registration, Notification Service Extension, tap routing |
-| Sign-in | Existing instance OIDC and consent after selection | Bundled avibe.bot email OTP and current-device account lifecycle |
+| Sign-in | Existing instance OIDC and consent after selection | Bundled avibe.bot email OTP or password and current-device account lifecycle |
 | Instance choice | Runtime authorization remains server-owned | Account-scoped owned/shared/Organization list, offline recovery, switch |
 | Reach (Phase 2) | Deep-link targets | App Intents, widgets, Share extension, HealthKit (section 10) |
 
@@ -464,7 +464,8 @@ their top-level `avibe-app://bundle` document receives the narrow
 the app-bundled mobile build directory, giving Vite's ES modules and assets one
 fixed local origin.
 A native-owned hidden WebView loads the public auth configuration from the
-known control-plane origin, sends and verifies the Supabase email OTP, and
+known control-plane origin, sends and verifies the Supabase email OTP (or, for
+an account that set an avibe.bot password, runs Supabase's password grant), and
 posts the transient access/refresh pair to the existing `/auth/callback`.
 That callback remains the owner of Supabase `setSession`, invitation activation,
 membership email synchronization, and `avibe_session`.

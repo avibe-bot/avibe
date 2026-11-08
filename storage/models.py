@@ -231,6 +231,23 @@ agent_sessions = Table(
     # The Sessions projected running, for the startup projection repair (migration 0068).
     Index("ix_agent_sessions_agent_status", "agent_status", "status"),
     Index("ix_agent_sessions_visibility", "visibility"),
+    Index(
+        "ix_agent_sessions_status_visibility_activity",
+        "status",
+        "visibility",
+        "last_active_at",
+        "created_at",
+        "id",
+    ),
+    Index(
+        "ix_agent_sessions_scope_status_visibility_activity",
+        "scope_id",
+        "status",
+        "visibility",
+        "last_active_at",
+        "created_at",
+        "id",
+    ),
     Index("ix_agent_sessions_scope_status_activity", "scope_id", "status", "last_active_at", "created_at", "id"),
     Index(
         "ix_agent_sessions_scope_status_pinned_activity",
@@ -321,6 +338,7 @@ run_definitions = Table(
         sqlite_where=text("deleted_at is null and retired_at is null"),
     ),
     Index("ix_run_definitions_session", "session_id"),
+    Index("ix_run_definitions_session_pending", "session_id", "enabled", "deleted_at", "retired_at"),
     Index("ix_run_definitions_agent", "agent_name"),
     Index("ix_run_definitions_updated", "updated_at"),
 )
@@ -375,9 +393,13 @@ agent_runs = Table(
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
+    Index("ix_agent_runs_session_status", "session_id", "status"),
+    Index("ix_agent_runs_sender_status", "source_kind", "source_actor", "status"),
+    Index("ix_agent_runs_pair_callback", "session_id", "callback_session_id", "callback_status"),
     # Every ownership arm must be indexed or a Session's OR filter scans history.
     Index("ix_agent_runs_callback_session", "callback_session_id"),
     Index("ix_agent_runs_source_actor", "source_kind", "source_actor"),
+    Index("ix_agent_runs_source_session", "source_kind", "session_id", "source_actor"),
     Index(
         "uq_agent_runs_delivery",
         "delivery_id",
@@ -408,6 +430,20 @@ agent_runs = Table(
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
     # every state change, so it is the single column that scan filters on.
     Index("ix_agent_runs_updated", "updated_at"),
+)
+
+session_delegations = Table(
+    "session_delegations",
+    metadata,
+    Column("sender_session_id", String, primary_key=True),
+    Column("recipient_session_id", String, primary_key=True),
+    Column("message_id", String, nullable=False),
+    Column("run_id", String, nullable=False),
+    Column("state", String, nullable=False),
+    Column("notice_run_id", String, nullable=True),
+    Column("updated_at", String, nullable=False),
+    Index("ix_session_delegations_pending", "state", "run_id"),
+    Index("ix_session_delegations_sender_state", "sender_session_id", "state"),
 )
 
 # Backwards-compatible Python aliases for legacy callers. The physical table

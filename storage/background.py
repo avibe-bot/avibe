@@ -6087,7 +6087,9 @@ class SQLiteBackgroundTaskStore:
             if result.rowcount:
                 _defer_run_ids_updated_from_connection(conn, [run_id])
 
-    def mark_callback_pending(self, run_id: str, *, updated_at: Optional[str] = None) -> None:
+    def mark_callback_pending(
+        self, run_id: str, *, updated_at: Optional[str] = None, deliver_result: bool = False,
+    ) -> None:
         now = updated_at or _utc_now_iso()
         values: dict[str, Any] = {
             "callback_status": "pending",
@@ -6095,6 +6097,13 @@ class SQLiteBackgroundTaskStore:
             "callback_completed_at": None,
             "updated_at": now,
         }
+        if deliver_result:
+            # A disconnected sync reader can have committed its receipt already.
+            # Recover its requested full return, preserving all other metadata
+            # (including authority) in the same transaction as callback handoff.
+            metadata = case((func.json_valid(agent_runs.c.metadata_json) == 1,
+                             agent_runs.c.metadata_json), else_="{}")
+            values["metadata_json"] = func.json_remove(metadata, "$.callback_mode")
         with run_update_event_transaction(self.engine) as conn:
             result = conn.execute(
                 update(agent_runs).where(agent_runs.c.id == run_id).values(**values)

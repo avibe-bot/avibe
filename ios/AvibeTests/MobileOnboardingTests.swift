@@ -537,6 +537,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "session.bootstrap",
                 "auth.requestOtp",
                 "auth.verifyOtp",
+                "auth.signInWithPassword",
                 "auth.verifySecondFactor",
                 "auth.verifyPasskey",
                 "session.refresh",
@@ -549,6 +550,152 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertThrowsError(
             try MobileBridgeRequest.parse(["method": "auth.fetch"])
         )
+    }
+
+    func testBundledPageSignsInWithThePasswordThroughTheBridge() async throws {
+        let signedOutTransport = FakeMobileAuthTransport()
+        let loginTransport = FakeMobileAuthTransport()
+        let signedIn = snapshot(accountID: "account-1")
+        loginTransport.signInWithPasswordHandler = { _, _ in
+            MobilePasswordSignInDiscovery(
+                discovery: .signedIn(signedIn),
+                weakPasswordReasons: nil
+            )
+        }
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedOutTransport, loginTransport]
+            )
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer {
+            window.isHidden = true
+        }
+
+        let welcome = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const button = document.querySelector("main button");
+              return button instanceof HTMLButtonElement && !button.disabled;
+            })()
+            """
+        }
+        XCTAssertTrue(welcome)
+        let openedEmail = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const button = document.querySelector("main button");
+              if (!(button instanceof HTMLButtonElement) || button.disabled) {
+                return false;
+              }
+              button.click();
+              return true;
+            })()
+            """
+        ) as? Bool
+        XCTAssertEqual(openedEmail, true)
+        let emailReady = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.querySelector("#mobile-login-email") !== null
+            """
+        }
+        XCTAssertTrue(emailReady)
+        let enteredEmail = try await replaceText(
+            "alex@example.com",
+            in: webView,
+            selector: "#mobile-login-email"
+        )
+        XCTAssertTrue(enteredEmail)
+
+        // "Sign in with password" is the email form's one secondary button.
+        let openedPassword = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const buttons = document.querySelectorAll("form button[type=button]");
+              const button = buttons[0];
+              if (buttons.length !== 1 || !(button instanceof HTMLButtonElement) || button.disabled) {
+                return false;
+              }
+              button.click();
+              return true;
+            })()
+            """
+        ) as? Bool
+        XCTAssertEqual(openedPassword, true)
+        let passwordReady = try await waitForJavaScriptValue(in: webView) {
+            """
+            (() => {
+              const password = document.querySelector("#mobile-login-password");
+              const username = document.querySelector("input[autocomplete=username]");
+              return password instanceof HTMLInputElement
+                && password.type === "password"
+                && password.autocomplete === "current-password"
+                && username instanceof HTMLInputElement
+                && username.form === password.form
+                && username.readOnly
+                && username.value === "alex@example.com";
+            })()
+            """
+        }
+        XCTAssertTrue(passwordReady)
+        let enteredPassword = try await replaceText(
+            "correct horse battery",
+            in: webView,
+            selector: "#mobile-login-password"
+        )
+        XCTAssertTrue(enteredPassword)
+        let submitted = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const button = document.querySelector("form button[type=submit]");
+              if (!(button instanceof HTMLButtonElement) || button.disabled) {
+                return false;
+              }
+              button.click();
+              return true;
+            })()
+            """
+        ) as? Bool
+        XCTAssertEqual(submitted, true)
+
+        let reachedInstances = try await waitForJavaScriptValue(in: webView) {
+            """
+            document.body.textContent.includes("Personal Avibe")
+            """
+        }
+        XCTAssertTrue(reachedInstances)
+        XCTAssertEqual(loginTransport.passwordAttempts.map(\.email), ["alex@example.com"])
+        XCTAssertEqual(
+            loginTransport.passwordAttempts.map(\.password),
+            ["correct horse battery"]
+        )
+    }
+
+    func testBridgeRequestDescriptionsNameParametersWithoutValues() throws {
+        let request = try MobileBridgeRequest.parse([
+            "method": "auth.signInWithPassword",
+            "params": [
+                "email": "alex@example.com",
+                "password": "correct horse battery",
+            ],
+        ])
+        XCTAssertEqual(request.method, .authSignInWithPassword)
+        var dumped = ""
+        dump(request, to: &dumped)
+        for rendered in [
+            String(describing: request),
+            String(reflecting: request),
+            "\(request)",
+            dumped,
+        ] {
+            XCTAssertFalse(rendered.contains("correct horse battery"), rendered)
+            XCTAssertFalse(rendered.contains("alex@example.com"), rendered)
+            XCTAssertTrue(rendered.contains("password"), rendered)
+        }
     }
 
     func testBundledOriginAndResourcePathStayClosed() throws {
@@ -1113,6 +1260,121 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(transport.proofs.last?.codeProof?.1, "287082")
         XCTAssertEqual(store.identifier, storeIdentifier)
         XCTAssertFalse(transport.invalidated)
+        XCTAssertEqual(try coordinator.selectInstance(id: instance.id), instance)
+    }
+
+    func testPasswordSignInRotatesTheStoreAfterEveryFailureAndKeepsItOnSuccess() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let rejected = FakeMobileAuthTransport()
+        let endedSession = FakeMobileAuthTransport()
+        endedSession.signInWithPasswordHandler = { _, _ in
+            throw MobileAccountError.signedOut
+        }
+        let accepted = FakeMobileAuthTransport()
+        accepted.signInWithPasswordHandler = { _, _ in
+            MobilePasswordSignInDiscovery(
+                discovery: .secondFactorRequired(
+                    MobileSecondFactorRequirement(
+                        email: nil,
+                        gate: .challenge,
+                        methods: [.totp]
+                    )
+                ),
+                weakPasswordReasons: [.pwned]
+            )
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [rejected, endedSession, accepted]
+        )
+        coordinator.activateAccountSurface()
+        var storeIdentifier = store.identifier
+
+        // The page requires only a password; native repeats the email check.
+        for (email, password) in [
+            ("alex@example.com", ""),
+            ("alex@", "correct-horse"),
+        ] {
+            do {
+                _ = try await coordinator.signInWithPassword(
+                    email: email,
+                    password: password
+                )
+                XCTFail("Expected a malformed request for \(email)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error, .invalidRequest)
+            }
+        }
+        XCTAssertTrue(rejected.passwordAttempts.isEmpty)
+        XCTAssertEqual(store.identifier, storeIdentifier)
+
+        do {
+            _ = try await coordinator.signInWithPassword(
+                email: " alex@example.com ",
+                password: " correct horse "
+            )
+            XCTFail("Expected the rejected password to fail")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .invalidCredentials)
+        }
+        XCTAssertEqual(rejected.passwordAttempts.map(\.email), ["alex@example.com"])
+        // A password is never trimmed.
+        XCTAssertEqual(rejected.passwordAttempts.map(\.password), [" correct horse "])
+        XCTAssertTrue(rejected.invalidated)
+        XCTAssertNotEqual(store.identifier, storeIdentifier)
+        storeIdentifier = store.identifier
+
+        // The session's 401 is the explicit signed-out answer; it rotates too.
+        let ended = try await coordinator.signInWithPassword(
+            email: "alex@example.com",
+            password: "correct-horse"
+        )
+        XCTAssertEqual(
+            ended,
+            MobilePasswordSignInResult(state: .signedOut, weakPasswordReasons: nil)
+        )
+        XCTAssertNil(ended.jsonObject["weak_password"])
+        XCTAssertTrue(endedSession.invalidated)
+        XCTAssertNotEqual(store.identifier, storeIdentifier)
+        storeIdentifier = store.identifier
+
+        let owed = try await coordinator.signInWithPassword(
+            email: "alex@example.com",
+            password: "correct-horse"
+        )
+        XCTAssertEqual(
+            owed,
+            MobilePasswordSignInResult(
+                state: .twoFactorRequired(
+                    MobileSecondFactorRequirement(
+                        email: "alex@example.com",
+                        gate: .challenge,
+                        methods: [.totp]
+                    )
+                ),
+                weakPasswordReasons: [.pwned]
+            )
+        )
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(owed.jsonObject))
+        XCTAssertEqual(owed.jsonObject["status"] as? String, "twoFactorRequired")
+        XCTAssertEqual(
+            owed.jsonObject["weak_password"] as? NSDictionary,
+            ["reasons": ["pwned"]]
+        )
+        XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertFalse(accepted.invalidated)
+
+        // The second factor continues on the same store, unchanged.
+        let proved = snapshot(accountID: "account-1")
+        accepted.verifySecondFactorHandler = { _ in .signedIn(proved) }
+        let state = try await coordinator.verifySecondFactor(
+            method: .totp,
+            code: "287082"
+        )
+        XCTAssertEqual(state, .signedIn(snapshot: proved, selectedInstanceID: nil))
+        XCTAssertEqual(store.identifier, storeIdentifier)
         XCTAssertEqual(try coordinator.selectInstance(id: instance.id), instance)
     }
 
@@ -1904,6 +2166,13 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         throw MobileAccountError.secondFactorInvalid
     }
     private(set) var proofs: [MobileSecondFactorProof] = []
+    var signInWithPasswordHandler: (
+        String,
+        String
+    ) async throws -> MobilePasswordSignInDiscovery = { _, _ in
+        throw MobileAccountError.invalidCredentials
+    }
+    private(set) var passwordAttempts: [(email: String, password: String)] = []
     var logoutError: Error?
     var logoutHandler: () async throws -> Void = {}
     var requestOTPHandler: (String) async throws -> Int = { _ in 60 }
@@ -1932,6 +2201,14 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
             return .signedIn(session)
         }
         return .signedIn(try await verifyOTPHandler(email, code))
+    }
+
+    func signInWithPassword(
+        email: String,
+        password: String
+    ) async throws -> MobilePasswordSignInDiscovery {
+        passwordAttempts.append((email, password))
+        return try await signInWithPasswordHandler(email, password)
     }
 
     func fetchSession() async throws -> MobileSessionDiscovery? {
