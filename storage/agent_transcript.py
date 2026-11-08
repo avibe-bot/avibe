@@ -75,6 +75,7 @@ import asyncio
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from sqlalchemy import and_, bindparam, func, or_, select, text
@@ -376,6 +377,9 @@ class SQLiteTranscriptStore:
             row_metadata_for_write = dict(row_metadata)
             if origin.turn_id:
                 row_metadata_for_write["turn_id"] = origin.turn_id
+            hosted_media = _register_images(conn, origin.scope_id, session_id, stored_message)
+            if hosted_media:
+                row_metadata_for_write["hosted_media"] = hosted_media
             row = messages_service.append(
                 conn,
                 scope_id=origin.scope_id,
@@ -392,7 +396,6 @@ class SQLiteTranscriptStore:
                 metadata=row_metadata_for_write or None,
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
-            _register_images(conn, origin.scope_id, session_id, stored_message)
             return ContextEntry(
                 session_id, seq, "response", row["id"], message=replace(stored_message, transcript_row_id=row["id"]),
                 payload=model, created_at=_epoch(row["created_at"]),
@@ -511,6 +514,7 @@ class SQLiteTranscriptStore:
     ) -> ContextEntry:
         origin = _turn_origin(conn, session_id, agent_name, turn_id)
         seq = _next_context_seq(conn, session_id)
+        hosted_media = _register_images(conn, origin.scope_id, session_id, message) if message is not None else {}
         row = agent_events_service.append(
             conn,
             scope_id=origin.scope_id,
@@ -518,6 +522,7 @@ class SQLiteTranscriptStore:
             platform=origin.platform,
             event_type=_EVENT_TYPE_BY_KIND[kind],
             content=payload,
+            metadata={"hosted_media": hosted_media} if hosted_media else None,
             agent_name=origin.agent_name,
             backend=origin.backend,
             turn_id=origin.turn_id,
@@ -525,8 +530,6 @@ class SQLiteTranscriptStore:
             source="agent",
             context_seq=seq,
         )
-        if message is not None:
-            _register_images(conn, origin.scope_id, session_id, message)
         if kind == "compaction":
             _record_digest(conn, session_id, row["id"], row["created_at"], payload)
         return ContextEntry(
@@ -560,8 +563,12 @@ async def _settle(task: asyncio.Future[Any]) -> None:
 
 def _register_images(
     conn: Connection, scope_id: Optional[str], session_id: str, message: AssistantMessage | ToolResultMessage
-) -> None:
-    """Register each generated image ``message`` names, in its row's transaction (module docstring)."""
+) -> dict[str, str]:
+    """Register generated images atomically and retain their exact media capabilities.
+
+    A projection must use this registration, not a later registration of a file
+    reusing the same path. Tokens are compact display metadata, not model context.
+    """
 
     # WebFetchRecord shares the hosted envelope, not search/image fields.
     # Narrow before entering media registration so page results can commit.
@@ -571,17 +578,19 @@ def _register_images(
     elif message.hosted is not None and isinstance(message.hosted.record, HostedRecord):
         records = [message.hosted.record]
     else:
-        return
+        return {}
+    registered = {}
     for image in (image for record in records for image in record.images or ()):
-        media_service.register(
+        registered[image.path] = media_service.register(
             conn,
             scope_id=scope_id,
             session_id=session_id,
             kind="image",
             source=media_service.AGENT_CONTEXT_SOURCE,
-            local_path=image.path,
+            local_path=str(Path(image.path).resolve()),
             content_type=image.mime,
         )
+    return registered
 
 
 def _own_bound(conn: Connection, session_id: str) -> Optional[int]:

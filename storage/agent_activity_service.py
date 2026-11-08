@@ -1,9 +1,12 @@
 """Turn-grouped agent activity for the Web Chat Activity panel.
 
-Composes the two persisted trace sources into per-turn groups:
+Composes persisted activity into per-turn groups:
 
-* interim ``assistant`` messages (``messages`` table, ``type='assistant'``), and
-* activity and migrated terminal events from ``agent_events``.
+* interim ``assistant`` messages (``messages`` table, ``type='assistant'``),
+* tool steps projected from marked Vibey responses and their canonical results,
+  using the same projection as live publication (``storage.tool_activity_service``),
+* legacy/backend traces and migrated terminal events from ``agent_events``.
+  Transitional traces link to their canonical response/call and deduplicate.
 
 A *turn* ends at its durable Turn row (``session_turns``), the IM
 ``silent_terminal`` trace, or a terminal row (``error`` / backend-failure
@@ -47,7 +50,8 @@ from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import AssistantMessage, message_from_dict
 from core.hosted_activity import native_activities
 from core.backend_failure import is_backend_failure_notification
-from storage import agent_events_service, messages_service
+from core.tool_activity import ACTIVITY_FIELDS, SOURCE_KEY, linked_step
+from storage import agent_events_service, messages_service, tool_activity_service
 from storage.models import message_deliveries, messages, session_turns
 from vibe.message_types import (
     PROMOTED_FROM_KEY,
@@ -233,6 +237,9 @@ def _event_anchor_micros(event: dict[str, Any], ts: datetime) -> int:
     names that row (``precedes_message_id``) and belongs wherever that row does.
     """
     metadata = event.get("metadata") or {}
+    response_id = event.get("response_id")
+    if isinstance(response_id, str) and response_id:
+        return _emit_micros(response_id, ts)
     precedes = metadata.get("precedes_message_id")
     if isinstance(precedes, str) and precedes:
         return _emit_micros(precedes, ts)
@@ -246,6 +253,9 @@ def _event_anchor_micros(event: dict[str, Any], ts: datetime) -> int:
 def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
     """The event's place in the timeline: a hosted call happened before the text of
     its response, so it sorts just ahead of that row."""
+    activity = (event.get("content") or {}).get("activity") or {}
+    if isinstance(activity, dict) and isinstance(activity.get("order_micros"), int):
+        return activity["order_micros"]
     anchor = _event_anchor_micros(event, ts)
     precedes = (event.get("metadata") or {}).get("precedes_message_id")
     return anchor - 1 if isinstance(precedes, str) and precedes else anchor
@@ -314,7 +324,8 @@ def _project_native_traces(
 
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
-    chronologically-ordered list of classified items."""
+    chronologically-ordered list of classified items, projecting marked canonical
+    tool calls and retaining legacy/non-Vibey trace readers."""
     msgs = messages_service.list_session_messages(
         conn,
         session_id=session_id,
@@ -330,6 +341,16 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         newest_first=True,
     )
     events = _project_native_traces(conn, session_id, events, tuple(str(msg["id"]) for msg in msgs))
+    projection_ids = {str(msg["id"]) for msg in msgs}
+    # Validate bounded transitional aliases even when their source just fell out
+    # of the message window. Otherwise a late physical trace would reappear with
+    # an evt_ identity here and disappear again when that redundant row expires.
+    projection_ids.update(
+        event["metadata"][SOURCE_KEY]["response_id"] for event in events if linked_step(event.get("metadata"))
+    )
+    events = tool_activity_service.merge_steps(events, tool_activity_service.response_steps(
+        conn, session_id=session_id, response_ids=projection_ids,
+    ))
     message_ids = tuple(
         str(message["id"])
         for message in msgs
@@ -458,6 +479,8 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     # dropped too.
     oldest_msg_sort = min((item["sort"] for item in items), default=None)
     for event in events:
+        facts = (event.get("content") or {}).get("activity")
+        facts = facts if isinstance(facts, dict) else {}
         event_ts = _parse_ts(event.get("created_at"))
         event_sort = _event_emit_micros(event, event_ts)
         # Window membership by the row the event belongs to, never by its sort key:
@@ -504,6 +527,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 # A hosted-tool call carries its card (``core.hosted_activity``); every
                 # other tool call is its text alone.
                 "hosted": ((event.get("content") or {}).get("hosted") if include_text else None),
+                **{key: value for key, value in facts.items() if key in ACTIVITY_FIELDS},
             }
         )
     for turn in conn.execute(
@@ -543,9 +567,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "terminal_status": _outcome_status(turn["terminal_outcome"]),
             }
         )
-    # Sort by decoded emission microsecond (true cross-table order); the phase rank
-    # is a fallback for undecodable ids, and the id a final deterministic tiebreak.
-    items.sort(key=lambda item: (item["sort"], item["rank"], item["id"]))
+    # Canonical steps supply their response anchor and block order explicitly;
+    # legacy rows retain decoded emission order. Rank only breaks phase ties.
+    items.sort(key=lambda item: (item["sort"], item["rank"], item.get("order_index", 0), item["id"]))
     return items
 
 
@@ -589,6 +613,7 @@ def _make_group(
                 "created_at": item["created_at"],
                 # Migrated event ids are hashes; only storage has the original clock.
                 "order_micros": item["sort"],
+                **{key: item[key] for key in ACTIVITY_FIELDS if key in item},
                 # Omitted entirely when there is nothing to carry, so an ordinary
                 # row keeps the wire shape it always had.
                 **(

@@ -35,6 +35,7 @@ import time
 import traceback
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
@@ -99,6 +100,7 @@ from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutco
 from core.citations import CitationBundle, register_citations, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, terminal_output_for
+from core.tool_activity import PROJECTION_KEY, PROJECTION_VERSION, SOURCE_KEY, relative_to as _relative_to, source_link
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
@@ -151,23 +153,6 @@ _MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
-def _relative_to(cwd: str) -> Callable[[str], str]:
-    """Tool-call paths relative to the run's cwd, as the Claude backend shows them."""
-
-    def relative(path: str) -> str:
-        # A relative argument names a path under the run's cwd, as the tool resolves it.
-        absolute = os.path.abspath(os.path.join(cwd, os.path.expanduser(path)) if cwd else os.path.expanduser(path))
-        if not cwd:
-            return absolute
-        try:
-            shown = os.path.relpath(absolute, cwd)
-        except ValueError:  # Windows: another drive has no relative path
-            return absolute
-        return absolute if shown.startswith(os.path.join(os.pardir, os.pardir)) else shown
-
-    return relative
-
-
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
 _NO_OUTPUT_CAP = 1 << 30
 #: A failure's diagnostic in the service log: one redacted line, bounded, never a payload.
@@ -210,6 +195,7 @@ class _Run:
     errors: list[AgentError] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
+    tool_responses: dict[str, str] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
     # The loop's decision for each response whether it replies (``has_reply``), committed with its row.
@@ -1123,8 +1109,17 @@ class VibeyAgent(BaseAgent):
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):
+            # Store callbacks run in the producer, potentially several responses
+            # ahead of this bounded event consumer. Bind tool ids here, in event
+            # order, so a later response reusing an id cannot steal an earlier
+            # ToolStarted/ToolFinished (or its compatibility trace).
+            message = run.responses.get(event.message_id)
+            if message is not None:
+                run.tool_calls.update({call.id: call for call in message.tool_calls})
+                run.tool_responses.update({call.id: event.message_id for call in message.tool_calls})
             # A response's native hosted calls show before the text that reads their results.
             await self._emit_native_hosted(run, event.message_id)
+            await self.controller.message_dispatcher.publish_tool_projection(run.request.context, event.message_id, unhosted_only=True)
             if event.final:
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
@@ -1134,9 +1129,26 @@ class VibeyAgent(BaseAgent):
                 await self._emit_narration(run, event.message_id)
         elif isinstance(event, ToolStarted):
             run.tool_started[event.tool_call_id] = time.monotonic()
+            response_id = run.tool_responses.get(event.tool_call_id)
+            if response_id:
+                await self.controller.message_dispatcher.publish_tool_projection(
+                    run.request.context, response_id, call_id=event.tool_call_id,
+                    facts={"started_at": datetime.now(timezone.utc).isoformat()}, unhosted_only=True,
+                )
             await self._emit_tool_started(run, event)
         elif isinstance(event, ToolFinished):
-            await self._emit_proxy_hosted(run, event)
+            started = run.tool_started.pop(event.tool_call_id, None)
+            duration = int((time.monotonic() - started) * 1000) if started is not None else None
+            response_id = run.tool_responses.get(event.tool_call_id)
+            if response_id:
+                await self.controller.message_dispatcher.publish_tool_projection(
+                    run.request.context, response_id, call_id=event.tool_call_id,
+                    facts={"duration_ms": duration, "ended_at": datetime.now(timezone.utc).isoformat()}, publish=False,
+                )
+            await self._emit_proxy_hosted(run, event, duration=duration)
+            call = run.tool_calls.get(event.tool_call_id)
+            if response_id and (call is None or call.name not in HOSTED_RESULT_TOOLS):
+                await self.controller.message_dispatcher.publish_tool_projection(run.request.context, response_id, call_id=event.tool_call_id)
         elif isinstance(event, AgentError):
             run.errors.append(event)
         elif isinstance(event, RunEnded):
@@ -1440,6 +1452,16 @@ class VibeyAgent(BaseAgent):
                 render_result=suite.render_recovered,
                 wait_running=wait_running,
             )
+        # Recovery commits results without ToolFinished events. For the live
+        # owner, publish their settled projection now, before a terminal (or an
+        # automatic continuation) can clear/reuse the browser's activity buffer.
+        # Startup recovery with no live owner remains a durable read-only update.
+        run = self._run_for(session_id, owner_turn)
+        if run is not None:
+            for owner, call in open_calls:
+                await self.controller.message_dispatcher.publish_tool_projection(
+                    run.request.context, owner.row_id, call_id=call.id,
+                )
         return True
 
     def _work_state(self, turn_id: Optional[str]) -> str:
@@ -1988,7 +2010,10 @@ class VibeyAgent(BaseAgent):
             await emit_output(
                 self.controller,
                 run.request.context,
-                ToolActivity(line, status_label=line, hosted=activity.to_payload()),
+                ToolActivity(
+                    line, status_label=line, hosted=activity.to_payload(),
+                    output=self._tool_output(run, activity.call_id, response_id=activity.response_id),
+                ),
             )
         except Exception:
             logger.exception("Vibey could not show hosted call %s", activity.call_id)
@@ -1998,13 +2023,18 @@ class VibeyAgent(BaseAgent):
         if message is None:
             return
         names, _states = await self._source_display()
-        for activity in native_activities(message, source_names=names.get, response_id=row_id):
+        activities = native_activities(message, source_names=names.get, response_id=row_id)
+        source_ids = {activity.source_id for activity in activities if activity.source_id}
+        if source_ids:
+            await self.controller.message_dispatcher.publish_tool_projection(run.request.context, row_id, facts={
+                "source_names": {key: names[key] for key in source_ids if key in names},
+            }, publish=False)
+        for activity in activities:
             await self._emit_hosted(run, activity)
 
-    async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:
+    async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished, *, duration: int | None = None) -> None:
         """A proxied hosted call, once its result is committed: the record its executor returned."""
         call = run.tool_calls.get(event.tool_call_id)
-        started = run.tool_started.pop(event.tool_call_id, None)
         if call is None or call.name not in HOSTED_RESULT_TOOLS:
             return
         try:
@@ -2015,20 +2045,24 @@ class VibeyAgent(BaseAgent):
         if result is None or result.hosted is None:
             # A hosted-named call that ended without a record (a plain error result):
             # it still shows, as the tool line its start would have drawn.
-            await self._emit_tool_line(run, call.name, dict(call.arguments))
+            await self._emit_tool_line(run, call.name, dict(call.arguments), call_id=call.id)
             return
-        duration = int((time.monotonic() - started) * 1000) if started is not None else None
         names, states = await self._source_display(call.name)
-        await self._emit_hosted(
-            run,
-            proxy_activity(
-                call,
-                result.hosted,
-                source_names=names.get,
-                source_state=states.get if states is not None else None,
-                duration_ms=duration,
-            ),
+        activity = proxy_activity(
+            call, result.hosted, source_names=names.get, source_state=states.get if states is not None else None,
+            duration_ms=duration,
         )
+        response_id = run.tool_responses.get(call.id)
+        if response_id:
+            source_ids = {
+                activity.source_id, activity.fallback_source_id,
+                *(attempt.source_id for attempt in activity.attempts or ()),
+            } - {None}
+            await self.controller.message_dispatcher.publish_tool_projection(run.request.context, response_id, call_id=call.id, facts={
+                "source_names": {key: names[key] for key in source_ids if key in names},
+                "source_states": {key: states[key] for key in source_ids if key in states} if states is not None else None,
+            }, publish=False)
+        await self._emit_hosted(run, activity)
 
     def _committed_tool_result(self, event_id: str) -> Optional[ToolResultMessage]:
         """The tool result a ``ToolFinished`` names: one row, by primary key."""
@@ -2049,9 +2083,16 @@ class VibeyAgent(BaseAgent):
             # A proxied hosted call shows once, as its card, when its result lands.
             return
         call = run.tool_calls.get(event.tool_call_id)
-        await self._emit_tool_line(run, event.name, dict(call.arguments) if call is not None else {})
+        await self._emit_tool_line(run, event.name, dict(call.arguments) if call is not None else {}, call_id=event.tool_call_id)
 
-    async def _emit_tool_line(self, run: _Run, name: str, arguments: dict) -> None:
+    @staticmethod
+    def _tool_output(run: _Run, call_id: str, *, response_id: str | None = None) -> MessageOutput | None:
+        owner = response_id or run.tool_responses.get(call_id)
+        return MessageOutput(
+            completes_run=False, records_run_output=False, metadata={SOURCE_KEY: source_link(owner, call_id)},
+        ) if owner else None
+
+    async def _emit_tool_line(self, run: _Run, name: str, arguments: dict, *, call_id: str | None = None) -> None:
         formatter = self._get_formatter(run.request.context)
         relative = _relative_to(run.cwd)
         try:
@@ -2061,6 +2102,7 @@ class VibeyAgent(BaseAgent):
                 ToolActivity(
                     formatter.format_toolcall(name, arguments, get_relative_path=relative),
                     status_label=formatter.format_toolcall_label(name, arguments, get_relative_path=relative),
+                    output=self._tool_output(run, call_id) if call_id else None,
                 ),
             )
         except Exception:
@@ -2071,6 +2113,8 @@ class VibeyAgent(BaseAgent):
         current = getattr(getattr(run, "router", None), "current", None)
         routes = getattr(getattr(current, "endpoint", None), "hosted_tools", {})
         return {
+            **({PROJECTION_KEY: {"version": PROJECTION_VERSION, "backend": BACKEND, "cwd": run.cwd,
+                                 "platform": run.request.context.platform, "language": self._language()}} if run else {}),
             **response_recovery_metadata(message, (
                 tool for tool, route in routes.items()
                 if route.mode == "proxy" and route.route_switch == "native_interrupted"
@@ -2102,7 +2146,6 @@ class VibeyAgent(BaseAgent):
             run.replied[row_id] = replied
         if images:
             run.reply_images[row_id] = images
-        run.tool_calls.update({call.id: call for call in message.tool_calls})
         self._note_tokens(run, message)
 
     def _note_tokens(self, run: _Run, message: AssistantMessage) -> None:

@@ -670,6 +670,13 @@ class ConsolidatedMessageDispatcher:
             logger.debug("runtime turn guard failed open", exc_info=True)
             return True
 
+    async def publish_tool_projection(self, context: MessageContext, response_id: str, **options: Any) -> None:
+        """Canonical activity updates obey the same runtime-owner/routing gate as emits."""
+        from core.message_mirror import publish_tool_projection
+
+        options["publish"] = options.get("publish", True) and self._is_current_runtime_turn(context)
+        await publish_tool_projection(self._get_target_context(context), response_id, **options)
+
     def _t(self, key: str, **kwargs) -> str:
         translator = getattr(self.controller, "_t", None)
         if callable(translator):
@@ -4151,7 +4158,7 @@ class ConsolidatedMessageDispatcher:
             canonical_type,
             persist_text,
             citations=citations,
-            metadata={TRANSCRIPT_COPY_KEY: "interim"} if interim_row else None,
+            metadata={**(output_metadata or {}), **({TRANSCRIPT_COPY_KEY: "interim"} if interim_row else {})} or None,
             existing_row_id=existing_row_id,
             hosted=hosted if canonical_type == "toolcall" else None,
             presentation=decision,
