@@ -2,8 +2,9 @@
 """Exercise exactly one published predecessor, optionally enabling no-copy in a build.
 
 CI runs the probe without --activate. The existing publisher runs it immediately
-before packaging and fills one literal in storage/compatibility.py; source builds
-remain conservative. There is no runtime network lookup or persistent proof store.
+before packaging and fills one literal in storage/compatibility.py. An activated
+source literal must also pass CI's probe; None keeps a build conservative.
+There is no runtime network lookup or persistent proof store.
 The --probe subprocess mode must not add this checkout to sys.path: -I imports the
 actual previous wheel, not today's editable/source implementation.
 """

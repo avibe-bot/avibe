@@ -3,8 +3,8 @@
 Implementation of section A in [the downtime plan](../plans/sqlite-upgrade-downtime.md).
 The bridge, mechanical migration classification, and gated no-copy path share the
 same preflight. No-copy is enabled only in a build whose immediately previous
-published binary passes the real protocol/reader/writer contract. Source builds
-and builds with a pre-protocol predecessor keep conservative upgrade snapshots.
+published binary passes the real protocol/reader/writer contract. Builds with an
+unverified or pre-protocol predecessor keep conservative upgrade snapshots.
 
 ## Change contract
 
@@ -71,8 +71,8 @@ lane. The bridge by itself does not claim any projection capability.
 **Bridge release (R0)** means the first release of any kind, RC or stable, whose
 binaries implement protocol v1. A prerelease establishes the bridge for each
 DB it opens; the per-DB integer marker is the authority, not a version number.
-The next release containing this implementation carries the bridge, and later
-stable releases carry the same protocol. This PR cuts no release or version.
+`gh-v3.2.5rc19`, published on 2026-11-08, establishes that bridge; later stable
+releases carry the same protocol. This implementation cuts no release or version.
 
 **First no-copy release (R1)** means a later release containing no-copy activation.
 The owner clarified the gate on 2026-11-08: all four conditions must hold:
@@ -115,8 +115,12 @@ and a breaking boundary.
 The existing migration-guard CI job runs this contract. The existing publisher
 runs it again immediately before packaging, and `--activate` fills just
 `storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
-Its source default is `None`; pre-protocol or unsupported predecessors leave
+`None` disables the capability; pre-protocol or unsupported predecessors leave
 it `None`, with an explicit **not-applicable**, never a passing rollback claim.
+The source literal is now `1` after the actual `gh-v3.2.5rc19` wheel passed at
+epoch 1 (SHA-256 `e19c6b0bcfcbbdb6716842653c25c5231cf5d7600fd69fda0a3cb4f4bf2630be`).
+CI rechecks an activated literal against the actual published predecessor;
+the publisher independently fills or clears it before packaging.
 A failed applicable reader/writer test stops the build. The literal ships in the
 wheel/sdist; there is no runtime network check, config switch, per-DB lineage or
 separate attestation registry. Local source-fixture tests validate the harness,
@@ -176,10 +180,10 @@ None of this gate skips a runtime snapshot by itself.
 
 Release-cadence dependency: the immediately previous published binary must
 contain the bridge and pass the real contract before a no-copy build can activate.
-Until that publication, PRs must say **predecessor not yet published**, not claim
-that a local bridge fixture proves a released rollback target. Public English and
-Chinese documentation must distinguish the conservative bridge from later
-verified no-copy releases; no release is created by this implementation.
+The actual RC19 wheel has passed at epoch 1; a local bridge fixture alone would
+not prove a released rollback target. Public English and Chinese documentation
+must distinguish the conservative bridge from later verified no-copy releases;
+no release is created by this implementation.
 
 ## Validation
 
