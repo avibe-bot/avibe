@@ -25,6 +25,22 @@ from tests.test_sqlite_migration_preflight import _snapshot
 pytestmark = pytest.mark.no_sqlite_template
 
 
+@pytest.fixture(autouse=True)
+def bridge_graph(tmp_path, monkeypatch):
+    """Keep these historical bridge/next-epoch fault cases on their original graph.
+
+    The production epoch-2 transition is exercised in test_tool_trace_suppression.
+    """
+    graph = tmp_path / "bridge-alembic"
+    shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
+    script = ScriptDirectory.from_config(migrations.alembic_config(tmp_path / "historical.sqlite"))
+    retained = {Path(revision.path).name for revision in script.iterate_revisions("20261108_0076", "base")}
+    for path in (graph / "versions").glob("*.py"):
+        if path.name != "__init__.py" and path.name not in retained:
+            path.unlink()
+    monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
+
+
 @pytest.fixture
 def bridge_db(tmp_path):
     path = tmp_path / "state" / "vibe.sqlite"

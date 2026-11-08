@@ -52,7 +52,7 @@ def test_activation_only_fills_the_build_literal_and_can_disable_it(tmp_path, mo
     path.parent.mkdir()
     path.write_text("VERIFIED_PREDECESSOR_EPOCH: int | None = None\nother = 7\n")
     monkeypatch.setattr(contract, "ROOT", tmp_path)
-    for epoch in (1, None):
+    for epoch in (1, 2, None):
         contract.activate_build(epoch)
         loaded = runpy.run_path(str(path))
         assert loaded["VERIFIED_PREDECESSOR_EPOCH"] == epoch
@@ -62,6 +62,22 @@ def test_activation_only_fills_the_build_literal_and_can_disable_it(tmp_path, mo
         contract.activate_build(1)
 
 
+def test_projection_contract_ignores_presentation_copy_but_not_identity_or_outcome():
+    step = {"id": "tool:response:call", "name": "read", "arguments": {"path": "/work/a"}, "status": "completed", "text": "read"}
+    group = {"id": step["id"], "steps": 1, "status": "done", "rows": [{**step, "kind": "tool_call"}]}
+    before = contract._projection_facts([step], {"groups": [group]}, [group], [], [])
+    restyled = {**step, "text": "Read", "new_display_field": "compatible"}
+    restyled_group = {**group, "new_group_field": "compatible", "rows": [{**restyled, "kind": "tool_call"}]}
+    assert contract._projection_facts([restyled], {"groups": [restyled_group]}, [restyled_group], [], []) == before
+    assert contract._projection_facts([{**restyled, "status": "unknown"}], {"groups": [group]}, [group], [], []) != before
+    assert contract._projection_facts([], {"groups": [group]}, [group], [], []) != before
+
+
+def test_refusal_control_cannot_activate_a_build():
+    with pytest.raises(SystemExit, match="2"):
+        contract.main(["--require-refusal", "--activate"])
+
+
 def test_wrong_previous_binary_is_rejected_before_any_store_write(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, "run_probe", lambda *args: {"version": "wrong", "storage": str(tmp_path / "storage.py")})
     with pytest.raises(RuntimeError, match="wrong predecessor"):
@@ -69,11 +85,15 @@ def test_wrong_previous_binary_is_rejected_before_any_store_write(tmp_path, monk
     assert not (tmp_path / "state").exists()
 
 
-@pytest.mark.parametrize("loss", [None, "replacement", "json"])
+@pytest.mark.parametrize("loss", [None, "replacement", "json", "projection"])
 def test_source_fixture_exercises_probe_and_detects_reader_write_loss(tmp_path, monkeypatch, loss):
     real_probe = contract.run_probe
 
     def source_fixture(python, action, home, *, current=False):
+        if not current and action == "projection-read" and loss == "projection":
+            with sqlite3.connect(home / "state/vibe.sqlite") as conn:
+                conn.execute("UPDATE messages SET metadata_json=json_set(metadata_json, '$.tool_projection.version', 99) "
+                             "WHERE json_extract(metadata_json, '$.tool_projection.version')=1")
         result = real_probe(Path(sys.executable), action, home, current=True)
         if action == "identity":
             # Name this explicitly as a source fixture, never a published result.
@@ -98,7 +118,24 @@ def test_source_fixture_exercises_probe_and_detects_reader_write_loss(tmp_path, 
     # wheel/version is impersonated, and activate_build is never invoked.
     fixture_python = contract.ROOT / "bin/python"
     if loss is None:
-        assert contract.verify_predecessor(fixture_python, tmp_path, expected_version="source-fixture") == 1
+        assert contract.verify_predecessor(fixture_python, tmp_path, expected_version="source-fixture") == 2
     else:
-        with pytest.raises((AssertionError, RuntimeError), match="lost new values|verify probe failed"):
+        with pytest.raises((AssertionError, RuntimeError), match="lost new values|verify probe failed|projection-read probe failed"):
             contract.verify_predecessor(fixture_python, tmp_path, expected_version="source-fixture")
+
+
+def test_source_fixture_proves_trace_only_reader_refusal_is_not_a_capability_pass(tmp_path, monkeypatch):
+    real_probe = contract.run_probe
+
+    def unsupported_reader(python, action, home, *, current=False):
+        if not current and action == "open":
+            with sqlite3.connect(home / "state/vibe.sqlite") as conn:
+                assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261108_0077",)
+            return {"refused": True}
+        result = real_probe(Path(sys.executable), action, home, current=True)
+        if action == "identity":
+            result.update(version="source-fixture", supported_epochs=[])
+        return result
+
+    monkeypatch.setattr(contract, "run_probe", unsupported_reader)
+    assert contract.verify_predecessor(contract.ROOT / "bin/python", tmp_path, expected_version="source-fixture") is None

@@ -101,8 +101,8 @@ async def test_unmarked_and_unknown_capabilities_keep_real_traces(engine, sessio
 async def test_projection_reader_compatible_opens_epoch_two_without_traces_or_startup_writes(engine, session):
     """The reader floor must understand epoch 2 before any writer activates it.
 
-    This is synthetic future state, not an activation migration or a substitute
-    for the later release-to-release rollback test. The current writer stays 1.
+    This is synthetic future state, not a substitute for the published-wheel
+    contract. The activated current writer and this older-reader shape use 2.
     """
     from storage import importer, migrations
     from storage.db import create_sqlite_engine
@@ -113,7 +113,7 @@ async def test_projection_reader_compatible_opens_epoch_two_without_traces_or_st
     response = await store.append_response(SESSION, assistant("", calls=(ToolCallBlock("call", "read", {"path": "/work/a.py"}),)), final=False, metadata=_mark())
     await store.append_tool_result(SESSION, ToolResultMessage("call", "read", (text("done"),)), details={})
     with engine.connect() as conn:
-        assert conn.exec_driver_sql("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").scalar() == "1"
+        assert conn.exec_driver_sql("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").scalar() == "2"
         assert conn.execute(select(agent_events.c.id).where(agent_events.c.event_type == "tool_call")).first() is None
     path = Path(engine.url.database)
     engine.dispose()
@@ -278,8 +278,9 @@ async def test_retained_window_and_query_plans_bound_canonical_reads(engine, ses
     assert any("SEARCH agent_events" in plan and "context_seq" in plan for plan in plans), plans
 
 
+@pytest.mark.parametrize("proof", [1, 2])
 @pytest.mark.parametrize("platform,background,enabled", [("avibe", False, True), ("avibe", True, True), ("avibe", False, False), ("telegram", False, True)])
-async def test_real_adapter_links_compatibility_writes_and_publishes_canonical_steps(engine, session, tmp_path, published, monkeypatch, platform, background, enabled):
+async def test_real_adapter_links_compatibility_writes_and_publishes_canonical_steps(engine, session, tmp_path, published, monkeypatch, platform, background, enabled, proof):
     """The producer marks its own rows, preserves IM/old-reader writes and Web gates.
 
     The reader tests cannot catch dropped output metadata at the dispatcher or a
@@ -287,6 +288,7 @@ async def test_real_adapter_links_compatibility_writes_and_publishes_canonical_s
     """
     from modules.im.formatters.avibe_formatter import AvibeFormatter
     from modules.im.formatters.telegram_formatter import TelegramFormatter
+    monkeypatch.setattr("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", proof)
     call = ToolCallBlock("call", "echo", {"path": "src"})
     harness = _Harness(engine, tmp_path, platform, [[Done(assistant("", calls=(call,)))], [Done(assistant("done"))]], tools=[FakeTool("echo")])
     harness.controller.im_client.formatter = AvibeFormatter() if platform == "avibe" else TelegramFormatter()
@@ -295,16 +297,19 @@ async def test_real_adapter_links_compatibility_writes_and_publishes_canonical_s
     request.context.platform_specific["suppress_delivery"] = background
     await harness.agent.handle_message(request)
     with engine.connect() as conn:
-        [trace] = conn.execute(select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")).mappings().all()
+        traces = conn.execute(select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")).mappings().all()
         [step] = [row for row in _rows(conn) if row["kind"] == "tool_call"]
-        source = json.loads(trace["metadata_json"])["tool_call_source"]
-        response = conn.execute(select(messages).where(messages.c.id == source["response_id"])).mappings().one()
+        response_id = step["id"].split(":")[1]
+        response = conn.execute(select(messages).where(messages.c.id == response_id)).mappings().one()
+        assert len(traces) == (1 if proof == 1 else 0)
+        if traces:
+            assert json.loads(traces[0]["metadata_json"])["tool_call_source"]["response_id"] == response_id
+            assert step["text"] == traces[0]["content_text"]
         cap = json.loads(response["metadata_json"])["tool_projection"]
         assert cap["version"] == 1 and cap["backend"] == "vibey"
         assert cap["calls"]["call"]["started_at"]
         assert not any(key in cap["calls"]["call"] for key in ("arguments", "text", "result"))
         assert step["id"] == f"tool:{response['id']}:call"
-        assert step["text"] == trace["content_text"]
         assert step["status"] == "completed" and step["started_at"] and step["ended_at"]
         assert step["duration_ms"] >= 0
     live = [value for topic, value in published if topic == "message.new" and value.get("type") == "tool_call"]
@@ -353,11 +358,11 @@ async def test_queued_tool_events_keep_their_response_when_the_producer_reuses_i
     assert len(response_ids) == 2
     with engine.connect() as conn:
         traces = conn.execute(select(agent_events).where(agent_events.c.event_type == "tool_call").order_by(agent_events.c.id)).mappings().all()
-        assert [row["content_text"] for row in traces] == [
+        assert traces == []
+        steps = [row for row in _rows(conn) if row["kind"] == "tool_call"]
+        assert [row["text"] for row in steps] == [
             '🔧 `echo` `{"value":"first"}`', '🔧 `echo` `{"value":"second"}`',
         ]
-        assert [json.loads(row["metadata_json"])["tool_call_source"]["response_id"] for row in traces] == response_ids
-        steps = [row for row in _rows(conn) if row["kind"] == "tool_call"]
         assert [row["id"] for row in steps] == [f"tool:{row_id}:reused" for row_id in response_ids]
         assert all(row["started_at"] and row["status"] == "completed" for row in steps)
     live = [value for topic, value in published if topic == "message.new" and value.get("type") == "tool_call"]
