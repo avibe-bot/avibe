@@ -13,6 +13,7 @@ import math
 import threading
 from argparse import Namespace
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from core.control_requests import OPERATIONS, ControlRequest, failure, result
 
@@ -354,6 +355,18 @@ def _error_payload(cli, request: ControlRequest, exc: Exception, help_command) -
 
 
 async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dict[str, Any]:
+    if not args.sync_run:
+        return await _agent_run_request(controller, request, args, run_sync, sync_run_id=None)
+    service = controller.scheduled_task_service
+    sync_run_id = uuid4().hex[:12]
+    service.sync_waiting_run_ids = frozenset((*getattr(service, "sync_waiting_run_ids", ()), sync_run_id))
+    try:
+        return await _agent_run_request(controller, request, args, run_sync, sync_run_id=sync_run_id)
+    finally:
+        service.sync_waiting_run_ids = service.sync_waiting_run_ids - {sync_run_id}
+
+
+async def _agent_run_request(controller, request: ControlRequest, args, run_sync, *, sync_run_id: str | None) -> dict[str, Any]:
     # Admission, file access, configuration and SQLite all run off the loop. The
     # second deadline check is inside the worker, after any executor queue wait.
     def enqueue():
@@ -375,7 +388,7 @@ async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dic
                 request_store = controller.scheduled_task_service.request_store
                 response, callback_session_id = cli._enqueue_agent_run(
                     args, caller_env=request.caller_env, invocation_cwd=request.cwd,
-                    agent_store=agent_store, request_store=request_store,
+                    agent_store=agent_store, request_store=request_store, run_id=sync_run_id,
                 )
                 return result(response), (authority, request_store, callback_session_id)
         except Exception as exc:

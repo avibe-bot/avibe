@@ -19,7 +19,7 @@ from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
 from storage import message_deliveries as deliveries
 from storage.models import agent_runs, agent_sessions, messages, run_definitions, session_delegations
-from storage.session_delegations import candidate_query, latest_reply_query, pending_wake_queries
+from storage.session_delegations import candidate_query, latest_reply_query, pending_return_queries, pending_wake_queries
 
 NOW = "2026-11-08T00:00:00+00:00"
 
@@ -133,6 +133,8 @@ def test_idle_notice_once_restart_and_new_message_rearms(harness, recipient):
     assert ("--bot main" if recipient == "ses_main" else "--session-id sesB") in notice["prompt"]
     assert not DelegationSafetyNet(h.service)._notify(pair)
     assert len(_notices(h)) == 1
+    from core.scheduled_tasks import TaskExecutionRequest
+    _accept(h, TaskExecutionRequest.from_dict(h.requests.get_run(notice["id"])))
     next_run = _send(h, recipient=recipient)
     _accept(h, next_run)
     assert h.lane._notify(_pair(h, recipient=recipient))
@@ -147,19 +149,37 @@ def test_any_progress_report_closes_reverse_pair_and_merged_senders_are_independ
     report = _send(h, sender="sesB", recipient="sesA")
     _accept(h, report)
     assert _pair(h)["state"] == "answered"
+    assert _pair(h, sender="sesB", recipient="sesA") is None
     assert not h.lane._notify(to_a)
-    # B has just asked A to do something (we do not classify "report" text),
-    # so D is not notified until A answers or its own safety-net reaches B.
-    assert not h.lane._notify(to_d)
-    assert h.lane._notify(_pair(h, sender="sesB", recipient="sesA"))
-    notice = h.requests.get_run(_notices(h)[0]["id"])
-    from core.scheduled_tasks import TaskExecutionRequest
-    _accept(h, TaskExecutionRequest.from_dict(notice))
+    # Reading a report does not oblige the dispatcher to report back. D's
+    # independent request is still unanswered, so it alone receives a notice.
     assert h.lane._notify(to_d)
-    assert [row["session_id"] for row in _notices(h)] == ["sesB", "sesD"]
+    assert [row["session_id"] for row in _notices(h)] == ["sesD"]
 
 
-@pytest.mark.parametrize("blocker", ["turn", "queued_run", "queued_input", "watch", "scheduled", "delegate"])
+@pytest.mark.parametrize("merged", [False, True])
+def test_multipart_answers_stay_answers_until_dispatcher_sends_again(harness, merged):
+    """Progress + final (including batching) cannot reintroduce reverse ping-pong."""
+    h = harness
+    _accept(h, _send(h))
+    reports = [_send(h, sender="sesB", recipient="sesA") for _ in range(2)]
+    if merged:
+        _accept(h, *reports)
+    else:
+        for report in reports:
+            _accept(h, report)
+    assert _pair(h)["state"] == "answered"
+    assert _pair(h, sender="sesB", recipient="sesA") is None
+    items, _ = h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    assert items == []
+    _accept(h, _send(h))
+    assert _pair(h)["state"] == "open"
+    assert h.lane._notify(_pair(h))
+    assert [row["session_id"] for row in _notices(h)] == ["sesA"]
+
+
+@pytest.mark.parametrize("blocker", ["turn", "queued_run", "queued_input", "watch", "scheduled", "delegate",
+                                     "outgoing-report", "outgoing-delegate"])
 def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harness, blocker):
     h = harness
     run = _send(h)
@@ -167,6 +187,8 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     pair = _pair(h)
     if blocker == "queued_run":
         pending = _send(h, sender="sesD")
+    elif blocker in {"outgoing-report", "outgoing-delegate"}:
+        pending = _send(h, sender="sesB", recipient="sesA" if blocker == "outgoing-report" else "sesC")
     elif blocker == "queued_input":
         with h.engine.begin() as conn:
             deliveries.insert_delivery(conn, delivery_id="user-queued", session_id="sesB", priority="p3", state="queued",
@@ -184,7 +206,7 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     assert next(item for item in items if item.partition_key == run.id).cursor_only
     if blocker == "turn":
         _finish(h, turn, [run])
-    elif blocker == "queued_run":
+    elif blocker in {"queued_run", "outgoing-report", "outgoing-delegate"}:
         h.requests.cancel_run(pending.id)
     elif blocker == "queued_input":
         with h.engine.begin() as conn:
@@ -232,6 +254,24 @@ def test_callback_and_failure_notice_preempt_safety_net_only_until_they_land(har
     assert not _notices(h)
 
 
+def test_earlier_runs_callback_defers_the_latest_no_callback_message(harness):
+    h = harness
+    first = _send(h, callback_session_id="sesA")
+    latest = _send(h, callback_session_id="sesA", metadata={"callback_mode": "failure"})
+    _accept(h, first, latest)
+    pair = _pair(h)
+    assert pair["run_id"] == latest.id
+    assert not h.lane._notify(pair)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == first.id).values(result_text="Done"))
+    callback = h.service._enqueue_callback_run(h.requests.get_run(first.id))
+    assert not h.lane._notify(pair)
+    _accept(h, callback)
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(pair)
+    assert not _notices(h)
+
+
 def test_success_without_opt_in_callback_gets_safety_net_and_preserves_authority(harness):
     from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
     h = harness
@@ -258,6 +298,149 @@ def test_failed_callback_is_not_a_return_and_unavailable_pairs_retire(harness):
         conn.execute(update(agent_sessions).where(agent_sessions.c.id == "sesC").values(status="archived"))
     assert not h.lane._notify(pair)
     assert _pair(h, sender="sesD", recipient="sesC")["state"] == "unavailable"
+
+
+def test_unprompted_message_opens_but_chain_answers_never_reverse(harness):
+    h = harness
+    _accept(h, _send(h))
+    _accept(h, _send(h, sender="sesB", recipient="sesC"))
+    _accept(h, _send(h, sender="sesC", recipient="sesB"))
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
+    assert _pair(h, sender="sesB", recipient="sesC")["state"] == "answered"
+    assert _pair(h, sender="sesC", recipient="sesB") is None
+    assert _pair(h, sender="sesB", recipient="sesA") is None
+    items, _ = h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    assert items == []
+    _accept(h, _send(h, sender="sesD", recipient="sesA"))
+    assert h.lane._notify(_pair(h, sender="sesD", recipient="sesA"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed", "canceled", "detached", "ack-failed"])
+async def test_sync_wait_is_pending_then_terminal_read_durably_answers_pair(harness, monkeypatch, status):
+    from core.control_requests import new_request
+    from core.handlers.cli_requests import _agent_run, _agent_run_arguments
+    from vibe import cli
+    h = harness
+    h.service.controller.vibe_agent_store = None
+    h.service.controller.scheduled_task_service = h.service
+    seen = []
+
+    def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id):
+        # Stand in for target routing, not the behavior under test: the actual
+        # store, acceptance, live-wait guard, waiter and acknowledgement run below.
+        assert run_id in h.service.sync_waiting_run_ids
+        run = _send(h, callback_session_id="sesA", callback_active=False,
+                    metadata={"callback_mode": "failure"}, run_id=run_id)
+        _accept(h, run, finish=status != "detached")
+        if status != "detached":
+            with h.engine.begin() as conn:
+                conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(
+                    status="succeeded" if status == "ack-failed" else status, result_text="B's finished answer",
+                ))
+        assert not h.lane._notify(_pair(h))  # includes the terminal-before-poll race
+        seen.append(run)
+        return {"ok": True, "run": {"id": run_id}}, "sesA"
+
+    monkeypatch.setattr(cli, "_enqueue_agent_run", enqueue)
+    if status == "ack-failed":
+        def failed_ack(run_id):
+            raise RuntimeError("database is locked")
+        monkeypatch.setattr(h.requests, "record_sync_return", failed_ack)
+    request = new_request("agent.run", {"sync_run": True, "message": "work", "wait_timeout": 0})
+    response = await _agent_run(h.service.controller, request, _agent_run_arguments(request.arguments), asyncio.to_thread)
+    assert response["exit_code"] == 0, response
+    assert not h.service.sync_waiting_run_ids
+    if status == "detached":
+        assert _pair(h)["state"] == "open"
+        assert h.requests.get_run(seen[0].id)["callback_status"] == "pending"
+    elif status == "ack-failed":
+        assert "B's finished answer" in str(response)
+        assert _pair(h)["state"] == "open"
+    else:
+        assert _pair(h)["state"] == "answered"
+        assert not DelegationSafetyNet(h.service)._notify(_pair(h))
+    assert not _notices(h)
+    if status == "ack-failed":
+        assert h.lane._notify(_pair(h))
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_sync_receipt_requires_acceptance_but_not_latest_run_ownership(harness, accepted):
+    """An enqueue failure is not a reply; an accepted return is pair-level."""
+    h = harness
+    _accept(h, _send(h))
+    sync_run = _send(h, callback_session_id="sesA", callback_active=False, metadata={"callback_mode": "failure"})
+    if accepted:
+        _accept(h, sync_run)
+        _accept(h, _send(h))  # accepted earlier result may answer a newer message
+    else:
+        h.requests.cancel_run(sync_run.id)
+    h.requests.record_sync_return(sync_run.id)
+    assert _pair(h)["state"] == ("answered" if accepted else "open")
+    assert h.lane._notify(_pair(h)) is not accepted
+
+
+@pytest.mark.asyncio
+async def test_sync_client_disconnect_releases_wait_without_acknowledging_result(harness, monkeypatch):
+    """A killed CLI must not leave a controller waiter consuming its later result."""
+    from core.control_requests import new_request
+    from core.internal_server import create_app
+    from vibe import cli
+
+    h = harness
+    h.service.controller.vibe_agent_store = None
+    h.service.controller.scheduled_task_service = h.service
+    app = create_app(h.service.controller)
+    enqueued = asyncio.Event()
+    disconnected = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    seen = []
+
+    def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id):
+        run = _send(h, callback_session_id="sesA", callback_active=False,
+                    metadata={"callback_mode": "failure"}, run_id=run_id)
+        turn = _accept(h, run, finish=False)
+        seen.append((run, turn))
+        loop.call_soon_threadsafe(enqueued.set)
+        return {"ok": True, "run": {"id": run_id}}, "sesA"
+
+    monkeypatch.setattr(cli, "_enqueue_agent_run", enqueue)
+    payload = new_request("agent.run", {"sync_run": True, "message": "work", "wait_timeout": 30}).to_payload()
+    first = True
+
+    async def receive():
+        nonlocal first
+        if first:
+            first = False
+            return {"type": "http.request", "body": json.dumps(payload).encode(), "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        pass
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/internal/control", "raw_path": b"/internal/control", "query_string": b"",
+             "headers": [(b"content-type", b"application/json")], "server": ("localhost", 80), "client": ("localhost", 123)}
+    request_task = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(enqueued.wait(), 5)
+        assert h.service.sync_waiting_run_ids
+        disconnected.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request_task, 5)
+        assert not h.service.sync_waiting_run_ids
+        run, turn = seen[0]
+        _finish(h, turn, [run])
+        assert _pair(h)["state"] == "open"
+        assert h.lane._notify(_pair(h))
+    finally:
+        disconnected.set()
+        if not request_task.done():
+            request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
 
 
 def test_notice_marker_and_outbox_roll_back_together(harness, monkeypatch):
@@ -317,6 +500,7 @@ async def test_supervisor_startup_recovers_idle_pair_without_turn_end_event(harn
 def test_hot_queries_are_index_keyed_without_history_sort(harness):
     h = harness
     queries = [candidate_query(limit=32, cursor="old"), *pending_wake_queries("sesB"),
+               *pending_return_queries("sesA", "sesB"),
                *(latest_reply_query("sesB", kind) for kind in ("result", "error", "output"))]
     with h.engine.connect() as conn:
         for query in queries:
@@ -359,7 +543,7 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
     from sqlalchemy import exists
     h = harness
     queries = [candidate_query(limit=32, cursor="0"),
-               *(select(exists(query)) for query in pending_wake_queries("sesB")),
+               *(select(exists(query)) for query in (*pending_wake_queries("sesB"), *pending_return_queries("sesA", "sesB"))),
                latest_reply_query("sesB", "result")]
     with h.engine.begin() as conn:
         def probe_work():
@@ -387,6 +571,7 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
         ) for i in range(2500)])
         conn.execute(agent_runs.insert(), [dict(
             id=f"old{i}", run_type="agent_run", status="succeeded", session_id="sesB",
+            source_kind="agent", source_actor="sesB", callback_session_id="sesA", callback_status="sent",
             created_at=NOW, updated_at=NOW, metadata_json="{}",
         ) for i in range(50000)])
         conn.execute(messages.insert(), [dict(

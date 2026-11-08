@@ -3134,6 +3134,12 @@ class TaskExecutionStore:
             count += 1
         return count
 
+    def record_sync_return(self, run_id: str) -> None:
+        if self._sqlite is not None:
+            from storage.session_delegations import acknowledge_sync_return
+
+            acknowledge_sync_return(self._sqlite.engine, run_id)
+
     def list_pending_callbacks(
         self,
         *,
@@ -4226,6 +4232,9 @@ class ScheduledTaskService:
         self.controller = controller
         self.store = store or ScheduledTaskStore()
         self.request_store = request_store or TaskExecutionStore()
+        # Controller CLI waiters publish immutable snapshots for off-loop scans.
+        # They vanish on shutdown; only a read terminal result answers the pair durably.
+        self.sync_waiting_run_ids: frozenset[str] = frozenset()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self.scheduler.add_listener(
             self._on_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR

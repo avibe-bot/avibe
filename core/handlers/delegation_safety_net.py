@@ -35,6 +35,9 @@ class DelegationSafetyNet:
     def __init__(self, service: ScheduledTaskService) -> None:
         self.service = service
 
+    def _eligible(self, conn, observation):
+        return eligible_pair(conn, observation, sync_run_ids=self.service.sync_waiting_run_ids)
+
     def scan(self, *, limit: int, occupied: frozenset[str], cursor: str | None) -> tuple[list[RuntimeWorkItem], bool]:
         store = self.service.request_store.sqlite_backend
         if store is None:
@@ -43,7 +46,7 @@ class DelegationSafetyNet:
             rows = list(conn.execute(candidate_query(limit=limit + 1, cursor=cursor, occupied=occupied)).mappings())
             items = [RuntimeWorkItem(
                 str(row["run_id"]), dict(row), rearm_after_process=False,
-                cursor_only=eligible_pair(conn, dict(row)) is None,
+                cursor_only=self._eligible(conn, dict(row)) is None,
             ) for row in rows[:limit]]
         return items, len(rows) > limit
 
@@ -68,7 +71,7 @@ class DelegationSafetyNet:
             target = None
         with run_update_event_transaction(store.engine) as conn:
             reserve_write_lock(conn)
-            pair = eligible_pair(conn, observation)
+            pair = self._eligible(conn, observation)
             if pair is None:
                 return False
             if pair.get("unavailable"):

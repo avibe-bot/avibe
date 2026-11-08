@@ -7248,7 +7248,7 @@ def cmd_agent_run(args):
     return response["exit_code"]
 
 
-def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request_store):
+def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id: str | None = None):
     """Existing enqueue semantics, with request-local inputs and service-owned stores.
 
     No process environment, working directory or output stream is changed. The
@@ -7464,6 +7464,7 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
             callback_active=run_async,
+            run_id=run_id,
             delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
             expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
@@ -7508,6 +7509,12 @@ async def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_t
     while True:
         run = await asyncio.to_thread(store.get_run, run_id)
         if run and normalize_run_status(run.get("status")) in {"succeeded", "failed", "canceled"}:
+            try:
+                await asyncio.to_thread(store.record_sync_return, run_id)
+            except Exception:
+                # An optional safety-net receipt must never replace the result
+                # the caller waited for. An unacknowledged pair can notify later.
+                logger.warning("Failed to acknowledge sync return for Run %s", run_id, exc_info=True)
             return _run_payload(run)
         elapsed = time.monotonic() - started
         if elapsed >= max_wait:

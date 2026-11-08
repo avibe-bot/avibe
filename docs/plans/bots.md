@@ -501,32 +501,48 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
 
 ### D14. Idle-delegate safety net (phase 2, owner decision 2026-11-08)
 
-- A has an open delegation to B while A's latest accepted Harness message to B
-  is newer than B's latest accepted message to A. Any Agent-authored message
-  counts, including a progress report; Avibe does not attribute replies to turns.
+- An accepted A→B Harness message opens a delegation unless A is answering B.
+  Any Agent-authored return, including progress, closes the reverse pair without
+  opening another delegation. Once B answers A, B's progress, final, and follow-up
+  messages stay answers until A sends again (orchestrator clarification,
+  2026-11-08); a previously notified pair is still answerable. Avibe never
+  attributes replies to turns. A later request from A re-arms A→B.
+  Trade-off: a genuine new request from B after answering A has no reverse
+  safety-net reminder; its message still reaches A normally.
 - When B is idle and no pending input, open delegate, armed Watch, or pending
   Task will wake B, Avibe sends A one short Harness notice naming B's title and
   Session id, a last-reply excerpt (up to 300 characters), and a follow-up command.
   A visible Session asking its user a question is idle too: its question is useful
   information for the dispatcher. Bots use their permanent Sessions under the same rule.
 - A newer accepted message from A re-arms the pair. Explicit return messages,
-  accepted callbacks, and failure notices suppress a redundant report. A runtime
-  notice is not a new delegation in the opposite direction. The queued notice
-  itself wakes the sender, so chains unwind one level at a time.
+  accepted callbacks, and failure notices suppress a redundant report. Pending
+  outgoing messages count before their recipient accepts them, and any pending
+  return from B to A defers a notice, including an earlier Run's callback. A
+  runtime notice is not a new delegation in the opposite direction. The queued
+  notice itself wakes the sender, so chains unwind one level at a time.
+- A `--sync` caller reading an accepted Run's terminal result is also a completed
+  return; a Run that never reached B cannot answer an older delegation. The
+  controller's live sync waiter prevents a poll-versus-idle race; the read marks
+  the pair answered durably. Waiters disappear on client disconnect,
+  cancellation, or restart, rather than leaving a persistent waiting flag.
+  Timeout/detach keeps the existing callback fallback. A bookkeeping failure
+  leaves the pair open but never hides the finished result from the caller.
 - The shared acceptance transaction maintains `session_delegations`; a new
   RuntimeWork lane checks its open pairs on queue/Run/definition events, with
   startup and periodic reconciliation for missed events. The idle recheck, notice
   outbox Run, and durable once marker commit together. Work stays off the controller
   loop and uses indexed live-state/Session probes, not transcript scans.
 - This additive projection starts with messages accepted after upgrade; there is
-  no historical backfill or startup notice flood. Same-epoch binary rollback keeps
-  the newer table but does not maintain it; the feature resumes on new exchanges.
+  no historical backfill or startup notice flood. Older binaries can use the
+  newer same-epoch schema but do not maintain this new projection.
   Paused, removed, or retired definitions are not pending wake-ups. Task/Watch
   targets, not unrelated Tasks that happen to have been created by B, decide what
   will wake B. A callback only queued to A defers the safety net; actual acceptance
   answers the pair. A return that failed before acceptance can still need a notice.
 - No system prompt changes, mandatory callbacks, or long-silent-running-turn
-  timeout policy. The optional running-turn anomaly routing is deferred.
+  timeout policy. The optional running-turn anomaly routing is deferred. Cycles
+  are not broken: an open delegate still blocks the upstream notice, even in a
+  cycle; recurring live definitions likewise keep their literal blocking rule.
 
 ## Prompt drafts
 
