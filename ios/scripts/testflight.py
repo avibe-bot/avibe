@@ -50,6 +50,7 @@ KEYCHAIN_NAME = "avibe-ios-signing.keychain-db"
 ASC_API = "https://api.appstoreconnect.apple.com"
 KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios.push"
 MAIN_REQUIRED_ENTITLEMENTS = {
+    "aps-environment": ["production"],
     "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
     "keychain-access-groups": [KEYCHAIN_ACCESS_GROUP],
@@ -57,6 +58,9 @@ MAIN_REQUIRED_ENTITLEMENTS = {
 NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS = {
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
     "keychain-access-groups": [KEYCHAIN_ACCESS_GROUP],
+}
+FORBIDDEN_ENTITLEMENTS = {
+    "com.apple.developer.usernotifications.filtering",
 }
 # Kept as the main-app alias for callers and older tests.
 REQUIRED_ENTITLEMENTS = MAIN_REQUIRED_ENTITLEMENTS
@@ -134,6 +138,15 @@ def check_profile(
     """Validate a current App Store profile and its target entitlements."""
     now = now or datetime.now(timezone.utc)
     entitlements = profile.get("Entitlements", {})
+    forbidden = set(FORBIDDEN_ENTITLEMENTS)
+    if bundle_id == NOTIFICATION_SERVICE_BUNDLE_ID:
+        forbidden.add("aps-environment")
+    present_forbidden = sorted(forbidden.intersection(entitlements))
+    if present_forbidden:
+        raise TestFlightError(
+            "The profile contains forbidden entitlements: "
+            + ", ".join(present_forbidden)
+        )
     if TEAM_ID not in profile.get("TeamIdentifier", []):
         raise TestFlightError(f"The profile is not for Team {TEAM_ID}")
     application_identifier = f"{TEAM_ID}.{bundle_id}"
@@ -148,6 +161,8 @@ def check_profile(
         raise TestFlightError("The App Store profile has expired; regenerate it in the Apple Developer account")
     for key, required in required_entitlements.items():
         actual = entitlements.get(key)
+        if key == "aps-environment" and actual != "production":
+            raise TestFlightError("The App Store profile must grant aps-environment=production")
         if actual is None:
             raise TestFlightError(f"The profile does not grant {key}; enable it on the App ID and regenerate")
         if isinstance(actual, str):
@@ -330,6 +345,20 @@ def archived_app(archive: Path) -> Path:
     return apps[0]
 
 
+def archived_notification_service_extensions(app: Path) -> list[Path]:
+    extensions = sorted(app.rglob("*.appex"))
+    extension_ids = [
+        plistlib.loads((extension / "Info.plist").read_bytes()).get("CFBundleIdentifier")
+        for extension in extensions
+    ]
+    if set(extension_ids) != {NOTIFICATION_SERVICE_BUNDLE_ID} or len(extensions) != 1:
+        raise TestFlightError(
+            "The archive must contain exactly one "
+            f"{NOTIFICATION_SERVICE_BUNDLE_ID} extension, found {extension_ids}"
+        )
+    return extensions
+
+
 def check_signed_bundle(
     info: dict,
     entitlements: dict,
@@ -352,8 +381,19 @@ def check_signed_bundle(
         raise TestFlightError("The bundle is not signed for " + application_identifier)
     if entitlements.get("get-task-allow"):
         raise TestFlightError("The bundle is signed with get-task-allow; that is a development signature")
+    forbidden = set(FORBIDDEN_ENTITLEMENTS)
+    if bundle_id == NOTIFICATION_SERVICE_BUNDLE_ID:
+        forbidden.add("aps-environment")
+    present_forbidden = sorted(forbidden.intersection(entitlements))
+    if present_forbidden:
+        raise TestFlightError(
+            "The signed bundle contains forbidden entitlements: "
+            + ", ".join(present_forbidden)
+        )
     for key, required in required_entitlements.items():
         actual = entitlements.get(key, [])
+        if key == "aps-environment" and actual != "production":
+            raise TestFlightError("The signed app must carry aps-environment=production")
         actual_values = {actual} if isinstance(actual, str) else set(actual)
         if not set(required) <= actual_values:
             raise TestFlightError(f"The bundle's {key} entitlement lacks {required}")
@@ -373,11 +413,7 @@ def check_signed_app(info: dict, entitlements: dict, *, build: str) -> None:
 
 def verify_archive(archive: Path, *, build: str) -> dict:
     app = archived_app(archive)
-    extensions = list(app.glob("PlugIns/*.appex"))
-    if len(extensions) != 1:
-        raise TestFlightError(
-            f"Expected one Notification Service Extension in {app}, found {len(extensions)}"
-        )
+    extensions = archived_notification_service_extensions(app)
     bundles = [
         (
             app,

@@ -40,6 +40,7 @@ def app_store_profile(**overrides) -> dict:
         "DeveloperCertificates": [b"certificate-der"],
         "Entitlements": {
             "application-identifier": testflight.APPLICATION_IDENTIFIER,
+            "aps-environment": "production",
             "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
             "com.apple.security.application-groups": ["group.bot.avibe.ios"],
             "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
@@ -84,6 +85,18 @@ def test_a_current_app_store_profile_for_this_app_is_accepted():
     testflight.check_profile(app_store_profile(), now=NOW)
 
 
+def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
+    profile = app_store_profile()
+    profile["Entitlements"]["aps-environment"] = "development"
+    with pytest.raises(testflight.TestFlightError, match="production"):
+        testflight.check_profile(profile, now=NOW)
+
+    profile = app_store_profile()
+    profile["Entitlements"]["com.apple.developer.usernotifications.filtering"] = True
+    with pytest.raises(testflight.TestFlightError, match="forbidden entitlements"):
+        testflight.check_profile(profile, now=NOW)
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -92,8 +105,9 @@ def test_a_current_app_store_profile_for_this_app_is_accepted():
                            "com.apple.developer.associated-domains": "*"}}, "not for 68B2SQ6YK3.bot.avibe.ios"),
         ({"ProvisionedDevices": ["00008110-000000000000001E"]}, "development or ad hoc"),
         ({"ExpirationDate": NOW - timedelta(seconds=1)}, "expired"),
-        ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios"}}, "associated-domains"),
+        ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios"}}, "aps-environment"),
         ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios",
+                           "aps-environment": "production",
                            "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
                            "com.apple.security.application-groups": ["group.bot.avibe.ios"],
                            "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
@@ -147,6 +161,7 @@ def signed(info=None, entitlements=None):
     base_info = {"CFBundleIdentifier": "bot.avibe.ios", "CFBundleVersion": "7.1",
                  "CFBundleShortVersionString": "0.1.0", "ITSAppUsesNonExemptEncryption": False}
     base_entitlements = {"application-identifier": "68B2SQ6YK3.bot.avibe.ios", "get-task-allow": False,
+                         "aps-environment": "production",
                          "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
                          "com.apple.security.application-groups": ["group.bot.avibe.ios"],
                          "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP]}
@@ -166,6 +181,7 @@ def test_a_distribution_signed_notification_service_with_shared_entitlements_pas
             "com.apple.developer.associated-domains": [],
         },
     )
+    entitlements.pop("aps-environment", None)
     testflight.check_signed_bundle(
         info,
         entitlements,
@@ -174,6 +190,52 @@ def test_a_distribution_signed_notification_service_with_shared_entitlements_pas
         required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
         build="7.1",
     )
+
+
+def test_a_notification_service_profile_has_shared_groups_but_no_apns():
+    profile = app_store_profile()
+    profile["Entitlements"] = {
+        "application-identifier": testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+        "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+        "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
+        "get-task-allow": False,
+    }
+    testflight.check_profile(
+        profile,
+        bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
+        required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+        now=NOW,
+    )
+
+    profile["Entitlements"]["aps-environment"] = "production"
+    with pytest.raises(testflight.TestFlightError, match="forbidden entitlements"):
+        testflight.check_profile(
+            profile,
+            bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
+            required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+            now=NOW,
+        )
+
+
+def _write_extension(path: Path, bundle_id: str) -> None:
+    path.mkdir(parents=True)
+    (path / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleIdentifier": bundle_id})
+    )
+
+
+def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
+    app = tmp_path / "Avibe.app"
+    valid = app / "PlugIns" / "Nested" / "NotificationService.appex"
+    _write_extension(valid, testflight.NOTIFICATION_SERVICE_BUNDLE_ID)
+    assert testflight.archived_notification_service_extensions(app) == [valid]
+
+    _write_extension(
+        app / "PlugIns" / "Unexpected.appex",
+        "bot.avibe.ios.unexpected-service",
+    )
+    with pytest.raises(testflight.TestFlightError, match="exactly one"):
+        testflight.archived_notification_service_extensions(app)
 
 
 @pytest.mark.parametrize(
@@ -185,8 +247,19 @@ def test_a_distribution_signed_notification_service_with_shared_entitlements_pas
         (None, {"get-task-allow": True}, "development signature"),
         (None, {"com.apple.developer.associated-domains": []}, "webcredentials:avibe.bot"),
         (None, {"application-identifier": "ZZZZZZZZZZ.bot.avibe.ios"}, "not signed for"),
+        (None, {"aps-environment": "development"}, "aps-environment"),
+        (None, {"com.apple.developer.usernotifications.filtering": True}, "forbidden entitlements"),
     ],
-    ids=["bundle", "build", "encryption", "debuggable", "passkeys", "team"],
+    ids=[
+        "bundle",
+        "build",
+        "encryption",
+        "debuggable",
+        "passkeys",
+        "team",
+        "development-aps",
+        "filtering",
+    ],
 )
 def test_an_archive_that_testflight_would_reject_or_mis_sign_fails_here(info, entitlements, message):
     info, entitlements = signed(info, entitlements)

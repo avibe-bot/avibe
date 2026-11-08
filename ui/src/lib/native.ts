@@ -233,9 +233,14 @@ export function onNativePushOpened(
       && typeof payload === 'object'
       && 'url' in payload
       && typeof payload.url === 'string'
-      && payload.url.startsWith('/')
     ) {
-      handler(payload.url);
+      try {
+        const parsed = new URL(payload.url, window.location.origin);
+        if (parsed.origin !== window.location.origin) return;
+        handler(parsed.pathname + parsed.search + parsed.hash);
+      } catch {
+        // Ignore malformed navigation payloads from the native shell.
+      }
     }
   });
 }

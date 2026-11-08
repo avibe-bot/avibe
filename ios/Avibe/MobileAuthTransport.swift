@@ -206,9 +206,22 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         )
         guard
             let statusCode = response.integer("status"),
-            let body = response["body"] as? [String: Any]
+            let rawBody = response["body"] as? String
         else {
             throw MobileAccountError.network
+        }
+        let body: [String: Any]
+        if rawBody.isEmpty {
+            body = [:]
+        } else {
+            guard
+                let data = rawBody.data(using: .utf8),
+                let object = try? JSONSerialization.jsonObject(with: data),
+                let dictionary = object as? [String: Any]
+            else {
+                throw MobileAccountError.network
+            }
+            body = dictionary
         }
         return PushManagementResponse(statusCode: statusCode, body: body)
     }
@@ -1047,16 +1060,9 @@ extension MobileAuthTransport: WKNavigationDelegate {
             body: body === null ? undefined : body
           });
           const text = await response.text();
-          let payload = {};
-          try {
-            const parsed = text ? JSON.parse(text) : {};
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              payload = parsed;
-            }
-          } catch {}
           return JSON.stringify({
             status: response.status,
-            body: payload
+            body: text
           });
         """
     )

@@ -5,6 +5,62 @@ import XCTest
 @testable import Avibe
 
 final class PushNotificationTests: XCTestCase {
+    func testSharedAccessGroupResolverRejectsUnexpandedOrMissingValues() {
+        XCTAssertEqual(
+            try? PushKeychainStore.resolveSharedAccessGroup(
+                "68B2SQ6YK3.bot.avibe.ios.push"
+            ),
+            "68B2SQ6YK3.bot.avibe.ios.push"
+        )
+        XCTAssertThrowsError(
+            try PushKeychainStore.resolveSharedAccessGroup(
+                "$(AppIdentifierPrefix)bot.avibe.ios.push"
+            )
+        ) { error in
+            XCTAssertEqual(error as? PushKeychainError, .invalidAccessGroup)
+        }
+        XCTAssertThrowsError(
+            try PushKeychainStore.resolveSharedAccessGroup("")
+        )
+        XCTAssertThrowsError(
+            try PushKeychainStore.resolveSharedAccessGroup(nil)
+        )
+    }
+
+    func testNativeSubscriptionUsesX963PublicKeyEncoding() throws {
+        let fixture = try loadNativeSubscriptionFixture()
+        let privateKey = try P256.KeyAgreement.PrivateKey(
+            rawRepresentation: try XCTUnwrap(
+                PushBase64URL.decode(fixture.privateKey)
+            )
+        )
+        let record = PushKeyRecord(
+            kid: "native-key-shape",
+            instanceOrigin: "https://instance.example",
+            accountID: "account-1",
+            accountGeneration: 1,
+            bindGeneration: 1,
+            privateKey: privateKey.rawRepresentation,
+            authSecret: Data(repeating: 24, count: 16),
+            vapidKeyHash: String(repeating: "a", count: 64),
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        )
+        let subscription = try XCTUnwrap(
+            record.publicSubscription["keys"] as? [String: Any]
+        )
+        let encoded = try XCTUnwrap(subscription["p256dh"] as? String)
+        let publicKey = try XCTUnwrap(PushBase64URL.decode(encoded))
+
+        XCTAssertEqual(publicKey.count, 65)
+        XCTAssertEqual(publicKey.first, 4)
+        XCTAssertEqual(encoded, fixture.p256dh)
+        XCTAssertNoThrow(
+            try P256.KeyAgreement.PublicKey(x963Representation: publicKey)
+        )
+    }
+
     func testRFC8291AppendixAIntermediateValuesAndPlaintext() throws {
         let privateKey = try XCTUnwrap(
             PushBase64URL.decode(
@@ -201,6 +257,16 @@ final class PushNotificationTests: XCTestCase {
 }
 
 private extension PushNotificationTests {
+    struct NativeSubscriptionFixture: Decodable {
+        let privateKey: String
+        let p256dh: String
+
+        enum CodingKeys: String, CodingKey {
+            case privateKey = "private_key"
+            case p256dh
+        }
+    }
+
     struct ReceiverFixture: Decodable {
         struct Native: Decodable {
             let instanceOrigin: String
@@ -261,6 +327,13 @@ private extension PushNotificationTests {
         try JSONDecoder().decode(
             ReceiverFixture.self,
             from: fixtureData(named: "instance-webpush-receiver")
+        )
+    }
+
+    func loadNativeSubscriptionFixture() throws -> NativeSubscriptionFixture {
+        try JSONDecoder().decode(
+            NativeSubscriptionFixture.self,
+            from: fixtureData(named: "native-subscription-key")
         )
     }
 

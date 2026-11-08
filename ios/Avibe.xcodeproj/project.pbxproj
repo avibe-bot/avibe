@@ -44,6 +44,7 @@
 		1000000000000000000000AD /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B6 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		1000000000000000000000AE /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B0 /* NotificationService.swift */; };
 		1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B1 /* PushNotificationProcessor.swift */; };
+			1000000000000000000000C1 /* native-subscription-key.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1 /* native-subscription-key.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -103,6 +104,7 @@
 		2000000000000000000000B6 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		2000000000000000000000B7 /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		2000000000000000000000B8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+			2000000000000000000000C1 /* native-subscription-key.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = native-subscription-key.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -207,6 +209,7 @@
 		700000000000000000000007 /* PushFixtures */ = {
 			isa = PBXGroup;
 			children = (
+					2000000000000000000000C1 /* native-subscription-key.json */,
 				2000000000000000000000B4 /* relay-apns-envelope.json */,
 				2000000000000000000000B5 /* instance-webpush-receiver.json */,
 			);
@@ -341,6 +344,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+					1000000000000000000000C1 /* native-subscription-key.json in Resources */,
 				1000000000000000000000AB /* relay-apns-envelope.json in Resources */,
 				1000000000000000000000AC /* instance-webpush-receiver.json in Resources */,
 			);

@@ -931,6 +931,10 @@ const NON_KEY_LITERALS = [
   'session.logout',
   'session.refresh',
   'session.selectInstance',
+  'push.opened',
+  'push.status',
+  'push.subscribe',
+  'push.unsubscribe',
   'viewport.setOuterScrollLocked',
   'voice.permission',
 

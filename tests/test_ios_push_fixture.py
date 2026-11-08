@@ -13,6 +13,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "push"
 REQUEST_PATH = FIXTURE_DIR / "instance-webpush-request.json"
 RECEIVER_PATH = FIXTURE_DIR / "instance-webpush-receiver.json"
 GENERATOR_PATH = FIXTURE_DIR / "capture_instance_webpush_request.py"
+NATIVE_SUBSCRIPTION_PATH = FIXTURE_DIR / "native-subscription-key.json"
 
 
 def _load_generator():
@@ -89,3 +90,43 @@ def test_real_serializer_and_pywebpush_capture_is_decryptable():
         "sub": "mailto:notifications@avibe.bot",
     }
     assert json.loads(plaintext.decode("utf-8")) == receiver["expected"]
+
+
+def test_production_sender_encrypts_to_native_x963_subscription_key(monkeypatch):
+    native = json.loads(NATIVE_SUBSCRIPTION_PATH.read_text(encoding="utf-8"))
+    public_key = _b64url_decode(native["p256dh"])
+    assert len(public_key) == 65
+    assert public_key[0] == 4
+
+    generator = _load_generator()
+    import pywebpush
+
+    calls = []
+
+    class Response:
+        status_code = 201
+        text = ""
+        reason = "Created"
+        headers = {}
+
+    def capture_post(endpoint, **kwargs):
+        calls.append((endpoint, kwargs))
+        return Response()
+
+    monkeypatch.setattr(pywebpush.requests, "post", capture_post)
+
+    from core.web_push import send_web_push
+
+    send_web_push(
+        subscription={
+            "endpoint": generator.ENDPOINT,
+            "p256dh": native["p256dh"],
+            "auth": generator.AUTH_SECRET,
+        },
+        payload={"title": "Native key shape", "body": "X9.63"},
+        vapid_keys=generator._vapid_keys(),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == generator.ENDPOINT
+    assert calls[0][1]["data"]

@@ -1391,6 +1391,85 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testColdLaunchPushTapWaitsForAccountBootstrap() async throws {
+        let sessionHeaders = FixtureEvent(description: "session response headers")
+        let sessionRelease = DispatchSemaphore(value: 0)
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                let body = """
+                {
+                  "account": {
+                    "id": "account-1",
+                    "email": "max@example.com"
+                  },
+                  "instances": [
+                    {
+                      "id": "instance-1",
+                      "name": "Push target",
+                      "host": "instance.example",
+                      "url": "https://instance.example",
+                      "relationship": "owner",
+                      "owner_email": "max@example.com",
+                      "available": true
+                    }
+                  ]
+                }
+                """
+                return LocalHTTPResponse(
+                    status: 200,
+                    headers: [("Content-Type", "application/json")],
+                    body: Data(body.utf8),
+                    headersSentEvent: sessionHeaders,
+                    bodyRelease: sessionRelease
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            sessionRelease.signal()
+            server.stop()
+        }
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let appModel = AppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: baseURL
+            )
+        )
+        await fulfillment(of: [sessionHeaders.expectation], timeout: 15)
+
+        NotificationCenter.default.post(
+            name: .avibePushNotificationTapped,
+            object: nil,
+            userInfo: [
+                "payload": [
+                    "account_id": "account-1",
+                    "instance_origin": "https://instance.example",
+                    "url": "/chat/ses_1?from=notification",
+                ],
+            ]
+        )
+        sessionRelease.signal()
+
+        try await waitUntil {
+            guard case .browser(let runtime) = appModel.route else {
+                return false
+            }
+            return runtime.instance.id == "instance-1"
+        }
+    }
+
     /// SwiftUI's root hosting controller hands the status bar to its newest
     /// representable controller. The bundled sign-in page follows the system
     /// theme, and so does its status bar; over a runtime, the runtime

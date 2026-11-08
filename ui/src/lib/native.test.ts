@@ -9,6 +9,7 @@ import {
   nativeHapticImpact,
   nativeShowAccount,
   nativeVoicePermission,
+  onNativePushOpened,
   openNativeExternal,
   setNativeAccountActionAvailable,
   setNativeOuterScrollLocked,
@@ -124,5 +125,27 @@ describe('native shell bridge', () => {
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(false);
     await expect(nativeShowAccount()).resolves.toBe(false);
     await expect(setNativeAccountActionAvailable(true)).resolves.toBe(false);
+  });
+
+  it('normalizes same-origin native notification paths and rejects foreign origins', () => {
+    const on = vi.fn((event: string, handler: (payload: unknown) => void) => {
+      if (event === 'push.opened') {
+        handler({ url: '/chat/ses_1?from=push#latest' });
+        handler({ url: 'https://avibe.bot/chat/ses_2' });
+        handler({ url: '//evil.example/phish' });
+        handler({ url: '/\\evil.example/phish' });
+      }
+      return () => undefined;
+    });
+    installBridge({
+      capabilities: { push: 1 },
+      on,
+    });
+
+    const handler = vi.fn();
+    onNativePushOpened(handler);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith('/chat/ses_1?from=push#latest');
   });
 });

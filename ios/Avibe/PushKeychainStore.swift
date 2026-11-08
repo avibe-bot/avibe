@@ -5,6 +5,7 @@ import Security
 enum PushKeychainError: Error, Equatable {
     case unavailable(OSStatus)
     case invalidData
+    case invalidAccessGroup
 }
 
 struct PushInstallationState: Codable, Equatable {
@@ -137,7 +138,7 @@ private struct P256KeyAgreementPrivateKey {
         let privateKey = try CryptoKit.P256.KeyAgreement.PrivateKey(
             rawRepresentation: rawRepresentation
         )
-        publicKey = privateKey.publicKey.rawRepresentation
+        publicKey = privateKey.publicKey.x963Representation
     }
 }
 
@@ -156,10 +157,15 @@ final class PushKeychainStore: PushKeychainStoring {
     static let installationService = "bot.avibe.ios.push.installation"
     static let orphanedInstallationService = "bot.avibe.ios.push.orphaned"
     static let recordService = "bot.avibe.ios.push.record"
-    static let sharedAccessGroup = "$(AppIdentifierPrefix)bot.avibe.ios.push"
+    static let accessGroupInfoKey = "AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"
 
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let bundle: Bundle
+
+    init(bundle: Bundle = .main) {
+        self.bundle = bundle
+    }
 
     func loadInstallation() throws -> PushInstallationState? {
         try load(
@@ -201,7 +207,7 @@ final class PushKeychainStore: PushKeychainStoring {
         try load(
             service: Self.recordService,
             account: kid,
-            accessGroup: Self.sharedAccessGroup
+            accessGroup: sharedAccessGroup()
         )
     }
 
@@ -210,7 +216,7 @@ final class PushKeychainStore: PushKeychainStoring {
             record,
             service: Self.recordService,
             account: record.kid,
-            accessGroup: Self.sharedAccessGroup
+            accessGroup: sharedAccessGroup()
         )
     }
 
@@ -218,7 +224,7 @@ final class PushKeychainStore: PushKeychainStoring {
         let query = baseQuery(
             service: Self.recordService,
             account: kid,
-            accessGroup: Self.sharedAccessGroup
+            accessGroup: try sharedAccessGroup()
         )
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
@@ -230,7 +236,7 @@ final class PushKeychainStore: PushKeychainStoring {
         var query = baseQuery(
             service: Self.recordService,
             account: nil,
-            accessGroup: Self.sharedAccessGroup
+            accessGroup: try sharedAccessGroup()
         )
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         query[kSecReturnData as String] = true
@@ -246,6 +252,24 @@ final class PushKeychainStore: PushKeychainStoring {
             throw PushKeychainError.invalidData
         }
         return try values.map { try decoder.decode(PushKeyRecord.self, from: $0) }
+    }
+
+    static func resolveSharedAccessGroup(_ value: Any?) throws -> String {
+        guard
+            let value = value as? String,
+            !value.isEmpty,
+            !value.contains("$("),
+            !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else {
+            throw PushKeychainError.invalidAccessGroup
+        }
+        return value
+    }
+
+    private func sharedAccessGroup() throws -> String {
+        try Self.resolveSharedAccessGroup(
+            bundle.object(forInfoDictionaryKey: Self.accessGroupInfoKey)
+        )
     }
 
     private func load<Value: Decodable>(

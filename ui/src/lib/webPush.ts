@@ -164,20 +164,20 @@ export async function enableWebPush(
   if (hasNativeCapability('push')) {
     const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
     const existing = await nativePushStatus(publicKey);
-    if (existing?.state === 'on' && !options.forceResubscribe) {
-      return {
-        endpoint: existing.endpoint,
-        keys: existing.keys,
-      };
-    }
-    const subscription = await nativePushSubscribe(publicKey);
+    const subscription = existing?.state === 'on' && !options.forceResubscribe
+      ? existing
+      : await nativePushSubscribe(publicKey);
     if (!subscription) throw new Error('native_push_unavailable');
+    const json: PushSubscriptionJSON = {
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+    };
     const previousEndpoints = [
       ...(existing?.state === 'on' ? [existing.endpoint] : []),
       ...await getRememberedWebPushEndpoints(),
     ];
     const result = await api.subscribeWebPush(
-      subscription,
+      json,
       'iPhone App',
       undefined,
       previousEndpoints,
@@ -187,8 +187,8 @@ export async function enableWebPush(
       await nativePushUnsubscribe();
       throw new Error('recovery_not_authorized');
     }
-    await rememberWebPushEndpoint(subscription.endpoint);
-    return subscription;
+    await rememberWebPushEndpoint(json.endpoint);
+    return json;
   }
   const support = getWebPushSupportState();
   if (!support.supported) {

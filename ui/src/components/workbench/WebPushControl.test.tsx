@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebPushControl } from './WebPushControl';
 
 const { api, push } = vi.hoisted(() => ({
-  api: { getWebPushStatus: vi.fn() },
+  api: {
+    getWebPushStatus: vi.fn(),
+    getWebPushVapidPublicKey: vi.fn(),
+  },
   push: {
     disableWebPush: vi.fn(),
     enableWebPush: vi.fn(),
@@ -18,6 +21,11 @@ const { api, push } = vi.hoisted(() => ({
   },
 }));
 
+const native = vi.hoisted(() => ({
+  hasNativeCapability: vi.fn(),
+  nativePushStatus: vi.fn(),
+}));
+
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({ capabilities: { can_read_instance: true } }),
@@ -25,6 +33,7 @@ vi.mock('@/context/InstanceAuthorizationContext', () => ({
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/lib/webPush', () => push);
+vi.mock('@/lib/native', () => native);
 
 const oldEndpoint = 'https://push.example.test/sub/old';
 const newEndpoint = 'https://push.example.test/sub/new';
@@ -59,6 +68,9 @@ beforeEach(() => {
   push.enableWebPush.mockResolvedValue(undefined);
   push.rememberWebPushEndpoint.mockResolvedValue(undefined);
   push.webPushSubscriptionUsesVapidKey.mockReturnValue(true);
+  native.hasNativeCapability.mockReturnValue(false);
+  native.nativePushStatus.mockResolvedValue(null);
+  api.getWebPushVapidPublicKey.mockResolvedValue({ public_key: 'new-key' });
   api.getWebPushStatus.mockResolvedValue(status(false));
 });
 
@@ -155,5 +167,64 @@ describe('WebPushControl recovery', () => {
 
     await screen.findByText('workbench.inbox.notifications.enable');
     expect(push.rememberWebPushEndpoint).not.toHaveBeenCalled();
+  });
+});
+
+describe('native push recovery', () => {
+  const nativeSubscription = {
+    state: 'on' as const,
+    endpoint: 'https://avibe.bot/api/push/apns/native-old',
+    keys: { p256dh: 'native-key', auth: 'native-auth' },
+  };
+  const repairedSubscription = {
+    ...nativeSubscription,
+    endpoint: 'https://avibe.bot/api/push/apns/native-new',
+  };
+
+  it('repairs a native endpoint disabled by provider failure', async () => {
+    native.hasNativeCapability.mockReturnValue(true);
+    native.nativePushStatus
+      .mockResolvedValueOnce(nativeSubscription)
+      .mockResolvedValueOnce(repairedSubscription);
+    api.getWebPushStatus
+      .mockResolvedValueOnce(status(false, true))
+      .mockResolvedValueOnce(status(true));
+
+    render(<WebPushControl />);
+
+    await screen.findByText('workbench.inbox.notifications.enabled');
+    expect(api.getWebPushStatus).toHaveBeenNthCalledWith(1, {
+      endpoint: nativeSubscription.endpoint,
+      subscription: {
+        endpoint: nativeSubscription.endpoint,
+        keys: nativeSubscription.keys,
+      },
+      device_label: 'iPhone App',
+      previous_endpoints: [nativeSubscription.endpoint, oldEndpoint],
+    });
+    expect(push.enableWebPush).toHaveBeenCalledWith(api, {
+      forceResubscribe: true,
+      recoverOnly: true,
+    });
+    expect(api.getWebPushStatus).toHaveBeenNthCalledWith(2, {
+      endpoint: repairedSubscription.endpoint,
+      subscription: {
+        endpoint: repairedSubscription.endpoint,
+        keys: repairedSubscription.keys,
+      },
+      device_label: 'iPhone App',
+      previous_endpoints: [nativeSubscription.endpoint, oldEndpoint],
+    });
+  });
+
+  it('keeps an explicitly disabled native endpoint off', async () => {
+    native.hasNativeCapability.mockReturnValue(true);
+    native.nativePushStatus.mockResolvedValue(nativeSubscription);
+    api.getWebPushStatus.mockResolvedValue(status(false));
+
+    render(<WebPushControl />);
+
+    await screen.findByText('workbench.inbox.notifications.enable');
+    expect(push.enableWebPush).not.toHaveBeenCalled();
   });
 });

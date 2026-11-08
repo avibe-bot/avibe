@@ -63,7 +63,7 @@ final class NativePushCoordinatorTests: XCTestCase {
     }
 
     func testProviderPatchFailuresKeepTheCompleteTuplePending() async throws {
-        for statusCode in [401, 502] {
+        for statusCode in [401, 502, 503] {
             let store = makeInstallationStore(
                 providerGeneration: 0,
                 provider: nil,
@@ -95,6 +95,134 @@ final class NativePushCoordinatorTests: XCTestCase {
             XCTAssertEqual(store.installation?.provider?.generation, 1)
             XCTAssertTrue(store.installation?.providerPatchPending == true)
         }
+    }
+
+    func testProviderConflictKeepsTuplePendingAndRetriesWithHigherGeneration() async throws {
+        let token = Data(repeating: 21, count: 32)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: true
+        )
+        let recorder = ManagementRecorder()
+        var patchCount = 0
+        recorder.responseHandler = { request in
+            if request.method == "PATCH" {
+                patchCount += 1
+                if patchCount == 1 {
+                    return PushManagementResponse(
+                        statusCode: 409,
+                        body: [
+                            "error": ["code": "provider_generation_conflict"],
+                            "provider_generation": 10,
+                            "device_token": PushBase64URL.encode(
+                                Data(repeating: 99, count: 32)
+                            ),
+                            "environment": "production",
+                            "topic": "wrong.topic",
+                        ]
+                    )
+                }
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        coordinator.didRegister(
+            deviceToken: token,
+            environment: "sandbox"
+        )
+        try await recorder.waitForRequestCount(1)
+        try await waitUntil {
+            store.installation?.providerPatchPending == true
+                && store.installation?.provider?.generation == 11
+        }
+
+        _ = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        let patches = recorder.requests.filter { $0.method == "PATCH" }
+        XCTAssertEqual(patches.count, 2)
+        let retried = try XCTUnwrap(patches.last)
+        let body = try XCTUnwrap(jsonBody(retried))
+        XCTAssertEqual(
+            (body["provider_generation"] as? NSNumber)?.int64Value,
+            11
+        )
+        XCTAssertEqual(
+            body["device_token"] as? String,
+            PushBase64URL.encode(token)
+        )
+        XCTAssertEqual(body["environment"] as? String, "sandbox")
+        XCTAssertEqual(body["topic"] as? String, "bot.avibe.ios")
+        XCTAssertFalse(store.installation?.providerPatchPending ?? true)
+    }
+
+    func testRelayUnavailableKeepsTuplePendingUntilLaterReconciliation() async throws {
+        let token = Data(repeating: 22, count: 32)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "production",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: true
+        )
+        let recorder = ManagementRecorder()
+        var patchCount = 0
+        recorder.responseHandler = { request in
+            if request.method == "PATCH" {
+                patchCount += 1
+                if patchCount == 1 {
+                    return PushManagementResponse(
+                        statusCode: 503,
+                        body: ["error": ["code": "relay_unavailable"]]
+                    )
+                }
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        coordinator.didRegister(
+            deviceToken: token,
+            environment: "production"
+        )
+        try await recorder.waitForRequestCount(1)
+        try await waitUntil {
+            store.installation?.providerPatchPending == true
+        }
+        XCTAssertEqual(store.installation?.provider?.deviceToken, token)
+        XCTAssertEqual(store.installation?.provider?.environment, "production")
+        XCTAssertEqual(store.installation?.provider?.topic, "bot.avibe.ios")
+
+        _ = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        let patches = recorder.requests.filter { $0.method == "PATCH" }
+        XCTAssertEqual(patches.count, 2)
+        let body = try XCTUnwrap(jsonBody(try XCTUnwrap(patches.last)))
+        XCTAssertEqual(body["device_token"] as? String, PushBase64URL.encode(token))
+        XCTAssertEqual(body["environment"] as? String, "production")
+        XCTAssertEqual(body["topic"] as? String, "bot.avibe.ios")
+        XCTAssertFalse(store.installation?.providerPatchPending ?? true)
     }
 
     func testProviderGenerationUsesInt64WireIntegersAndStopsAtMaximum() async throws {
@@ -397,6 +525,99 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
     }
 
+    func testUnsubscribeScopesTheRecordToAccountAndInstanceOrigin() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 16, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        try store.saveRecord(
+            PushKeyRecord(
+                kid: "a-other-account",
+                instanceOrigin: "https://other-instance.example",
+                accountID: Self.accountB.id,
+                accountGeneration: 1,
+                bindGeneration: 1,
+                privateKey: Data(repeating: 17, count: 32),
+                authSecret: Data(repeating: 18, count: 16),
+                vapidKeyHash: String(repeating: "b", count: 64),
+                state: .active,
+                pendingRevoke: false,
+                replacementRegistrationIDs: []
+            )
+        )
+        try store.saveRecord(
+            PushKeyRecord(
+                kid: "b-stale-generation",
+                instanceOrigin: Self.instanceOrigin,
+                accountID: Self.accountA.id,
+                accountGeneration: 0,
+                bindGeneration: 1,
+                privateKey: Data(repeating: 17, count: 32),
+                authSecret: Data(repeating: 18, count: 16),
+                vapidKeyHash: String(repeating: "b", count: 64),
+                state: .active,
+                pendingRevoke: false,
+                replacementRegistrationIDs: []
+            )
+        )
+        let target = makeRecord(
+            kid: "z-current-account",
+            state: .active,
+            pendingRevoke: false,
+            bindGeneration: 1
+        )
+        try store.saveRecord(target)
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let revoked = try await coordinator.unsubscribe(
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertTrue(revoked)
+
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            ["/api/push/apns/registrations/\(target.kid)"]
+        )
+        XCTAssertNil(try store.loadRecord(kid: target.kid))
+        XCTAssertNotNil(try store.loadRecord(kid: "a-other-account"))
+        XCTAssertNotNil(try store.loadRecord(kid: "b-stale-generation"))
+    }
+
+    func testLogoutRemovesNotificationsForTheFormerAccount() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 19, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        var cleanedAccountIDs: [String] = []
+        let coordinator = makeCoordinator(
+            store: store,
+            management: ManagementRecorder(),
+            notificationCleanup: { accountID in
+                cleanedAccountIDs.append(accountID)
+            }
+        )
+
+        await coordinator.prepareForLogout(throughBindGeneration: 1)
+
+        XCTAssertEqual(cleanedAccountIDs, [Self.accountA.id])
+    }
+
     func testReinstallMovesCredentialToBoundedOrphanRevoke() async throws {
         let store = InMemoryPushKeychainStore()
         let oldID = UUID()
@@ -464,9 +685,16 @@ final class NativePushCoordinatorTests: XCTestCase {
                 "url": "/chat/\u{1b}[31m",
             ]
         )
+        coordinator.handleNotificationTap(
+            userInfo: [
+                "account_id": Self.accountA.id,
+                "instance_origin": Self.instanceOrigin,
+                "url": "/chat\\evil",
+            ]
+        )
 
         XCTAssertEqual(taps, 0)
-        XCTAssertEqual(recoveries, 2)
+        XCTAssertEqual(recoveries, 3)
     }
 
     private static let successResponse = PushManagementResponse(
@@ -480,6 +708,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         tokenWaitSeconds: Double = 0.5,
         marker: InMemoryPushInstallationMarkerStore? = nil,
         account: Locked<MobileAccount?>? = nil,
+        notificationCleanup: @escaping @MainActor (String) async -> Void = { _ in },
         onTap: @escaping @MainActor (PushNotificationTap) -> Void = { _ in },
         onTapRecovery: @escaping @MainActor () -> Void = {}
     ) -> NativePushCoordinator {
@@ -489,16 +718,20 @@ final class NativePushCoordinatorTests: XCTestCase {
         if installationMarker.installationID == nil {
             installationMarker.installationID = store.installation?.installationID
         }
+        let generationStore = InMemoryPushGenerationStore()
+        generationStore.generation = account.value == nil ? 0 : 1
         return NativePushCoordinator(
             keychain: store,
-            generationStore: InMemoryPushGenerationStore(),
+            generationStore: generationStore,
             managementRequest: { request in
                 management.record(request)
                 return try await management.respond(to: request)
             },
             accountProvider: { account.value },
+            registerForRemoteNotifications: {},
             requestNotificationAuthorization: { true },
             installationMarker: installationMarker,
+            removeAccountNotifications: notificationCleanup,
             tokenWaitSeconds: tokenWaitSeconds,
             onTap: onTap,
             onTapRecovery: onTapRecovery

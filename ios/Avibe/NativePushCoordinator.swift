@@ -61,6 +61,7 @@ final class NativePushCoordinator {
     typealias TapHandler = @MainActor (PushNotificationTap) -> Void
     typealias TapRecoveryHandler = @MainActor () -> Void
     typealias RequestNotificationAuthorization = @MainActor () async throws -> Bool
+    typealias NotificationCleanup = @MainActor (String) async -> Void
 
     private static let publicBaseURL = "https://avibe.bot"
     private static let topic = "bot.avibe.ios"
@@ -81,6 +82,7 @@ final class NativePushCoordinator {
     private let onTap: TapHandler
     private let onTapRecovery: TapRecoveryHandler
     private let installationMarker: PushInstallationMarkerStoring
+    private let removeAccountNotifications: NotificationCleanup
     private let tokenWaitSeconds: Double
 
     private var tokenWaiters: [UUID: TokenWaiter] = [:]
@@ -104,6 +106,9 @@ final class NativePushCoordinator {
         },
         installationMarker: PushInstallationMarkerStoring =
             UserDefaultsPushInstallationMarkerStore(),
+        removeAccountNotifications: @escaping NotificationCleanup = { accountID in
+            await NativePushCoordinator.removeNotifications(for: accountID)
+        },
         tokenWaitSeconds: Double = 15,
         onTap: @escaping TapHandler = { _ in },
         onTapRecovery: @escaping TapRecoveryHandler = {}
@@ -115,6 +120,7 @@ final class NativePushCoordinator {
         self.registerForRemoteNotifications = registerForRemoteNotifications
         self.requestNotificationAuthorization = requestNotificationAuthorization
         self.installationMarker = installationMarker
+        self.removeAccountNotifications = removeAccountNotifications
         self.tokenWaitSeconds = tokenWaitSeconds
         self.onTap = onTap
         self.onTapRecovery = onTapRecovery
@@ -323,11 +329,14 @@ final class NativePushCoordinator {
         }
         guard
             let record = try keychain.listRecords().first(where: {
-                ($0.state == .active && !$0.pendingRevoke)
-                    || ($0.state == .retiring && $0.pendingRevoke)
-            && $0.accountID == account.id
-            && $0.bindGeneration == installation.bindGeneration
-            && $0.instanceOrigin == instanceOrigin
+                (
+                    ($0.state == .active && !$0.pendingRevoke)
+                        || ($0.state == .retiring && $0.pendingRevoke)
+                )
+                    && $0.accountID == account.id
+                    && $0.bindGeneration == installation.bindGeneration
+                    && $0.accountGeneration == generationStore.generation
+                    && $0.instanceOrigin == instanceOrigin
             })
         else {
             return false
@@ -425,6 +434,7 @@ final class NativePushCoordinator {
         installation.pendingBulkRevokeThroughGeneration = throughBindGeneration
         try? keychain.saveInstallation(installation)
         advanceAccountGeneration()
+        let accountID = installation.accountID
 
         let createsReconciled =
             (try? await reconcileRegistrationCreates(
@@ -435,6 +445,9 @@ final class NativePushCoordinator {
         zeroAccountKeys(
             throughBindGeneration: throughBindGeneration
         )
+        if let accountID {
+            await removeAccountNotifications(accountID)
+        }
         try? keychain.saveInstallation(installation)
         guard createsReconciled else {
             return
@@ -705,23 +718,25 @@ final class NativePushCoordinator {
                     throw Self.managementError(response)
                 }
                 if response.statusCode == 409 {
-                    if let serverGeneration = Self.int64(
+                    guard current.provider?.generation == provider.generation else {
+                        throw Self.managementError(response)
+                    }
+                    let serverGeneration = Self.int64(
                         response.body["provider_generation"]
-                    ) {
-                        current.providerGeneration = max(
-                            current.providerGeneration,
-                            serverGeneration
-                        )
-                    }
-                    if current.provider?.generation == provider.generation {
-                        current.providerPatchPending = false
-                    }
+                    ) ?? provider.generation
+                    let nextGeneration = try Self.nextGeneration(
+                        after: max(current.providerGeneration, serverGeneration)
+                    )
+                    current.providerGeneration = nextGeneration
+                    current.provider = PushProviderState(
+                        deviceToken: provider.deviceToken,
+                        environment: provider.environment,
+                        topic: provider.topic,
+                        generation: nextGeneration
+                    )
+                    current.providerPatchPending = true
                     try self.keychain.saveInstallation(current)
                     throw Self.managementError(response)
-                }
-                if current.provider?.generation == provider.generation {
-                    current.providerPatchPending = false
-                    try self.keychain.saveInstallation(current)
                 }
                 throw Self.managementError(response)
             }
@@ -987,6 +1002,34 @@ final class NativePushCoordinator {
         }
     }
 
+    private static func removeNotifications(for accountID: String) async {
+        let center = UNUserNotificationCenter.current()
+        let delivered: [UNNotification] = await withCheckedContinuation { continuation in
+            center.getDeliveredNotifications { notifications in
+                continuation.resume(returning: notifications)
+            }
+        }
+        let pending: [UNNotificationRequest] = await withCheckedContinuation {
+            continuation in
+            center.getPendingNotificationRequests { requests in
+                continuation.resume(returning: requests)
+            }
+        }
+        let deliveredIDs = delivered.compactMap { notification in
+            notification.request.content.userInfo["account_id"] as? String
+                == accountID
+                ? notification.request.identifier
+                : nil
+        }
+        let pendingIDs = pending.compactMap { request in
+            request.content.userInfo["account_id"] as? String == accountID
+                ? request.identifier
+                : nil
+        }
+        center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
+        center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
+    }
+
     private func resumeTokenWaiters(with error: Error? = nil) {
         let waiters = Array(tokenWaiters.values)
         for waiter in waiters {
@@ -1096,6 +1139,7 @@ final class NativePushCoordinator {
         guard
             !value.isEmpty,
             value.first == "/",
+            !value.contains("\\"),
             !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
         else {
             return false

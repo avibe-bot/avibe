@@ -55,6 +55,8 @@ final class AppModel: ObservableObject {
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
+    private var hasCompletedBootstrap = false
+    private var pendingPushTap: PushNotificationTap?
     private var pendingPushOpenedURL: String?
 
     private lazy var sessionCoordinator = MobileSessionCoordinator(
@@ -198,6 +200,11 @@ final class AppModel: ObservableObject {
         } catch {
             route = .onboarding(.instances)
         }
+        hasCompletedBootstrap = true
+        if let pendingPushTap {
+            self.pendingPushTap = nil
+            handlePushTap(pendingPushTap)
+        }
     }
 
     private func stopRuntime() {
@@ -231,6 +238,10 @@ final class AppModel: ObservableObject {
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {
+        guard hasCompletedBootstrap else {
+            pendingPushTap = tap
+            return
+        }
         guard
             let account = sessionCoordinator.currentAccount,
             account.id == tap.accountID,
@@ -257,6 +268,7 @@ final class AppModel: ObservableObject {
         guard
             !value.isEmpty,
             value.first == "/",
+            !value.contains("\\"),
             !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
             let components = URLComponents(string: value),
             components.scheme == nil,

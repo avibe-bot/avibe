@@ -14,7 +14,6 @@ import {
   getRememberedWebPushEndpoints,
   getExistingWebPushSubscription,
   getWebPushSupportState,
-  readWebPushDeviceState,
   rememberWebPushEndpoint,
   webPushSubscriptionUsesVapidKey,
   type WebPushSupportState,
@@ -38,8 +37,60 @@ export const WebPushControl: React.FC = () => {
     const nextSupport = getWebPushSupportState();
     setSupport(nextSupport);
     if (hasNativeCapability('push')) {
-      const nativeState = await readWebPushDeviceState(api);
-      setStatus(nativeState === 'on' ? 'enabled' : nativeState === 'off' ? 'disabled' : 'unsupported');
+      try {
+        const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
+        const nativeState = await nativePushStatus(publicKey);
+        if (nativeState?.state !== 'on') {
+          setStatus('disabled');
+          return;
+        }
+        const previousEndpoints = [
+          nativeState.endpoint,
+          ...await getRememberedWebPushEndpoints(),
+        ].filter((endpoint, index, endpoints) => endpoints.indexOf(endpoint) === index);
+        const nativeSubscription = {
+          endpoint: nativeState.endpoint,
+          keys: nativeState.keys,
+        };
+        const serverStatus = await api.getWebPushStatus({
+          endpoint: nativeState.endpoint,
+          subscription: nativeSubscription,
+          device_label: 'iPhone App',
+          previous_endpoints: previousEndpoints,
+        });
+        if (serverStatus.current_subscription_enabled) {
+          await rememberWebPushEndpoint(nativeState.endpoint);
+          setStatus('enabled');
+          return;
+        }
+        if (serverStatus.current_subscription_repairable) {
+          try {
+            await enableWebPush(api, { forceResubscribe: true, recoverOnly: true });
+            const repaired = await nativePushStatus(publicKey);
+            if (repaired?.state === 'on') {
+              const repairedStatus = await api.getWebPushStatus({
+                endpoint: repaired.endpoint,
+                subscription: {
+                  endpoint: repaired.endpoint,
+                  keys: repaired.keys,
+                },
+                device_label: 'iPhone App',
+                previous_endpoints: previousEndpoints,
+              });
+              if (repairedStatus.current_subscription_enabled) {
+                await rememberWebPushEndpoint(repaired.endpoint);
+                setStatus('enabled');
+                return;
+              }
+            }
+          } catch {
+            // Keep the control recoverable; the user can still retry manually.
+          }
+        }
+        setStatus('disabled');
+      } catch {
+        setStatus('disabled');
+      }
       return;
     }
     if (!nextSupport.supported) {

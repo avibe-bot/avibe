@@ -205,6 +205,49 @@ describe('web push recovery', () => {
     );
   });
 
+  it('re-posts an existing native subscription when the instance is disabled', async () => {
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call: vi.fn(async (method: string, params: Record<string, unknown>) => {
+          if (method === 'push.status') {
+            expect(params).toEqual({ vapidPublicKey: 'AQIDBA' });
+            return {
+              state: 'on',
+              endpoint: 'https://avibe.bot/api/push/apns/registration',
+              keys: { p256dh: 'key', auth: 'auth' },
+            };
+          }
+          throw new Error(`unexpected method ${method}`);
+        }),
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: { getItem: () => null, setItem: vi.fn() },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
+    } as unknown as ApiContextType;
+
+    await expect(enableWebPush(api)).resolves.toEqual({
+      endpoint: 'https://avibe.bot/api/push/apns/registration',
+      keys: { p256dh: 'key', auth: 'auth' },
+    });
+    expect(api.subscribeWebPush).toHaveBeenCalledWith(
+      {
+        endpoint: 'https://avibe.bot/api/push/apns/registration',
+        keys: { p256dh: 'key', auth: 'auth' },
+      },
+      'iPhone App',
+      undefined,
+      ['https://avibe.bot/api/push/apns/registration'],
+      undefined,
+    );
+  });
+
   it('keeps the browser subscription when the server cannot record an opt-out', async () => {
     const subscription = {
       endpoint: 'https://push.example.test/sub/old',
