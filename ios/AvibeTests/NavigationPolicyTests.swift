@@ -1199,7 +1199,7 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    func testAccountBridgeUsesAppModelTransitionBeforeLateCallbacks() async throws {
+    func testAccountCoversTheRuntimeUntilASwitchOrLogoutReleasesIt() async throws {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
@@ -1218,6 +1218,15 @@ final class NavigationPolicyTests: XCTestCase {
                           "name": "Alice",
                           "host": "alice-app.avibe.bot",
                           "url": "https://alice-app.avibe.bot",
+                          "relationship": "owner",
+                          "owner_email": "max@example.com",
+                          "available": true
+                        },
+                        {
+                          "id": "instance-2",
+                          "name": "Bob",
+                          "host": "bob-app.avibe.bot",
+                          "url": "https://bob-app.avibe.bot",
                           "relationship": "owner",
                           "owner_email": "max@example.com",
                           "available": true
@@ -1240,17 +1249,23 @@ final class NavigationPolicyTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
 
-        let storeCleanup = NamedDataStoreCleanup()
+        // The launch store, and the fresh store sign-out rotates to.
+        let storeCleanups = [NamedDataStoreCleanup(), NamedDataStoreCleanup()]
         addTeardownBlock {
-            _ = await storeCleanup.remove()
+            for storeCleanup in storeCleanups {
+                _ = await storeCleanup.remove()
+            }
         }
 
-        storeCleanup.identifier = try await exerciseAppModelAccountTransition(
+        try await exerciseAppModelAccountTransition(
             defaults: defaults,
-            controlPlaneURL: baseURL
+            controlPlaneURL: baseURL,
+            storeCleanups: storeCleanups
         )
-        let removalError = await storeCleanup.remove()
-        XCTAssertNil(removalError)
+        for storeCleanup in storeCleanups {
+            let removalError = await storeCleanup.remove()
+            XCTAssertNil(removalError)
+        }
     }
 
     @MainActor
@@ -1661,28 +1676,30 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     private func exerciseAppModelAccountTransition(
         defaults: UserDefaults,
-        controlPlaneURL: URL
-    ) async throws -> UUID {
+        controlPlaneURL: URL,
+        storeCleanups: [NamedDataStoreCleanup]
+    ) async throws {
         var appModel: AppModel? = AppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: controlPlaneURL
             )
         )
-        let storeIdentifier = try XCTUnwrap(
+        storeCleanups[0].identifier = try XCTUnwrap(
             appModel?.websiteDataStore.identifier
         )
         try await exerciseRuntimeAccountTransition(
-            appModel: try XCTUnwrap(appModel)
+            appModel: try XCTUnwrap(appModel),
+            storeCleanups: storeCleanups
         )
         appModel = nil
         try? await Task.sleep(for: .milliseconds(100))
-        return storeIdentifier
     }
 
     @MainActor
     private func exerciseRuntimeAccountTransition(
-        appModel: AppModel
+        appModel: AppModel,
+        storeCleanups: [NamedDataStoreCleanup]
     ) async throws {
         try await waitUntil {
             if case .onboarding(.instances) = appModel.route {
@@ -1692,51 +1709,68 @@ final class NavigationPolicyTests: XCTestCase {
         }
         _ = try appModel.mobileSessionCoordinator.selectInstance(id: "instance")
 
-        let runtime: MobileRuntimeContext
-        guard case .browser(let selectedRuntime) = appModel.route else {
+        guard case .browser(let runtime) = appModel.route else {
             XCTFail("Selecting an instance did not open the runtime.")
             return
         }
-        runtime = selectedRuntime
+        let (controller, webView, window) = try await openRuntimeDocument(
+            for: runtime,
+            origin: instance,
+            in: appModel
+        )
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
 
-        let controller = WebViewController(
-            instanceOrigin: instance,
-            websiteDataStore: appModel.runtimeWebsiteDataStore,
-            showAccount: appModel.showAccount,
-            didStartLoading: {},
-            didFinishLoading: {},
-            didFailLoading: {}
-        )
-        appModel.registerRuntimeController(controller, for: runtime)
-        let window = host(controller)
-        let webView = try XCTUnwrap(
-            controller.view.subviews.compactMap { $0 as? WKWebView }.first
-        )
-        let probe = WebViewLoadProbe()
-        webView.navigationDelegate = probe
-        try await probe.loadHTML(
-            """
-            <!doctype html>
-            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
-              Account
-            </button>
-            """,
-            baseURL: instance.url,
-            in: webView
-        )
-
+        // Account covers the runtime and leaves its document as it was.
         _ = try await webView.callAsyncJavaScript(
-            "document.querySelector('#account').click()",
+            """
+            window.avibeRuntimeState = "kept";
+            document.querySelector('#account').click();
+            """,
             arguments: [:],
             in: nil,
             contentWorld: .page
         )
         try await waitUntil {
-            if case .onboarding(.account) = appModel.route {
-                return true
-            }
-            return false
+            appModel.route == .accountOverBrowser(runtime)
         }
+        XCTAssertNotNil(webView.superview)
+        appModel.showAccount()
+        XCTAssertEqual(appModel.route, .accountOverBrowser(runtime))
+
+        XCTAssertTrue(appModel.returnToRuntime())
+        XCTAssertEqual(appModel.route, .browser(runtime))
+        XCTAssertFalse(appModel.returnToRuntime())
+        let returnedState = try await webView.callAsyncJavaScript(
+            """
+            await window.avibeNative.call(
+              "app.setAccountActionAvailable",
+              {available: true}
+            );
+            return window.avibeRuntimeState;
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(returnedState as? String, "kept")
+        XCTAssertNotNil(webView.superview)
+        let runtimeIdentity = appModel.runtimeIdentity
+
+        // Switching instance from that account page releases the runtime.
+        appModel.showAccount()
+        XCTAssertEqual(appModel.route, .accountOverBrowser(runtime))
+        _ = try appModel.mobileSessionCoordinator.selectInstance(
+            id: "instance-2"
+        )
+        guard case .browser(let switched) = appModel.route else {
+            XCTFail("Switching instance did not open the new runtime.")
+            return
+        }
+        XCTAssertEqual(switched.instance.id, "instance-2")
+        XCTAssertEqual(appModel.runtimeIdentity, runtimeIdentity + 1)
         XCTAssertNil(webView.superview)
 
         let lateBridgeResult = try await webView.callAsyncJavaScript(
@@ -1765,6 +1799,7 @@ final class NavigationPolicyTests: XCTestCase {
         let lateBridgePayload = try jsonObject(from: lateBridgeResult)
         XCTAssertEqual(lateBridgePayload["registration"] as? String, "forbidden")
         XCTAssertEqual(lateBridgePayload["history"] as? String, "forbidden")
+        XCTAssertEqual(appModel.route, .browser(switched))
 
         controller.webView(
             webView,
@@ -1780,9 +1815,64 @@ final class NavigationPolicyTests: XCTestCase {
         )
         controller.webViewWebContentProcessDidTerminate(webView)
         controller.webViewDidClose(webView)
+
+        // Signing out from the account page over a runtime releases it too.
+        let switchedOrigin = try XCTUnwrap(
+            WebOrigin(url: switched.instance.url)
+        )
+        let (_, switchedWebView, switchedWindow) = try await openRuntimeDocument(
+            for: switched,
+            origin: switchedOrigin,
+            in: appModel
+        )
+        defer {
+            switchedWindow.rootViewController = nil
+            switchedWindow.isHidden = true
+        }
+        appModel.showAccount()
+        XCTAssertEqual(appModel.route, .accountOverBrowser(switched))
+
+        let signedOut = try await appModel.mobileSessionCoordinator.logout()
+        storeCleanups[1].identifier = appModel.websiteDataStore.identifier
+        XCTAssertEqual(signedOut, .signedOut)
+        XCTAssertEqual(appModel.route, .onboarding(.account))
+        XCTAssertNil(switchedWebView.superview)
+        XCTAssertFalse(appModel.returnToRuntime())
         appModel.mobileSessionCoordinator.deactivateAccountSurface()
-        window.rootViewController = nil
-        window.isHidden = true
+    }
+
+    @MainActor
+    private func openRuntimeDocument(
+        for runtime: MobileRuntimeContext,
+        origin: WebOrigin,
+        in appModel: AppModel
+    ) async throws -> (WebViewController, WKWebView, UIWindow) {
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: appModel.runtimeWebsiteDataStore,
+            showAccount: appModel.showAccount,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        appModel.registerRuntimeController(controller, for: runtime)
+        let window = host(controller)
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <button id="account" onclick="window.avibeNative.call('app.showAccount')">
+              Account
+            </button>
+            """,
+            baseURL: origin.url,
+            in: webView
+        )
+        return (controller, webView, window)
     }
 
     private func assertForbiddenReply(

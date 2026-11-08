@@ -3,20 +3,28 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var appModel: AppModel
 
+    // Each layer keeps its own position, so Account can cover a runtime and
+    // leave it untouched, and an account transition can release that runtime
+    // without reloading the account page above it.
     var body: some View {
-        Group {
-            switch appModel.route {
-            case .loading:
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .onboarding(let startScreen):
+        ZStack {
+            if let runtime = appModel.route.runtime {
+                BrowserScreen(runtime: runtime)
+                    .id(appModel.runtimeIdentity)
+                    .allowsHitTesting(!appModel.route.coversRuntime)
+                    .accessibilityHidden(appModel.route.coversRuntime)
+            }
+            if let startScreen = appModel.route.onboardingStartScreen {
                 MobileOnboardingContainer(
                     coordinator: appModel.mobileSessionCoordinator,
-                    startScreen: startScreen
+                    startScreen: startScreen,
+                    returnToRuntime: appModel.returnToRuntime
                 )
                 .ignoresSafeArea(.container, edges: .all)
-            case .browser(let runtime):
-                BrowserScreen(runtime: runtime)
+            }
+            if appModel.route == .loading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Color(uiColor: .systemBackground))

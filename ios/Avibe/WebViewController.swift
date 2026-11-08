@@ -776,6 +776,18 @@ final class WebViewController: UIViewController {
         )
     }
 
+    /// Account is about to cover this runtime inside the root view. Child
+    /// windows are sheets above the root, so they close as `window.close()`
+    /// would, and the keyboard leaves with the covered editor. The primary
+    /// document stays as it is.
+    func prepareForAccountCover() {
+        guard !isInvalidatedForAccountTransition else {
+            return
+        }
+        discardAllPopups(animated: false)
+        viewIfLoaded?.endEditing(true)
+    }
+
     func invalidateForAccountTransition() -> WebsiteDataStoreReleaseBarrier {
         guard !isInvalidatedForAccountTransition else {
             return WebsiteDataStoreReleaseBarrier(webViews: [])

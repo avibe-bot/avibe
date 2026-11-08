@@ -124,6 +124,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
     case appOpenExternal = "app.openExternal"
+    case appReturnToInstance = "app.returnToInstance"
 }
 
 struct MobileBridgeRequest {
@@ -219,9 +220,14 @@ enum MobileBridgeConfiguration {
 private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
     weak var trustedWebView: WKWebView?
     private let coordinator: MobileSessionCoordinator
+    private let returnToRuntime: () -> Bool
 
-    init(coordinator: MobileSessionCoordinator) {
+    init(
+        coordinator: MobileSessionCoordinator,
+        returnToRuntime: @escaping () -> Bool
+    ) {
         self.coordinator = coordinator
+        self.returnToRuntime = returnToRuntime
     }
 
     func userContentController(
@@ -344,6 +350,11 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         options: [:]
                     )
                     reply(replyHandler, result: ["opened": opened])
+                case .appReturnToInstance:
+                    guard returnToRuntime() else {
+                        throw MobileAccountError.runtimeUnavailable
+                    }
+                    reply(replyHandler, result: NSNull())
                 }
             } catch let error as MobileAccountError {
                 reply(replyHandler, error: error)
@@ -382,6 +393,9 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
 
 final class MobileOnboardingViewController: UIViewController, WKNavigationDelegate {
     private let coordinator: MobileSessionCoordinator
+    /// Over a live runtime the hidden transport waits for the first account
+    /// transition, which releases that runtime before it starts one.
+    private let startsAccountSurfaceOnAppear: Bool
     private let resourceURL: URL
     private let schemeHandler: MobileBundleSchemeHandler
     private let handler: MobileBridgeHandler
@@ -393,7 +407,8 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
     init(
         coordinator: MobileSessionCoordinator,
         startScreen: MobileOnboardingStartScreen = .instances,
-        resourceURL: URL? = nil
+        resourceURL: URL? = nil,
+        returnToRuntime: @escaping () -> Bool = { false }
     ) {
         let resourceDirectoryURL = resourceURL?.deletingLastPathComponent()
             ?? Bundle.main.resourceURL!.appendingPathComponent(
@@ -410,9 +425,13 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         components.fragment = startScreen.rawValue
         let resolvedResourceURL = components.url!
         self.coordinator = coordinator
+        startsAccountSurfaceOnAppear = startScreen != .runtimeAccount
         self.resourceURL = resolvedResourceURL
         self.schemeHandler = schemeHandler
-        handler = MobileBridgeHandler(coordinator: coordinator)
+        handler = MobileBridgeHandler(
+            coordinator: coordinator,
+            returnToRuntime: returnToRuntime
+        )
         webView = WKWebView(
             frame: .zero,
             configuration: MobileBridgeConfiguration.make(
@@ -465,7 +484,9 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        coordinator.activateAccountSurface()
+        if startsAccountSurfaceOnAppear {
+            coordinator.activateAccountSurface()
+        }
         guard !hasLoadedBundledPage else {
             return
         }

@@ -134,5 +134,13 @@ export const logoutMobileSession = (): Promise<MobileSessionState> =>
 export const openMobileExternal = (url: string): Promise<{ opened: boolean }> =>
   call('app.openExternal', { url });
 
+/**
+ * Closes an account page that native opened over a live instance
+ * (`#runtime-account`) and shows that instance again, unchanged. Rejects with
+ * `runtime_unavailable` once a switch, refresh, or sign-out has closed it.
+ */
+export const returnToMobileInstance = (): Promise<null> =>
+  call('app.returnToInstance');
+
 /** Where an account that must turn on two-step verification sets it up. */
 export const ACCOUNT_SECURITY_URL = 'https://avibe.bot/app/account/security';

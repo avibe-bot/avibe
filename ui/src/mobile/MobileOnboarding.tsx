@@ -44,6 +44,7 @@ import {
   openMobileExternal,
   refreshMobileSession,
   requestMobileOtp,
+  returnToMobileInstance,
   selectMobileInstance,
   type MobileBridgeError,
   type MobileInstance,
@@ -73,7 +74,8 @@ type BusyAction =
   | 'passkey'
   | 'refresh'
   | 'select'
-  | 'logout';
+  | 'logout'
+  | 'return';
 type CooldownSource = 'client' | 'provider' | null;
 type CooldownScope = 'send' | 'all' | null;
 type MobileOperation =
@@ -99,6 +101,10 @@ type SecondFactorSession = Extract<MobileSessionState, { status: 'twoFactorRequi
 type SecondFactorStep = 'passkey' | 'totp' | 'recovery' | 'setup';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CODE_PATTERN = /^\d{6}$/;
+// Native opens the account page with this fragment over a live instance, and
+// then answers `app.returnToInstance`; `#account` has no instance behind it.
+const RUNTIME_ACCOUNT_HASH = '#runtime-account';
 const DEFAULT_COOLDOWN_SECONDS = 60;
 const FAILED_COOLDOWN_SECONDS = 15;
 // avibe.bot counts second-factor attempts over this window.
@@ -176,10 +182,17 @@ const firstSecondFactorStep = (session: SecondFactorSession): SecondFactorStep =
   return session.methods.includes('totp') ? 'totp' : 'recovery';
 };
 
-const secondFactorRetryMinutes = (error: MobileBridgeError): number =>
+const secondFactorRetrySeconds = (error: MobileBridgeError): number =>
   typeof error.retry_after_seconds === 'number' && error.retry_after_seconds > 0
-    ? Math.ceil(error.retry_after_seconds / 60)
-    : SECOND_FACTOR_RETRY_MINUTES;
+    ? error.retry_after_seconds
+    : SECOND_FACTOR_RETRY_MINUTES * 60;
+
+const secondFactorRetryMinutes = (error: MobileBridgeError): number =>
+  Math.ceil(secondFactorRetrySeconds(error) / 60);
+
+/** True when an edit, not a re-render, makes a six-digit code complete. */
+const completesCode = (next: string, previous: string): boolean =>
+  CODE_PATTERN.test(next) && next !== previous;
 
 const pageErrorKey = (
   error: MobileBridgeError,
@@ -1318,7 +1331,14 @@ function BootRecovery({
 
 export function MobileOnboarding() {
   const { i18n } = useTranslation();
-  const startsOnAccount = useRef(window.location.hash === '#account');
+  const startsOnAccount = useRef(
+    window.location.hash === '#account' || window.location.hash === RUNTIME_ACCOUNT_HASH,
+  );
+  // Account Back returns to the instance this page covers while native still
+  // holds it; otherwise it shows the instance list.
+  const coversInstance = useRef(window.location.hash === RUNTIME_ACCOUNT_HASH);
+  // avibe.bot's second-factor throttle window; a completed code waits for the button.
+  const secondFactorRetryAt = useRef(0);
   const [screen, setScreen] = useState<Screen>('boot');
   const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
   const [email, setEmail] = useState('');
@@ -1442,6 +1462,8 @@ export function MobileOnboarding() {
         setCooldownScope(null);
       }
       setResent(resend);
+      // A new email sign-in owes its own second factor.
+      secondFactorRetryAt.current = 0;
       setScreen('code');
     } catch (rawError) {
       if (!ownsOperation(token)) return;
@@ -1462,13 +1484,13 @@ export function MobileOnboarding() {
     }
   };
 
-  const verifyOtp = async () => {
-    if (providerCooldownActive || !/^\d{6}$/.test(code)) return;
+  const verifyOtp = async (candidate: string = code) => {
+    if (providerCooldownActive || !CODE_PATTERN.test(candidate)) return;
     const token = beginOperation('verify');
     if (token === null) return;
     setErrorKey(null);
     try {
-      const next = await verifyMobileOtp(email, code);
+      const next = await verifyMobileOtp(email, candidate);
       applySession(token, next, false);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
@@ -1503,22 +1525,29 @@ export function MobileOnboarding() {
     }
   };
 
-  const verifySecondFactorCode = async () => {
+  const recordSecondFactorFailure = (error: MobileBridgeError) => {
+    if (error.code === 'rate_limited') {
+      secondFactorRetryAt.current = Date.now() + secondFactorRetrySeconds(error) * 1000;
+    }
+    setFactorRetryMinutes(secondFactorRetryMinutes(error));
+  };
+
+  const verifySecondFactorCode = async (candidate: string = factorCode) => {
     if (factorStep !== 'totp' && factorStep !== 'recovery') return;
     const method = factorStep;
-    if (method === 'totp' ? !/^\d{6}$/.test(factorCode) : factorCode.trim().length === 0) {
+    if (method === 'totp' ? !CODE_PATTERN.test(candidate) : candidate.trim().length === 0) {
       return;
     }
     const token = beginOperation('verify');
     if (token === null) return;
     setErrorKey(null);
     try {
-      const next = await verifyMobileSecondFactor(method, factorCode);
+      const next = await verifyMobileSecondFactor(method, candidate);
       applySession(token, next, true);
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      setFactorRetryMinutes(secondFactorRetryMinutes(error));
+      recordSecondFactorFailure(error);
       setErrorKey(pageErrorKey(error, method));
     } finally {
       finishOperation(token);
@@ -1535,7 +1564,7 @@ export function MobileOnboarding() {
     } catch (rawError) {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
-      setFactorRetryMinutes(secondFactorRetryMinutes(error));
+      recordSecondFactorFailure(error);
       setErrorKey(pageErrorKey(error, 'passkey'));
     } finally {
       finishOperation(token);
@@ -1585,6 +1614,29 @@ export function MobileOnboarding() {
       if (!ownsOperation(token)) return;
       const error = normalizeMobileBridgeError(rawError);
       setErrorKey(pageErrorKey(error, 'logout'));
+    } finally {
+      finishOperation(token);
+    }
+  };
+
+  const leaveAccount = async () => {
+    if (!coversInstance.current) {
+      if (isOperationLocked()) return;
+      setErrorKey(null);
+      setScreen(accountReturnScreen);
+      return;
+    }
+    const token = beginOperation('return');
+    if (token === null) return;
+    setErrorKey(null);
+    try {
+      // Native shows the covered instance again and removes this page.
+      await returnToMobileInstance();
+    } catch {
+      if (!ownsOperation(token)) return;
+      // A switch, refresh, or sign-out closed it; nothing is behind the page.
+      coversInstance.current = false;
+      setScreen(accountReturnScreen);
     } finally {
       finishOperation(token);
     }
@@ -1661,8 +1713,10 @@ export function MobileOnboarding() {
         onBack={showEmail}
         onCodeChange={(value) => {
           if (isOperationLocked()) return;
+          const complete = completesCode(value, code);
           setCode(value);
           setErrorKey(null);
+          if (complete) void verifyOtp(value);
         }}
         onVerify={() => void verifyOtp()}
         onResend={() => void requestOtp(true)}
@@ -1687,8 +1741,13 @@ export function MobileOnboarding() {
         }}
         onCodeChange={(value) => {
           if (isOperationLocked()) return;
+          // A recovery code is free text and waits for the button.
+          const complete = factorStep === 'totp'
+            && completesCode(value, factorCode)
+            && Date.now() >= secondFactorRetryAt.current;
           setFactorCode(value);
           setErrorKey(null);
+          if (complete) void verifySecondFactorCode(value);
         }}
         onVerify={() => void verifySecondFactorCode()}
         onPasskey={() => void verifyPasskey()}
@@ -1708,12 +1767,7 @@ export function MobileOnboarding() {
         busy={busy === 'logout'}
         locked={locked}
         errorKey={errorKey}
-        onBack={() => {
-          if (!isOperationLocked()) {
-            setErrorKey(null);
-            setScreen(accountReturnScreen);
-          }
-        }}
+        onBack={() => void leaveAccount()}
         onSwitch={() => {
           if (!isOperationLocked()) {
             setErrorKey(null);
