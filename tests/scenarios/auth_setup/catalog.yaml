@@ -343,7 +343,11 @@ scenarios:
       selection flow against deterministic bridge responses; the sixth code
       digit sends the verification without a button press. The Python
       auth_setup harness drives IM backend auth and cannot reach the bundled
-      page or WebKit, so this case is the iOS sign-in closed loop.
+      page or WebKit, so this case is the iOS sign-in closed loop. Focused
+      cases in the same file own the send rule: a typed, pasted, or autofilled
+      code is sent once; a failed code again only after an edit or a button
+      press; nothing during an operation, a provider cooldown, or the
+      second-factor throttle; a recovery code only by the button.
   - id: AUTH-SETUP-149
     name: Mobile account failures preserve their owning screen and never silently start reauthentication
     status: covered
@@ -455,39 +459,6 @@ scenarios:
       assertion for avibe.bot needs the associated domain on a signed build and
       a real account with a passkey, so it remains a manual device check.
     owning_layer: iOS XCTest plus physical-device acceptance
-  - id: AUTH-SETUP-158
-    name: Bundled iOS sign-in verifies a completed email or authenticator code once, without a button press
-    status: covered
-    kind: happy_path
-    layer: contract
-    backend: ios
-    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-158 starts verification once when the last code digit is typed, pasted, or autofilled
-    reason: >-
-      The bundled page owns when a code is sent, and AUTH-SETUP-148 and
-      AUTH-SETUP-156 run the whole sign-in through it. The cited case drives a
-      typed last digit and a pasted or autofilled code that arrives as both
-      input and change events. Sibling cases in the same file cover a failed code
-      that is sent again only after an edit or a button press, the
-      authenticator code, a recovery code that waits for the button, and no
-      submission while an operation runs, during a provider cooldown, or
-      during avibe.bot's second-factor throttle. Physical-device Mail autofill
-      remains AUTH-SETUP-152.
-  - id: AUTH-SETUP-159
-    name: Account opened from an iOS instance returns to that instance unchanged
-    status: partial
-    kind: happy_path
-    layer: contract
-    missing_layer: physical-device-runtime-state
-    backend: ios
-    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-159 returns Account Back to the instance it covers, and to the list when none is behind it
-    reason: >-
-      The cited case owns the page's Back target: an account page opened over
-      an instance asks native to return to it, and falls back to the instance
-      list once native reports it closed. Real-WKWebView XCTest owns the native
-      route (Account keeps the same runtime controller and document; a switch
-      or sign-out releases it), which the catalog citation checker does not
-      collect. Conversation and scroll position on a device remain manual.
-    owning_layer: Vitest plus iOS XCTest plus physical-device acceptance
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered

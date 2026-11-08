@@ -1178,7 +1178,7 @@ describe('mobile onboarding', () => {
     expect(mobile.verifyPasskey).not.toHaveBeenCalled();
   });
 
-  it('AUTH-SETUP-158 starts verification once when the last code digit is typed, pasted, or autofilled', async () => {
+  it('starts verification once when the last code digit is typed, pasted, or autofilled', async () => {
     const user = userEvent.setup();
     const verification = deferred<MobileSessionState>();
     mobile.verifyOtp.mockReturnValueOnce(verification.promise);
@@ -1292,7 +1292,7 @@ describe('mobile onboarding', () => {
     expect(mobile.verifySecondFactor).toHaveBeenLastCalledWith('totp', '287083');
   });
 
-  it('AUTH-SETUP-159 returns Account Back to the instance it covers, and to the list when none is behind it', async () => {
+  it('returns Account Back to the instance it covers, and to the list when none is behind it', async () => {
     await openAccount('#account');
     fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
     expect(await screen.findByRole('heading', {
