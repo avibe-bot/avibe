@@ -75,14 +75,14 @@ All A drafts live in `ui/design/kit/mobile-app.tsx`; no competing direction kit.
 
 The old-runtime account fallback is an implementation compatibility state, not
 a new design-frame variant. It reuses the Account avatar and
-`MobileBrandHeader` metrics: a 56px content row plus the top safe-area inset,
+`MobileBrandHeader` metrics: a 48px content row plus the top safe-area inset,
 the existing background/border tokens, the account email-local-part initial,
 and Account/Change Instance actions. In a current native shell,
 `MobileBrandHeader` owns the same Account avatar as a 44pt target and opens the
 bundled Account/Change Instance surface. That reachable header action registers
 with native code, so current Web UI shows no native fallback. The mobile chat
-header uses the same 56px content height and safe-area ownership; built-in app
-headers keep their separate compact 48px chrome.
+header and built-in app headers use the same 48px content height and safe-area
+ownership.
 
 All spacing, type, radius, semantic colors, shadows, gradients and motion values
 come from `ui/src/index.css` or existing component variants. No new tokens. The

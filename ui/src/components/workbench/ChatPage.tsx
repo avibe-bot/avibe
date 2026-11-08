@@ -3473,7 +3473,7 @@ export const ChatPage: React.FC = () => {
     // at the viewport top — it must be a full ``100dvh`` tall. The previous
     // ``calc(100dvh-4rem)`` double-subtracted the (already-cancelled) padding
     // and left a 4rem dead gap below the compose bar. On mobile the sticky
-    // the 56px mobile header owns the safe-area inset inside this surface.
+    // the 48px mobile header owns the safe-area inset inside this surface.
     <ImageViewerProvider images={sessionImages}>
       <FileViewerProvider>
       {/* Attachment cards keep their metadata with this conversation (lib/localStore). */}
@@ -4275,7 +4275,7 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readVoiceContex
     // so the input sits close to the bottom edge. The input row is the shared
     // <Composer>, also used by the Workbench home.
     <div
-      className="shrink-0 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 md:px-8 md:pb-4"
+      className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 md:px-8 md:pb-4"
       style={{ background: 'linear-gradient(to top, var(--background) 65%, transparent)' }}
     >
       <Composer
@@ -4547,7 +4547,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
     // No project-id pill and no override banner — both were noise the user
     // flagged (regression feedback #1/#3).
     <div data-chat-header="" data-tauri-drag-region={desktopDragRegion()} className={clsx(
-      'h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur',
+      'h-[calc(3rem+env(safe-area-inset-top))] shrink-0 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur',
       'md:h-auto md:bg-surface/70 md:px-8 md:py-2.5 md:pt-2.5',
       windowChrome && 'md:h-full',
     )}>

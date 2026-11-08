@@ -6,7 +6,7 @@ import { Loader2, Mic } from 'lucide-react';
 
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
-import { accountDrawerAvatarClassName, accountInitialFor } from './AccountAvatar';
+import { accountHeaderAvatarClassName, accountInitialFor } from './AccountAvatar';
 import { BotFace } from './workbench/bots/BotFace';
 import type { BotAvatar as BotAvatarSpec } from '../lib/bots';
 import { useAuthAccount } from '../lib/useAuthAccount';
@@ -137,9 +137,11 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
   );
 };
 
-// The bar is exactly `--mobile-nav-height` tall, so whatever sits above it starts at its edge.
+// The bar is exactly `--mobile-nav-height` tall, so whatever sits above it starts at its edge; its
+// bottom padding (`--mobile-nav-pad-bottom`) is the home indicator's inset where a phone has one
+// (ui/design: home/home/e-native-phone).
 // `data-mobile-tab-bar`: a sheet that ends at that edge draws the bar above itself (index.css).
-const BAR = 'fixed inset-x-0 bottom-0 h-(--mobile-nav-height) border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden';
+const BAR = 'fixed inset-x-0 bottom-0 h-(--mobile-nav-height) border-t border-border bg-surface/96 px-2 pt-2 pb-(--mobile-nav-pad-bottom) backdrop-blur md:hidden';
 
 // Workbench mobile tabs flank a raised center: the main Bot for the Owner, a
 // new-session action for everyone else.
@@ -199,11 +201,13 @@ const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
   );
 };
 
-// The mobile brand header above every tabbed page: the logo home link, and on
-// iOS Safari the Add-to-Home-Screen nudge. 56px below the safe area, with the page's
-// 16px top inset below it, so the first section neither crowds the header nor floats
-// far below it. The open tab names the page for assistive tech only; the tab bar
-// shows it to everyone else.
+// The mobile brand header above every tabbed page: the logo home link, on iOS Safari
+// the Add-to-Home-Screen nudge, and in the phone app the account avatar. 48px below the
+// safe area, the height of every mobile top bar (the chat's, a built-in app's): room for
+// a 44px touch target and little more, with the page's 16px top inset below it, so the
+// first section neither crowds the header nor floats far below it. The open tab names
+// the page for assistive tech only; the tab bar shows it to everyone else
+// (ui/design: home/home/e-native-phone).
 const NativeHeaderAccountAction: React.FC = () => {
   const { t } = useTranslation();
   const { email, signingOut, signOut } = useAuthAccount();
@@ -227,7 +231,7 @@ const NativeHeaderAccountAction: React.FC = () => {
       onClick={() => void openAccount()}
       className="inline-flex size-11 shrink-0 items-center justify-center rounded-full transition hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60 disabled:cursor-not-allowed disabled:opacity-60"
     >
-      <span className={accountDrawerAvatarClassName} aria-hidden="true">
+      <span className={accountHeaderAvatarClassName} aria-hidden="true">
         {accountInitialFor(email)}
       </span>
     </button>
@@ -240,7 +244,7 @@ export const MobileBrandHeader: React.FC<{
 }> = ({ title, nativeAccountAction = false }) => {
   const { t } = useTranslation();
   return (
-    <header className="sticky top-0 z-40 flex h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
+    <header className="sticky top-0 z-40 flex h-[calc(3rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
       {title && <h1 className="sr-only">{title}</h1>}
       <Link
         to="/"

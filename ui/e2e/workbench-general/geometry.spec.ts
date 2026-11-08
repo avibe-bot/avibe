@@ -460,6 +460,90 @@ test.describe('phone tab bar under the Apps drawer', () => {
   });
 });
 
+/**
+ * A phone that draws the page edge to edge (the phone app, a Home Screen web app) reports its
+ * status bar and home indicator through `env(safe-area-inset-*)`; a Safari tab with its toolbar
+ * shown reports none at the bottom. The home indicator takes the place of the tab bar's own bottom
+ * padding instead of adding to it, so the labels end where a native tab bar's do, 4px above the
+ * inset; without an inset nothing moves. What clears the bar follows it, the main Bot keeps its
+ * rise, the brand and chat headers are 48px below the top inset, and the chat composer rests on the
+ * inset rather than 16px above it. Measured with the browser reporting the owner's iPhone insets,
+ * so a bar, a header, or a composer that went back to adding the inset fails here.
+ */
+test.describe('phone chrome on the safe area', () => {
+  const CHAT = 'ses_geometry';
+  const turnState = {
+    in_flight: false, foreground: 'idle', native_turn_started: false, pending_input_count: 0,
+    background_activities: [], pending_activity_output_count: 0, connection: 'connected',
+  };
+  const session = {
+    id: CHAT, scope_id: null, project_id: null, title: 'Phone chrome', agent_id: 'agt-vibey', agent_name: 'vibey',
+    agent_backend: 'vibey', agent_variant: 'vibey', model: 'gpt-6-astra', reasoning_effort: 'high', speed: null,
+    status: 'active', agent_status: 'idle', pinned: false, visibility: 'foreground', workdir: '/fixture',
+    native_session_id: null, metadata: {}, created_at: '2026-11-08T00:00:00Z', updated_at: '2026-11-08T00:00:00Z',
+  };
+
+  for (const inset of [{ top: 0, bottom: 0 }, { top: 62, bottom: 34 }]) {
+    test(`keeps the bar, the headers and the composer at native spacing (insets ${inset.top}/${inset.bottom})`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: false } }));
+      await page.route(`**/api/sessions/${CHAT}/bootstrap`, (route) => route.fulfill({ json: {
+        session, capabilities: { can_chat: true }, agents: [], default_agent_name: 'vibey', config: { ui: {} },
+        messages: [], queued: [], next_after_id: null, next_before_id: null,
+        draft: { text: '', updated_at: null }, turn_state: turnState,
+      } }));
+      await page.route(`**/api/sessions/${CHAT}`, (route) => route.fulfill({ json: session }));
+      await page.route(`**/api/sessions/${CHAT}/turn-state`, (route) => route.fulfill({ json: turnState }));
+      await page.route(`**/api/sessions/${CHAT}/activity**`, (route) => route.fulfill({ json: { groups: [] } }));
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { ...inset, left: 0, right: 0 } });
+      await page.setViewportSize(NARROW);
+      await open(page, '/');
+
+      const nav = page.locator(MOBILE_NAV);
+      await expect(nav.getByRole('button', { name: /^Vibey: / })).toBeVisible();
+      const home = await page.evaluate((barSelector) => {
+        const height = window.innerHeight;
+        const bar = document.querySelector(barSelector)!;
+        const center = bar.querySelector('button[aria-label^="Vibey: "]')!;
+        const tabs = [...bar.querySelectorAll(':scope > div > :is(a, button)')].filter((tab) => tab !== center);
+        return {
+          header: document.querySelector('header')!.getBoundingClientRect().height,
+          bar: height - bar.getBoundingClientRect().top,
+          labels: tabs.map((tab) => height - tab.lastElementChild!.getBoundingClientRect().bottom),
+          centerLabel: height - center.lastElementChild!.getBoundingClientRect().bottom,
+          rise: bar.getBoundingClientRect().top - center.firstElementChild!.getBoundingClientRect().top,
+          sharedRise: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--mobile-nav-center-rise')),
+          clearance: Number.parseFloat(getComputedStyle(document.querySelector('main#app-shell-scroll')!).paddingBottom),
+        };
+      }, MOBILE_NAV);
+      const label = Math.max(16, inset.bottom + 4);
+      expect(home.header - inset.top, 'the brand header is 48px below the top inset').toBeCloseTo(48, 1);
+      expect(home.labels.length).toBe(4);
+      for (const gap of home.labels) expect(gap, 'a tab label ends at native spacing').toBeCloseTo(label, 1);
+      expect(home.centerLabel, "the main Bot's name stays level with the labels").toBeCloseTo(label, 1);
+      expect(home.rise, 'the main Bot keeps its rise').toBeCloseTo(home.sharedRise, 1);
+      expect(home.clearance, 'the scroll area clears the bar it draws').toBeCloseTo(home.bar + 8, 1);
+      if (!inset.bottom) expect(home.bar, 'without an inset the bar is as tall as before').toBeCloseTo(80, 1);
+
+      await open(page, `/chat/${CHAT}`);
+      const textbox = page.locator('main').getByRole('textbox').last();
+      await expect(textbox).toBeVisible();
+      const chat = await page.evaluate(() => {
+        const compose = [...document.querySelectorAll<HTMLElement>('div[style*="linear-gradient"]')]
+          .find((node) => node.querySelector('[role="textbox"], textarea'))!;
+        return {
+          header: document.querySelector('[data-chat-header]')!.getBoundingClientRect().height,
+          composer: window.innerHeight - compose.firstElementChild!.getBoundingClientRect().bottom,
+        };
+      });
+      expect(chat.header - inset.top, 'the chat header is as tall as the brand header').toBeCloseTo(48, 1);
+      expect(chat.composer, 'the composer rests on the inset, or 16px up without one').toBeCloseTo(Math.max(16, inset.bottom), 1);
+      expect(denied).toEqual([]);
+    });
+  }
+});
+
 test.describe('settings overlay geometry', () => {
   test('opens as a standalone zero-offset surface and gives the home back its draft on close', async ({ page }) => {
     const denied = await serveProduct(page);

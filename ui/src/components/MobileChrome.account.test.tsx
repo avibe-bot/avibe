@@ -45,7 +45,7 @@ afterEach(() => {
 });
 
 describe('MobileBrandHeader native account action', () => {
-  it('uses the Account initial in a 44-point target and opens the native account', async () => {
+  it('draws the Account initial at 28 points in a 44-point target and opens the native account', async () => {
     const call = vi.fn(async () => null);
     installBridge(call);
     render(
@@ -57,7 +57,7 @@ describe('MobileBrandHeader native account action', () => {
     const button = screen.getByRole('button', { name: 'appShell.accountMenuLabel' });
     expect(button.className).toContain('size-11');
     expect(button.textContent).toBe('M');
-    expect(button.querySelector('span')?.className).toContain('size-9');
+    expect(button.querySelector('span')?.className).toContain('size-7');
     fireEvent.click(button);
 
     await waitFor(() => {

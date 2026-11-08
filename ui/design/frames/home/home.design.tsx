@@ -94,8 +94,8 @@ const keyboardUp = (nativeShell: boolean) => () => (
         <div
           className={
             nativeShell
-              ? 'flex h-[calc(100dvh-3.5rem)] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
-              : 'flex h-[calc(100dvh-3.5rem-var(--mobile-nav-clearance))] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
+              ? 'flex h-[calc(100dvh-3rem)] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
+              : 'flex h-[calc(100dvh-3rem-var(--mobile-nav-clearance))] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
           }
         >
           <Workbench />

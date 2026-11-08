@@ -106,7 +106,7 @@ export const BootSkeleton = () => {
         <div className="min-h-0 flex-1 px-4 pt-4">
           <MobileProjectCardsSkeleton rows={4} quiet />
         </div>
-        <SkeletonShimmer className="fixed inset-x-0 bottom-0 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))]">
+        <SkeletonShimmer className="fixed inset-x-0 bottom-0 border-t border-border bg-surface/96 px-2 pt-2 pb-(--mobile-nav-pad-bottom)">
           <div className="flex items-end justify-between gap-1">
             {Array.from({ length: 5 }, (_, index) => (
               <div key={index} className="flex min-w-0 flex-1 flex-col items-center justify-center gap-1 px-1 py-2 text-[10px]">
