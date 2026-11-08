@@ -227,6 +227,8 @@ def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
         ("sestarget", "proj_target"),
         ("sesincoming", "proj_incoming"),
         ("sescallback", "proj_callback"),
+        ("sesexecution", "proj_execution"),
+        ("sesrecipient", "proj_recipient"),
         ("sesharness", "proj_harness"),
         ("sesunrelated", "proj_unrelated"),
     ):
@@ -255,6 +257,14 @@ def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
     )
     _agent_run(
         engine,
+        "run-explicit-callback",
+        session_id="sesexecution",
+        source_kind="agent",
+        source_actor="sescaller",
+        callback_session_id="sesrecipient",
+    )
+    _agent_run(
+        engine,
         "run-harness-child",
         session_id="sesharness",
         source_kind="callback",
@@ -276,7 +286,12 @@ def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
         "sestarget",
         "sesincoming",
         "sescallback",
+        "sesexecution",
     }
+
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesexecution")
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
+    assert {row["id"] for row in payload["sessions"]} == {"sescaller", "sesrecipient"}
 
 
 def test_list_mine_requires_the_injected_caller_session(monkeypatch, tmp_path, capsys):

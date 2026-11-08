@@ -5,6 +5,7 @@ import sqlite3
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy.engine import make_url
 
 
@@ -37,10 +38,15 @@ def downgrade_legacy_schema(config: Config, revision: str) -> None:
     path = make_url(config.get_main_option("sqlalchemy.url")).database
     with closing(sqlite3.connect(path)) as conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-    if stamp != [("20261108_0076",)]:
+    bridge_revision = "20261108_0076"
+    if stamp != [(bridge_revision,)]:
         # New additive migrations may sit above the non-downgradable bridge.
-        # Remove only those successors first; never ask Alembic to cross 0076.
-        command.downgrade(config, "20261108_0076")
+        # Remove only those successors first; a pre-bridge stamp is already
+        # in the historical graph and must keep the previous behavior.
+        script = ScriptDirectory.from_config(config)
+        successors = {item.revision for item in script.walk_revisions(base=bridge_revision)}
+        if len(stamp) == 1 and stamp[0][0] in successors:
+            command.downgrade(config, bridge_revision)
     with closing(sqlite3.connect(path)) as conn, conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
         if stamp == [("20261108_0076",)]:

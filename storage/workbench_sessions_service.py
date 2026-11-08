@@ -446,8 +446,9 @@ def _mine_session_ids(session_id: str):
 
     ``source_actor`` is the dispatching Session for a real Agent run. The
     execution Session is the recipient, and ``callback_session_id`` is the
-    Session receiving a requested result. Callback child Runs are Harness
-    plumbing and are excluded by the ``source_kind = 'agent'`` predicate.
+    Session receiving a requested result. Both callback directions are
+    included. Callback child Runs are Harness plumbing and are excluded by the
+    ``source_kind = 'agent'`` predicate.
     Each arm is indexed on the owner-sized ``agent_runs`` table.
     """
 
@@ -461,11 +462,15 @@ def _mine_session_ids(session_id: str):
         select(agent_runs.c.source_actor.label("session_id"))
         .where(agent_run, agent_source, agent_runs.c.session_id == session_id)
     )
+    callback_recipient = (
+        select(agent_runs.c.callback_session_id.label("session_id"))
+        .where(agent_run, agent_source, agent_runs.c.session_id == session_id)
+    )
     callback = (
         select(agent_runs.c.session_id.label("session_id"))
         .where(agent_run, agent_source, agent_runs.c.callback_session_id == session_id)
     )
-    return union(dispatched, received, callback).subquery("mine_session_ids")
+    return union(dispatched, received, callback_recipient, callback).subquery("mine_session_ids")
 
 
 _SESSION_STATUS_MAX_CHARS = 200
