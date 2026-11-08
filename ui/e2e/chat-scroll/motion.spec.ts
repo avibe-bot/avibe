@@ -912,12 +912,17 @@ function expectNoDoubledLabel(frames: Disclosed[], { moves = true }: { moves?: b
   expect(Math.max(...frames.map(({ copies }) => copies[0]))).toBe(1);
   expect(Math.min(...frames.map(({ copies }) => copies[1]))).toBe(1);
   if (!moves) return;
-  // The one that shows moves between the panel head's place and the pill's: it passes places in between, where
-  // one that jumped there would pass none.
-  const places = drawn(frames).map(({ title }) => title).filter((place): place is [number, number] => place !== null);
+  // The one that shows moves between the panel head's place and the pill's: read at any time during its move it
+  // is somewhere in between, where one that jumped there is only ever at either end. Judged where the reads come
+  // closer together than the move lasts (over 120 ms), so one of them falls in it.
+  const places = frames.map(({ title }) => title).filter((place): place is [number, number] => place !== null);
   const apart = (a: [number, number], b: [number, number]) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
   const [start, end] = [places[0], places.at(-1)!];
-  if (apart(start, end) > 2) expect(places.filter((place) => apart(place, start) > 1 && apart(place, end) > 1).length).toBeGreaterThanOrEqual(1);
+  const reads = frames.filter(({ frame }) => frame !== null).map(({ t }) => t);
+  const sparsest = Math.max(0, ...reads.slice(1).map((t, index) => t - reads[index]));
+  if (apart(start, end) > 2 && sparsest < 110) {
+    expect(places.filter((place) => apart(place, start) > 1 && apart(place, end) > 1).length).toBeGreaterThanOrEqual(1);
+  }
 }
 /** Closing lifts the rows below by exactly what the layout gives back: once what closed is gone, nothing moves on. */
 function expectLandsAsItGoes(frames: Disclosed[]) {
