@@ -192,9 +192,11 @@ different set at execution time.
 
 There is at most one active registration for an
 `(installation_id, vapid_key_sha256)` pair. Replacement is explicit: the
-caller supplies the concrete current IDs it observed, and the relay either
-revokes exactly those IDs and inserts the new row in one transaction or
-returns the current set without mutation.
+caller supplies the concrete current IDs it observed. The set includes every
+active ID in the target VAPID scope and may also name the prior VAPID scope for
+that instance during key rotation. The relay either revokes exactly those IDs
+and inserts the new row in one transaction or returns the current set without
+mutation.
 
 ### 3.3 Mutation ledger
 
@@ -207,7 +209,7 @@ a new request.
 | --- | --- | --- |
 | Account bind or rebind | `installation_id`, authenticated account, next credential, concrete `revoke_registration_ids` | Validate account, exact Origin, current/pending credential, revocation set, ownership update, revocations, and credential rotation under one installation lock. An account change requires the supplied IDs to equal the current active set. |
 | Provider PATCH | Persisted `provider_generation` and complete provider tuple | Exactly `current + 1` replaces the tuple; equal and identical is idempotent; every other value never mutates. |
-| Registration create | Fresh `registration_id`, VAPID hash, concrete `replaces_registration_ids` | The supplied replacement set must equal the active set for that VAPID scope; revoke exactly it and insert once. |
+| Registration create | Fresh `registration_id`, VAPID hash, concrete `replaces_registration_ids` | The supplied set must cover the target VAPID scope and contain only active rows owned by the installation; revoke exactly it and insert once. |
 | Single revoke | One concrete `registration_id` | Revoke only that owned row; retry is idempotent. |
 | Logout bulk revoke | Complete captured active ID set plus next credential | Require the supplied set to equal the current active set, revoke exactly it, and rotate the credential in one transaction. |
 | APNs invalidation | Captured generation plus complete token hash/environment/topic tuple | Mark invalid only while every captured value still matches; otherwise return a retryable race result and do not mutate. |
@@ -224,22 +226,33 @@ linked from `ios-app.md`:
 
 | Direction | Method or event | Exact shape |
 | --- | --- | --- |
-| Web -> native | `push.status()` | `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}` |
+| Web -> native | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}` |
 | Web -> native | `push.subscribe({vapidPublicKey})` | `{endpoint: string, keys: {p256dh: string, auth: string}}` |
 | Web -> native | `push.unsubscribe()` | `{revoked: boolean}` |
 | Native -> Web | `push.opened({url})` | Same-origin path event after the target instance loads. |
 
-For `state: "on"`, `push.status()` returns the existing public subscription
-without creating a registration or rotating keys. For other states, endpoint
-and keys are absent. `push.unsubscribe().revoked` is true only after the relay
-confirmed the concrete registration was already revoked or is now revoked.
-False means local key deletion succeeded and a pending remote revoke remains.
+`push.status` never creates or replaces a registration. Native decodes and
+hashes a supplied `vapidPublicKey` exactly as `push.subscribe` does. It returns
+`state: "on"` and the existing public subscription only when that hash matches
+the stored active record. A missing or different key cannot prove that the
+record is current, so it returns `state: "off"` without endpoint or keys. The
+Web-owned enable/reconcile path may then call
+`push.subscribe({vapidPublicKey})`; a mismatch creates a fresh registration and
+names the old concrete IDs in `replaces_registration_ids`.
+
+`push.unsubscribe().revoked` is true only after the relay confirmed the
+concrete registration was already revoked or is now revoked. False means local
+key deletion succeeded and a pending remote revoke remains.
 
 The Web UI obtains `vapidPublicKey` from the instance's existing
-`GET /api/web-push/vapid-public-key`, calls the native bridge when the `push`
-capability exists, then POSTs the returned standard subscription to the
-existing `POST /api/web-push/subscriptions`. Inside the native app it does not
-use `PushManager`; browser and installed-PWA behavior remains unchanged.
+`GET /api/web-push/vapid-public-key`. While the user has notifications enabled,
+the instance Web UI polls `push.status({vapidPublicKey})` on instance-origin
+load and later authenticated foreground sessions. It POSTs an `on`
+subscription to the existing `POST /api/web-push/subscriptions`; for `off` it
+uses the same Web-owned enable/reconcile path to call `push.subscribe` and then
+POSTs the result. Native does not initiate a Web call or POST to an instance.
+Inside the native app the Web UI does not use `PushManager`; browser and
+installed-PWA behavior remains unchanged.
 
 The bridge exists only in an instance-origin main frame under the existing
 `ios/README.md` and `ios-app.md` origin checks. Private keys, auth-management
@@ -474,11 +487,14 @@ Native generates and persists the new ID, P-256 key, 16-byte auth secret, VAPID
 hash, and concrete replacement IDs before sending.
 
 For a new ID, the relay verifies the credential, checks the authenticated
-account creation limit before row allocation, locks the installation and VAPID
-scope, and requires the supplied replacement set to equal that scope's current
-active set. It revokes exactly those rows and inserts the new row in one
-transaction. Every replacement ID must belong to the same installation and
-VAPID hash; an unknown or differently owned ID is reported as
+account creation limit before row allocation, and locks the installation,
+target VAPID scope, and supplied replacement rows. The supplied set must
+include every current active registration in the target VAPID scope. Every
+supplied replacement ID must also be active and belong to the same
+installation, but it may carry the previous VAPID hash so one
+`push.subscribe` operation can rotate an instance key. The relay revokes
+exactly the supplied rows and inserts the new row in one transaction. A
+missing, revoked, differently owned, or omitted target-scope ID is reported as
 `replacement_set_changed` without mutation.
 
 If the same registration ID already exists and is active with the same
@@ -860,7 +876,8 @@ origin, or URL also takes this recovery path.
 | `device_token` | APNs callback | Relay APNs request builder | Installation-credential PATCH; protected at rest | APNs |
 | `environment`, `topic` | Build/bundle configuration | Relay host and `apns-topic` | Installation-credential PATCH plus deployment allowlists | Native target |
 | `registration_id` | Native CSPRNG | Relay path, endpoint, APNs `kid`, NSE lookup | Installation-credential create request | Pending/shared Keychain record |
-| `vapid_key_sha256` | Native from instance VAPID public key | Relay registration and delivery verifier | Installation-credential request; checked against VAPID `k` | Instance key through native bridge |
+| `vapidPublicKey` | Instance `GET /api/web-push/vapid-public-key` | Native status comparison and subscribe | Exact-origin bridge call in the authenticated instance session | Instance Web UI |
+| `vapid_key_sha256` | Native from decoded `vapidPublicKey` | Native active-record comparison; relay registration and delivery verifier | Installation-credential request; checked against VAPID `k` | Native status/registration coordinator |
 | `p256dh`, `auth` | Native | Instance encryption and NSE decryption | HTTPS subscription POST; RFC 8291 inputs | Native public subscription |
 | Notification fields and `badge_count` | Instance | NSE after decryption | RFC 8291 AES-GCM | Existing instance delivery path |
 | VAPID JWT | Instance | Relay | RFC 8292 ES256 over JWT header and claims | Instance VAPID private key |
@@ -897,11 +914,20 @@ selects an endpoint.
 4. APNs invalidation returns relay `410` only for the captured current provider;
    the instance follows its existing terminal disable path.
 5. A later APNs callback persists and PATCHes a higher provider generation.
-6. After successful provider recovery, native calls `push.status()` for each
-   local active instance subscription and the Web UI re-POSTs that existing
-   public subscription to the instance. It does not call `push.subscribe`,
-   create a registration, or rotate the key merely to re-enable the instance
-   row.
+6. On the next authenticated instance-origin load or foreground session while
+   notifications remain enabled, Web fetches the current VAPID key and calls
+   `push.status({vapidPublicKey})`. A matching `on` result is re-POSTed to
+   re-enable the instance row after provider recovery. This does not create a
+   registration or rotate keys.
+7. If the current VAPID key differs, status returns `off`; the same Web-owned
+   reconcile path calls `push.subscribe({vapidPublicKey})`, whose fresh
+   registration replaces the captured old concrete IDs, then POSTs the new
+   public subscription. Native never invents a native-to-Web recovery event or
+   posts directly to the instance.
+
+Failed reconciliation remains recoverable at a later authenticated
+instance-origin foreground opportunity. Provider PATCH success alone does not
+promise background instance re-enablement.
 
 ### 9.4 Tap
 
@@ -1048,7 +1074,10 @@ Tests compare decoded bytes and all intermediate values, including the
    logout/account request carries old concrete IDs and cannot revoke a fresh
    registration after rebind. If current IDs changed before an account switch,
    the first request is mutation-free `409`, native persists the readback, and
-   the retry converges.
+   the retry converges. A later authenticated Web-owned reconcile re-POSTs an
+   existing subscription after provider recovery; after a VAPID hash change it
+   observes `off`, creates a fresh registration that replaces the old concrete
+   IDs, and POSTs the replacement.
 
 3. **Newest provider wins.** Provider generation and pending tuple survive a
    process restart and account rebind. Once generation `N+1` is accepted, a
