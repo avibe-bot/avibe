@@ -138,7 +138,7 @@ interface AvibeNative {
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
 | `composer` | `composer.attach({surface, sessionId, draft, placeholder, busy, disabled, actions})`, `composer.update({...})`, `composer.detach()`, `composer.insertMention({trigger, value, data})`, `composer.setText({text})`, `composer.focus()`, `composer.voicePreview({text})`, `composer.voiceCommit({text})`, `composer.voiceRestore()` | `composer.change({text, references})`, `composer.submit({text, references, files})`, `composer.stop`, `composer.trigger({trigger, query, active})`, `composer.voice({phase})`, `composer.files({files})`, `composer.action({id})`, `composer.layout({height})` |
-| `push` | `push.status()`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys}`, `push.unsubscribe()` | `push.opened({url})` |
+| [`push`](ios-push-relay-contract.md) | `push.status({vapidPublicKey?: string})` → `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` → `{revoked: boolean}` | `push.opened({url})` |
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
@@ -537,76 +537,32 @@ the fallback is to open Vault approvals in Safari.
 
 ## 8. Push
 
-### Today
+The complete Phase 1 contract is in
+[iOS Push Relay Contract](ios-push-relay-contract.md). It supersedes the
+earlier sealed-endpoint sketch in this section.
 
-`core/web_push_notifications.py::_send_to_enabled_subscriptions` waits 3 s,
-drops already-read messages, resolves the owner's authorization, filters by
-Project access, skips owners for whom the Session is hidden
-(`WEB_PUSH_DISPOSITION_HIDDEN`), skips owners whose category is muted
-(`core.notification_categories`, `core.notification_preferences.category_is_loud`),
-computes a per-owner badge, and then calls `core/web_push.py::send_web_push`
-(pywebpush, VAPID, TTL 12 h) for each enabled subscription. A 404 or 410
-disables the subscription. `storage/web_push_service.py::validate_subscription_payload`
-accepts any HTTPS endpoint.
+The instance keeps its existing notification gates, RFC 8291 `aes128gcm`
+encryption, RFC 8292 VAPID signing, per-owner `badge_count`, and 404/410
+subscription disabling. The relay uses fresh stateful registration IDs, binds
+each one to an installation and VAPID public-key hash, forwards ciphertext to
+APNs without decryption, and returns the status mappings that the instance
+already understands. Account-cookie authentication is limited to installation
+binding; all management requests also carry a stable native-only installation
+credential. Native persists a monotonic bind generation before each sign-in
+bind, registration creation carries the current generation, single revokes
+name concrete registration IDs, and logout bulk revokes are bounded by the
+captured generation. Provider updates use a separate persisted monotonic
+generation.
 
-### Design: a Web Push to APNs relay
-
-```text
-Instance (unchanged dispatch)
-  -> RFC 8291 encrypted Web Push, VAPID-signed
-  -> POST https://avibe.bot/api/push/apns/<sealed-endpoint>      (new, avibe-bot-backend)
-       verifies the VAPID key bound at registration, cannot decrypt
-  -> APNs (HTTP/2, provider token from the .p8 key), mutable-content: 1
-  -> Notification Service Extension on the phone
-       decrypts with the per-instance key in the app-group Keychain,
-       sets title, body, badge, thread id, deep link
-```
-
-Registration: when the user enables notifications in the shell, the Web UI calls
-`push.subscribe` (section 4). The app requests notification permission,
-obtains the APNs device token, creates a P-256 key pair and auth secret for this
-instance, fetches the instance's VAPID public key
-(`/api/web-push/vapid-public-key`), and asks the relay to seal
-`{device token, environment, VAPID key hash, key id}` into an opaque endpoint.
-The Web UI posts `{endpoint, keys}` to `/api/web-push/subscriptions` exactly as a
-browser does.
-
-Precedent: the Mastodon client Toot! uses the same pattern
-([toot-relay](https://github.com/DagAgren/toot-relay)): a relay forwards
-encrypted Web Push payloads to APNs and a service extension decrypts them.
-Apple recommends encrypting sensitive payload data and decrypting it in a
-service extension, and caps a regular payload at 4 KB
-([Apple](https://developer.apple.com/documentation/usernotifications/generating-a-remote-notification)).
-
-### What carries over and what changes
-
-| Behavior | Result |
-| --- | --- |
-| Muted categories | Unchanged: the instance skips muted owners before any subscription is touched. |
-| Hidden Sessions | Unchanged: hidden owners are dropped before delivery. |
-| Read suppression, authorization and Project gates | Unchanged. |
-| Badge | `badge_count` is already in the payload; the extension sets it. |
-| App deleted | APNs answers 410 to the relay, the relay answers 410, the instance disables the subscription (existing path). |
-| Payload size | Body is capped at 240 characters, but `json.dumps` escapes non-ASCII to `\uXXXX`, and the title is unbounded. Add a byte budget so the base64 ciphertext plus envelope stays under 4 KB. |
-| Settings device list | Label relay subscriptions as "iPhone app". |
-
-The extension does not need to suppress notifications, which would require
-Apple's filtering entitlement, because the instance never sends muted or
-hidden items.
-
-### Ownership
-
-| Part | Repository |
-| --- | --- |
-| Shell bridge, APNs registration, key storage, Notification Service Extension, tap routing | avibe (`ios/`) |
-| Shell-aware notification toggle | avibe (`ui/`) |
-| Payload byte budget, subscription label | avibe (`core/`, `storage/`) |
-| Relay registration and delivery routes, APNs provider key, rate limits | avibe-bot-backend |
-| User documentation | avibe-docs (English and Chinese) |
-
-`avibe-bot-backend/AGENTS.md` forbids a new content-processing path without
-product and security review. The relay carries only ciphertext, but it is a new
-path through the backend, so the review is required before Phase 1 ships.
+The contract also fixes the 2800-byte UTF-8 plaintext budget, the compact
+APNs envelope, the shared Keychain record, the Notification Service
+Extension fallback, same-origin tap routing, account lifecycle, RFC 8291
+Appendix A fixture, and the required non-ASCII end-to-end test. Product and
+security review is required because this is a new ciphertext forwarding
+channel through `avibe.bot`, even though the relay cannot read the content.
+Phase 1 explicitly accepts that an offline logout has no fixed remote-revoke
+deadline: generic and possibly audible fallback alerts may continue until a
+later app execution successfully reaches the relay.
 
 ## 9. Voice
 
