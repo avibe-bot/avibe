@@ -888,6 +888,43 @@ final class NavigationPolicyTests: XCTestCase {
         }
     }
 
+    // DIAGNOSTIC ONLY: the original test's exact flow, fresh servers each time,
+    // logging a timeline whenever the asserted state (env padded, no inset,
+    // tab bar short of the bottom) appears.
+    @MainActor
+    func testZZDiagnoseOriginalFlowRepeatedly() async throws {
+        var mismatches = 0
+        for iteration in 1...30 {
+            let server = try LocalHTTPServer { _ in
+                LocalHTTPResponse.html(FullBleedFixture.workbenchDocument)
+            }
+            let baseURL = try await server.start()
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            let controller = makeRuntimeController(instanceOrigin: origin)
+            let window = try await makeHomeIndicatorWindow(rootViewController: controller)
+            let webView = try XCTUnwrap(
+                controller.view.subviews.compactMap { $0 as? WKWebView }.first
+            )
+            let inset = window.safeAreaInsets.bottom
+            _ = bottom(of: webView, in: window)
+            try await waitForTitle("Workbench", in: webView)
+            try await waitUntil {
+                let padding = await self.paddingBottom(of: "#tab-bar", in: webView)
+                return abs((padding ?? -1) - inset) < 0.5
+                    && webView.scrollView.adjustedContentInset.bottom == 0
+            }
+            let first = await diagnosticSnapshot(webView)
+            if !first.contains("\"tab\":812") {
+                mismatches += 1
+                print("AVIBE_DIAG original-flow iter=\(iteration) MISMATCH first=\(first) timeline: " + (try await diagnosticTimeline(webView, seconds: 3)))
+            }
+            window.rootViewController = nil
+            window.isHidden = true
+            server.stop()
+        }
+        print("AVIBE_DIAG original-flow mismatches=\(mismatches)/30")
+    }
+
     /// Distinct page/native geometry states with their elapsed time.
     @MainActor
     private func diagnosticTimeline(
