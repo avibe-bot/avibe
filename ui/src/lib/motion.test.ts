@@ -24,13 +24,13 @@ describe('timeToProgress', () => {
 
 describe('useDisclosure', () => {
   afterEach(() => {
-    document.documentElement.style.removeProperty('--motion-duration-instant');
+    document.documentElement.style.removeProperty('--motion-disclose-close-duration');
     vi.useRealTimers();
   });
 
-  it('keeps what closes for one `instant`, closing, then lets it go', () => {
+  it('keeps what closes for `--motion-disclose-close-duration`, closing, then lets it go', () => {
     vi.useFakeTimers();
-    document.documentElement.style.setProperty('--motion-duration-instant', '100ms');
+    document.documentElement.style.setProperty('--motion-disclose-close-duration', '100ms');
     const { result, rerender } = renderHook(({ open }) => useDisclosure(open), { initialProps: { open: true } });
     expect(result.current).toEqual({ present: true, closing: false, closed: false });
     rerender({ open: false });

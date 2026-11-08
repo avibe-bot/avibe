@@ -129,6 +129,8 @@ curves also exposed as `ease-*` utilities through `@theme inline`.
 | `--motion-scale-press` / `--motion-scale-press-control` | 0.97 / 0.94 | A pressed surface (card, row); a pressed control (button, chip) |
 | `--motion-scale-morph` | 0.6 | An icon trading places with another (Send ↔ Stop, a badge leaving) |
 | `--motion-scale-arm` | 1.15 | What a swipe uncovers grows its icon to once letting go would commit it (M7) |
+| `--motion-disclose-open-duration` / `--motion-disclose-close-duration` | 440 / 350 ms (move) | A disclosure in the transcript opening, and closing with its cross-fade (M3) |
+| `--motion-disclose-summary-duration` | 90 ms (enter) | What stands for a disclosure closed coming in after a fold that cross-fades into nothing (the running card's compact view, M3) |
 | `--motion-handover-duration` / `--motion-handover-ease` | base / enter | Skeleton or cached view to content (section 6) |
 | `--motion-shimmer-duration` (`animate-skeleton-shimmer`) | 1600 ms | A skeleton's highlight sweep (section 6) |
 
@@ -331,7 +333,8 @@ reduced-motion form.
     (about 92 ms into `instant` on the exit curve), so two texts are never drawn
     over each other (owner, 2026-11-06; at 30% the two still showed together
     for a frame). A reply that keeps the bubble's head
-    takes over from its dots alone, at once.
+    takes over from its dots alone, at once. Disclosures are the exception:
+    they cross-fade (below).
   - **Live** means the stream delivered it or the reader sent it here. What a
     read brings lands still, and the conversation around it does not glide:
     the bootstrap, a catch-up after the stream was down, a cached window the
@@ -339,38 +342,55 @@ reduced-motion form.
     a reconnect is live again. A row is live only while it is shown: one the
     retained window dropped, read back with an older page, lands still.
 - **Opening and closing** what the transcript folds (an execution-process
-  chip, a Harness group, a Harness row's body, the running card's full view):
-  the layout changes at once in that commit, and the scroller holds the item
-  the reader tapped where it was, leaving the tail if it was following it
-  (#3307). What opened then shows itself: it grows from
-  `--motion-scale-enter-sm` at its top-left corner while it fades in on `fast`
-  (enter). Only what is inside an item moves (a chip's panel, a row's body,
-  what an opened group's member holds), by the individual `scale` property and
-  opacity; an item a disclosure laid out (a group's member, with the rail it
-  draws) fades as a whole. The box the scroller measures never moves, and no
-  layout property is animated. A chip opened while its rows load shows its spinner in their
-  place, and the rows fade in when they land, without a second reveal. Only a
-  tap on a disclosure control (`aria-expanded`) in the last second opens
-  anything this way; what a read adds to an opened group lands still.
-- **Closing** (owner, 2026-11-06: the same easing both ways): the control says
-  so at once (`aria-expanded`), and what it closes leaves the way it came
-  while it still holds its layout: it fades and shrinks to
-  `--motion-scale-enter-sm` toward its top-left corner on `instant`, exit (the
-  turn-at-work handoff's tokens), so nothing below moves up into it and no two
-  texts are drawn over each other. Then the layout lets go of it in one commit,
-  and what was below moves up. A Harness group's head keeps its open shape
-  until its members are gone; its collapse pill fades out with them, on the
-  same time and curve. What stands for it closed (a chip's pill, a
-  group's folded card under its unchanged head line, the running card's compact
-  view) then comes in where it
-  lands, in that same commit's layout: it fades in and grows from
-  `--motion-scale-enter-sm` at its top-left corner on `instant`, enter, never
-  appearing whole in one frame (owner, 2026-11-06). The scroller holds the
-  tapped item through both commits. A tap that closes something opens nothing:
-  only a tap on a closed control marks what the next commit opens, and only
-  inside the tapped item or among the items its own Harness group lays out.
-- **Reduced**: crossfade on `fast`; what opens only fades in, what closes only
-  fades out, and what stands for it closed only fades in.
+  chip, a Harness group, a Harness row's body, the running card's full view;
+  owner, 2026-11-08, variant D of the disclosure lab at 0.5×): the layout
+  changes at once in that commit, and the scroller holds the item the reader
+  tapped where it was, leaving the tail if it was following it (#3307).
+  - **Reveal and make room.** What opened is revealed top to bottom: a band of
+    the transcript's own backdrop laid over it moves down with the revealing
+    edge, and the rows below slide down with that edge, from where they were
+    to where the layout put them (so does what the tapped item draws after
+    the content, such as a Harness row's time). The tapped item stays still. Closing mirrors
+    it: the edge folds back up to the summary's size (none for a Harness row's
+    body) while the content still holds its layout, the rows below rise with
+    it, and the layout lets go of the content in one commit as they land.
+    Only `transform`, `translate` and `opacity` animate, all on the compositor;
+    no clip-path, no layout property, and the boxes the scroller measures
+    never move.
+  - **Timing.** Opening takes `--motion-disclose-open-duration` (440 ms),
+    closing `--motion-disclose-close-duration` (350 ms) including the
+    cross-fade. The edge and the rows ride the move curve; what fades in
+    rides enter, what fades out rides exit.
+  - **Cross-fade, not a sequence.** What stands for it closed (a chip's pill, a
+    group's folded card) waits, unseen and inert, at its final place inside the
+    item that stays. Closing, it fades in on top during the fold's tail while the
+    content fades out under it; opening, it stays opaque while the content fades
+    in beneath it, then fades out. Where the two overlap at least 98% is drawn:
+    no empty frame, no dimming.
+  - **Shared text morphs.** The chip's status icon and title move between
+    their pill place and the panel head's during the cross-fade, so the title
+    is never drawn twice. A group's folded card covers its members before its
+    own words fade in, and on opening they go first.
+  - **Turning back.** Closed while still opening (or opened while closing), it
+    turns from wherever it is drawn, on the new direction's curve, over the
+    share of the way left.
+  - **Loading.** A finished chip whose steps are not read yet opens at once to
+    a skeleton of as many rows as it counts (at most 16, within the panel's
+    height cap); the rows fade in over the skeleton when they land while it
+    fades out under them, so no frame is empty, and whatever height is left
+    over settles with the rows below on the move curve,
+    so the panel never grows twice and no spinner shows.
+  - **Exception.** The running card's compact view comes in after its full view
+    folds (`motion-summary-in`, `--motion-disclose-summary-duration`) rather
+    than cross-fading: the two views draw the same rows, so a cross-fade would
+    draw them twice. It sits under the composer.
+  - Only a tap on a closed disclosure control (`aria-expanded="false"`) in the
+    last second opens anything this way, inside the tapped item or among the
+    items its own Harness group lays out; a tap that closes opens nothing, and
+    what a read adds to an opened group lands still.
+- **Reduced**: fades only. Nothing moves; the cross-fade keeps its timing, and
+  the chip's title in the panel head is hidden before the pill's shows, so it is
+  never drawn twice.
 - **Frames**: `motion/arrival/phone`, `phone-reduced`, `phone-card`,
   `phone-turn-end`, `phone-show-page`; `motion/disclosure/*`.
 
@@ -542,6 +562,13 @@ send (they change `ChatPage`).
    only from the app's own Back; a system traversal (an edge swipe in Safari,
    the Home Screen app or the iOS shell, the browser's Back) is a cut with no
    web transition (M5; owner feedback 2026-11-06).
+6. **Disclosures** (2026-11-08, from the disclosure lab): variant D at 0.5×.
+   What opens is revealed top to bottom while the rows below make room by
+   transform, and closing mirrors it; opening 440 ms, closing 350 ms with its
+   cross-fade. Disclosures cross-fade with their summary instead of handing
+   over in sequence, the chip's title morphs instead of doubling, reduced
+   motion fades only, and the running card's compact view keeps its sequenced
+   fade-in (M3).
 
 ## 12. Known by design
 

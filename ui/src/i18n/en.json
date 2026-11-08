@@ -5922,6 +5922,7 @@
       "toolsHiddenLive": "Tool calls hidden · running",
       "params": "Parameters",
       "viewJson": "JSON",
+      "loading": "Loading the steps…",
       "jsonLoading": "Loading…",
       "copy": "Copy",
       "copied": "Copied",

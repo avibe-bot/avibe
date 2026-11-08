@@ -9,7 +9,9 @@
 // paints the cached window first), inbox=1 (the Inbox lists the chat with its
 // newest reply, so an uncached open draws the skeleton and that reply first),
 // sendDelay (ms the server takes to answer a sent message, 150), send=fail (it
-// refuses every send).
+// refuses every send), records=1 (an execution-process group's rows load with the
+// steps it took, else it has none), activityDelay (ms a group's rows take to load,
+// 0).
 import '../../design/shell/storage';
 
 import { createRoot } from 'react-dom/client';
@@ -23,7 +25,7 @@ import { apiResponses, demoProjects } from '../../design/shell/fixtures';
 import { designNetwork, installDesignNetwork } from '../../design/shell/network';
 import { chatFixtures, chatPhone } from '../../design/frames/chat/fixtures';
 
-import { LAB_SESSION_ID, activityGroups, conversation, messageAt } from './conversation';
+import { LAB_SESSION_ID, activityGroups, activityRecords, conversation, messageAt } from './conversation';
 import { installScrollRecorder, type ScrollLab } from './recorder';
 
 const params = new URLSearchParams(window.location.search);
@@ -36,13 +38,15 @@ const reader = params.get('reader');
 const inbox = params.get('inbox') === '1';
 const sendDelay = Number(params.get('sendDelay') ?? 150);
 const sendFails = params.get('send') === 'fail';
+const records = params.get('records') === '1';
+const activityDelay = Number(params.get('activityDelay') ?? 0);
 
 const history = conversation(count).map((message) =>
   images ? message : { ...message, text: message.text.replace(/!\[[^\]]*\]\([^)]*\)/g, '(chart)') },
 );
 const PAGE = 50;
 const tail = history.slice(-PAGE);
-const initialGroups = activity ? activityGroups(history) : [];
+const initialGroups = activity ? activityGroups(history, records) : [];
 
 installDesignNetwork();
 
@@ -97,6 +101,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const row = { ...messageAt(history.length), author: 'user', type: 'user', source: 'user', author_id: 'local', id: `msg_sent_${history.length}`, text: sent.text ?? '', metadata: sent.metadata ?? {} } as WorkbenchMessage;
     history.push(row);
     return json(row);
+  }
+  // One settled group's rows, read when its chip opens.
+  if (url.pathname === `${base}/activity` && url.searchParams.has('group_id')) {
+    const group = [...initialGroups, ...settledGroups].find(({ id }) => id === url.searchParams.get('group_id'));
+    if (activityDelay > 0) await new Promise((resolve) => setTimeout(resolve, activityDelay));
+    return json(group ? { ...group, rows: records ? activityRecords(group) : [] } : {});
   }
   // The settled execution-process groups, as the server has them now.
   if (url.pathname === `${base}/activity` && !url.searchParams.has('group_id')) {

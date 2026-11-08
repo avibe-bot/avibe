@@ -185,6 +185,8 @@ describe('ActivityChip completed duration', () => {
       />,
     );
 
-    expect(screen.getByText(/1d 14:33:11/)).toBeTruthy();
+    // Expanded, the inert copy of the pill that closing cross-fades into says it too; the reader sees one.
+    const shown = screen.getAllByText(/1d 14:33:11/).filter((el) => !el.closest('[data-transcript-summary]'));
+    expect(shown).toHaveLength(1);
   });
 });

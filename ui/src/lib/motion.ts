@@ -43,20 +43,20 @@ export function motionTiming(duration: MotionDuration, ease: MotionEase): Motion
 
 /**
  * A disclosure's content (a chip's panel, a Harness row's body, an opened group's members, the running
- * card's full view) while it is open, and for one `instant` after it closes: closing, it leaves in place
- * (`motion-disclose-out` in src/index.css) while it still holds its layout, so nothing below moves up into
- * it, and only then lets go of the layout in one commit (docs/plans/web-ui-motion.md M3). `closed`: it
- * has just left that way, so what stands for it closed (a pill, a folded card) comes in
- * (`motion-summary-in`) rather than appearing whole; it stays true until it opens again. Where the token
- * is missing (no stylesheet), it goes at once.
+ * card's full view) while it is open, and for `--motion-disclose-close-duration` after it closes: closing,
+ * it folds back while it still holds its layout and takes no input (`motion-disclose-leaving`; the fold is
+ * lib/transcriptMotion's), and only then lets go of the layout in one commit (docs/plans/web-ui-motion.md
+ * M3). `closed`: it has just left that way, so what stands for it closed where nothing cross-fades into it
+ * (the running card's compact view) comes in (`motion-summary-in`); it stays true until it opens again.
+ * Where the token is missing (no stylesheet), it goes at once.
  */
 export function useDisclosure(open: boolean): { present: boolean; closing: boolean; closed: boolean } {
   const [phase, setPhase] = useState<'open' | 'closing' | 'closed' | 'rest'>(open ? 'open' : 'rest');
   if (open && phase !== 'open') setPhase('open');
-  if (!open && phase === 'open') setPhase(readMotionMs('--motion-duration-instant') > 0 ? 'closing' : 'rest');
+  if (!open && phase === 'open') setPhase(readMotionMs('--motion-disclose-close-duration') > 0 ? 'closing' : 'rest');
   useEffect(() => {
     if (phase !== 'closing') return undefined;
-    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-duration-instant'));
+    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-disclose-close-duration'));
     return () => window.clearTimeout(timer);
   }, [phase]);
   return { present: phase === 'open' || phase === 'closing', closing: phase === 'closing', closed: phase === 'closed' };
