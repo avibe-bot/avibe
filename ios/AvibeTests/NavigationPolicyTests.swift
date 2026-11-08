@@ -1044,6 +1044,17 @@ final class NavigationPolicyTests: XCTestCase {
             rootViewController: hostingController
         )
         defer {
+            // The app never destroys its root hosting view, so release the
+            // runtime as an account transition does first. Dismantling a live
+            // runtime inside SwiftUI's graph teardown writes BrowserScreen
+            // state during that teardown.
+            if let runtimeController = primaryRuntimeWebView(
+                in: hostingController.view
+            )?.superview?.next as? WebViewController {
+                appModel.recordRuntimeReleaseBarrier(
+                    runtimeController.invalidateForAccountTransition()
+                )
+            }
             window.rootViewController = nil
             window.isHidden = true
         }
