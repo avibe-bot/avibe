@@ -372,6 +372,30 @@ def _restrict_project_to(conn, project_id: str, email: str, *, access_role: str 
     assert result.outcome == "applied"
 
 
+def test_project_resolver_filters_inaccessible_duplicate_names(engine, tmp_path):
+    hidden_folder = tmp_path / "hidden"
+    visible_folder = tmp_path / "visible"
+    hidden_folder.mkdir()
+    visible_folder.mkdir()
+    caller = _acl_context("viewer", email="visible@example.com")
+    with engine.begin() as conn:
+        hidden = projects_service.create_project(conn, str(hidden_folder), display_name="Demo")
+        visible = projects_service.create_project(conn, str(visible_folder), display_name="Demo")
+        _restrict_project_to(conn, hidden["id"], "other@example.com")
+
+        assert projects_service.resolve_project_target(
+            conn,
+            "Demo",
+            authorization_context=caller,
+        )["id"] == visible["id"]
+        with pytest.raises(LookupError, match=f"Project not found: {hidden['id']}"):
+            projects_service.resolve_project_target(
+                conn,
+                hidden["id"],
+                authorization_context=caller,
+            )
+
+
 @pytest.mark.parametrize("role", ["member", "owner", "editor", "viewer"])
 def test_project_mutations_follow_instance_operations_and_lower_role_acl(engine, tmp_path, role):
     """Instance managers operate restricted Projects; lower roles retain ACLs."""

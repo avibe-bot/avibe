@@ -796,6 +796,7 @@ def resolve_project_target(
     *,
     active_only: bool = True,
     require_workdir: bool = True,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Resolve a Project by public name or stable id for CLI/runtime consumers.
 
@@ -808,6 +809,7 @@ def resolve_project_target(
     if not needle:
         raise LookupError("Project name is required")
     normalized_needle = " ".join(needle.split())
+    context = require_instance_role(authorization_context, "viewer")
     rows = conn.execute(
         select(
             scopes.c.native_id,
@@ -820,6 +822,10 @@ def resolve_project_target(
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
         .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
     ).mappings().all()
+    rows = [
+        row for row in rows
+        if project_access_service.can_read_project(conn, context, str(row["native_id"]))
+    ]
     id_matches = [row for row in rows if str(row["native_id"]) == needle]
     if id_matches:
         row = id_matches[0]
