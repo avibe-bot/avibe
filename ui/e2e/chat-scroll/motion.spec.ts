@@ -63,6 +63,50 @@ const animationsOf = (page: Page, selector: string) => page.evaluate((sel) => {
 
 type Kind = { moves: boolean; fades: boolean };
 type Copy = { text: string; rows: number; animations: Kind[]; column: Kind[] };
+type AnimationSample = {
+  origin: string;
+  animations: { moves: boolean; fades: boolean; delay: number }[];
+};
+
+/** Capture the send animations in the DOM commit that creates them, before a
+ * slow runner can let those animations finish. */
+async function watchSendAnimations(page: Page) {
+  await page.evaluate(() => {
+    const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+    const lab = window as unknown as {
+      sendAnimations: {
+        message: AnimationSample | null;
+        bubble: AnimationSample | null;
+      };
+    };
+    const snapshot = (el: Element): AnimationSample => ({
+      origin: getComputedStyle(el).transformOrigin,
+      animations: el.getAnimations().map((animation) => {
+        const frames = (animation.effect as KeyframeEffect).getKeyframes();
+        return {
+          moves: frames.some((frame) => 'transform' in frame),
+          fades: frames.some((frame) => 'opacity' in frame),
+          delay: Number(animation.effect!.getTiming().delay ?? 0),
+        };
+      }),
+    });
+
+    lab.sendAnimations = { message: null, bubble: null };
+    const observer = new MutationObserver(() => {
+      const message = transcript.querySelector('[aria-busy="true"][data-message-id]');
+      const bubble = transcript.querySelector('[data-transcript-working]');
+      if (message && !lab.sendAnimations.message) lab.sendAnimations.message = snapshot(message);
+      if (bubble && !lab.sendAnimations.bubble) lab.sendAnimations.bubble = snapshot(bubble);
+      if (lab.sendAnimations.message && lab.sendAnimations.bubble) observer.disconnect();
+    });
+    observer.observe(transcript, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['aria-busy'],
+    });
+  });
+}
 
 /** From now on, each copy of a row that leaves as it goes in (it lasts a moment, and a slow runner must
  *  not miss it): its text, the rows still in it, what it plays, and what the content column plays then. */
@@ -151,11 +195,18 @@ test('a reply that lands while the reader follows the tail glides in, and the ta
 test('a sent message rises from the composer as the conversation glides, the working bubble a beat behind', async ({ page }) => {
   await open(page, 'delay=0&sendDelay=600');
   await record(page);
+  await watchSendAnimations(page);
   await send(page, 'Ship the standard strength, then open the PR.');
   const sending = '[data-testid="chat-transcript"] [aria-busy="true"][data-message-id]';
   await expect(page.locator(sending)).toBeVisible();
-  const message = await animationsOf(page, sending);
-  const bubble = await animationsOf(page, '[data-transcript-working]');
+  const { message, bubble } = await page.evaluate(() => (
+    (window as unknown as {
+      sendAnimations: {
+        message: AnimationSample | null;
+        bubble: AnimationSample | null;
+      };
+    }).sendAnimations
+  ));
   // Keep the row's element: the server's row takes its place without entering again.
   await page.evaluate((sel) => { (window as unknown as { sent: Element }).sent = document.querySelector(sel)!; }, sending);
   await expect(page.locator(sending)).toHaveCount(0);

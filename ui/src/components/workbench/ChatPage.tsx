@@ -5294,8 +5294,22 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const restoreScrollPosition = useCallback(() => {
     const el = scrollRef.current;
     if (!el || suppressAnchorRef.current || jumpTarget) return;
+    const bottomGap = el.scrollHeight - el.clientHeight - el.scrollTop;
+    // A browser can move the scroller before it delivers the corresponding
+    // scroll event. If a live commit lands in that gap, the ref still says the
+    // reader follows the tail and the pinned branch would write the reader
+    // back to the bottom. The current position is authoritative here: a gap
+    // away from the bottom means the reader has already left the tail.
+    if (pinnedRef.current
+      && el.scrollTop + 0.5 < lastScrollTopRef.current
+      && bottomGap > 1
+      && !bottomBounceRef.current
+      && !takebackRef.current) {
+      setFollowingTail(false);
+      captureAnchor();
+    }
     if (pinnedRef.current) {
-      if (el.scrollHeight - el.clientHeight - el.scrollTop > 0.5) {
+      if (bottomGap > 0.5) {
         if (bottomBounceRef.current && !isAtRest()) {
           // The rubber band at the bottom takes a write back (iOS 27): pin
           // the new bottom once it has come to rest.
@@ -5361,7 +5375,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     // A programmatic adjustment must not look like upward input when its
     // queued scroll event is delivered.
     lastScrollTopRef.current = Math.max(0, el.scrollTop);
-  }, [captureAnchor, isAtRest, jumpTarget, pinnedRef, whenSettled]);
+  }, [captureAnchor, isAtRest, jumpTarget, pinnedRef, setFollowingTail, whenSettled]);
 
   // Jump to the exact bottom and resume following. Instant, not smooth: a smooth
   // glide emits intermediate scroll events that would flip the pin off mid-flight
@@ -5382,6 +5396,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
     lastScrollTopRef.current = Math.max(0, el.scrollTop);
+    takebackRef.current = null;
     setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
