@@ -248,6 +248,8 @@ def test_epoch_mismatch_or_unsupported_target_rolls_back_before_commit(bridge_db
 
 
 def test_sqlite_busy_is_not_misdiagnosed_as_an_incompatible_epoch(bridge_db, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
     dispose_cached_sqlite_engines()
     connect = sqlite3.connect
     with closing(connect(bridge_db)) as writer:
@@ -256,6 +258,8 @@ def test_sqlite_busy_is_not_misdiagnosed_as_an_incompatible_epoch(bridge_db, mon
         monkeypatch.setattr(migrations.sqlite3, "connect", lambda *args, **kw: connect(*args, **{**kw, "timeout": 0.01}))
         with pytest.raises(sqlite3.OperationalError, match="locked"):
             migrations.preflight_database(bridge_db)
+        with pytest.raises(OperationalError, match="locked"):
+            create_sqlite_engine(bridge_db)
         writer.rollback()
 
 

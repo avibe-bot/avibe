@@ -9,7 +9,7 @@ from typing import Callable, TypeVar
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from config import paths
 from storage import loop_writers
@@ -55,7 +55,15 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
         with _cached_engine_lock:
             checked = _checked_sqlite_paths.get(path)
         if checked != identity:
-            preflight_database(path, read_only=read_only)
+            try:
+                preflight_database(path, read_only=read_only)
+            except sqlite3.Error as exc:
+                # Factory callers already handle SQLAlchemy's DBAPI error
+                # hierarchy. Preserve it when the earlier raw-SQLite admission
+                # check observes corruption, busy state or a missing table.
+                raise DBAPIError.instance(
+                    "SQLite compatibility preflight", None, exc, sqlite3.Error, hide_parameters=True,
+                ) from exc
             with _cached_engine_lock:
                 _checked_sqlite_paths[path] = identity
     if not read_only:

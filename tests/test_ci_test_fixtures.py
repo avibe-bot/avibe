@@ -79,6 +79,7 @@ def test_raw_schema_copies_match_fresh_migrations_and_preserve_isolation(
 ):
     from storage.migrations import run_migrations
     from tests.test_sqlite_state_migration import _schema_fingerprint
+    from tests.migration_helpers import migration_seed_data
 
     fresh_path = tmp_path / "fresh.sqlite"
     run_migrations(fresh_path)
@@ -87,9 +88,7 @@ def test_raw_schema_copies_match_fresh_migrations_and_preserve_isolation(
     original = template.read_bytes()
     with closing(sqlite3.connect(fresh_path)) as fresh, closing(sqlite3.connect(first)) as clone:
         assert _schema_fingerprint(fresh) == _schema_fingerprint(clone)
-        assert sorted(row for row in fresh.iterdump() if row.startswith("INSERT INTO")) == sorted(
-            row for row in clone.iterdump() if row.startswith("INSERT INTO")
-        )
+        assert migration_seed_data(fresh) == migration_seed_data(clone)
         for pragma in ("journal_mode", "user_version", "application_id"):
             assert fresh.execute(f"PRAGMA {pragma}").fetchall() == clone.execute(f"PRAGMA {pragma}").fetchall()
         assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
