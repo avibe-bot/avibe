@@ -3379,9 +3379,9 @@ class TaskExecutionStore:
             write_atomic(path, json.dumps(payload, indent=2))
             return
 
-    def mark_callback_pending(self, run_id: str) -> None:
+    def mark_callback_pending(self, run_id: str, *, deliver_result: bool = False) -> None:
         if self._sqlite is not None:
-            self._sqlite.mark_callback_pending(run_id)
+            self._sqlite.mark_callback_pending(run_id, deliver_result=deliver_result)
             return
         now = _utc_now_iso()
         for state in ("pending", "processing", "completed"):
@@ -3394,6 +3394,8 @@ class TaskExecutionStore:
                 payload = {"id": run_id}
             if not isinstance(payload, dict):
                 payload = {"id": run_id}
+            if deliver_result and isinstance(payload.get("metadata"), dict):
+                payload["metadata"].pop(AGENT_RUN_CALLBACK_MODE_METADATA_KEY, None)
             payload.update(
                 {
                     "callback_status": "pending",

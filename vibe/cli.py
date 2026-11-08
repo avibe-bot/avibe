@@ -7501,7 +7501,10 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
         raise
 
 
-async def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout: Optional[float]) -> dict:
+async def _wait_for_run_result(
+    store: TaskExecutionStore, run_id: str, *, wait_timeout: Optional[float],
+    on_terminal_read: Callable[[], None] | None = None,
+) -> dict:
     from storage.background import normalize_run_status
 
     started = time.monotonic()
@@ -7509,6 +7512,8 @@ async def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_t
     while True:
         run = await asyncio.to_thread(store.get_run, run_id)
         if run and normalize_run_status(run.get("status")) in {"succeeded", "failed", "canceled"}:
+            if on_terminal_read is not None:
+                on_terminal_read()
             try:
                 await asyncio.to_thread(store.record_sync_return, run_id)
             except Exception:

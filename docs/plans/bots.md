@@ -508,7 +508,10 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   2026-11-08); a previously notified pair is still answerable. Avibe never
   attributes replies to turns. A later request from A re-arms A→B.
   Trade-off: a genuine new request from B after answering A has no reverse
-  safety-net reminder; its message still reaches A normally.
+  safety-net reminder; its message still reaches A normally. A's answer to that
+  question is indistinguishable from a new A→B request and re-arms the pair, so
+  A can receive a notice if B then stays quiet. Avoiding that would require the
+  reply attribution this rule intentionally excludes.
 - When B is idle and no pending input, open delegate, armed Watch, or pending
   Task will wake B, Avibe sends A one short Harness notice naming B's title and
   Session id, a last-reply excerpt (up to 300 characters), and a follow-up command.
@@ -525,8 +528,14 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   controller's live sync waiter prevents a poll-versus-idle race; the read marks
   the pair answered durably. Waiters disappear on client disconnect,
   cancellation, or restart, rather than leaving a persistent waiting flag.
-  Timeout/detach keeps the existing callback fallback. A bookkeeping failure
-  leaves the pair open but never hides the finished result from the caller.
+  Timeout, disconnect, and cancellation keep the existing callback fallback;
+  an in-flight enqueue lands before its callback handoff. If cancellation arrives
+  after the waiter read a terminal result, its receipt may still commit: that
+  already-requested sync return is handed off in full through the callback route,
+  including a success that would otherwise be failure-only. Before that read,
+  default successful Runs still use only the idle safety net. This recovery uses
+  the existing Run metadata, not a durable receipt/CAS protocol. A bookkeeping
+  failure leaves the pair open but never hides the finished result from the caller.
 - The shared acceptance transaction maintains `session_delegations`; a new
   RuntimeWork lane checks its open pairs on queue/Run/definition events, with
   startup and periodic reconciliation for missed events. The idle recheck, notice

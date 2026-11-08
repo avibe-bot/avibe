@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -383,10 +384,13 @@ def test_sync_receipt_requires_acceptance_but_not_latest_run_ownership(harness, 
 
 
 @pytest.mark.asyncio
-async def test_sync_client_disconnect_releases_wait_without_acknowledging_result(harness, monkeypatch):
-    """A killed CLI must not leave a controller waiter consuming its later result."""
+@pytest.mark.parametrize("disconnect_at", ["enqueue", "waiting", "receipt"])
+@pytest.mark.parametrize("failure_only,status", [(False, "succeeded"), (True, "failed"), (True, "succeeded")])
+async def test_sync_disconnect_hands_off_callback_or_idle_notice(harness, monkeypatch, disconnect_at, failure_only, status):
+    """Disconnect during admission, polling, or receipt preserves a real return."""
     from core.control_requests import new_request
     from core.internal_server import create_app
+    from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
     from vibe import cli
 
     h = harness
@@ -394,18 +398,52 @@ async def test_sync_client_disconnect_releases_wait_without_acknowledging_result
     h.service.controller.scheduled_task_service = h.service
     app = create_app(h.service.controller)
     enqueued = asyncio.Event()
+    polling = asyncio.Event()
     disconnected = asyncio.Event()
+    in_receipt = asyncio.Event()
+    receipt_done = asyncio.Event()
+    release_enqueue = threading.Event()
+    release_receipt = threading.Event()
     loop = asyncio.get_running_loop()
     seen = []
+    original_get_run = h.requests.get_run
+    original_receipt = h.requests.record_sync_return
+    authority = {"user_id": "example", "role": "member"}
+
+    def slow_receipt(run_id):
+        if disconnect_at != "receipt":
+            return original_receipt(run_id)
+        loop.call_soon_threadsafe(in_receipt.set)
+        try:
+            assert release_receipt.wait(5)  # a contended receipt write outlives its cancelled await
+            return original_receipt(run_id)
+        finally:
+            loop.call_soon_threadsafe(receipt_done.set)
+
+    def observe_poll(run_id):
+        result = original_get_run(run_id)
+        loop.call_soon_threadsafe(polling.set)
+        return result
 
     def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id):
-        run = _send(h, callback_session_id="sesA", callback_active=False,
-                    metadata={"callback_mode": "failure"}, run_id=run_id)
-        turn = _accept(h, run, finish=False)
-        seen.append((run, turn))
         loop.call_soon_threadsafe(enqueued.set)
+        if disconnect_at == "enqueue":
+            assert release_enqueue.wait(5)
+        metadata = {RESOURCE_USER_CONTEXT_METADATA_KEY: authority}
+        if failure_only:
+            metadata["callback_mode"] = "failure"
+        run = _send(h, callback_session_id="sesA", callback_active=False, metadata=metadata, run_id=run_id)
+        turn = _accept(h, run, finish=disconnect_at == "receipt")
+        if disconnect_at == "receipt":
+            with h.engine.begin() as conn:
+                conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(
+                    status=status, result_text="Full result",
+                ))
+        seen.append((run, turn))
         return {"ok": True, "run": {"id": run_id}}, "sesA"
 
+    monkeypatch.setattr(h.requests, "get_run", observe_poll)
+    monkeypatch.setattr(h.requests, "record_sync_return", slow_receipt)
     monkeypatch.setattr(cli, "_enqueue_agent_run", enqueue)
     payload = new_request("agent.run", {"sync_run": True, "message": "work", "wait_timeout": 30}).to_payload()
     first = True
@@ -427,20 +465,51 @@ async def test_sync_client_disconnect_releases_wait_without_acknowledging_result
     request_task = asyncio.create_task(app(scope, receive, send))
     try:
         await asyncio.wait_for(enqueued.wait(), 5)
+        if disconnect_at == "waiting":
+            await asyncio.wait_for(polling.wait(), 5)
+        elif disconnect_at == "receipt":
+            await asyncio.wait_for(in_receipt.wait(), 5)
         assert h.service.sync_waiting_run_ids
         disconnected.set()
+        if disconnect_at == "enqueue":
+            await asyncio.sleep(0.15)  # let the HTTP monitor observe disconnect
+            assert not request_task.done(), "Cancellation must land admission before handing it off"
+            release_enqueue.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(request_task, 5)
         assert not h.service.sync_waiting_run_ids
         run, turn = seen[0]
-        _finish(h, turn, [run])
-        assert _pair(h)["state"] == "open"
-        assert h.lane._notify(_pair(h))
+        current = h.requests.get_run(run.id)
+        assert current["callback_status"] == "pending"
+        assert current["metadata"][RESOURCE_USER_CONTEXT_METADATA_KEY] == authority
+        if disconnect_at == "receipt":
+            assert not h.lane._notify(_pair(h))  # full-return promise wins even before receipt commits
+            release_receipt.set()
+            await asyncio.wait_for(receipt_done.wait(), 5)
+        else:
+            _finish(h, turn, [run])
+            with h.engine.begin() as conn:
+                conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status=status, result_text="Full result"))
+        assert _pair(h)["state"] == ("answered" if disconnect_at == "receipt" else "open")
+        callback = h.service._enqueue_callback_run(h.requests.get_run(run.id))
+        if failure_only and status == "succeeded" and disconnect_at != "receipt":
+            assert callback is None
+            assert h.lane._notify(_pair(h))
+        else:
+            assert callback is not None
+            assert not h.lane._notify(_pair(h))
+            _accept(h, callback)
+            assert _pair(h)["state"] == "answered"
+            assert not _notices(h)
     finally:
+        release_enqueue.set()
+        release_receipt.set()
         disconnected.set()
         if not request_task.done():
             request_task.cancel()
         await asyncio.gather(request_task, return_exceptions=True)
+        if in_receipt.is_set():
+            await asyncio.wait_for(receipt_done.wait(), 5)
 
 
 def test_notice_marker_and_outbox_roll_back_together(harness, monkeypatch):
