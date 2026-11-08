@@ -662,6 +662,104 @@ def test_new_revision_requires_exact_attestation(monkeypatch, declaration, expec
         assert any(expected_fragment in problem and revision in problem for problem in problems)
 
 
+def _compatibility_graph(monkeypatch, source: str, *, released: bool = False):
+    bridge = (
+        _revision_file(guard.BRIDGE_REVISION, '"20260104_0004"')
+        + 'MIGRATION_COMPATIBILITY = "breaking"\nCOMPATIBILITY_EPOCH = 1\n'
+    )
+    shipped = {**SHIPPED_GRAPH, "bridge.py": bridge}
+    current = {**shipped, "addition.py": source}
+    _graphs(monkeypatch, current if released else shipped, current)
+    monkeypatch.setattr(guard, "latest_released_tag", lambda: "v0.0.0")
+
+
+def _new_compatibility_revision(label: str = "additive", body: str = 'op.create_index("ix", "items", ["value"])', epoch: str = "") -> str:
+    return (
+        'from alembic import op\n'
+        + _revision_file("20990101_9999", repr(guard.BRIDGE_REVISION)).split("def upgrade")[0]
+        + f'MIGRATION_COMPATIBILITY = {label!r}\n{epoch}\ndef upgrade():\n    {body}\n'
+    )
+
+
+@pytest.mark.parametrize(("source", "fragment"), [
+    (_new_compatibility_revision(), None),
+    (_new_compatibility_revision("breaking", 'op.execute("UPDATE items SET value = 1")', "COMPATIBILITY_EPOCH = 2"), None),
+    (_new_compatibility_revision("additive", 'op.create_index("uq", "items", ["value"], unique=True)'), "unproven"),
+    (_new_compatibility_revision("additive", 'helper()'), "unproven"),
+    (_new_compatibility_revision("unknown"), "literal MIGRATION_COMPATIBILITY"),
+    (_new_compatibility_revision().replace('MIGRATION_COMPATIBILITY = \'additive\'', ''), "literal MIGRATION_COMPATIBILITY"),
+    (_new_compatibility_revision("breaking"), "greater than 1"),
+    (_new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = 1"), "greater than 1"),
+    (_new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = True"), "greater than 1"),
+    (_new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = next_epoch()"), "greater than 1"),
+    (_new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = 2\nCOMPATIBILITY_EPOCH = 3"), "greater than 1"),
+    (_new_compatibility_revision(epoch="COMPATIBILITY_EPOCH = 2"), "unproven"),
+])
+def test_new_compatibility_class_is_mechanical_and_breaking_advances_epoch(monkeypatch, source, fragment):
+    _compatibility_graph(monkeypatch, source)
+    problems = guard.migration_compatibility_problems()
+    if fragment is None:
+        assert problems == []
+    else:
+        assert any(fragment in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize("rebinding", [
+    "COMPATIBILITY_EPOCH -= 1", "if True:\n    COMPATIBILITY_EPOCH = 1",
+    "del COMPATIBILITY_EPOCH", "def COMPATIBILITY_EPOCH():\n    return 1",
+    "from elsewhere import COMPATIBILITY_EPOCH",
+    "try:\n    raise ValueError()\nexcept ValueError as COMPATIBILITY_EPOCH:\n    pass",
+    "match 1:\n    case COMPATIBILITY_EPOCH:\n        pass",
+    "match {}:\n    case {**COMPATIBILITY_EPOCH}:\n        pass",
+])
+def test_breaking_epoch_must_be_one_unmodified_literal_binding(monkeypatch, rebinding):
+    source = _new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = 2\n" + rebinding)
+    _compatibility_graph(monkeypatch, source)
+    assert any("greater than 1" in problem for problem in guard.migration_compatibility_problems())
+
+
+@pytest.mark.parametrize("dependency", ["epoch_side", "20990101_9998"])
+def test_epoch_floor_resolves_real_alembic_dependency_labels(monkeypatch, dependency):
+    source = _new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = 2")
+    _compatibility_graph(monkeypatch, source)
+    current = dict(guard.working_tree_sources())
+    current["dependency.py"] = source.replace("20990101_9999", "20990101_9998") + '\nbranch_labels = ("epoch_side",)\n'
+    current["addition.py"] += f'\ndepends_on = {dependency!r}\n'
+    monkeypatch.setattr(guard, "working_tree_sources", lambda: current)
+    assert any("20990101_9999" in problem and "greater than 2" in problem for problem in guard.migration_compatibility_problems())
+
+
+@pytest.mark.parametrize(("epoch", "passes"), [(2, False), (3, True)])
+def test_new_breaking_sibling_cannot_reuse_a_published_epoch(monkeypatch, epoch, passes):
+    source = _new_compatibility_revision("breaking", epoch=f"COMPATIBILITY_EPOCH = {epoch}")
+    _compatibility_graph(monkeypatch, source)
+    shipped = dict(guard.released_sources("v0.0.0"))
+    shipped["released-sibling.py"] = _new_compatibility_revision("breaking", epoch="COMPATIBILITY_EPOCH = 2").replace("20990101_9999", "20990101_9998")
+    current = {**shipped, "addition.py": source}
+    current["merge.py"] = _new_compatibility_revision().replace("20990101_9999", "20990101_9997").replace(repr(guard.BRIDGE_REVISION), repr(("20990101_9998", "20990101_9999")))
+    _graphs(monkeypatch, shipped, current)
+    problems = guard.migration_compatibility_problems()
+    if passes:
+        assert problems == []
+    else:
+        assert any("20990101_9999" in problem and "greater than 2" in problem for problem in problems)
+
+
+def test_compatibility_guard_never_relabels_released_migrations(monkeypatch):
+    _compatibility_graph(monkeypatch, _new_compatibility_revision("old-unclassified"), released=True)
+    assert guard.migration_compatibility_problems() == []
+
+
+def test_new_branches_cannot_avoid_the_bridge(monkeypatch):
+    _compatibility_graph(monkeypatch, _new_compatibility_revision().replace(repr(guard.BRIDGE_REVISION), repr("20260104_0004")))
+    assert any("does not descend" in item for item in guard.migration_compatibility_problems())
+
+
+@requires_release_history
+def test_real_graph_has_only_proven_compatibility_declarations():
+    assert guard.migration_compatibility_problems() == []
+
+
 @requires_release_history
 def test_real_release_baseline_has_no_new_migration_safety_obligations():
     """A current graph with no post-release revisions needs no new attestation run."""

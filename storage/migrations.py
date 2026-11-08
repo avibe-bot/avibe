@@ -30,6 +30,7 @@ from storage.compatibility import (
     BRIDGE_REVISION, CompatibilityEpochError, read_compatibility_epoch, require_supported_compatibility_epoch,
 )
 from storage.db import create_sqlite_engine, sqlite_url
+from storage.migration_policy import declared_migration_epoch
 from storage.lock import MigrationFileLock, migration_lock_path_for
 
 
@@ -295,10 +296,17 @@ def _script_directory(cfg: Config) -> ScriptDirectory:
 
 def declared_compatibility_epoch(script: ScriptDirectory, revisions: set[str]) -> int:
     """Epoch at an exact bridge-or-later revision set, using the Alembic graph."""
-    return max(
-        getattr(item.module, "COMPATIBILITY_EPOCH", 1)
-        for item in script.iterate_revisions(tuple(revisions), BRIDGE_REVISION, inclusive=True)
-    )
+    epochs = []
+    for item in script.iterate_revisions(tuple(revisions), BRIDGE_REVISION, inclusive=True):
+        try:
+            epoch = declared_migration_epoch(Path(item.path).read_text(encoding="utf-8"), strict=True)
+        except (ValueError, SyntaxError) as exc:
+            raise CompatibilityEpochError(f"invalid compatibility_epoch declaration in {item.revision}: {exc}") from exc
+        # Module-level annotations/defaults and opaque breaking helpers can
+        # mutate module attributes. The literal source is the contract that
+        # commit validation must enforce, regardless of those Python effects.
+        epochs.append(epoch or 1)
+    return max(epochs)
 
 
 def run_migrations(

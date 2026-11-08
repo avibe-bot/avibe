@@ -247,6 +247,48 @@ def test_epoch_mismatch_or_unsupported_target_rolls_back_before_commit(bridge_db
     assert _snapshot(bridge_db)["database.sql"] == before
 
 
+@pytest.mark.parametrize("intermediate", [False, True])
+@pytest.mark.parametrize("mutation", ["annotation", "default", "namespace", "inside-upgrade"])
+def test_mutable_python_epoch_cannot_weaken_any_revision_commit(bridge_db, tmp_path, monkeypatch, mutation, intermediate):
+    with closing(sqlite3.connect(bridge_db)) as conn, conn:
+        conn.execute("CREATE TABLE epoch_probe(value TEXT)")
+        conn.execute("INSERT INTO epoch_probe VALUES ('before')")
+    body = (
+        '    op.create_index("uq_epoch_probe", "epoch_probe", ["value"], unique=True)\n'
+        '    from storage.compatibility import advance_compatibility_epoch\n'
+        '    advance_compatibility_epoch(op.get_bind(), COMPATIBILITY_EPOCH)\n'
+    )
+    if mutation == "inside-upgrade":
+        body = '    globals()["COMPATIBILITY_EPOCH"] = 1\n' + body
+    _next_graph(tmp_path, monkeypatch, body, epoch=2)
+    version = migrations.alembic_dir() / "versions" / "20261109_0077_next.py"
+    source = version.read_text()
+    if mutation == "annotation":
+        source = source.replace("COMPATIBILITY_EPOCH = 2", 'COMPATIBILITY_EPOCH: globals().__setitem__("COMPATIBILITY_EPOCH", 1) = 2')
+        # Python 3.14 defers annotation evaluation; force the same mutation in
+        # that interpreter while retaining the eager 3.10-3.13 reproduction.
+        source += '\nglobals().get("__annotate__", lambda _format: None)(1)\n'
+    elif mutation == "default":
+        source += '\ndef helper(unused=globals().__setitem__("COMPATIBILITY_EPOCH", 1)):\n    pass\n'
+    elif mutation == "namespace":
+        source += '\nglobals().update(COMPATIBILITY_EPOCH=1)\n'
+    version.write_text(source)
+    if intermediate:
+        (version.parent / "20261110_0078_after.py").write_text(
+            "from alembic import op\nrevision = '20261110_0078'\ndown_revision = '20261109_0077'\n"
+            "MIGRATION_COMPATIBILITY = 'additive'\ndef upgrade():\n"
+            '    op.create_index("ix_after_probe", "epoch_probe", ["value"])\n'
+        )
+    before = _snapshot(bridge_db)["database.sql"]
+    with pytest.raises(RuntimeError, match="compatibility_epoch does not match"):
+        migrations.run_migrations(bridge_db)
+    assert _snapshot(bridge_db)["database.sql"] == before
+    # The old write contract still works; even an intermediate restrictive
+    # migration did not commit under the old epoch before a later head failed.
+    with closing(sqlite3.connect(bridge_db)) as conn, conn:
+        conn.execute("INSERT INTO epoch_probe VALUES ('before')")
+
+
 def test_sqlite_busy_is_not_misdiagnosed_as_an_incompatible_epoch(bridge_db, monkeypatch):
     from sqlalchemy.exc import OperationalError
 

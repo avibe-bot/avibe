@@ -103,19 +103,22 @@ def run_migrations_online() -> None:
                 yield step
 
         def validate_epoch_schema(*, ctx, step, heads, run_args):
-            if not step.is_upgrade or heads != set(script.get_heads()) or not heads.intersection(modern):
+            if not step.is_upgrade or not heads.intersection(modern):
                 return
             from storage.compatibility import read_compatibility_epoch, require_supported_compatibility_epoch
             from storage.migrations import alembic_config, declared_compatibility_epoch, _compatible_schema_problem
 
             raw = connection.connection.driver_connection
             epoch = read_compatibility_epoch(raw)
+            # Every modern revision is its own transaction. Validate its epoch
+            # before each commit, not only the final head: a later failure/crash
+            # must not expose a restrictive intermediate schema under an old epoch.
             if epoch != declared_compatibility_epoch(script, heads):
                 raise RuntimeError("compatibility_epoch does not match the committed schema revision")
             # The release-graph guard drives historical version_locations with
             # today's env.py. A historical head must not require today's new
             # columns; only the actual installed head owns this schema check.
-            if heads == set(ScriptDirectory.from_config(alembic_config()).get_heads()):
+            if heads == set(script.get_heads()) == set(ScriptDirectory.from_config(alembic_config()).get_heads()):
                 require_supported_compatibility_epoch(epoch)
                 problem = _compatible_schema_problem(raw)
                 if problem:

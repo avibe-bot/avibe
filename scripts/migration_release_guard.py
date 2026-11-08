@@ -7,7 +7,7 @@ never back. So editing a released revision's parentage does not change what thos
 databases have already done -- it changes what they will do next, silently, with no error
 at the moment of the edit and no error at the moment of the upgrade.
 
-Eight properties, one primitive: the graph as a released tag actually shipped it, read
+The properties share one primitive: the graph as a released tag actually shipped it, read
 straight out of git. Nothing here is an allowlist of known-bad cases that outlives its
 reason, and nothing needs an old Python environment -- ``env.py`` reads
 ``target_metadata`` only during autogenerate, so today's runtime can drive an older
@@ -29,6 +29,8 @@ reason, and nothing needs an old Python environment -- ``env.py`` reads
     _graph()                      window the property above walks
     migration_safety_problems()   each post-latest-release revision has one finite, explicit
                                   migration-safety attestation
+    migration_compatibility      new additive declarations are mechanically proven;
+    _problems()                   breaking revisions declare a higher literal epoch
 
 Readiness is not this module's opinion. ``unrepairable_releases`` drives
 ``run_migrations`` and asks ``background_tables_ready``, so it covers the repair and
@@ -78,10 +80,13 @@ if str(REPO_ROOT) not in sys.path:
 from alembic import command
 from alembic.config import Config
 from alembic.script.base import _only_source_rev_file
+from alembic.script.revision import Revision, RevisionError, RevisionMap
 from alembic.util import to_tuple
 from packaging.version import InvalidVersion, Version
 
 from scripts.release_package_version import package_version_from_release_tag
+from storage.compatibility import BRIDGE_REVISION
+from storage.migration_policy import classify_migration_source, declared_migration_epoch
 from storage.migrations import (
     HEAD_ONLY_REQUIRED_COLUMNS,
     HEAD_REQUIRED_COLUMNS,
@@ -744,6 +749,55 @@ def migration_safety_problems() -> list[str]:
         ))
     ]
 
+    return problems
+
+
+def migration_compatibility_problems() -> list[str]:
+    """Prove post-bridge additions without relabeling released migration bodies.
+
+    This supplements, rather than replaces, the all-release graph/data guard.
+    Classification interprets literal Alembic operations, never migration code.
+    Epoch changes remain explicit semantic boundaries even without DDL.
+    """
+    sources = working_tree_sources()
+    graph = revision_graph(sources)
+    if BRIDGE_REVISION not in graph:
+        return []  # Historical graphs predate the protocol.
+    released_sources_by_name = released_sources(latest_released_tag())
+    released = revision_graph(released_sources_by_name)
+    # Epochs describe the whole database, not one branch. A new sibling may
+    # execute after an already released head, even though that head is not its
+    # ancestor, so it must not reuse that release's breaking boundary.
+    released_floor = max((declared_migration_epoch(source) or 0 for source in released_sources_by_name.values()), default=0)
+    epochs = {revision: declared_migration_epoch(sources[name]) or 0 for revision, (name, _edges) in graph.items()}
+    try:
+        revisions = RevisionMap(lambda: (
+            Revision(revision, edges["down_revision"], dependencies=edges["depends_on"], branch_labels=edges["branch_labels"])
+            for revision, (_name, edges) in graph.items()
+        ))
+        ancestry = {
+            revision: {parent.revision for parent in revisions.iterate_revisions(revision, "base")} - {revision}
+            for revision in set(graph) - set(released)
+        }
+    except (RevisionError, KeyError, TypeError, ValueError) as exc:
+        return [f"Cannot prove compatibility epochs in the literal Alembic graph: {exc}"]
+
+    problems = []
+    for revision in sorted(set(graph) - set(released)):
+        source = sources[graph[revision][0]]
+        decision = classify_migration_source(source)
+        if decision.declared not in {"additive", "breaking"}:
+            problems.append(f"{revision} requires one literal MIGRATION_COMPATIBILITY = 'additive' or 'breaking'")
+            continue
+        if decision.declared == "additive" and decision.permitted != "additive":
+            problems.append(f"{revision} additive declaration is unproven: {decision.reason}")
+        previous = ancestry[revision]
+        if revision != BRIDGE_REVISION and BRIDGE_REVISION not in previous:
+            problems.append(f"{revision} does not descend from the compatibility bridge")
+        if decision.declared == "breaking":
+            prior_epoch = max(released_floor, max((epochs[parent] for parent in previous), default=0))
+            if epochs[revision] <= prior_epoch:
+                problems.append(f"{revision} breaking migration requires a literal COMPATIBILITY_EPOCH greater than {prior_epoch}")
     return problems
 
 
@@ -1870,6 +1924,7 @@ def collect_problems(
     problems.extend(spent_body_edit_declarations(baseline))
 
     problems.extend(migration_safety_problems())
+    problems.extend(migration_compatibility_problems())
 
     if include_upgrade:
         failures, refused = unrepairable_releases()
