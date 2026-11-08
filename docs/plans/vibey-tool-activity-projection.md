@@ -132,6 +132,10 @@ On 2026-11-08 the actual wheels verified were:
   `4ce5a670fab4ae595fdef43871497c6b140b20ff0c08ae24de023adf18540aa2`.
   The default harness passed the same epoch-2 contract. CI/publishing continue
   to select the actual immediate predecessor, not a convenient pinned pass.
+- RC21, published at 15:28:26 UTC and then selected by the default harness:
+  SHA-256 `fe0deaa11f538967925edffefb0a5b142d8bcc093a673060415602cda4e71065`.
+  The actual installed wheel passed the epoch-2 reader/writer contract against
+  revision `20261108_0080`. RC19's independent rollback-floor proof remains.
 - RC18, a pre-reader binary: SHA-256
   `13c52796b5c5525fd09e45780c5cad0d3f8181d0602ddd16726b5e2d9cab94a4`.
   Its installed wheel refused the actual epoch-2 revision before any logical
@@ -212,5 +216,9 @@ trace compatibility/identity links, query ACL and query plans. Frontend tests
 cover live upserts, explicit ordering and reload deduplication. Stage-2 coverage
 adds fallback gates, real epoch-2 crash atomicity/snapshot preservation, real
 released-wheel readers and all native/proxy hosted integration tests against
-projection-only storage. No release, service restart, remote operation or bulk
-cleanup is authorized here.
+projection-only storage. Frozen historical downgrade tests reconstruct only the
+two known marker-only boundaries, refuse fixtures containing projection metadata,
+and still execute all structural downgrades; production refuses cross-epoch
+Alembic downgrades unchanged. Completed-upgrade assertions derive the checkout's
+head instead of pinning the old bridge stamp. No release, service restart, remote
+operation or bulk cleanup is authorized here.

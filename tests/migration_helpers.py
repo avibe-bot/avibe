@@ -28,31 +28,43 @@ def migration_seed_data(conn: sqlite3.Connection) -> list[str]:
     )
 
 
-def downgrade_legacy_schema(config: Config, revision: str) -> None:
-    """Reconstruct the pre-bridge fixture, then test a historical downgrade.
+def latest_migration_revision() -> str:
+    """Expected completed stamp from the checkout's graph, not a stale literal."""
+    from storage import migrations
 
-    The bridge adds only a marker, so removing that marker and its stamp creates
-    exactly the historical fixture these tests used before epochs existed. This
-    is deliberately test-only: the product refuses cross-epoch downgrades.
+    head = ScriptDirectory.from_config(migrations.alembic_config()).get_current_head()
+    assert head is not None
+    return head
+
+
+def downgrade_legacy_schema(config: Config, revision: str) -> None:
+    """Reconstruct a pre-bridge fixture, then test a frozen historical downgrade.
+
+    Only the two known marker-only transitions may be removed, and never from a
+    fixture with projection-capable responses. Structural downgrades still run.
+    This is NOT a supported downgrade path; production epoch guards stay intact.
     """
     path = make_url(config.get_main_option("sqlalchemy.url")).database
-    with closing(sqlite3.connect(path)) as conn:
-        stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-    bridge_revision = "20261108_0076"
-    if stamp != [(bridge_revision,)]:
-        # New additive migrations may sit above the non-downgradable bridge.
-        # Remove only those successors first; a pre-bridge stamp is already
-        # in the historical graph and must keep the previous behavior.
-        script = ScriptDirectory.from_config(config)
-        successors = {item.revision for item in script.walk_revisions(base=bridge_revision)}
-        if len(stamp) == 1 and stamp[0][0] in successors:
-            command.downgrade(config, bridge_revision)
-    with closing(sqlite3.connect(path)) as conn, conn:
-        stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-        if stamp == [("20261108_0076",)]:
+    script = ScriptDirectory.from_config(config)
+    for boundary, epoch in (("20261108_0080", 2), ("20261108_0076", 1)):
+        with closing(sqlite3.connect(path)) as conn:
+            [(stamp,)] = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+            if boundary not in {item.revision for item in script.iterate_revisions(stamp, "base")}:
+                continue
             assert conn.execute(
                 "SELECT value_json FROM state_meta WHERE key = 'compatibility_epoch'"
-            ).fetchone() == ("1",)
-            conn.execute("DELETE FROM state_meta WHERE key = 'compatibility_epoch'")
-            conn.execute("UPDATE alembic_version SET version_num = '20261107_0075'")
+            ).fetchone() == (str(epoch),)
+            if epoch == 2:
+                assert conn.execute(
+                    "SELECT count(*) FROM messages WHERE CASE WHEN json_valid(metadata_json) "
+                    "THEN json_extract(metadata_json, '$.tool_projection') IS NOT NULL ELSE 0 END"
+                ).fetchone() == (0,), "cannot relabel canonical projection data as a historical fixture"
+        if stamp != boundary:
+            command.downgrade(config, boundary)
+        with closing(sqlite3.connect(path)) as conn, conn:
+            if epoch == 2:
+                conn.execute("UPDATE state_meta SET value_json='1' WHERE key='compatibility_epoch'")
+            else:
+                conn.execute("DELETE FROM state_meta WHERE key='compatibility_epoch'")
+            conn.execute("UPDATE alembic_version SET version_num=?", (script.get_revision(boundary).down_revision,))
     command.downgrade(config, revision)

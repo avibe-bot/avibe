@@ -129,7 +129,7 @@ runs it again immediately before packaging, and `--activate` fills just
 `storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
 `None` disables the capability; pre-protocol or unsupported predecessors leave
 it `None`, with an explicit **not-applicable**, never a passing rollback claim.
-The source literal is now `2` after actual RC19 and RC20 wheels passed at epoch 2,
+The source literal is now `2` after actual RC19, RC20 and RC21 wheels passed at epoch 2,
 including trace-suppressed canonical tool presentation through Activity and SQL.
 The [representation contract](../plans/vibey-tool-activity-projection.md#released-reader-proof)
 records the wheel digests and RC18 refusal evidence. The no-copy decision still

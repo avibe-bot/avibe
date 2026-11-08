@@ -14,7 +14,7 @@ from types import MappingProxyType
 
 import pytest
 from alembic import command
-from tests.migration_helpers import downgrade_legacy_schema
+from tests.migration_helpers import downgrade_legacy_schema, latest_migration_revision
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
@@ -45,7 +45,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261108_0082"
+HEAD_REVISION = latest_migration_revision()
 PREVIOUS_HEAD_REVISION = "20261016_0068"
 _SCOPE_ID_DRIFT_TABLES = ("messages", "agent_events", "media_objects")
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and

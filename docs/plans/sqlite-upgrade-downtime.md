@@ -187,7 +187,7 @@ always mean "only slower".
 
 This replaces the separate-trace-DB proposal. The reader-first implementation
 shipped in `gh-v3.2.5rc19`; the [C-alt delivery contract](vibey-tool-activity-projection.md)
-records stage 2's breaking epoch-2 transition, actual RC19/RC20 reader proofs,
+records stage 2's breaking epoch-2 transition, actual RC19/RC20/RC21 reader proofs,
 RC18 refusal, and single-copy-normalized savings. For Vibey, an assistant response
 already commits call ID/name/arguments in
 `messages.content_json.model.message`, with `context_seq`

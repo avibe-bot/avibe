@@ -81,6 +81,19 @@ async def test_writer_requires_epoch_proof_and_exact_committed_response(engine, 
             assert step["status"] == "completed" and step["started_at"] is None
 
 
+async def test_historical_fixture_helper_cannot_relabel_projection_data(engine, session):
+    from tests.migration_helpers import downgrade_legacy_schema
+
+    store = await _store(engine)
+    await store.append_response(SESSION, assistant("", calls=(ToolCallBlock("call", "read", {}),)), final=False, metadata=_mark())
+    from pathlib import Path
+    path = Path(engine.url.database)
+    before = _snapshot(path)["database.sql"]
+    with pytest.raises(AssertionError, match="cannot relabel canonical projection data"):
+        downgrade_legacy_schema(migrations.alembic_config(path), "20261107_0075")
+    assert _snapshot(path)["database.sql"] == before
+
+
 @pytest.mark.no_sqlite_template
 @pytest.mark.parametrize("crash", ["before-commit", "after-commit"])
 def test_real_epoch_two_transition_is_atomic_and_keeps_fresh_rollback_snapshot(tmp_path, crash):
