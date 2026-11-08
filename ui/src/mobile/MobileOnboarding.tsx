@@ -575,7 +575,7 @@ function EmailEntry({
                 ? 'mobile-login-email-feedback'
                 : 'mobile-login-email-hint mobile-login-email-feedback'}
               className={cn(
-                'h-14 rounded-2xl bg-surface px-4 text-base shadow-sm',
+                'h-14 rounded-2xl px-4 text-base',
                 passwordMode && emailInvalid && 'border-destructive',
               )}
               onChange={(event) => onEmailChange(event.target.value)}
@@ -634,7 +634,7 @@ function EmailEntry({
                   aria-invalid={wrong || undefined}
                   aria-describedby="mobile-login-password-feedback"
                   className={cn(
-                    'h-14 rounded-2xl bg-surface pr-14 pl-4 text-base shadow-sm',
+                    'h-14 rounded-2xl pr-14 pl-4 text-base',
                     wrong && 'border-destructive',
                   )}
                   onFocus={revealActions}
@@ -1064,7 +1064,7 @@ function SecondFactor({
               disabled={locked}
               aria-invalid={errorKey === 'mobileApp.twoFactor.recoveryInvalid' || undefined}
               aria-describedby="mobile-login-code-hint mobile-login-code-feedback"
-              className="h-14 rounded-2xl bg-surface px-4 text-base tracking-wide shadow-sm"
+              className="h-14 rounded-2xl px-4 text-base tracking-wide"
               onChange={(event) => onCodeChange(event.target.value)}
             />
             <p id="mobile-login-code-hint" className="text-xs leading-6 text-muted">

@@ -259,7 +259,7 @@ export const SettingsGeneralPage: React.FC = () => {
               value={current.code}
               onChange={(event) => void select(event.target.value)}
               wrapperClassName="w-[190px] max-w-full"
-              className="h-10 rounded-[9px] border-border-strong bg-surface px-3.5 pr-9 text-[13px]"
+              className="h-10 rounded-[9px] px-3.5 pr-9 text-[13px]"
             >
               {languages.map((lang) => (
                 <option key={lang.code} value={lang.code}>{lang.label}</option>

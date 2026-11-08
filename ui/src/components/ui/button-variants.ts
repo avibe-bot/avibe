@@ -48,10 +48,11 @@ export const buttonVariants = cva(
           'gap-2 bg-gold font-bold text-gold-foreground shadow-glow-cta-gold hover:bg-gold-hover active:bg-gold-hover disabled:shadow-none',
         'brand-violet':
           'gap-2 bg-violet font-bold text-violet-foreground shadow-glow-cta-violet hover:bg-violet-hover active:bg-violet-hover disabled:shadow-none',
-        secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong active:border-border-strong',
-        // Outline — bg matches page surface so it sits cleanly on glow gradients.
+        // Secondary and outline are soft buttons (ui/design: system/elevation/edges): the field fill, no
+        // outline; the transparent border keeps their size and returns under forced colours.
+        secondary: 'gap-1.5 border border-edge bg-field text-secondary-foreground hover:bg-field-hover active:bg-field-hover',
         outline:
-          'gap-1.5 border border-border bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.05)] hover:bg-surface-2 active:bg-surface-2',
+          'gap-1.5 border border-edge bg-field text-foreground hover:bg-field-hover active:bg-field-hover',
         // Cyan outline — for "Read Vibe Remote" / docs style CTAs.
         'outline-cyan':
           'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10] active:bg-cyan/[0.10]',

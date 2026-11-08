@@ -31,7 +31,7 @@ const railClass = (checked: boolean, size: SwitchSize) =>
 const Thumb: React.FC<{ checked: boolean; size: SwitchSize }> = ({ checked, size }) => (
   <span
     className={cn(
-      'inline-block rounded-full bg-background shadow-[0_1px_3px_rgba(0,0,0,0.15),0_4px_8px_rgba(0,0,0,0.1)] transition-transform',
+      'inline-block rounded-full bg-background shadow-elevation-1 transition-transform',
       SIZES[size].thumb,
       checked ? SIZES[size].on : 'translate-x-0',
     )}

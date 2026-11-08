@@ -436,7 +436,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --surface-3: #06060e;
   --card: #11111c;
   --card-foreground: #f5f1e8;
-  --popover: #11111c;
+  /* Floating and overlay fill: one step above --card, so the surface rather than
+     a black smear separates a menu from the card under it (ui/design:
+     system/elevation/scale). */
+  --popover: #161622;
   --popover-foreground: #f5f1e8;
 
   /* On a dark surface a vivid accent is already legible, so ink tracks fill
@@ -673,11 +676,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
-    /* The light brand mint at 50%. It composites to ~1.5:1 on every light surface,
-       under the 3:1 non-text floor, and stays there by the same owner decision
-       as the fills above: the ring is a hint drawn beside a focused control,
-       and the brand value is not traded away to raise its ratio. */
-    --ring: rgba(16, 185, 129, 0.5);
+    /* The light brand mint, opaque. A field has no border at rest, so the ring
+       is its focus edge; at full alpha it reads 2.2-2.5:1 on the light surfaces
+       without moving off the brand value (owner, 2026-11-08). */
+    --ring: #10b981;
 
     /* Each --X-ink carries the same brand value as its fill: an accent is never
        moved off its design value to buy contrast. As small text on a light
@@ -837,7 +839,7 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --border-strong: rgba(8, 8, 18, 0.14);
   --input: rgba(8, 8, 18, 0.12);
   /* Mirrors the @media light block above; see the note there. */
-  --ring: rgba(16, 185, 129, 0.5);
+  --ring: #10b981;
 
   /* Bot avatar wells; mirrors the @media light block above. */
   --bot-mascot-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
@@ -1751,6 +1753,62 @@ pre,
   @keyframes skeleton-reveal {
     from { opacity: 0; }
     to { opacity: 1; }
+  }
+}
+
+/* The composer's edge (ui/design: system/elevation/edges, system/elevation/chat,
+   system/elevation/phone-chat-running). At rest a gradient hairline (mint, cyan,
+   violet) drawn as its border over a soft edge; focused, a mint ring outside it;
+   while an Agent works (`data-working`), a light sweeps the hairline, one turn in
+   2.8 s, and holds still under reduced motion. The fill is the composer's
+   surface, painted inside the border so the hairline shows around it. */
+@property --composer-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@utility composer-edge {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--surface-2), var(--surface-2)) padding-box,
+    linear-gradient(
+        120deg,
+        color-mix(in srgb, var(--mint) 60%, transparent),
+        color-mix(in srgb, var(--cyan) 45%, transparent) 50%,
+        color-mix(in srgb, var(--violet) 45%, transparent)
+      )
+      border-box;
+  --tw-shadow: var(--composer-shadow);
+  box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
+  &:focus-within {
+    --tw-shadow: var(--composer-shadow-focus);
+  }
+  &[data-working] {
+    background:
+      linear-gradient(var(--surface-2), var(--surface-2)) padding-box,
+      conic-gradient(
+          from var(--composer-sweep),
+          transparent 0deg,
+          color-mix(in srgb, var(--mint) 85%, transparent) 60deg,
+          color-mix(in srgb, var(--cyan) 70%, transparent) 110deg,
+          transparent 170deg,
+          transparent 360deg
+        )
+        border-box,
+      linear-gradient(color-mix(in srgb, var(--mint) 25%, transparent), color-mix(in srgb, var(--mint) 25%, transparent)) border-box;
+    --tw-shadow: var(--composer-shadow-focus);
+    animation: composer-sweep 2.8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    &[data-working] {
+      animation: none;
+      --composer-sweep: 200deg;
+    }
+  }
+}
+@keyframes composer-sweep {
+  to {
+    --composer-sweep: 360deg;
   }
 }
 

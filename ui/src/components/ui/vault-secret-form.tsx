@@ -1255,7 +1255,7 @@ export const VaultSecretForm: React.FC<{
             <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{t('vaults.dialog.nameUpper')}</span>
             <span className="whitespace-normal break-all font-mono text-[15px] font-semibold text-foreground">{secretName}</span>
           </div>
-          <Badge variant="secondary" className="bg-surface">{t('vaults.request.notSetYet')}</Badge>
+          <Badge variant="secondary">{t('vaults.request.notSetYet')}</Badge>
         </div>
 
         {!isKeypair && (

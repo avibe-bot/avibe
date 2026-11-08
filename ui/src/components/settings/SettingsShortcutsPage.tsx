@@ -338,7 +338,7 @@ export const SettingsShortcutsPage: React.FC = () => {
                   void pet.apply(() => pet.actions!.setVoiceMode(event.target.value as 'hold' | 'toggle'));
                 }}
                 wrapperClassName="w-[190px] max-w-full"
-                className="h-9 rounded-lg border-border-strong bg-surface-2 px-3 text-[12px]"
+                className="h-9 rounded-lg px-3 text-[12px]"
               >
                 <option value="hold">{t('settings.shortcuts.desktopMiniMode.hold')}</option>
                 <option value="toggle">{t('settings.shortcuts.desktopMiniMode.toggle')}</option>
