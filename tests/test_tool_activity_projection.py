@@ -97,6 +97,46 @@ async def test_unmarked_and_unknown_capabilities_keep_real_traces(engine, sessio
         assert row["order_micros"] == int(trace["id"][4:19], 16)
 
 
+@pytest.mark.no_sqlite_template
+async def test_projection_reader_compatible_opens_epoch_two_without_traces_or_startup_writes(engine, session):
+    """The reader floor must understand epoch 2 before any writer activates it.
+
+    This is synthetic future state, not an activation migration or a substitute
+    for the later release-to-release rollback test. The current writer stays 1.
+    """
+    from storage import importer, migrations
+    from storage.db import create_sqlite_engine
+    from tests.test_sqlite_compatibility_epoch import _future
+    from tests.test_sqlite_migration_preflight import _snapshot
+
+    store = await _store(engine)
+    response = await store.append_response(SESSION, assistant("", calls=(ToolCallBlock("call", "read", {"path": "/work/a.py"}),)), final=False, metadata=_mark())
+    await store.append_tool_result(SESSION, ToolResultMessage("call", "read", (text("done"),)), details={})
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").scalar() == "1"
+        assert conn.execute(select(agent_events.c.id).where(agent_events.c.event_type == "tool_call")).first() is None
+    path = Path(engine.url.database)
+    engine.dispose()
+    _future(path, epoch="2")
+    before = _snapshot(path)
+    decision = migrations.preflight_database(path)
+    assert decision.compatible_open and decision.compatibility_epoch == 2
+    importer.ensure_sqlite_state(db_path=path, state_dir=path.parent)
+    reopened = create_sqlite_engine(path)
+    try:
+        with reopened.connect() as conn:
+            [row] = _rows(conn)
+            assert row["id"] == f"tool:{response.row_id}:call"
+            assert row["text"] == '🔧 `read` `{"path":"a.py"}`'
+            assert row["status"] == "completed" and row["started_at"] is None
+        query = run_read_only_query("select id, source, status from tool_calls", db_path=path, page_request=None)
+        assert query.rows == [{"id": f"tool:{response.row_id}:call", "source": "canonical", "status": "completed"}]
+    finally:
+        reopened.dispose()
+    assert _snapshot(path) == before
+    assert importer.validated_sqlite_backup_attempt(path) is None
+
+
 async def test_reused_call_ids_and_fork_results_never_settle_another_response(engine, session):
     """A later retry/fork success cannot claim that an earlier unstarted call ran."""
     store = await _store(engine)

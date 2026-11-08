@@ -1,8 +1,9 @@
 # Vibey canonical tool activity (reader-first)
 
 Contract: `sqlite-upgrade-downtime.md`, section C-alt. This change keeps all
-compatibility trace INSERTs. Write suppression and the epoch/downgrade floor are
-separate work, blocked on section A and the owner's activation instruction.
+compatibility trace INSERTs. It advertises reader support for epochs 1 and 2,
+without advancing any database marker. Write suppression/epoch activation remain
+separate work, blocked on a released reader floor and the owner's explicit approval.
 
 ## Invariants
 
@@ -58,18 +59,28 @@ It retains the existing `agent_events` Member/Owner diagnostic access requiremen
 it is not a way around the raw-table authorizer. `agent_events` stays physical,
 and `transcript`, `turns`, `digests` and message search keep their meanings.
 
-The additive UI consumer (#3369) has landed first. This reader-first change still
-writes all compatibility traces, so trace-only rollback remains correct. It
-adds response capability/source links, compact start/finish/source-display facts,
+The additive UI consumer (#3369) and conservative compatibility bridge (#3370)
+have landed first. The owner reserved **epoch 2 for C-alt's representation** on
+2026-11-08; section A's lane owns the shared epoch registry. This reader supports
+`{1, 2}` before activation, so it can compatible-open a future exact revision
+holding projection-only calls. The bridge still writes epoch 1. No marker is
+advanced and no new migration is added here. The synthetic epoch-2 fixture proves
+Activity/SQL reconstruction without traces, restamping, startup mutation, backup
+creation or receipt adoption; it is not the later real previous-release test.
+
+This reader-first change still writes all compatibility traces, so trace-only
+rollback remains correct. It adds response capability/source links, compact start/finish/source-display facts,
 and exact canonical image registration tokens; it does not change model payloads
 or `context_seq`. The event consumer binds call ids at `MessageCommitted`, not in
 the producer's ahead-of-consumer store callback, so a queued event cannot be
 attributed to a later response that reused the id. Live recovery publishes its
 committed settlements before terminal delivery or automatic continuation; a
 missing ToolFinished cannot leave the last live step running after Stop. No
-storage savings are claimed while the compatibility writer is still enabled. The write-suppression PR owns
-epoch activation, previous-release compatibility testing, upgrade documentation,
-and measurements against #3367's single-copy baseline.
+storage savings are claimed while the compatibility writer is still enabled.
+The write-suppression PR owns epoch activation, previous-release compatibility
+testing, upgrade documentation and measurements against #3367's single-copy
+baseline. It requires a **released projection-aware reader floor and explicit
+owner approval**; epoch-2 support by itself is not permission to suppress writes.
 
 ## Validation
 
