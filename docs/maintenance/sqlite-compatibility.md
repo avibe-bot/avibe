@@ -172,8 +172,14 @@ its WAL/SHM untouched, removes staging files, and refuses that candidate. Its
 error names the next older recognized directory backup, ordered by recorded
 sequence (legacy timestamps only when no sequence exists), excluding known failed
 copies. That is a suggestion, **not a verified or binary-compatible fallback**:
-no older backup is automatically restored. With none eligible, the error asks
-for manual recovery while retaining the live database and backup evidence.
+no older backup is automatically restored. Target-storage/access failures are not
+proof of corruption: an incomplete attempt preserves the last completed physical
+check (pass or failure), or records `incomplete` if none exists. A check that passed
+before a target fsync failure retains its physical pass. Such faults neither hide
+a healthy candidate nor clear a known corruption result; resolve the storage/access
+problem and retry the same copy rather than losing newer writes. With no older
+eligible copy, corruption/missing-source errors ask for manual recovery while
+retaining the live database and backup evidence.
 Stop all writers before restoring; choosing an older point discards newer writes.
 As before, a restore attempt revokes prior expiry authority even when it fails;
 a successful physical check cannot revive an old readiness/expiry clock.

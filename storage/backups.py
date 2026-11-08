@@ -1236,6 +1236,11 @@ def _record_restore_verification(backup_dir: Path, *, status: str, error: str | 
     manifest = _read_manifest(manifest_path)
     if manifest is None:
         raise OSError(f"Cannot record rollback verification: unreadable receipt {manifest_path}")
+    previous = manifest.get("verification")
+    if status == "incomplete" and isinstance(previous, dict) and previous.get("status") in {"passed", "failed"}:
+        # A staging/access fault learned nothing about the copy. Preserve the
+        # last actual check, especially known corruption, until a new check ends.
+        return
     manifest["verification"] = {
         "stage": "restore", "method": "quick_check", "status": status,
         "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -1244,8 +1249,14 @@ def _record_restore_verification(backup_dir: Path, *, status: str, error: str | 
     _write_backup_metadata(manifest_path, manifest)
 
 
-def _restore_refusal(backup_dir: Path, error: Exception) -> str:
-    """Suggest a managed older candidate, never select it for automatic restore."""
+def _restore_refusal(backup_dir: Path, error: Exception, *, retry_same: bool = False) -> str:
+    """Suggest an older copy only for a bad/missing source, never a target I/O fault."""
+    message = f"Refusing SQLite rollback point {backup_dir}: restore could not complete ({error}). Live database was not swapped. "
+    if retry_same:
+        return message + (
+            "Resolve the storage/access error and retry this same backup; this failure does not prove it corrupt. "
+            "No older backup was restored."
+        )
     # A missing source can itself be the restore failure. Its receipt still
     # orders the request; suggested candidates must retain their actual files.
     current = _directory_candidate(backup_dir, require_database=False)
@@ -1259,7 +1270,6 @@ def _restore_refusal(backup_dir: Path, error: Exception) -> str:
             if isinstance(verification, dict) and verification.get("status") == "failed":
                 continue
             older.append(candidate)
-    message = f"Refusing SQLite rollback point {backup_dir}: validation failed ({error}). Live database was not swapped. "
     if older:
         candidate = max(older, key=lambda item: item.written_order)
         message += (
@@ -1312,6 +1322,7 @@ def _restore_sqlite_backup_locked(backup_dir: Path, db_path: Path) -> Path | Non
 
     for stale in staged_paths:
         stale.unlink(missing_ok=True)
+    check_passed = False
     try:
         with closing(sqlite3.connect(f"{source_db.as_uri()}?mode=ro", uri=True)) as source:
             with closing(sqlite3.connect(staged)) as destination:
@@ -1320,14 +1331,21 @@ def _restore_sqlite_backup_locked(backup_dir: Path, db_path: Path) -> Path | Non
                 check = destination.execute("PRAGMA quick_check").fetchone()
                 if check != ("ok",):
                     raise sqlite3.DatabaseError(f"SQLite rollback point quick_check failed: {check!r}")
+                check_passed = True
         os.chmod(staged, 0o600)
         _fsync_file(staged)
     except (sqlite3.Error, OSError) as error:
         for stale in staged_paths:
             stale.unlink(missing_ok=True)
-        message = _restore_refusal(source_db.parent, error)
+        # SQLITE_CORRUPT/NOTADB and our non-ok check result use DatabaseError;
+        # OperationalError (FULL, BUSY, CANTOPEN, IOERR) and target fsync/chmod
+        # failures are not evidence against this backup. Do not hide a healthy
+        # recent copy from later suggestions because staging ran out of space.
+        corrupt = type(error) is sqlite3.DatabaseError
+        status = "passed" if check_passed else ("failed" if corrupt else "incomplete")
+        message = _restore_refusal(source_db.parent, error, retry_same=not corrupt and source_db.is_file())
         try:
-            _record_restore_verification(source_db.parent, status="failed", error=str(error))
+            _record_restore_verification(source_db.parent, status=status, error=None if check_passed else str(error))
         except OSError as receipt_error:
             # The candidate is still refused if disk/receipt failure prevents
             # recording it; never hide the original failure or recovery hint.

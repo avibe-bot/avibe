@@ -992,6 +992,80 @@ def test_failed_restore_names_only_the_next_eligible_older_copy(tmp_path, eligib
     assert not db_path.with_name(db_path.name + ".restoring").exists()
 
 
+@pytest.mark.parametrize(
+    ("failure", "previous"),
+    [("fsync", "deferred"), ("disk-full", "deferred"), ("disk-full", "passed"), ("disk-full", "failed")],
+)
+def test_staging_io_failure_preserves_actual_backup_verification(tmp_path, monkeypatch, failure, previous):
+    # Target I/O faults must neither disqualify a healthy copy nor erase known
+    # corruption. Exercise every prior-result class, not only a fresh clone.
+    db_path = tmp_path / "vibe.sqlite"
+    _stamp(db_path, "old")
+
+    def clone(source, destination):
+        if previous == "passed":
+            return False  # Exercise a real online-copy verification at creation.
+        shutil.copyfile(source, destination)
+        return True
+
+    monkeypatch.setattr(backups, "_try_clone_sqlite_snapshot", clone)
+    older = create_sqlite_migration_backup(db_path)
+    if previous == "failed":
+        conn = sqlite3.connect(db_path)
+        try:
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='alembic_version'").fetchone()[0]
+        finally:
+            conn.close()
+        with (older / "vibe.sqlite").open("r+b") as stream:
+            stream.seek((page - 1) * page_size)
+            stream.write(b"\x00")
+        with pytest.raises(sqlite3.DatabaseError):
+            backups.restore_sqlite_backup(older, db_path)
+    prior = json.loads((older / "manifest.json").read_text())["verification"]
+    assert prior["status"] == previous
+    _stamp(db_path, "new")
+    damaged = create_sqlite_migration_backup(db_path)
+    before = db_path.read_bytes()
+    connect = sqlite3.connect
+    fsync = backups._fsync_file
+
+    def full_destination(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        if str(path).endswith(".restoring"):
+            conn.execute("PRAGMA max_page_count=1")
+        return conn
+
+    def failed_fsync(path):
+        if path.name.endswith(".restoring"):
+            raise OSError(errno.EIO, "target disk I/O error")
+        fsync(path)
+
+    with monkeypatch.context() as patch:
+        if failure == "disk-full":
+            patch.setattr(backups.sqlite3, "connect", full_destination)
+        else:
+            patch.setattr(backups, "_fsync_file", failed_fsync)
+        with pytest.raises((OSError, sqlite3.DatabaseError), match="retry this same backup") as caught:
+            backups.restore_sqlite_backup(older, db_path)
+    assert "Next older" not in str(caught.value)
+    result = json.loads((older / "manifest.json").read_text())["verification"]
+    if previous in {"passed", "failed"}:
+        assert result == prior
+    else:
+        assert result["status"] == ("passed" if failure == "fsync" else "incomplete")
+    assert db_path.read_bytes() == before
+    (damaged / "vibe.sqlite").write_bytes(b"actually corrupt")
+    with pytest.raises(sqlite3.DatabaseError) as caught:
+        backups.restore_sqlite_backup(damaged, db_path)
+    if previous == "failed":
+        assert "No older eligible managed backup" in str(caught.value)
+    else:
+        assert f"Next older managed candidate: {older}" in str(caught.value)
+    assert db_path.read_bytes() == before
+    assert not list(older.parent.glob("*/vibe.sqlite.replaced"))
+
+
 def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path: Path) -> None:
     # A displaced database is a full copy, so it needs a bound like every other
     # copy in this directory. It gets the one that already exists by living inside
