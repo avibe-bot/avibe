@@ -80,7 +80,14 @@ from modules.im import MessageContext
 from storage import message_deliveries, messages_service
 from storage.agent_transcript import SQLiteTranscriptStore, resolve_fork_point
 from storage.db import create_sqlite_engine
-from storage.models import agent_events, agent_runs, agent_sessions, messages, session_turns
+from storage.models import (
+    agent_events,
+    agent_runs,
+    agent_sessions,
+    message_deliveries as message_deliveries_table,
+    messages,
+    session_turns,
+)
 from storage.settings_service import upsert_scope
 from tests.agent_core.fakes import ORIGIN, FakeJobHost, FakeTool, ScriptedProvider, assistant
 from vibe.i18n import t as i18n_t
@@ -599,6 +606,9 @@ class _RecoveryProbe(SimpleNamespace):
     def _durable_recovery_turns(self):
         return VibeyAgent._durable_recovery_turns(self)
 
+    def _unsettled_interrupted_sessions_query(self):
+        return VibeyAgent._unsettled_interrupted_sessions_query(self)
+
 
 def _recovery_probe(engine):
     return _RecoveryProbe(_engine=engine)
@@ -659,7 +669,120 @@ def test_vibey_recovery_candidate_query_plan_stays_on_durable_work_tables(engine
     assert any("session_turns" in detail for detail in details)
     assert any("message_deliveries" in detail for detail in details)
     assert any("agent_runs" in detail for detail in details)
-    assert not any("SCAN messages" in detail for detail in details)
+    interrupted_compiled = probe._unsettled_interrupted_sessions_query().compile(
+        engine, compile_kwargs={"literal_binds": True}
+    )
+    with engine.connect() as conn:
+        interrupted_details = [
+            str(row[3])
+            for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {interrupted_compiled}")
+        ]
+
+    assert not any("SCAN messages" in detail for detail in interrupted_details)
+
+
+def test_vibey_recovery_excludes_ten_thousand_settled_interrupted_turns(engine, session):
+    settled_session = "settled-interrupted-history"
+    _inserted_deliveries = []
+    turns = []
+    response_rows = []
+    result_rows = []
+    with engine.begin() as conn:
+        _insert_session(conn, settled_session, _SCOPES["avibe"])
+        for index in range(10_000):
+            turn_id = f"settled-turn-{index:05d}"
+            delivery_id = f"settled-delivery-{index:05d}"
+            response_id = f"settled-response-{index:05d}"
+            call_id = f"settled-call-{index:05d}"
+            seq = index * 2 + 1
+            _inserted_deliveries.append({
+                "id": delivery_id,
+                "session_id": settled_session,
+                "priority": "p3",
+                "state": "retired",
+                "snapshot_sha256": "",
+                "dispatch_sha256": "",
+                "submitted_at": NOW,
+                "updated_at": NOW,
+            })
+            turns.append({
+                "id": turn_id,
+                "session_id": settled_session,
+                "initial_delivery_id": delivery_id,
+                "state": "terminal",
+                "backend": "vibey",
+                "start_attempt_id": f"settled-attempt-{index:05d}",
+                "start_receipt_outcome": "accepted",
+                "start_receipt_json": "{}",
+                "dispatch_text": "settled request",
+                "dispatch_sha256": "",
+                "terminal_outcome": "canceled" if index % 2 else "failed",
+                "settled_by": "stopped" if index % 2 else "no_terminal_result",
+                "terminal_evidence_json": "{}",
+                "version": 1,
+                "created_at": NOW,
+                "updated_at": NOW,
+                "terminal_at": NOW,
+            })
+            response_rows.append({
+                "id": response_id,
+                "scope_id": _SCOPES["avibe"],
+                "session_id": settled_session,
+                "platform": "avibe",
+                "author": "agent",
+                "source": "agent",
+                "type": "output",
+                "content_json": json.dumps({
+                    "model": {
+                        "version": 1,
+                        "message": {
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_call",
+                                "id": call_id,
+                                "name": "echo",
+                                "arguments": {},
+                            }],
+                        },
+                    },
+                }),
+                "metadata_json": json.dumps({"turn_id": turn_id}),
+                "created_at": NOW,
+                "updated_at": NOW,
+                "context_seq": seq,
+            })
+            result_rows.append({
+                "id": f"settled-result-{index:05d}",
+                "scope_id": _SCOPES["avibe"],
+                "session_id": settled_session,
+                "turn_id": turn_id,
+                "platform": "avibe",
+                "agent_name": "vibey",
+                "backend": "vibey",
+                "event_type": "tool_result",
+                "visibility": "context",
+                "content_json": json.dumps({
+                    "version": 1,
+                    "message": {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "tool_name": "echo",
+                        "content": [{"type": "text", "text": "settled"}],
+                        "is_error": False,
+                    },
+                }),
+                "metadata_json": "{}",
+                "source": "agent",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "context_seq": seq + 1,
+            })
+        conn.execute(message_deliveries_table.insert(), _inserted_deliveries)
+        conn.execute(session_turns.insert(), turns)
+        conn.execute(messages.insert(), response_rows)
+        conn.execute(agent_events.insert(), result_rows)
+
+    assert VibeyAgent._sessions_with_open_tail(_recovery_probe(engine)) == []
 
 
 def test_vibey_open_tail_candidates_include_unfinished_agent_run_and_skip_history_only_tail(engine, session):

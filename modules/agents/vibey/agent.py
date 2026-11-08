@@ -729,16 +729,10 @@ class VibeyAgent(BaseAgent):
 
     def _durable_recovery_query(self):
         unfinished_run_statuses = ("pending", "queued", "processing", "running")
-        interrupted_turn = and_(
-            session_turns.c.state == "terminal",
-            session_turns.c.terminal_outcome.in_(("failed", "canceled")),
-            session_turns.c.settled_by.in_(_INTERRUPTED_TURN_SETTLEMENTS),
-        )
-        turn_owner = or_(session_turns.c.state != "terminal", interrupted_turn)
         return union(
             select(session_turns.c.session_id).where(
                 session_turns.c.backend == BACKEND,
-                turn_owner,
+                session_turns.c.state != "terminal",
             ),
             select(message_deliveries.c.session_id)
             .select_from(
@@ -759,6 +753,56 @@ class VibeyAgent(BaseAgent):
             ),
         )
 
+    def _unsettled_interrupted_sessions_query(self):
+        """Find only the latest transcript tail of an interrupted Vibey Session.
+
+        Terminal outcome is ownership evidence, not recovery evidence. The latest
+        response must still contain more tool calls than durable results after it;
+        normal stopped/canceled history therefore contributes no candidate.
+        """
+        return sql_text(
+            f"""
+            WITH interrupted_sessions AS (
+                SELECT DISTINCT session_id
+                FROM session_turns
+                WHERE backend = 'vibey'
+                  AND state = 'terminal'
+                  AND terminal_outcome IN ('failed', 'canceled')
+                  AND settled_by IN ({','.join(repr(value) for value in _INTERRUPTED_TURN_SETTLEMENTS)})
+            ), latest AS (
+                SELECT interrupted_sessions.session_id AS session_id,
+                       (
+                           SELECT max(messages.context_seq)
+                           FROM messages
+                           WHERE messages.session_id = interrupted_sessions.session_id
+                             AND messages.context_seq IS NOT NULL
+                             AND messages.type IN ('assistant', 'output', 'result', 'error')
+                       ) AS seq
+                FROM interrupted_sessions
+            )
+            SELECT latest.session_id
+            FROM latest
+            JOIN messages
+              ON messages.session_id = latest.session_id
+             AND messages.context_seq = latest.seq
+            WHERE (
+                SELECT count(*)
+                FROM json_each(
+                    CASE WHEN json_valid(messages.content_json) = 1
+                         THEN messages.content_json ELSE '{{}}' END,
+                    '$.model.message.content'
+                ) AS blocks
+                WHERE json_extract(blocks.value, '$.type') = 'tool_call'
+            ) > (
+                SELECT count(*)
+                FROM agent_events
+                WHERE agent_events.session_id = messages.session_id
+                  AND agent_events.event_type = 'tool_result'
+                  AND agent_events.context_seq > messages.context_seq
+            )
+            """
+        )
+
     def _durable_recovery_sessions(self) -> set[str]:
         """Return Sessions whose durable work can own a restart-open Vibey tail.
 
@@ -766,25 +810,22 @@ class VibeyAgent(BaseAgent):
         historical responses. A live/non-terminal Vibey Turn is the durable owner
         for a crash, Stop, backend switch, or fork boundary; an unfinished Vibey
         Agent Run is the legacy/Workbench owner for work that had not settled.
+        Terminal interrupted Turns are considered only through the latest Session
+        tail and only while that tail still has an unmatched tool call.
         """
         with self._engine.connect() as conn:
             candidates = set(conn.execute(self._durable_recovery_query()).scalars())
+            candidates.update(conn.execute(self._unsettled_interrupted_sessions_query()).scalars())
         return {str(session_id) for session_id in candidates if session_id is not None}
 
     def _durable_recovery_turns(self) -> dict[str, set[str]]:
-        interrupted_turn = and_(
-            session_turns.c.state == "terminal",
-            session_turns.c.terminal_outcome.in_(("failed", "canceled")),
-            session_turns.c.settled_by.in_(_INTERRUPTED_TURN_SETTLEMENTS),
-        )
-        turn_owner = or_(session_turns.c.state != "terminal", interrupted_turn)
         with self._engine.connect() as conn:
             rows = conn.execute(
                 select(session_turns.c.session_id, session_turns.c.id).where(
                     session_turns.c.backend == BACKEND,
-                    turn_owner,
+                    session_turns.c.state != "terminal",
                 )
-            )
+            ).all()
         turns: dict[str, set[str]] = {}
         for session_id, turn_id in rows:
             turns.setdefault(str(session_id), set()).add(str(turn_id))
