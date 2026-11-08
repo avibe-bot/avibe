@@ -12,7 +12,7 @@ import threading
 from contextlib import closing
 
 import pytest
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 from sqlalchemy import Engine, event
 
 from storage import importer, migrations
@@ -102,7 +102,7 @@ def test_current_startup_is_read_only_even_behind_migration_and_sqlite_writers(
     assert not any(sql.startswith(("BEGIN", "COMMIT")) for sql in statements)
     with closing(connect(ready_db)) as conn:
         plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + reads[0])]
-    assert sum("SEARCH state_meta USING INDEX" in step for step in plan) == 3
+    assert sum("SEARCH state_meta USING INDEX" in step for step in plan) == 4
 
 
 @pytest.mark.parametrize("change", [
@@ -198,13 +198,13 @@ def test_uncached_initialization_repairs_replacement_before_returning(ready_db, 
     assert importer.probe_current_sqlite_state(ready_db) is False
     report = importer.ensure_sqlite_state(db_path=ready_db, state_dir=ready_db.parent)
     with closing(sqlite3.connect(ready_db)) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("20261107_0075",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("20261108_0076",)]
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'session_digests'").fetchone()
     assert report.imported is True
 
 
 def test_startup_waits_for_concurrent_upgrade_instead_of_using_old_revision(ready_db, monkeypatch):
-    command.downgrade(migrations.alembic_config(ready_db), "20261020_0071")
+    downgrade_legacy_schema(migrations.alembic_config(ready_db), "20261020_0071")
     before_stamp = threading.Event()
     allow_stamp = threading.Event()
     repair_entered = threading.Event()
@@ -235,7 +235,7 @@ def test_startup_waits_for_concurrent_upgrade_instead_of_using_old_revision(read
         try:
             importer.ensure_sqlite_state(db_path=ready_db, state_dir=ready_db.parent)
             with closing(sqlite3.connect(ready_db)) as conn:
-                assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("20261107_0075",)]
+                assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("20261108_0076",)]
                 conn.execute("SELECT session_id FROM session_digests").fetchall()
             finished.set()
         except BaseException as exc:

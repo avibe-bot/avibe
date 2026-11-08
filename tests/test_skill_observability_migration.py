@@ -2,7 +2,7 @@
 
 import sqlite3
 
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 
 from storage import migrations
 
@@ -35,7 +35,7 @@ def test_skill_schema_upgrade_downgrade_preserves_existing_events(tmp_path):
     migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
         assert conn.execute(f"SELECT {columns} FROM agent_events ORDER BY id").fetchall() == original
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261107_0075",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261108_0076",)
         assert conn.execute("SELECT count(*) FROM skill_usage_daily").fetchone() == (0,)
         assert {row[2] for row in conn.execute("PRAGMA foreign_key_list(skill_usage_daily)")} == {
             "scopes",
@@ -48,7 +48,7 @@ def test_skill_schema_upgrade_downgrade_preserves_existing_events(tmp_path):
             "INSERT INTO agent_events (id, platform, event_type, visibility, content_json, metadata_json, "
             "created_at, updated_at) VALUES ('skill', 'web', 'skill.load_result', 'trace', '{}', '{}', 'now', 'now')"
         )
-    command.downgrade(migrations.alembic_config(path), "20260821_0060")
+    downgrade_legacy_schema(migrations.alembic_config(path), "20260821_0060")
     with sqlite3.connect(path) as conn:
         assert conn.execute(f"SELECT {columns} FROM agent_events ORDER BY id").fetchall() == original
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='skill_usage_daily'").fetchone() is None

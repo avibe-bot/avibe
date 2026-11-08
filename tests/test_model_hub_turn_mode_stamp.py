@@ -171,10 +171,10 @@ def test_the_migration_indexes_a_released_database_and_downgrades_cleanly(tmp_pa
         ).fetchall()
         assert found == [("msg_released",)]
 
-    from alembic import command
+    from tests.migration_helpers import downgrade_legacy_schema
     from storage import migrations
 
-    command.downgrade(migrations.alembic_config(db_path), _REVISION.down_revision)
+    downgrade_legacy_schema(migrations.alembic_config(db_path), _REVISION.down_revision)
     assert _index_sql(db_path) is None
 
 

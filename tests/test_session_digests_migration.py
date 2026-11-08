@@ -10,13 +10,13 @@ import json
 import sqlite3
 
 import pytest
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 
 from storage import migrations
 
 pytestmark = pytest.mark.no_sqlite_template
 
-HEAD_REVISION = "20261107_0075"
+HEAD_REVISION = "20261108_0076"
 PREVIOUS_REVISION = "20261020_0071"
 V5 = {
     "version": 1,
@@ -86,7 +86,7 @@ def test_upgrade_gives_each_session_its_latest_checkpoint_memory(tmp_path):
         assert conn.execute("select version_num from alembic_version").fetchone() == (HEAD_REVISION,)
     assert _digests(path) == expected
 
-    command.downgrade(migrations.alembic_config(path), PREVIOUS_REVISION)
+    downgrade_legacy_schema(migrations.alembic_config(path), PREVIOUS_REVISION)
     with sqlite3.connect(path) as conn:
         assert "session_digests" not in {row[0] for row in conn.execute("select name from sqlite_master")}
     migrations.run_migrations(path)
