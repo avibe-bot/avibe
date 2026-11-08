@@ -46,7 +46,7 @@ def downgrade_legacy_schema(config: Config, revision: str) -> None:
     """
     path = make_url(config.get_main_option("sqlalchemy.url")).database
     script = ScriptDirectory.from_config(config)
-    for boundary, epoch in (("20261108_0080", 2), ("20261108_0076", 1)):
+    for boundary, epoch in (("20261108_0083", 2), ("20261108_0076", 1)):
         with closing(sqlite3.connect(path)) as conn:
             [(stamp,)] = conn.execute("SELECT version_num FROM alembic_version").fetchall()
             if boundary not in {item.revision for item in script.iterate_revisions(stamp, "base")}:

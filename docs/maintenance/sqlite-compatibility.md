@@ -63,7 +63,7 @@ advance the marker inside that revision's transaction. The runtime's supported
 reader set is separate from parsing a known old epoch for forward upgrade.
 
 C-alt's projection-aware reader shipped in `gh-v3.2.5rc19` with support for
-`{1, 2}` while retaining compatibility traces. Breaking revision `20261108_0080`
+`{1, 2}` while retaining compatibility traces. Breaking revision `20261108_0083`
 activates epoch 2; it always takes the conservative upgrade snapshot on populated
 state, even in an activated build. The epoch/stamp commit together, without
 backfilling or deleting any history. Only exact supported committed Vibey calls

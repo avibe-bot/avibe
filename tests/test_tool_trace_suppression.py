@@ -17,6 +17,8 @@ from core.tool_activity import source_link
 from modules.im.base import MessageContext
 from storage import migrations, tool_activity_service
 from storage.compatibility import BRIDGE_REVISION
+
+PRE_PROJECTION_REVISION = "20261108_0082"
 from storage.models import agent_events, agent_sessions, messages
 from tests.agent_core.fakes import assistant
 from tests.test_sqlite_migration_preflight import _snapshot
@@ -98,7 +100,7 @@ async def test_historical_fixture_helper_cannot_relabel_projection_data(engine, 
 @pytest.mark.parametrize("crash", ["before-commit", "after-commit"])
 def test_real_epoch_two_transition_is_atomic_and_keeps_fresh_rollback_snapshot(tmp_path, crash):
     path = tmp_path / "vibe.sqlite"
-    migrations.run_migrations(path, revision=BRIDGE_REVISION)
+    migrations.run_migrations(path, revision=PRE_PROJECTION_REVISION)
     before = _snapshot(path)["database.sql"]
     decision = migrations.preflight_database(path)
     assert decision.compatibility_epoch == 1 and not decision.skip_snapshot
@@ -108,7 +110,7 @@ from pathlib import Path
 from sqlalchemy import Engine, event
 from storage import migrations
 def crash_before_commit(conn, cursor, statement, parameters, context, executemany):
-    if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0080' in statement:
+    if sys.argv[2] == 'before-commit' and statement.startswith('UPDATE alembic_version SET') and '20261108_0083' in statement:
         os._exit(71)
 event.listen(Engine, 'after_cursor_execute', crash_before_commit)
 migrations.run_migrations(Path(sys.argv[1]))
@@ -118,7 +120,7 @@ os._exit(72)
     with closing(sqlite3.connect(path)) as conn:
         epoch = conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()[0]
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert (epoch, stamp) == (("1", BRIDGE_REVISION) if crash == "before-commit" else ("2", "20261108_0080"))
+    assert (epoch, stamp) == (("1", PRE_PROJECTION_REVISION) if crash == "before-commit" else ("2", "20261108_0083"))
     [backup] = list((tmp_path / "backups").glob("*/vibe.sqlite"))
     assert _snapshot(backup)["database.sql"] == before
     if crash == "before-commit":
@@ -143,7 +145,7 @@ def test_verified_epoch_two_keeps_no_copy_for_subsequent_additive_upgrades(tmp_p
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     (graph / "versions" / "20990101_9999_additive.py").write_text(
-        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0080'\n"
+        "from alembic import op\nrevision='20990101_9999'\ndown_revision='20261108_0083'\n"
         "MIGRATION_COMPATIBILITY='additive'\n"
         "def upgrade():\n    op.create_index('ix_epoch_two_next', 'agents', ['description'], unique=False)\n"
     )

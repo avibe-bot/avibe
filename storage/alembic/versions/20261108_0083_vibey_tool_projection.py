@@ -1,7 +1,7 @@
 """Activate projection-only Vibey tool steps after the RC19 reader release.
 
-Revision ID: 20261108_0080
-Revises: 20261108_0076
+Revision ID: 20261108_0083
+Revises: 20261108_0082
 
 Semantic breaking boundary: old trace-only binaries cannot reconstruct omitted
 calls. Existing traces and canonical results are untouched. The normal breaking
@@ -11,8 +11,8 @@ from alembic import op
 
 from storage.compatibility import advance_compatibility_epoch
 
-revision = "20261108_0080"
-down_revision = "20261108_0076"
+revision = "20261108_0083"
+down_revision = "20261108_0082"
 branch_labels = None
 depends_on = None
 MIGRATION_SAFETY = "backfill"

@@ -34,11 +34,16 @@ def bridge_graph(tmp_path, monkeypatch):
     graph = tmp_path / "bridge-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
     script = ScriptDirectory.from_config(migrations.alembic_config(tmp_path / "historical.sqlite"))
-    retained = {Path(revision.path).name for revision in script.iterate_revisions("20261108_0076", "base")}
+    retained = {Path(revision.path).name for revision in script.iterate_revisions("20261108_0082", "base")}
     for path in (graph / "versions").glob("*.py"):
         if path.name != "__init__.py" and path.name not in retained:
             path.unlink()
     monkeypatch.setattr(migrations, "alembic_dir", lambda: graph)
+    importer._installed_schema_revision.cache_clear()
+    importer._installed_schema_epoch.cache_clear()
+    yield
+    importer._installed_schema_revision.cache_clear()
+    importer._installed_schema_epoch.cache_clear()
 
 
 @pytest.fixture

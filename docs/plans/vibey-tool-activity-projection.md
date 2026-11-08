@@ -87,7 +87,7 @@ exist; epoch-2 reader support alone was never permission to suppress writes.
 ## Stage 2: epoch-gated write suppression
 
 Authorized after the RC19 reader release on 2026-11-08. Breaking revision
-`20261108_0080` advances the database marker to `VIBEY_TOOL_PROJECTION_EPOCH = 2`
+`20261108_0083` advances the database marker to `VIBEY_TOOL_PROJECTION_EPOCH = 2`
 in the same transaction as its Alembic stamp. It changes no rows or tables beyond
 the marker/stamp. A populated upgrade keeps the normal fresh rollback snapshot;
 it is **not** an additive no-copy migration. Stop every writer before upgrading.
@@ -135,7 +135,7 @@ On 2026-11-08 the actual wheels verified were:
 - RC21, published at 15:28:26 UTC and then selected by the default harness:
   SHA-256 `fe0deaa11f538967925edffefb0a5b142d8bcc093a673060415602cda4e71065`.
   The actual installed wheel passed the epoch-2 reader/writer contract against
-  revision `20261108_0080`. RC19's independent rollback-floor proof remains.
+  revision `20261108_0083`. RC19's independent rollback-floor proof remains.
 - RC18, a pre-reader binary: SHA-256
   `13c52796b5c5525fd09e45780c5cad0d3f8181d0602ddd16726b5e2d9cab94a4`.
   Its installed wheel refused the actual epoch-2 revision before any logical

@@ -26,7 +26,7 @@ def test_session_list_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path
             "select name, sql from sqlite_master where type='index' order by name"
         ).fetchall()
 
-    migrations.run_migrations(path)
+    migrations.run_migrations(path, revision="20261108_0082")
     with sqlite3.connect(path) as conn:
         assert conn.execute("select * from agent_runs").fetchall() == before_rows
         assert [row[2] for row in conn.execute("pragma index_info(ix_agent_runs_source_session)")] == [
