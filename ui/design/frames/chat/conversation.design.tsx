@@ -1,8 +1,9 @@
 // The chat conversation: the header, the transcript, and the composer, rendered by the shipped ChatPage.
 // ui/design: chat/conversation/* — the empty states, a Bot's conversation, a fork, an archived chat, the
-// named senders of an Organization instance's shared transcript, and a message the reader just sent:
-// on screen at once as sending, then the server's row in its place.
+// named senders of an Organization instance's shared transcript, a message the reader just sent (on
+// screen at once as sending, then the server's row in its place), and the phone app drawn edge to edge.
 import { frames } from '../../frame';
+import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
 import { UNANSWERED } from '../../shell/network';
 import { CHAT_ID, agentSays, at, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays } from './fixtures';
 
@@ -166,6 +167,15 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(),
     fixtures: chatFixtures({ messages }),
+    render: chatPhone,
+  },
+  {
+    name: 'phone-native',
+    title: '会话 · iOS App（iPhone 17 Pro，安全区 62/34）：输入框贴近底部',
+    ...IPHONE_17_PRO,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ messages, extra: { nativeShell: IOS_APP_CAPABILITIES } }),
     render: chatPhone,
   },
   {

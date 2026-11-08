@@ -12,7 +12,7 @@ import '@/index.css';
 import.meta.glob(['/src/**/*.css', '!/src/index.css', '!/src/pet/**'], { eager: true });
 
 import { DesignRoot } from './Canvas';
-import type { DesignLang, DesignTheme } from './frame';
+import type { DesignLang, DesignTheme, FrameSafeArea } from './frame';
 import { loadAllFrames, loadFrame } from './registry';
 import { installFixedClock } from './shell/clock';
 import { apiResponses } from './shell/fixtures';
@@ -30,7 +30,7 @@ void i18n.changeLanguage(lang);
 declare global {
   interface Window {
     __DESIGN__?: {
-      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[]; wait?: number; press?: string; reducedMotion?: boolean }[];
+      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[]; wait?: number; press?: string; reducedMotion?: boolean; safeArea?: FrameSafeArea }[];
       unfixtured: () => string[];
       quiet: () => Promise<void>;
       t: (key: string) => string;
@@ -56,8 +56,16 @@ async function boot() {
   if (shown?.fixtures?.localSnapshotReader) setLocalSnapshotPrincipal(shown.fixtures.localSnapshotReader);
   // The desktop app marks its own window before any page script runs (`isDesktopShell()`).
   if (shown?.fixtures?.desktopShell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+  // The phone app defines its bridge at document start, before any page script (`src/lib/native.ts`).
+  if (shown?.fixtures?.nativeShell) {
+    const capabilities = shown.fixtures.nativeShell;
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, call: async () => null, on: () => () => {} },
+    });
+  }
   window.__DESIGN__ = {
-    frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait, press: f.press, reducedMotion: f.reducedMotion })),
+    frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait, press: f.press, reducedMotion: f.reducedMotion, safeArea: f.safeArea })),
     unfixtured: () => designNetwork.unfixtured(),
     quiet: () => designNetwork.quiet(),
     // Click selectors name copy by key (`{t:<key>}`); the page resolves it in the frame's language.
