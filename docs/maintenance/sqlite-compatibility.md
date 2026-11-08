@@ -10,7 +10,8 @@ unverified or pre-protocol predecessor keep conservative upgrade snapshots.
 
 - Revision `20261108_0076` establishes integer `state_meta.compatibility_epoch = 1`.
   Its schema is otherwise unchanged. Entering the bridge from a non-empty
-  pre-protocol database always gets a fresh verified snapshot; a marker created
+  pre-protocol database always gets a fresh snapshot (clone verification is
+  deferred until restore; online-backup copies are verified immediately); a marker created
   by this upgrade cannot opt that same upgrade out. Fresh databases need no snapshot.
 - `storage.migrations.preflight_database` is the common decision owner.
   `MigrationPreflight.compatible_open` means the installed binary may use the
@@ -136,7 +137,59 @@ freeze otherwise eligible expiry. Failed, unconfirmed, restored and wrong-inode
 receipts remain protected; the original 72-hour clock and exact-position count
 retention are unchanged.
 
+### Physical verification and restore
+
+Conservative/breaking upgrades still take a fresh rollback copy. A filesystem
+clone is made only after checkpointing under SQLite's exclusive writer lock;
+its independent COW file preserves the source bytes, including any pre-existing
+bad pages. It is **not physically verified at creation**. The existing backup
+manifest records `copy_method` and `verification.status = "deferred"`. When COW
+is unavailable, the SQLite online-backup path still runs `PRAGMA quick_check`
+before publishing its copy and records a creation-time pass.
+
+Neither post-migration lifecycle completion runs a full live-database scan.
+Their exact revision checks, `migrated`/`validated` transitions, service readiness,
+72-hour expiry clock and first/last-copy position retention remain. In these
+receipts, `validated` means application-state validation completed, **not** that
+the rollback copy passed a physical scan. The manifest's separate `verification`
+field is the latest physical-verification result. Unverified clones may expire
+under the same successful-upgrade policy; deferring verification does not extend
+retention or guarantee detection of dormant corruption during startup.
+
+`quick_check` is not proof of migration correctness. Migration writes still use
+SQLite transactions, per-revision epoch checks and final schema checks. A bad
+page encountered by a modern migration causes that transaction to fail and roll
+back; unaccessed bad pages may remain undiscovered. The importer retains its own
+`integrity_check` when it actually imports JSON/background state. No background
+scan, new startup readiness gate or change to historical migration transactions
+is introduced here.
+
+Every restore through `storage.backups.restore_sqlite_backup` checks the **staged
+candidate** before `_swap_live_database`, even when that copy passed a prior
+check. The existing manifest is required to record the latest restore pass or
+failure durably before promotion. A failed check leaves the live database and
+its WAL/SHM untouched, removes staging files, and refuses that candidate. Its
+error names the next older recognized directory backup, ordered by recorded
+sequence (legacy timestamps only when no sequence exists), excluding known failed
+copies. That is a suggestion, **not a verified or binary-compatible fallback**:
+no older backup is automatically restored. Target-storage/access failures are not
+proof of corruption: an incomplete attempt preserves the last completed physical
+check (pass or failure), or records `incomplete` if none exists. A check that passed
+before a target fsync failure retains its physical pass. Such faults neither hide
+a healthy candidate nor clear a known corruption result; resolve the storage/access
+problem and retry the same copy rather than losing newer writes. With no older
+eligible copy, corruption/missing-source errors ask for manual recovery while
+retaining the live database and backup evidence.
+Stop all writers before restoring; choosing an older point discards newer writes.
+As before, a restore attempt revokes prior expiry authority even when it fails;
+a successful physical check cannot revive an old readiness/expiry clock.
+
 ## Mechanical classification
+
+Prefer additive **expand/contract** changes: add the new representation, dual-write
+while old readers remain supported, and remove the old representation in a later
+release with the required breaking boundary. In-place rewrites and other breaking
+migrations are exceptions; explain why an additive rollout cannot meet the need.
 
 `storage.migration_policy` interprets a small literal Python grammar and rebuilds
 the corresponding Alembic operation objects without executing migration code.
@@ -201,6 +254,13 @@ crash/resume, stale-attempt refusal and original-clock expiry across additive
 successors. `tests/test_sqlite_predecessor_contract.py` checks predecessor
 selection, fixture isolation and loss-detection in the probe; the separately
 executed published-wheel probe supplies release evidence.
+
+`tests/test_sqlite_snapshot.py` owns clone/online-copy verification and corrupt-page
+restore refusal. `tests/test_state_backups.py` covers staged restore preservation,
+write-order fallback hints without automatic restore, and crash/durability
+boundaries. `tests/test_sqlite_backup_expiry.py` covers scan-free exact-target
+lifecycle completion, fresh restore evidence (including receipt I/O failures),
+and unchanged expiry/readiness semantics.
 
 No live database, restart, release, remote operation or retention change is
 part of this validation.

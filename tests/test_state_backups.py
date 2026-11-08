@@ -945,6 +945,127 @@ def test_a_restore_that_cannot_be_staged_leaves_the_database_alone(tmp_path: Pat
     assert not db_path.with_name(db_path.name + ".restoring").exists()
 
 
+@pytest.mark.parametrize("eligible_older", [False, True])
+@pytest.mark.parametrize("missing_source", [False, True])
+def test_failed_restore_names_only_the_next_eligible_older_copy(tmp_path, eligible_older, missing_source):
+    # Sequence, not a reversed clock or the live revision, orders suggestions.
+    # Known-failed copies and copies newer than the requested point are excluded;
+    # even an eligible suggestion must never trigger an automatic second restore.
+    db_path = tmp_path / "vibe.sqlite"
+    copies = []
+    for index, revision in enumerate(("a", "a", "b", "b")):
+        _stamp(db_path, revision)
+        copies.append(create_sqlite_migration_backup(
+            db_path, now=datetime(2026, 8, 4 - index, tzinfo=timezone.utc)
+        ))
+    oldest, failed, requested, newer = copies
+    for point in (failed,) if eligible_older else (oldest, failed):
+        (point / "vibe.sqlite").write_bytes(b"corrupt older candidate")
+        with pytest.raises(sqlite3.DatabaseError):
+            backups.restore_sqlite_backup(point, db_path)
+    if missing_source:
+        (requested / "vibe.sqlite").unlink()
+    else:
+        (requested / "vibe.sqlite").write_bytes(b"corrupt requested candidate")
+    before = db_path.read_bytes()
+    sidecars = [db_path.with_name(db_path.name + suffix) for suffix in ("-wal", "-shm")]
+    for sidecar in sidecars:
+        sidecar.write_bytes(b"live generation sidecar")
+
+    with pytest.raises(sqlite3.DatabaseError) as caught:
+        backups.restore_sqlite_backup(requested, db_path)
+
+    message = str(caught.value)
+    assert str(requested) in message
+    if eligible_older:
+        assert f"Next older managed candidate: {oldest}" in message
+        assert "integrity and binary compatibility are not proven" in message
+        assert "discards newer writes" in message
+    else:
+        assert "No older eligible managed backup" in message
+    assert str(failed) not in message
+    assert str(newer) not in message
+    assert "No older backup was restored" in message
+    assert db_path.read_bytes() == before
+    assert all(sidecar.read_bytes() == b"live generation sidecar" for sidecar in sidecars)
+    assert not list(requested.parent.glob("*/vibe.sqlite.replaced"))
+    assert not db_path.with_name(db_path.name + ".restoring").exists()
+
+
+@pytest.mark.parametrize(
+    ("failure", "previous"),
+    [("fsync", "deferred"), ("disk-full", "deferred"), ("disk-full", "passed"), ("disk-full", "failed")],
+)
+def test_staging_io_failure_preserves_actual_backup_verification(tmp_path, monkeypatch, failure, previous):
+    # Target I/O faults must neither disqualify a healthy copy nor erase known
+    # corruption. Exercise every prior-result class, not only a fresh clone.
+    db_path = tmp_path / "vibe.sqlite"
+    _stamp(db_path, "old")
+
+    def clone(source, destination):
+        if previous == "passed":
+            return False  # Exercise a real online-copy verification at creation.
+        shutil.copyfile(source, destination)
+        return True
+
+    monkeypatch.setattr(backups, "_try_clone_sqlite_snapshot", clone)
+    older = create_sqlite_migration_backup(db_path)
+    if previous == "failed":
+        conn = sqlite3.connect(db_path)
+        try:
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='alembic_version'").fetchone()[0]
+        finally:
+            conn.close()
+        with (older / "vibe.sqlite").open("r+b") as stream:
+            stream.seek((page - 1) * page_size)
+            stream.write(b"\x00")
+        with pytest.raises(sqlite3.DatabaseError):
+            backups.restore_sqlite_backup(older, db_path)
+    prior = json.loads((older / "manifest.json").read_text())["verification"]
+    assert prior["status"] == previous
+    _stamp(db_path, "new")
+    damaged = create_sqlite_migration_backup(db_path)
+    before = db_path.read_bytes()
+    connect = sqlite3.connect
+    fsync = backups._fsync_file
+
+    def full_destination(path, *args, **kwargs):
+        conn = connect(path, *args, **kwargs)
+        if str(path).endswith(".restoring"):
+            conn.execute("PRAGMA max_page_count=1")
+        return conn
+
+    def failed_fsync(path):
+        if path.name.endswith(".restoring"):
+            raise OSError(errno.EIO, "target disk I/O error")
+        fsync(path)
+
+    with monkeypatch.context() as patch:
+        if failure == "disk-full":
+            patch.setattr(backups.sqlite3, "connect", full_destination)
+        else:
+            patch.setattr(backups, "_fsync_file", failed_fsync)
+        with pytest.raises((OSError, sqlite3.DatabaseError), match="retry this same backup") as caught:
+            backups.restore_sqlite_backup(older, db_path)
+    assert "Next older" not in str(caught.value)
+    result = json.loads((older / "manifest.json").read_text())["verification"]
+    if previous in {"passed", "failed"}:
+        assert result == prior
+    else:
+        assert result["status"] == ("passed" if failure == "fsync" else "incomplete")
+    assert db_path.read_bytes() == before
+    (damaged / "vibe.sqlite").write_bytes(b"actually corrupt")
+    with pytest.raises(sqlite3.DatabaseError) as caught:
+        backups.restore_sqlite_backup(damaged, db_path)
+    if previous == "failed":
+        assert "No older eligible managed backup" in str(caught.value)
+    else:
+        assert f"Next older managed candidate: {older}" in str(caught.value)
+    assert db_path.read_bytes() == before
+    assert not list(older.parent.glob("*/vibe.sqlite.replaced"))
+
+
 def test_repeated_restores_to_one_rollback_point_do_not_grow_the_window(tmp_path: Path) -> None:
     # A displaced database is a full copy, so it needs a bound like every other
     # copy in this directory. It gets the one that already exists by living inside
@@ -1133,7 +1254,8 @@ def test_the_displaced_generation_is_durable_before_the_live_path_commits(
 
     live_commit = journal.index(("rename", db_path))
     into_the_point = [
-        path for operation, path in journal[:live_commit] if operation == "rename" and path.parent == rollback_point
+        path for operation, path in journal[:live_commit]
+        if operation == "rename" and path.parent == rollback_point and path.name != "manifest.json"
     ]
     # The swap displaced something, so the ordering below is a claim about real
     # renames rather than a vacuous one over an empty list.
@@ -1144,4 +1266,8 @@ def test_the_displaced_generation_is_durable_before_the_live_path_commits(
     assert journal.index(("sync dir", rollback_point)) < live_commit
     # And the directory sync comes after the renames it is there to persist:
     # syncing it earlier records entries that do not exist yet.
-    assert journal.index(("sync dir", rollback_point)) > max(journal.index(("rename", path)) for path in into_the_point)
+    last_displacement = max(journal.index(("rename", path)) for path in into_the_point)
+    assert any(
+        operation == ("sync dir", rollback_point)
+        for operation in journal[last_displacement + 1:live_commit]
+    )

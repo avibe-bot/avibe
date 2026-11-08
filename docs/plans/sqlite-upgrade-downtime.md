@@ -7,7 +7,9 @@ service restart or data changes. Source inventory baseline: `15c5a8533`.
 ## Decisions
 
 1. **A: ship a lean compatibility epoch.** Classify new migrations mechanically;
-   after a bridge release, only breaking batches take a verified snapshot.
+   after a bridge release, only conservative/breaking batches take a snapshot.
+   The later [verification contract](../maintenance/sqlite-compatibility.md#physical-verification-and-restore)
+   defers clone checks until restore; online-backup copies remain checked at creation.
 2. **B: defer background index jobs.** Removing the backup addresses the main
    observed cost; a roughly 31 s index upgrade does not justify that subsystem.
 3. **C-alt: stop redundant Vibey tool-call trace copies.** Derive tool-step
@@ -305,7 +307,7 @@ runs. Use bounded test volumes, never fill the owner's disk or copy personal dat
 
 | Gate | Evidence required |
 | --- | --- |
-| Baseline / A latency | Stop-to-true-readiness; separately time snapshot wait/copy/clone/quick_check/fsync, each migration and live validation. Additive path creates zero backups/backup receipts; breaking keeps fresh verified copies. Test APFS/reflink and non-COW paths |
+| Baseline / A latency | Stop-to-true-readiness; separately time snapshot wait/copy/clone/quick_check/fsync, each migration and live validation. Additive path creates zero backups/backup receipts; breaking keeps fresh durable copies, with clone verification deferred until restore and immediate online-copy verification. Test APFS/reflink and non-COW paths |
 | A compatibility/crash | Previous-release old writes against new rows; fresh/pre-marker/bridge/same-epoch/incompatible-epoch opens and all entry points. Crash before/after transaction commit must preserve matching schema/stamp/epoch. Refusal must precede backup/repair/import |
 | A rollback/retention | Same-epoch binary rollback, cross-epoch/pre-marker refusal and explicit restore; mixed batches, failed attempts, first/last positions, exact 72-hour eligibility and no receipt adoption by additive upgrades |
 | C-alt behavior | Tool-only responses, parallel/repeated calls, retries/forks reusing call IDs, cancellation/recovery, native/proxy hosted media/errors, mixed legacy/new rows, IM gates, ACLs, live versus reloaded step identity/order/status; trace-only old binary refused and previous projection-aware binary correct |

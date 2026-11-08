@@ -1,6 +1,14 @@
 # Migration startup snapshots and readiness
 
-## Contract
+Historical implementation and measurement record for #3365. The later
+[SQLite compatibility and verification contract](../maintenance/sqlite-compatibility.md)
+is authoritative: proven additive upgrades may omit snapshots; conservative
+COW copies defer physical verification until restore, online-backup copies
+retain creation-time verification, and neither live post-migration lifecycle
+completion performs a full scan. The original decisions and measurements below
+are retained as history, not current verification requirements.
+
+## Original contract (#3365)
 
 Migration-bearing upgrades retain a fresh, independent, durable and verified SQLite rollback point before any schema repair/upgrade. On supported filesystems, avoid rewriting every database page: checkpoint WAL and clone under the migration lock **and SQLite writer exclusion**. MigrationFileLock coordinates migrators, not existing ordinary SQL connections; a busy exclusive SQLite lock must fall back to the online backup API, never silently omit committed WAL pages.
 
@@ -41,9 +49,9 @@ Hermetic synthetic data, macOS arm64 / Python 3.13 / SQLite 3.51.2 / APFS on an 
 
 The clone itself is consistently **4–7 ms**, but the required `quick_check` on the new inode remains database-sized and cache-sensitive: **about 3.0 seconds per decimal GB** on this fresh-clone workload. This workload **does not establish a material overall backup-latency improvement**, despite avoiding the full data copy and its disk allocation. The backup remains a real independent, full-logical-size file sharing COW extents; later divergence consumes storage, and fallback still allocates a full copy. Do not advertise size-independent/few-second upgrades from these results. Native clone independence and restoration were also tested on actual APFS.
 
-Remaining startup costs:
+Startup costs and decisions at #3365 (superseded where noted above):
 
-| Work | Measured cost / scope | Decision |
+| Work | Measured cost / scope | Decision at #3365 |
 | --- | --- | --- |
 | Backup `quick_check` | ~9.8 s on a fresh 3.27-GB clone | Retained unchanged. |
 | Post-Alembic live validation | 2.35 s on that fixture | Retained: gates `migrated`. |
@@ -62,7 +70,7 @@ The reported startup log bounds the pre-migration phase at **110.81 s for an app
 
 Primary references: SQLite's Online Backup API documentation (`backup.html`, all-pages versus incremental examples) and CPython 3.15.1 `Modules/_sqlite/connection.c` (`pysqlite_connection_backup_impl`, default `pages=-1`). The reproduction used a two-second external writer updating one committed WAL row every 5 ms; reset counts are increases in `sqlite3_backup_remaining` between progress callbacks, not guesses from elapsed time.
 
-## Follow-up validation-placement options (not implemented)
+## Historical validation-placement options
 
 - Optimize verification I/O while retaining the identical synchronous SQLite check; compare cold-cache behavior, not only copy time.
 - Pre-stage and verify a snapshot before downtime, then fence writers and capture every intervening commit; this needs a new consistency design, not reuse of a stale snapshot.
