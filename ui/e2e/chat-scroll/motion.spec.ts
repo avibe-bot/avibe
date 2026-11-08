@@ -690,6 +690,8 @@ type Disclosed = {
   /** Read at an animation frame (not at a change in between): that frame's time (ms, on the clock the
    *  animations are sampled at), else null. */
   frame: number | null;
+  /** How late after its frame's time a frame read ran (ms). */
+  lag: number | null;
   /** Read after the second tap (`then`), if there is one. */
   turned: boolean;
   /** The tapped item's top, and the top of the first item below what it opened. */
@@ -721,6 +723,8 @@ type Disclosed = {
   /** While a curtain is down: how far from the top of what it covers the box it slides in lies. It belongs on
    *  that top, whatever else moves. */
   curtainAt: number | null;
+  /** How opaque the curtain is drawn while it is down: it hides what is not revealed only if fully. */
+  curtainOpacity: number | null;
   /** How far the conversation is still drawn from where the layout puts it by a glide (px). */
   glide: number;
 };
@@ -778,15 +782,19 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
       const curtain = [item, ...opened].map((el) => el.querySelector('[data-transcript-curtain]')).find(Boolean) ?? null;
       const curtainTop = curtain ? curtain.getBoundingClientRect().top : Infinity;
       const contentTop = opened.length > 0 ? Math.min(...opened.map((node) => node.getBoundingClientRect().top)) : null;
-      const visible = opened.map((node) => {
-        const box = node.getBoundingClientRect();
-        return { bottom: curtainTop <= box.top ? null : Math.min(box.bottom, curtainTop), opacity: shownOpacity(node) };
-      }).filter(({ bottom, opacity }) => bottom !== null && opacity > 0.02);
+      // What it opened that shows, as one span from its top to its bottom (a group's items, with the gaps between
+      // them), cut where the curtain lies over it.
+      const showing = opened.filter((node) => shownOpacity(node) > 0.02).map((node) => node.getBoundingClientRect());
+      const spanTop = showing.length > 0 ? Math.min(...showing.map((box) => box.top)) : null;
+      const spanBottom = showing.length > 0 ? Math.max(...showing.map((box) => box.bottom)) : null;
+      const visible = spanTop === null || curtainTop <= spanTop ? [] : [{ bottom: Math.min(spanBottom!, curtainTop) }];
       const copy = item.querySelector('[data-transcript-summary]');
       const real = summarySelector ? item.querySelector(summarySelector) : null;
       const summaryOpacity = copy ? shownOpacity(copy) : real ? shownOpacity(real) : null;
       const late = copy?.querySelector('[data-transcript-summary-late]');
-      const contentOpacity = opened.length > 0 ? Math.max(...opened.map(shownOpacity)) : null;
+      // How opaque what it opened shows, but for what its curtain lies in and covers (a group's collapse bar).
+      const uncovered = opened.filter((node) => !(curtain && node.contains(curtain)));
+      const contentOpacity = opened.length > 0 ? Math.max(0, ...uncovered.map(shownOpacity)) : null;
       const animated = document.getAnimations().filter((animation) => {
         const target = (animation.effect as KeyframeEffect | null)?.target;
         return animation.playState === 'running' && !!target && transcript.contains(target);
@@ -794,6 +802,7 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
       out.push({
         t: performance.now() - t0,
         frame,
+        lag: frame === null ? null : performance.now() - frame,
         turned: tapped,
         tapped: item.getBoundingClientRect().top,
         next: next ? next.getBoundingClientRect().top : null,
@@ -814,6 +823,7 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         })(),
         trailOver: trailEl?.isConnected && curtain ? getComputedStyle(trailEl).zIndex === '1' : null,
         curtainAt: curtain?.parentElement && contentTop !== null ? curtain.parentElement.getBoundingClientRect().top - contentTop : null,
+        curtainOpacity: curtain ? shownOpacity(curtain) : null,
         glide: ownOffset(column),
         body: (() => {
           const box = opened[0]?.lastElementChild;
@@ -854,15 +864,15 @@ function expectInPlace(frames: Disclosed[]) {
  *  further behind it than the layout leaves them when it is open (a few px of play where the edge crosses the
  *  gap between two items it opened); its curtain rests on what it covers; nothing animates layout. */
 function expectRowsWithEdge(all: Disclosed[]) {
-  // Where things are drawn is read at frames: between them an engine may give an element its compositor's
-  // place at that moment, and another one the timeline's.
-  const frames = all.filter(({ frame }) => frame !== null);
+  const frames = drawn(all);
   const gaps = frames.filter(({ next, shown }) => next !== null && shown !== null).map(({ next, shown }) => next! - shown!);
   expect(Math.min(Infinity, ...gaps)).toBeGreaterThanOrEqual(-0.5);
   const resting = frames.filter(({ next, shown, curtainAt }) => next !== null && shown !== null && curtainAt === null).map(({ next, shown }) => next! - shown!);
   if (resting.length > 0) expect(Math.max(...gaps)).toBeLessThanOrEqual(Math.max(...resting) + 8);
   const off = frames.filter(({ curtainAt }) => curtainAt !== null).map(({ curtainAt }) => Math.abs(curtainAt!));
-  expect(Math.max(0, ...off)).toBeLessThanOrEqual(1);
+  // Within 2 px: an engine may measure the two a moment apart while the conversation glides.
+  expect(Math.max(0, ...off)).toBeLessThanOrEqual(2);
+  expect(Math.min(1, ...all.filter(({ curtainOpacity }) => curtainOpacity !== null).map(({ curtainOpacity }) => curtainOpacity!))).toBeGreaterThanOrEqual(0.99);
   expect(all.some(({ layout }) => layout)).toBe(false);
 }
 /** No frame is empty or dim where the summary and what it stands for meet: at least 95% is drawn there. */
@@ -884,14 +894,23 @@ function expectLandsAsItGoes(frames: Disclosed[]) {
   const after = frames.slice(gone).map(({ next }) => next).filter((top): top is number => top !== null);
   expect(Math.max(...after) - Math.min(...after)).toBeLessThanOrEqual(0.5);
 }
+/** The frame reads taken on time, where things are where they are drawn. Between frames, or in a frame read
+ *  long after its time on a busy runner, an engine may place an element with an animation of its own at that
+ *  moment and another at the frame's time, so where they are drawn is judged on these. */
+const ON_TIME_MS = 4;
+function drawn(frames: Disclosed[]) {
+  const onTime = frames.filter(({ frame, lag }) => frame !== null && lag! <= ON_TIME_MS);
+  expect(onTime.length).toBeGreaterThanOrEqual(5);
+  return onTime;
+}
 /** How far the row below moves in all, how fast at its fastest (px/ms, on the animations' clock), and how
  *  often it turns back, as drawn (at frames). */
 function rowPath(frames: Disclosed[]) {
-  const tops = frames.filter(({ frame }) => frame !== null).map(({ next }) => next).filter((top): top is number => top !== null);
+  const tops = drawn(frames).map(({ next }) => next).filter((top): top is number => top !== null);
   const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
   const turns = steps.slice(1).filter((step, index) => Math.sign(step) !== Math.sign(steps[index])).length;
   // Over at least two frames' time, so a frame drawn a little early or late does not read as a burst of speed.
-  const timed = frames.filter(({ frame, next }) => frame !== null && next !== null);
+  const timed = drawn(frames).filter(({ next }) => next !== null);
   const speeds = timed.flatMap(({ frame, next }, index) => {
     const later = timed.slice(index + 1).find((other) => other.frame! - frame! >= 30);
     return later ? [Math.abs(later.next! - next!) / (later.frame! - frame!)] : [];
@@ -956,6 +975,27 @@ test('a Harness group opens to its members and folds back into its card, whose w
   for (const frames of [opening, closing]) {
     expect(frames.filter(({ late, through }) => late !== null && late > 0.02 && through !== null && through > 0.05)).toEqual([]);
   }
+  expect(closing.at(-1)!.summary).toBe(1);
+});
+
+test('closing a Harness group with a member opened inside folds the group once, and the rows below land where it lets them', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  const head = transcript(page).locator('[data-harness-group]').last();
+  await head.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  await head.locator('button[aria-expanded="false"]').click();
+  const members = transcript(page).locator('[data-transcript-key^="harness-member:"]');
+  await expect(members).toHaveCount(4);
+  await page.waitForTimeout(600);
+  // A member's own body opened inside the group: closing the group closes it too, in the same commit.
+  await members.first().locator('button[aria-expanded="false"]').click();
+  await expect(members.first().locator('[data-transcript-reveal]')).toBeVisible();
+  await page.waitForTimeout(600);
+  const closing = await discloseAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', { summary: GROUP_CARD });
+  expectInPlace(closing);
+  expectCovered(closing);
+  expect(rowPath(closing).turns).toBe(0);
+  expectLandsAsItGoes(closing);
   expect(closing.at(-1)!.summary).toBe(1);
 });
 
@@ -1090,11 +1130,15 @@ test('a chip whose steps are still loading opens straight to their skeleton, and
   const path = rowPath(frames);
   expect(path.turns).toBe(0);
   expectInPlace(frames);
+  // Where the rows landed among the frames as drawn, from the last one with the skeleton on.
+  const seen = drawn(frames);
+  const landed = seen.findIndex(({ busy }, index) => index > 0 && !busy && seen[index - 1].busy);
+  expect(landed).toBeGreaterThan(0);
+  expect(rowPath(seen.slice(landed - 1)).fastest).toBeLessThanOrEqual(rowPath(seen.slice(0, landed)).fastest * 1.1);
+  expect(rowPath(seen.slice(landed - 1)).travel).toBeGreaterThan(20);
+  // The rows take the skeleton's place with no empty frame: it fades out under them as they fade in (at every
+  // read from the landing on).
   const landing = frames.findIndex(({ busy }, index) => index > 0 && !busy && frames[index - 1].busy);
-  expect(landing).toBeGreaterThan(0);
-  expect(rowPath(frames.slice(landing - 1)).fastest).toBeLessThanOrEqual(rowPath(frames.slice(0, landing)).fastest * 1.1);
-  expect(rowPath(frames.slice(landing - 1)).travel).toBeGreaterThan(20);
-  // The rows take the skeleton's place with no empty frame: it fades out under them as they fade in.
   expect(Math.min(...frames.slice(landing - 1).map(({ body }) => body ?? 0))).toBeGreaterThanOrEqual(0.9);
 });
 
@@ -1145,27 +1189,41 @@ test('a reader who scrolls while a disclosure opens keeps their place: nothing w
         rows[row.dataset.messageId!] = [row.getBoundingClientRect().top, moving];
       }
       lab.places.push({ scroll: transcriptEl.scrollTop, rows });
-      if (lab.places.length < 80) requestAnimationFrame(loop);
+      if (lab.places.length < 120) requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
   });
-  await row.locator('button[aria-expanded="false"]').click();
-  // The reader drags the conversation on while it opens, and a reply comes in under their finger.
+  // The reader drags the conversation on, and opens the row while it is moving under their finger (tapped from
+  // the page the moment it scrolls, so the drag goes on through the opening however slow the runner); a reply
+  // comes in during the drag too.
   const fingerY = Math.round(box.y + box.height * 0.75);
-  await page.evaluate(() => { window.setTimeout(() => window.__scrollLab.push('A reply while the reader drags.', 'agent'), 120); });
-  if (browserName === 'chromium') {
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send('Input.synthesizeScrollGesture', {
-      x, y: fingerY, yDistance: -200, speed: 800, gestureSourceType: 'touch', preventFling: true,
-    });
-    await cdp.detach();
-  } else {
-    await page.mouse.move(x, fingerY);
-    for (let step = 0; step < 10; step += 1) {
-      await page.mouse.wheel(0, 20);
-      await page.waitForTimeout(16);
+  const tapWhileScrolling = page.evaluate(async (selector) => {
+    const scroller = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
+    const from = scroller.scrollTop;
+    const since = performance.now();
+    while (Math.abs(scroller.scrollTop - from) < 2) {
+      if (performance.now() - since > 5000) throw new Error('The conversation never scrolled.');
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     }
-  }
+    document.querySelector<HTMLElement>(selector)!.click();
+    window.setTimeout(() => window.__scrollLab.push('A reply while the reader drags.', 'agent'), 120);
+  }, `[data-message-id="${rowId}"] button[aria-expanded="false"]`);
+  const drag = (async () => {
+    if (browserName === 'chromium') {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Input.synthesizeScrollGesture', {
+        x, y: fingerY, yDistance: -400, speed: 600, gestureSourceType: 'touch', preventFling: true,
+      });
+      await cdp.detach();
+    } else {
+      await page.mouse.move(x, fingerY);
+      for (let step = 0; step < 30; step += 1) {
+        await page.mouse.wheel(0, 14);
+        await page.waitForTimeout(16);
+      }
+    }
+  })();
+  await Promise.all([tapWhileScrolling, drag]);
   await page.waitForTimeout(1000);
   const places = await page.evaluate(() => (window as unknown as { places: { scroll: number; rows: Record<string, [number, boolean]> }[] }).places);
   // The reader did scroll while rows still moved with the disclosure.

@@ -569,11 +569,15 @@ function play(entry: Disclosing, from: State, closing: boolean, duration: number
       setShare(entry.moves, row, { start, duration, from: from.rows[index] ?? 0, to: closing ? -entry.rise : 0, curve: curveOf(curve), hold: closing });
     });
   }
+  // What fades is the content, but not the item the curtain lies in when that is part of it (a group's collapse
+  // bar, the last of the items it laid out): the curtain covers it, and fading it would fade the curtain too.
+  const host = entry.curtain?.parentElement?.parentElement ?? null;
+  const fading = entry.nodes.filter((node) => node !== host);
   if (entry.copy) {
     // Closing, the summary and its words fade in and the content out; opening, the other way round.
     const [fadeIn, fadeOut] = [tokens.enterEase, tokens.exitEase];
     add(entry.copy.animate(segment('opacity', String(from.copy), closing ? '1' : '0', way.summary, closing ? fadeIn : fadeOut), timing));
-    for (const node of entry.nodes) add(node.animate(segment('opacity', String(from.content), closing ? '0' : '1', way.content, closing ? fadeOut : fadeIn), timing));
+    for (const node of fading) add(node.animate(segment('opacity', String(from.content), closing ? '0' : '1', way.content, closing ? fadeOut : fadeIn), timing));
     if (way.late) for (const part of entry.late) add(part.animate(segment('opacity', String(from.late), closing ? '1' : '0', way.late, closing ? fadeIn : fadeOut), timing));
     entry.shared.forEach(({ el, translate, scale }, index) => {
       const now = from.shared[index] ?? { translate: '0px 0px', scale: '1' };
@@ -595,11 +599,11 @@ function play(entry: Disclosing, from: State, closing: boolean, duration: number
   } else if (closing) {
     // No summary comes in here (a Harness row's body, the running card's full view): it fades out, below
     // 10% by 70% of the way, and what stands for it closed comes in after (motion-summary-in).
-    for (const node of entry.nodes) {
+    for (const node of fading) {
       add(node.animate([{ opacity: from.content, offset: 0, easing: tokens.exitEase }, { opacity: Math.min(from.content, 0.08), offset: 0.7 }, { opacity: 0, offset: 1 }], timing));
     }
   } else {
-    for (const node of entry.nodes) add(node.animate([{ opacity: from.content }, { opacity: 1 }], { duration, easing: tokens.enterEase, fill }));
+    for (const node of fading) add(node.animate([{ opacity: from.content }, { opacity: 1 }], { duration, easing: tokens.enterEase, fill }));
   }
   entry.animations = animations;
 }
@@ -1011,7 +1015,10 @@ export function useTranscriptMotion({
       });
       if (revealing.length > 0) disclosure.current = null;
     }
-    const folding = newClosing;
+    // A disclosure closed together with one around it (a member's body when its group closes) folds with it,
+    // as part of what it folds, never as a disclosure of its own.
+    const outermost = (nodes: HTMLElement[]) => nodes.filter((node) => !nodes.some((other) => other !== node && other.contains(node)));
+    const folding = outermost(newClosing);
     const settling = landed.filter(({ node, delta }) => Math.abs(delta) >= 0.5 && disclosing.has(node));
     if (!shouldGlide && leaving.length === 0 && entering.length === 0 && revealing.length === 0 && folding.length === 0 && reopened.length === 0 && settling.length === 0) return;
     // Everything this commit's motion reads, before it writes anything.
@@ -1060,7 +1067,7 @@ export function useTranscriptMotion({
       const growth = ours ? end - box.top - ours.extent : 0;
       unfold(column, opened.item, nodes, growth, ours && next ? ours.extent : null, next, viewportBottom(), tokens, reduced);
     }
-    for (const run of runsOf(reopened)) refold(run, tokens, reduced);
+    for (const run of runsOf(outermost(reopened))) refold(run, tokens, reduced);
     for (const run of runsOf(folding)) fold(column, run, tokens, viewportBottom, reduced);
     for (const { node, delta } of settling) resettle(disclosing.get(node)!, delta, viewportBottom(), tokens, reduced);
 
