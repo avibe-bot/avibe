@@ -2196,7 +2196,16 @@ class SQLiteSessionsService:
                                     "session_anchor": stmt.excluded.session_anchor,
                                     "native_session_id": stmt.excluded.native_session_id,
                                     "status": stmt.excluded.status,
-                                    "metadata_json": stmt.excluded.metadata_json,
+                                    # SessionState does not project metadata. Merge only
+                                    # our legacy key into the current row, not a stale
+                                    # load snapshot or another owner's runtime/settings keys.
+                                    "metadata_json": func.json_patch(
+                                        case(
+                                            (func.json_valid(agent_sessions.c.metadata_json), agent_sessions.c.metadata_json),
+                                            else_="{}",
+                                        ),
+                                        stmt.excluded.metadata_json,
+                                    ),
                                     "updated_at": stmt.excluded.updated_at,
                                     # ``last_active_at`` is deliberately absent: it is the
                                     # session-list ranking column and only real activity may
