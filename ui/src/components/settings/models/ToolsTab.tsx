@@ -159,7 +159,7 @@ const ExecutorPrice: React.FC<{ candidate: HostedExecutorCandidate }> = ({ candi
   return <OrderPrice text={t(`settings.models.tools.cost.per1k.${price.unit}`, { usd: formatSmallUsd(price.usd_per_1k) })} title={title} href={price.url} />;
 };
 
-/** What the search order's ⓘ explains: how the automatic order is built, and where the built-in service sends a query. */
+/** Explain the automatic order and which service receives a query. */
 const SearchOrderHint: React.FC<{ tool: HostedWebSearchToolStatus; custom: boolean }> = ({ tool, custom }) => {
   const { t } = useTranslation();
   const keyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
@@ -167,7 +167,7 @@ const SearchOrderHint: React.FC<{ tool: HostedWebSearchToolStatus; custom: boole
     <span className="flex flex-col gap-2">
       <span>{t(keyless ? 'settings.models.searchServices.orderAutoKeyless' : 'settings.models.searchServices.orderAuto')}</span>
       {custom && <span>{t('settings.models.searchServices.orderCustom')}</span>}
-      {keyless && <span>{t('settings.models.searchServices.keylessQueryDestination')}</span>}
+      <span>{t('settings.models.searchServices.queryDestination')}</span>
     </span>
   );
 };

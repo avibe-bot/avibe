@@ -45,6 +45,7 @@ export const AddSearchServiceDialog: React.FC<{
             <div className="flex items-center gap-3"><SearchVendorGlyph vendor={vendor.id} /><h3 className="min-w-0 flex-1 font-semibold text-foreground">{vendorName}</h3></div>
             {fetchTool && <span className="flex gap-2"><span className="model-hub-pill model-hub-accent-pill--cyan border">{t('settings.models.webFetch.searchBadge')}</span>{fetchTool.service_vendors.some((item) => item.id === vendor.id) && <span className="model-hub-pill model-hub-accent-pill--cyan border">{t('settings.models.webFetch.fetchBadge')}</span>}</span>}
             <SearchVendorFacts vendor={vendor} />
+            {vendor.id === 'exa-mcp' && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessQueryDestination')}</p>}
             {vendor.id === 'parallel-mcp' && <p className="model-hub-tool-note">{t('settings.models.searchServices.parallelCustody')}</p>}
             <SearchServicePrice price={vendor.price} />
             {builtIn ? <>
@@ -69,7 +70,7 @@ export const AddSearchServiceDialog: React.FC<{
           </section>;
         })}
       </div>
-      <SearchServiceNotes vendor={tool.service_vendors?.find((vendor) => vendor.facts.built_in)} />
+      <SearchServiceNotes />
       <p className="model-hub-tool-note">{t('settings.models.searchServices.priceNote')}</p>
     </DialogContent>
   </Dialog>;

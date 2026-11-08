@@ -464,3 +464,31 @@ it('shows unelected Parallel disabled in its service detail', () => {
   expect(screen.getByRole('switch', { name: 'Use for web search' }).getAttribute('aria-checked')).toBe('false');
   expect(screen.queryByLabelText('API key')).toBeNull();
 });
+
+// MH-SEARCH-SERVICES-001: the order hint describes the selected route, while
+// provider-specific destinations belong to the cards where a user opts in.
+it.each(['en', 'zh'])('does not present Exa as the destination for a Parallel-only search in %s', async (lng) => {
+  const locale = i18n.cloneInstance({ lng });
+  const exa = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((v) => v.id === 'exa-mcp')!;
+  const base = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row): row is HostedServiceExecutorCandidate => row.kind === 'service' && row.source_id === 'src_exakeyless')!;
+  const parallel = { ...exa, id: 'parallel-mcp', name: 'Parallel (free)', source_ids: ['src_parallelkeyless'] };
+  const tool: HostedWebSearchToolStatus = {
+    ...KEYLESS_ACTIVE_SEARCH, prefer_native: false, service_vendors: [exa, parallel],
+    services: { src_exakeyless: { enabled: false }, src_parallelkeyless: { enabled: true } },
+    effective_order: ['src_parallelkeyless'],
+    executor_candidates: [
+      { ...base, source_id: 'src_parallelkeyless', model_id: 'parallel/mcp' },
+      { ...base, settings: { ...base.settings, enabled: false } },
+    ],
+  };
+  render(wrap(<ToolsTab read={readyRegion({ tools: [tool] })} sources={[]} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />, lng));
+  await userEvent.click(screen.getByRole('button', { name: locale.t('settings.models.searchServices.orderAbout') }));
+  expect(screen.queryByText(/mcp\.exa\.ai/)).toBeNull();
+  expect(screen.getByText(locale.t('settings.models.searchServices.queryDestination'))).toBeTruthy();
+  cleanup();
+  addDialog(tool, lng);
+  const exaCard = screen.getByRole('region', { name: locale.t('settings.models.searchServices.vendorName.exa-mcp') });
+  expect(within(exaCard).getByText(/mcp\.exa\.ai/)).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: parallel.name })).getByText(/mcp\.parallel\.ai/)).toBeTruthy();
+  expect(screen.getByText(locale.t('settings.models.searchServices.queryDestination'))).toBeTruthy();
+});
