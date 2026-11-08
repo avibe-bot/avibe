@@ -247,8 +247,7 @@
     },
     "password": {
       "entry": "使用密码登录",
-      "title": "输入密码。",
-      "signingInAs": "登录账号",
+      "codeEntry": "使用验证码登录",
       "label": "密码",
       "forgot": "忘记密码？",
       "show": "显示密码",
