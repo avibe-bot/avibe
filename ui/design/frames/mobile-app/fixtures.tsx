@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { FrameSpec } from '../../frame';
+import type { FrameSpec, FrameStatus } from '../../frame';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import { MobileLanguage, type MobileAccount, type MobileInstance, type MobileLoginFixture } from '../../kit/mobile-app';
@@ -39,10 +39,10 @@ export const longInstances: MobileInstance[] = [
 ];
 
 /** Locale is explicit so both translations survive the exporter's id+theme key. */
-export function bilingual(name: string, title: string, render: () => ReactNode, size: [number, number] = [390, 844]): FrameSpec[] {
+export function bilingual(name: string, title: string, render: () => ReactNode, size: [number, number] = [390, 844], status: FrameStatus = 'approved'): FrameSpec[] {
   return (['zh', 'en'] as const).map(lang => ({
     name: `${name}-${lang}`, title: `${title} · ${lang === 'zh' ? '中文' : 'English'}`,
-    width: size[0], height: size[1], status: 'approved', themes: ['light', 'dark'],
+    width: size[0], height: size[1], status, themes: ['light', 'dark'],
     fixtures: {
       bots: [],
       api: { '/api/session': { remote: true, authenticated: true, email: account.email } },

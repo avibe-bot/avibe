@@ -196,3 +196,101 @@ recovery code is one text field. An account that must turn on two-step
 verification opens avibe.bot and returns to "I've turned it on · Continue".
 The system passkey sheet is native and is not drawn; `passkey-waiting` is the
 page behind it.
+
+## Password sign-in — proposed
+
+Status: **proposed** on 2026-11-08 for the owner's approval. Plan:
+`docs/plans/2026-11-08-mobile-password-sign-in.md`. An account that set a
+password on avibe.bot (Account security → Set or change password) can sign in
+with it instead of the email code. The email code stays the primary path and
+the only way to create an account in the app. After either first factor, an
+account with two-step verification continues to `two-factor/*`; everyone else
+reaches the instance picker. The pages reuse the A composition (`CloudScreen`,
+`Brand`, `Primary`, the raised tile and card, the email card) and add no
+tokens or assets. `PasswordPage`, `ForgotPasswordPage` and `WeakPasswordNotice`
+live in `ui/design/kit/mobile-app.tsx`; the email step is `WelcomeIntro` with
+the `password` fixture flag, so the approved `welcome/*` frames are unchanged.
+
+| File / surface | States |
+| --- | --- |
+| `password` | `email` (both ways offered), `email-invalid`, `default`, `filled`, `shown`, `signing-in`, `invalid`, `unconfirmed`, `rate-limited`, `network`, `forgot`, `weak`, `small` (375 × 667, long email + error), `keyboard` (375 × 407) |
+
+**28 proposed frames / 56 theme captures** (14 states × zh/en × light/dark).
+On approval, `password/email` and `password/email-invalid` supersede the email
+entry of `welcome/default` and `welcome/email-invalid`.
+
+### Why a link under the primary action
+
+The email step keeps one primary action, Send verification code, and offers
+"Sign in with password" as a link under it, inside the same card. The code
+works for every account, new or existing, and avibe.bot calls the password
+optional, so the password is the secondary path. A link matches avibe.bot's
+own "Sign in with password" wording and the approved alternatives under the
+two-step verification action. A segmented control would present the two as
+equals and imply that a new email can create an account with a password, which
+the app does not offer. A second full-width button would compete with the
+primary action. Both actions validate the email first, so the invalid-email
+copy no longer names the code.
+
+### Interaction and accessibility handoff
+
+- Identifier-first: the password page shows the email from the email step,
+  complete and wrapped, with centered Change email (the approved code-step
+  pattern). Change email and Back return to the email step with the email kept
+  and the password cleared. The form carries the email in a visually hidden,
+  read-only `autocomplete="username"` field next to the password field
+  (`type=password`, `autocomplete="current-password"`, no autocapitalize or
+  spellcheck, `enterkeyhint="go"`), so iCloud Keychain can match the saved
+  avibe.bot login through the app's existing `webcredentials:avibe.bot`
+  association.
+- Sign in needs a non-empty password; there is no client minimum length,
+  because older passwords may predate avibe.bot's 8-character rule. Nothing
+  auto-submits. Return submits.
+- Show password is one toggle button with a stable label and `aria-pressed`,
+  a 44pt target inside the field. Its icon changes. The field returns to hidden
+  when the page is left.
+- Busy (`signing-in`) disables the field and every action, and sets `aria-busy`.
+- Errors render in the slot under the field (`role=alert`, linked with
+  `aria-describedby`). Email and password are kept. `invalid` also marks the
+  field. Supabase answers `invalid_credentials` for a wrong email, a wrong
+  password and an account with no password, so the copy covers all three. For
+  `invalid` and `unconfirmed`, where the email code is the fix, "Use an email
+  code instead" becomes an outline button; otherwise it stays a link.
+- `rate-limited` disables Sign in for the provider's `Retry-After`, or 60s when
+  none is given, and the label counts down. Editing stays allowed. As with the
+  approved resend timer, the countdown does not promise that the server limit
+  has ended. `network` keeps everything and leaves Sign in enabled.
+- "Use an email code instead" and the forgot page's Send verification code
+  request a code for the same email and enter the approved code step (code-only,
+  auto-submit on the last digit). While that request runs, the tapped control
+  shows Sending…; a failure uses the approved email-step copy in the same slot.
+- Forgot password opens `forgot`. Email sign-in always works, so the code comes
+  first. Open in Safari opens `https://avibe.bot/app/account/security`, already
+  on the `app.openExternal` allowlist. Signed out, avibe.bot sends Safari to
+  `/login?next=…`, the person signs in with email, and lands on Account security
+  to choose Set or change password. avibe.bot has no separate reset page.
+- `weak`: when Supabase signs the person in but reports the password as weak
+  (`weak_password`, reason `pwned`), the app shows this notice once, after any
+  second factor and before the picker. Continue never blocks. Change it in
+  Safari opens Account security. Other reasons use the plan's copy.
+- Motion: navigation between these steps follows the approved M5 rule above.
+  These frames add no new moment.
+
+### Proposed owner decisions
+
+1. Entry: a "Sign in with password" link under Send verification code, rather
+   than a segmented control or a second button.
+2. Identifier-first: the password page shows the email from the email step
+   with Change email, rather than a second editable email field.
+3. Forgot password: an email code now, and a new password on avibe.bot's
+   Account security page in Safari. No new avibe.bot reset page and no new
+   allowlist entry.
+4. Breached password: the one-time, non-blocking `weak` notice after sign-in.
+
+### Verification boundary
+
+Checked: design typecheck, `design:shot` for `mobile-app` (no unfixtured reads,
+no console errors), production build, and a light/dark inspection of every
+password capture. A screenshot proves layout only. Keychain suggestions and
+saving, keyboard insets, focus and announcements, and real Supabase answers
+belong to the implementation PR and a device check.
