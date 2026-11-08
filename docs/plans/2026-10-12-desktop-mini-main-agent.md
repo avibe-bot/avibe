@@ -320,6 +320,31 @@ revalidated by `getSessionResult`. No separate unread counter is created.
 The card says Replied while it has unread evidence and no running process.
 Callbacks to the main session are reported in Vibey's bubble.
 
+**Replied-card expiry (Owner, 2026-11-07).** A running activity card remains
+visible for the duration of its run. When the process ends and the card still
+has unread evidence, it enters the Replied state and uses the shared
+`REPLY_LINGER_MS = 30_000` budget. Only actual exposure spends this budget:
+the document must be visible, and the card must be the front of a collapsed
+stack or at least 50% visible in the expanded scroll viewport. Pointer hover,
+keyboard focus inside the activity-card area, and interaction with the expanded
+list pause it; leaving resumes with at least `REPLY_LINGER_RESUME_MS = 3_000`
+remaining. Merely expanding the list does not hold all replies indefinitely.
+Expiry changes presentation only; the existing Inbox and PetAvatar/Vibey unread
+indicators still lead to the unread item.
+
+The reply identity is `session_id + (preview_at ?? last_activity_at)` from the
+existing Inbox feed. A new run is always displayed; a new reply timestamp gets
+a new full budget. Refetching or reloading does not revive an expired identity.
+Known boundary: two replies with exactly the same timestamp count as one reply;
+cards without a loaded Inbox identity retain their existing display behavior.
+Timer-expired identities are stored in the pet webview's origin-isolated
+`localStorage`, retaining the latest 200 entries for at most seven days. After
+that retention window an old identity can be displayed again. Storage failures
+degrade silently to document-local memory. Manual × dismissal remains
+document-local and is not persisted by this rule. Pending Vault or other
+authorization cards keep their existing display rules and never spend this
+budget, including when they share a session with an unread reply.
+
 - Heading: project · agent; for IM, platform · project · agent.
 - Title: session title, with the existing localized fallback.
 - Priority: needs authorization, running, then replied. Preserve relative order

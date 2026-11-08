@@ -863,6 +863,23 @@ for (const theme of ['light', 'dark']) {
     await expect(card).toHaveCount(0);
   });
 
+  test(`a replied activity card folds after 30 seconds and keeps the unread badge (${theme})`, async ({ page }) => {
+    await page.clock.install();
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.locator('.pet-mini-collapsed').click();
+    const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+    await page.locator('.pet-mini-avatar-button').hover();
+    await page.locator('.pet-mini-avatar-button').focus();
+    await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+    await expect(replied).toBeVisible();
+    await page.clock.runFor(29_000);
+    await expect(replied).toBeVisible();
+    await page.clock.runFor(1_200);
+    await expect(replied).toHaveCount(0);
+    await expect(page.locator('.pet-avatar > span.bg-destructive')).toBeVisible();
+  });
+
   test(`one card stays in full beside the open history and everything fits (${theme})`, async ({ page }) => {
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=1&history=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
@@ -888,6 +905,195 @@ for (const theme of ['light', 'dark']) {
     expect(avatar.y + avatar.height).toBeLessThanOrEqual(600);
   });
 }
+
+// Protect actual exposure and stable reply identity across refetch/reload.
+test('activity exposure: covered stack cards keep their budget until expanded', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.clock.runFor(32_000);
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await expect(replied).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.clock.runFor(29_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_500);
+  await expect(replied).toHaveCount(0);
+});
+
+for (const fallback of [false, true]) {
+  test(`activity identity: reload keeps expiry and a new timestamp reappears (fallback=${fallback})`, async ({ page }) => {
+    await page.clock.install();
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&activities=3${fallback ? '&noPreviewAt' : ''}`);
+    await page.locator('.pet-mini-collapsed').click();
+    const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+    await expect(replied).toBeVisible();
+    await page.locator('.pet-mini-avatar-button').hover();
+    await page.locator('.pet-mini-avatar-button').focus();
+    await page.clock.runFor(31_000);
+    await expect(replied).toHaveCount(0);
+    await page.reload();
+    await page.locator('.pet-mini-collapsed').click();
+    await expect(page.locator('.pet-mini-panel')).toBeVisible();
+    await expect(replied).toHaveCount(0);
+    await expect(page.locator('.pet-avatar > span.bg-destructive')).toBeVisible();
+    await page.evaluate(() => window.petFixtureReplyActivity('ses_fixture_2'));
+    await expect(replied).toBeVisible();
+    await page.locator('.pet-mini-avatar-button').hover();
+    await page.locator('.pet-mini-avatar-button').focus();
+    await page.clock.runFor(29_000);
+    await expect(replied).toBeVisible();
+    await page.clock.runFor(1_500);
+    await expect(replied).toHaveCount(0);
+  });
+}
+
+for (const operation of ['getItem', 'setItem'] as const) {
+  test(`activity identity: storage ${operation} failure retains memory expiry and accepts a new reply`, async ({ page }) => {
+    await page.addInitScript((operation) => {
+      const read = Storage.prototype.getItem;
+      const write = Storage.prototype.setItem;
+      Object.defineProperty(Storage.prototype, operation, { value(this: Storage, key: string, value?: string) {
+        if (key === 'avibe.pet.activityExpiry.v1') throw new Error('fixture storage unavailable');
+        return operation === 'getItem' ? read.call(this, key) : write.call(this, key, value!);
+      } });
+    }, operation);
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.clock.install();
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+    await page.locator('.pet-mini-collapsed').click();
+    const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+    await expect(replied).toBeVisible();
+    await page.locator('.pet-mini-avatar-button').hover();
+    await page.locator('.pet-mini-avatar-button').focus();
+    await page.clock.runFor(31_000);
+    await expect(replied).toHaveCount(0);
+    await page.evaluate(() => window.petFixtureRefreshActivity('ses_fixture_2'));
+    await page.clock.runFor(1_000);
+    await expect(replied).toHaveCount(0);
+    await page.evaluate(() => window.petFixtureReplyActivity('ses_fixture_2'));
+    await expect(replied).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+}
+
+test('running activity cards do not spend the replied-card budget', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=2');
+  await page.locator('.pet-mini-collapsed').click();
+  const running = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
+  await expect(running).toBeVisible();
+  await page.clock.runFor(60_000);
+  await expect(running).toBeVisible();
+});
+
+test('hover pauses a replied activity card and leaves three seconds after the pointer leaves', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(28_000);
+  await replied.hover();
+  await page.clock.runFor(60_000);
+  await expect(replied).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(2_500);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(600);
+  await expect(replied).toHaveCount(0);
+});
+
+test('keyboard focus pauses a replied activity card and leaves three seconds after focus moves', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(28_000);
+  await replied.locator('.pet-mini-card-reference').focus();
+  await page.clock.runFor(60_000);
+  await expect(replied).toBeVisible();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(2_500);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(600);
+  await expect(replied).toHaveCount(0);
+});
+
+test('a hidden document pauses an unread replied activity card', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(600);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(60_000);
+  await expect(replied).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(28_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(replied).toHaveCount(0);
+});
+
+test('a new activity generation gets a fresh replied-card budget, while refetch does not revive an expired one', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.evaluate(() => new Promise<void>((resolve) => queueMicrotask(resolve)));
+  await page.clock.runFor(600);
+  await page.clock.runFor(30_200);
+  await expect(replied).toHaveCount(0);
+  await page.evaluate(() => window.petFixtureRefreshActivity('ses_fixture_2'));
+  await page.clock.runFor(100);
+  await expect(replied).toHaveCount(0);
+
+  await page.evaluate(() => window.petFixtureStartActivity('ses_fixture_2'));
+  await expect(replied).toBeVisible();
+  await page.evaluate(() => window.petFixtureFinishActivity('ses_fixture_2'));
+  await page.clock.runFor(29_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(replied).toHaveCount(0);
+});
+
+test('a pending activity authorization card remains visible', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  const needsInput = page.locator('.pet-mini-card[data-session-id="ses_fixture_0"]');
+  await expect(needsInput).toHaveClass(/is-needs-input/);
+  await page.clock.runFor(60_000);
+  await expect(needsInput).toBeVisible();
+});
 
 test('Vibey clicks with a lone card leave no hidden expansion for a second card', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?activities=1');
@@ -1850,4 +2056,75 @@ test('a layout flip re-reports the input regions, and stage attribute churn stay
   });
   await page.waitForTimeout(100);
   expect(await page.evaluate(() => window.petHitReports)).toBe(before);
+});
+
+test('activity exposure: cards below the expanded scroll viewport do not spend their budget', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=12');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await expect(replied).not.toBeInViewport({ ratio: 0.5 });
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.clock.runFor(32_000);
+  await expect(replied).toHaveCount(1);
+  await page.locator('.pet-mini-scroll').evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  await expect(replied).toBeInViewport({ ratio: 0.5 });
+  await page.clock.runFor(29_000);
+  await expect(replied).toHaveCount(1);
+  await page.clock.runFor(1_500);
+  await expect(replied).toHaveCount(0);
+});
+
+test('activity expiry storage prunes old entries and retains the newest 200', async ({ page }) => {
+  await page.clock.install();
+  await page.addInitScript(() => {
+    const now = Date.now();
+    const entries = Array.from({ length: 201 }, (_, i) => [`reply-${i}`, now - (201 - i) * 1000]);
+    entries.push(['older-than-seven-days', now - 8 * 24 * 60 * 60 * 1000]);
+    localStorage.setItem('avibe.pet.activityExpiry.v1', JSON.stringify(Object.fromEntries(entries)));
+  });
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  await page.locator('.pet-mini-avatar-button').hover();
+  await page.locator('.pet-mini-avatar-button').focus();
+  await page.clock.runFor(31_000);
+  await expect(page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]')).toHaveCount(0);
+  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('avibe.pet.activityExpiry.v1')!));
+  expect(Object.keys(stored)).toHaveLength(200);
+  expect(stored['older-than-seven-days']).toBeUndefined();
+  expect(stored['reply-0']).toBeUndefined();
+  expect(stored['reply-200']).toEqual(expect.any(Number));
+});
+
+
+test('activity hover resumes when the pointer leaves the Mini window', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  await page.locator('.pet-mini-collapsed').click();
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await page.locator('.pet-mini-avatar-button').focus();
+  await replied.hover();
+  await page.clock.runFor(31_000);
+  await expect(replied).toBeVisible();
+  await page.mouse.move(-20, -20);
+  await page.clock.runFor(29_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_500);
+  await expect(replied).toHaveCount(0);
+});
+
+
+test('keyboard expansion releases focus when the collapsed trigger is replaced', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=3');
+  const stack = page.locator('.pet-mini-collapsed');
+  await stack.focus();
+  await stack.press('Enter');
+  const replied = page.locator('.pet-mini-card[data-session-id="ses_fixture_2"]');
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(29_000);
+  await expect(replied).toBeVisible();
+  await page.clock.runFor(1_500);
+  await expect(replied).toHaveCount(0);
 });
