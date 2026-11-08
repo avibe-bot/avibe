@@ -340,7 +340,10 @@ scenarios:
       The owning browser boundary is the bundled React page and its fixed
       avibeMobile contract. The collected Vitest case drives the approved
       Welcome, full-email, six-cell OTP, session discovery, and authorized
-      selection flow against deterministic bridge responses.
+      selection flow against deterministic bridge responses; the sixth code
+      digit sends the verification without a button press. The Python
+      auth_setup harness drives IM backend auth and cannot reach the bundled
+      page or WebKit, so this case is the iOS sign-in closed loop.
   - id: AUTH-SETUP-149
     name: Mobile account failures preserve their owning screen and never silently start reauthentication
     status: covered
@@ -433,8 +436,9 @@ scenarios:
       The bundled page owns the approved two-factor screen and consumes the
       native twoFactorRequired state. The collected Vitest case drives the
       email code into an account that owes the second factor, a cancelled
-      passkey, the authenticator-code alternative, and authorized instance
-      selection. AUTH-SETUP-149 covers every second-factor failure code.
+      passkey, the authenticator-code alternative (sent by its sixth digit),
+      and authorized instance selection. AUTH-SETUP-149 covers every
+      second-factor failure code.
   - id: AUTH-SETUP-157
     name: Native second-factor transport and passkey assertion stay inside the account store
     status: partial
@@ -459,9 +463,10 @@ scenarios:
     backend: ios
     test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-158 starts verification once when the last code digit is typed, pasted, or autofilled
     reason: >-
-      The bundled page owns when a code is sent. The cited case drives a typed
-      last digit and a pasted or autofilled code that arrives as both input
-      and change events. Sibling cases in the same file cover a failed code
+      The bundled page owns when a code is sent, and AUTH-SETUP-148 and
+      AUTH-SETUP-156 run the whole sign-in through it. The cited case drives a
+      typed last digit and a pasted or autofilled code that arrives as both
+      input and change events. Sibling cases in the same file cover a failed code
       that is sent again only after an edit or a button press, the
       authenticator code, a recovery code that waits for the button, and no
       submission while an operation runs, during a provider cooldown, or
