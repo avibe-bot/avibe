@@ -342,11 +342,15 @@ async def test_sync_wait_does_not_pin_loop_or_worker(monkeypatch):
     loop_thread = threading.get_ident()
     finished = False
     reads = []
+    acknowledgements = []
 
     class Store:
         def get_run(self, run_id):
             reads.append(threading.get_ident())
             return {"id": run_id, "status": "succeeded" if finished else "running"}
+
+        def record_sync_return(self, run_id):
+            acknowledgements.append((run_id, threading.get_ident()))
 
     async def finish():
         nonlocal finished
@@ -357,3 +361,5 @@ async def test_sync_wait_does_not_pin_loop_or_worker(monkeypatch):
     assert waiter["status"] == "succeeded"
     assert len(reads) >= 2
     assert all(thread != loop_thread for thread in reads)
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0][0] == "run-1" and acknowledgements[0][1] != loop_thread

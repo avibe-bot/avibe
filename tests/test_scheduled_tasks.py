@@ -12259,6 +12259,7 @@ def test_hfr_164_hfr_165_service_restart_joins_only_its_harness_lane_generations
             RuntimeWorkLane.VAULT_CALLBACKS,
             RuntimeWorkLane.FAILURE_NOTICES,
             RuntimeWorkLane.STALE_RUNS,
+            RuntimeWorkLane.DELEGATION_SAFETY_NET,
         }
         expected_controller_lanes = {
             RuntimeWorkLane.SESSION_DELIVERIES,

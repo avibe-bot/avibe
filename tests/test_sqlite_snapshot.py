@@ -123,7 +123,7 @@ def test_busy_wal_reader_uses_online_backup_instead_of_omitting_the_tail(tmp_pat
         assert _value(snapshot / "vibe.sqlite") == "new WAL commit"
 
 
-def test_clone_is_verified_before_publication(tmp_path, monkeypatch):
+def test_unreadable_clone_header_is_rejected_before_publication(tmp_path, monkeypatch):
     db = tmp_path / "vibe.sqlite"
     _database(db)
     previous = backups.create_sqlite_migration_backup(db)
@@ -135,7 +135,72 @@ def test_clone_is_verified_before_publication(tmp_path, monkeypatch):
     assert _value(previous / "vibe.sqlite") == "committed"
 
 
-def test_native_clone_is_an_independent_verified_restorable_database(tmp_path):
+@pytest.mark.parametrize("cloned", [True, False], ids=["clone", "online-backup"])
+def test_creation_scans_only_online_copies_and_records_the_distinction(tmp_path, monkeypatch, cloned):
+    # Counting actual PRAGMAs catches both an accidental clone scan and silently
+    # dropping verification from the non-COW fallback; content tests cannot.
+    db = tmp_path / "vibe.sqlite"
+    _database(db)
+    monkeypatch.setattr(backups.sys, "platform", "darwin")
+
+    def clone(source, destination):
+        if not cloned:
+            raise OSError(errno.ENOTSUP, "no COW")
+        shutil.copyfile(source, destination)
+
+    monkeypatch.setattr(backups, "_clone_file", clone)
+    checks = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(lambda sql: checks.append(sql) if "quick_check" in sql.lower() else None)
+        return conn
+
+    monkeypatch.setattr(backups.sqlite3, "connect", traced_connect)
+    snapshot = backups.create_sqlite_migration_backup(db)
+    assert checks == ([] if cloned else ["PRAGMA quick_check"])
+    manifest = json.loads((snapshot / "manifest.json").read_text())
+    assert manifest["copy_method"] == ("filesystem_clone" if cloned else "sqlite_online_backup")
+    assert manifest["verification"]["status"] == ("deferred" if cloned else "passed")
+    assert manifest["verification"]["stage"] == "creation"
+    assert ("checked_at" in manifest["verification"]) is not cloned
+    assert _value(snapshot / "vibe.sqlite") == "committed"
+
+
+def test_corrupt_data_page_in_clone_is_deferred_then_refused_on_restore(tmp_path, monkeypatch):
+    # The schema/header are readable, so this is an actual full-page check at
+    # restore, not an incidental failure opening a non-SQLite file at creation.
+    db = tmp_path / "vibe.sqlite"
+    _database(db)
+    with closing(sqlite3.connect(db)) as conn:
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='records'").fetchone()[0]
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+
+    def damaged_clone(source, destination):
+        shutil.copyfile(source, destination)
+        with destination.open("r+b") as stream:
+            stream.seek((page - 1) * page_size)
+            stream.write(b"\x00")
+
+    monkeypatch.setattr(backups.sys, "platform", "darwin")
+    monkeypatch.setattr(backups, "_clone_file", damaged_clone)
+    snapshot = backups.create_sqlite_migration_backup(db)
+    manifest_path = snapshot / "manifest.json"
+    assert json.loads(manifest_path.read_text())["verification"]["status"] == "deferred"
+    before = db.read_bytes()
+    with pytest.raises(sqlite3.DatabaseError, match="Refusing SQLite rollback point"):
+        backups.restore_sqlite_backup(snapshot, db)
+    assert db.read_bytes() == before
+    assert not (snapshot / backups.REPLACED_DATABASE_NAME).exists()
+    verification = json.loads(manifest_path.read_text())["verification"]
+    assert verification["status"] == "failed"
+    assert verification["stage"] == "restore"
+    assert verification["method"] == "quick_check"
+    assert verification["error"]
+
+
+def test_native_clone_is_an_independent_restorable_database(tmp_path):
     db = tmp_path / "vibe.sqlite"
     _database(db, wal_tail=True)
     # Probe the actual filesystem, not only the OS; CI's Linux tempfs/ext4 may
@@ -159,3 +224,6 @@ def test_native_clone_is_an_independent_verified_restorable_database(tmp_path):
     backups.restore_sqlite_backup(snapshot, db)
     assert _value(db) == "committed"
     assert _value(snapshot / backups.REPLACED_DATABASE_NAME) == "new generation"
+    verification = json.loads((snapshot / "manifest.json").read_text())["verification"]
+    assert verification["status"] == "passed"
+    assert verification["stage"] == "restore"

@@ -147,7 +147,7 @@ def _read_manifest(path: Path) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _directory_candidate(path: Path) -> _BackupCandidate | None:
+def _directory_candidate(path: Path, *, require_database: bool = True) -> _BackupCandidate | None:
     if path.is_symlink() or not path.is_dir():
         return None
 
@@ -179,7 +179,7 @@ def _directory_candidate(path: Path) -> _BackupCandidate | None:
             and manifest.get("database") == "vibe.sqlite"
         ):
             return None
-        if not (path / "vibe.sqlite").is_file() or (path / "vibe.sqlite").is_symlink():
+        if (require_database and not (path / "vibe.sqlite").is_file()) or (path / "vibe.sqlite").is_symlink():
             return None
         kind = "sqlite"
 
@@ -614,7 +614,8 @@ def _create_sqlite_migration_backup_locked(
     of their own pruning.
 
     The copy is unconditional, and the window promises exactly one thing: a
-    restorable copy of the database as it stands at this call. Nothing here
+    durable copy of the database as it stands at this call (a filesystem clone's
+    physical verification is deferred until restore). Nothing here
     tries to recognize a copy it already holds and reuse it. Earlier revisions
     of this change did, by ranking the copies on wall-clock adjacency, then on
     the schema transition each attempt recorded, then on a fingerprint of each
@@ -669,14 +670,23 @@ def _create_sqlite_migration_backup_locked(
             copy_seconds = time.monotonic() - copy_started
             check_started = time.monotonic()
             destination.execute("PRAGMA journal_mode = DELETE")
-            check = destination.execute("PRAGMA quick_check").fetchone()
-            if check != ("ok",):
-                raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
+            # The exclusively locked, checkpointed COW clone preserves the source
+            # bytes. Scan it only if it is actually restored; the online backup
+            # path still verifies its newly assembled copy before publication.
+            verification = {"stage": "creation", "status": "deferred"}
+            if not cloned:
+                check = destination.execute("PRAGMA quick_check").fetchone()
+                if check != ("ok",):
+                    raise sqlite3.DatabaseError(f"SQLite backup quick_check failed: {check!r}")
+                verification = {
+                    "stage": "creation", "status": "passed", "method": "quick_check",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
             from_revisions = _stamped_revisions(destination)
         logger.info(
-            "SQLite rollback copy: method=%s copy_seconds=%.3f verification_seconds=%.3f",
+            "SQLite rollback copy: method=%s copy_seconds=%.3f verification=%s verification_seconds=%.3f",
             "filesystem clone" if cloned else "SQLite online backup",
-            copy_seconds, time.monotonic() - check_started,
+            copy_seconds, verification["status"], time.monotonic() - check_started,
         )
         os.chmod(temp_db, 0o600)
         _fsync_file(temp_db)
@@ -696,6 +706,8 @@ def _create_sqlite_migration_backup_locked(
             # pruned, and never offered as a rollback point. An older reader
             # ignores this field and prunes the window exactly as it does today.
             "backup_sequence": next_backup_sequence(target_root),
+            "copy_method": "filesystem_clone" if cloned else "sqlite_online_backup",
+            "verification": verification,
         }
         manifest_path = backup_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -837,11 +849,10 @@ def begin_sqlite_backup_migration(db_path: Path, backup_dir: Path) -> str | None
 
 
 def _validate_migrated_database(db_path: Path, revisions: Iterable[str]) -> None:
-    with sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True) as connection:
+    """Check the lifecycle's exact target, not physical pages or migration semantics."""
+    with closing(sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)) as connection:
         if _stamped_revisions(connection) != _normalized_position(revisions):
             raise sqlite3.DatabaseError("Migration did not reach its recorded target revisions")
-        if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
-            raise sqlite3.DatabaseError("Migrated SQLite database failed quick_check")
 
 
 def complete_sqlite_backup_migration(
@@ -867,6 +878,11 @@ def begin_sqlite_backup_validation(db_path: Path) -> str | None:
         record = _lifecycle_record(target)
         if record is None or record.get("phase") not in {"migrated", "validating", "validated"}:
             return None
+        # A later no-copy upgrade owns no backup attempt. This also prevents a
+        # subsequent startup from adopting that upgrade's older receipt.
+        with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as connection:
+            if _stamped_revisions(connection) != _normalized_position(record["to_revisions"]):
+                return None
         _advance_backup_lifecycle(target, record, phase="validating")
         return record["attempt_id"]
 
@@ -943,8 +959,20 @@ def expire_sqlite_migration_backups(
             if record is None or record.get("phase") != "ready":
                 return {"status": "unconfirmed", "removed": []}
             with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as connection:
-                if _stamped_revisions(connection) != _normalized_position(record["to_revisions"]):
-                    return {"status": "unconfirmed", "removed": []}
+                connection.execute("BEGIN")
+                current = _stamped_revisions(connection)
+                if current != _normalized_position(record["to_revisions"]):
+                    from storage.compatibility import CompatibilityEpochError, read_compatibility_epoch
+                    from storage.migrations import is_proven_additive_successor
+
+                    try:
+                        additive = is_proven_additive_successor(
+                            set(record["to_revisions"]), set(current), read_compatibility_epoch(connection)
+                        )
+                    except CompatibilityEpochError:
+                        additive = False
+                    if not additive:
+                        return {"status": "unconfirmed", "removed": []}
             for candidate in _managed_candidates(root):
                 if cancel_event is not None and cancel_event.is_set():
                     return {"status": "cancelled", "removed": removed}
@@ -1197,6 +1225,62 @@ def _swap_live_database(db_path: Path, replacement: Path, *, into: Path) -> Path
     return replaced
 
 
+def _record_restore_verification(backup_dir: Path, *, status: str, error: str | None = None) -> None:
+    """Record physical verification on the existing backup receipt, not expiry authority.
+
+    The lifecycle's validated/ready phases describe the upgraded application's
+    state, not this copy's page integrity. Restoring already revoked those phases;
+    even a successful quick_check must never re-enable their old expiry clock.
+    """
+    manifest_path = backup_dir / "manifest.json"
+    manifest = _read_manifest(manifest_path)
+    if manifest is None:
+        raise OSError(f"Cannot record rollback verification: unreadable receipt {manifest_path}")
+    previous = manifest.get("verification")
+    if status == "incomplete" and isinstance(previous, dict) and previous.get("status") in {"passed", "failed"}:
+        # A staging/access fault learned nothing about the copy. Preserve the
+        # last actual check, especially known corruption, until a new check ends.
+        return
+    manifest["verification"] = {
+        "stage": "restore", "method": "quick_check", "status": status,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        **({"error": error} if error is not None else {}),
+    }
+    _write_backup_metadata(manifest_path, manifest)
+
+
+def _restore_refusal(backup_dir: Path, error: Exception, *, retry_same: bool = False) -> str:
+    """Suggest an older copy only for a bad/missing source, never a target I/O fault."""
+    message = f"Refusing SQLite rollback point {backup_dir}: restore could not complete ({error}). Live database was not swapped. "
+    if retry_same:
+        return message + (
+            "Resolve the storage/access error and retry this same backup; this failure does not prove it corrupt. "
+            "No older backup was restored."
+        )
+    # A missing source can itself be the restore failure. Its receipt still
+    # orders the request; suggested candidates must retain their actual files.
+    current = _directory_candidate(backup_dir, require_database=False)
+    older = []
+    if current is not None and current.kind == "sqlite" and not backup_dir.parent.is_symlink():
+        for candidate in _managed_candidates(backup_dir.parent):
+            if candidate.kind != "sqlite" or not candidate.root.is_dir() or candidate.written_order >= current.written_order:
+                continue
+            manifest = _read_manifest(candidate.root / "manifest.json") or {}
+            verification = manifest.get("verification")
+            if isinstance(verification, dict) and verification.get("status") == "failed":
+                continue
+            older.append(candidate)
+    if older:
+        candidate = max(older, key=lambda item: item.written_order)
+        message += (
+            f"Next older managed candidate: {candidate.root}. Its integrity and binary compatibility are not proven; "
+            "stop all writers and validate it explicitly before restoring. An older restore discards newer writes. "
+        )
+    else:
+        message += "No older eligible managed backup was found; retain the live database and backups for manual recovery. "
+    return message + "No older backup was restored."
+
+
 def restore_sqlite_backup(backup_dir: Path, db_path: Path) -> Path | None:
     target = db_path.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1238,21 +1322,50 @@ def _restore_sqlite_backup_locked(backup_dir: Path, db_path: Path) -> Path | Non
 
     for stale in staged_paths:
         stale.unlink(missing_ok=True)
+    check_passed = False
     try:
-        with sqlite3.connect(f"{source_db.as_uri()}?mode=ro", uri=True) as source:
-            with sqlite3.connect(staged) as destination:
+        with closing(sqlite3.connect(f"{source_db.as_uri()}?mode=ro", uri=True)) as source:
+            with closing(sqlite3.connect(staged)) as destination:
                 source.backup(destination)
                 destination.execute("PRAGMA journal_mode = DELETE")
                 check = destination.execute("PRAGMA quick_check").fetchone()
                 if check != ("ok",):
                     raise sqlite3.DatabaseError(f"SQLite rollback point quick_check failed: {check!r}")
+                check_passed = True
         os.chmod(staged, 0o600)
         _fsync_file(staged)
+    except (sqlite3.Error, OSError) as error:
+        for stale in staged_paths:
+            stale.unlink(missing_ok=True)
+        # SQLITE_CORRUPT/NOTADB and our non-ok check result use DatabaseError;
+        # OperationalError (FULL, BUSY, CANTOPEN, IOERR) and target fsync/chmod
+        # failures are not evidence against this backup. Do not hide a healthy
+        # recent copy from later suggestions because staging ran out of space.
+        corrupt = type(error) is sqlite3.DatabaseError
+        status = "passed" if check_passed else ("failed" if corrupt else "incomplete")
+        message = _restore_refusal(source_db.parent, error, retry_same=not corrupt and source_db.is_file())
+        try:
+            _record_restore_verification(source_db.parent, status=status, error=None if check_passed else str(error))
+        except OSError as receipt_error:
+            # The candidate is still refused if disk/receipt failure prevents
+            # recording it; never hide the original failure or recovery hint.
+            message += f" Could not record this verification result: {receipt_error}."
+        if isinstance(error, OSError):
+            raise OSError(message) from error
+        raise sqlite3.DatabaseError(message) from error
     except Exception:
         for stale in staged_paths:
             stale.unlink(missing_ok=True)
         raise
 
+    # Persist the result before the swap. If publishing it fails, do not use the
+    # candidate, and do not let an earlier verification stand in for this attempt.
+    try:
+        _record_restore_verification(source_db.parent, status="passed")
+    except Exception:
+        for stale in staged_paths:
+            stale.unlink(missing_ok=True)
+        raise
     replaced = _swap_live_database(target, staged, into=source_db.parent)
     # Only the live directory, because the swap already synced the rollback point
     # it displaced into -- it has to, in the middle of its own sequence rather

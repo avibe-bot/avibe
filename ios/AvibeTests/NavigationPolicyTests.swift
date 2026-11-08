@@ -891,10 +891,18 @@ final class NavigationPolicyTests: XCTestCase {
 
         // The document locks its outer scroll as the Workbench AppShell does.
         try await waitForTitle("Workbench", in: webView)
+        // WebKit applies the cover declaration across separate updates: the
+        // inset behavior, the initial containing block, the env() value, and
+        // the fixed-position layout viewport. Wait for all of them together;
+        // a layout viewport that never reaches the bottom still fails here.
         try await waitUntil {
             let padding = await self.paddingBottom(of: "#tab-bar", in: webView)
+            let tabBarBottom = try? await webView.evaluateJavaScript(
+                "document.querySelector('#tab-bar').getBoundingClientRect().bottom"
+            ) as? Double
             return abs((padding ?? -1) - homeIndicatorInset) < 0.5
                 && webView.scrollView.adjustedContentInset.bottom == 0
+                && abs((tabBarBottom ?? -1) - Double(webView.bounds.height)) < 0.5
         }
         XCTAssertEqual(webView.scrollView.contentInsetAdjustmentBehavior, .never)
         let lockedResult = try await webView.evaluateJavaScript(

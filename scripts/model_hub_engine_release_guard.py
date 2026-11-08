@@ -12,11 +12,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from runpy import run_path
+
+download_to_path = run_path(str(Path(__file__).with_name("release_asset_download.py")))["download_to_path"]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "vibe" / "model_hub_runtime" / "cliproxyapi_manifest.json"
@@ -325,34 +327,19 @@ def publish_draft_release(
     return spec
 
 
-def _download(url: str, destination: Path, *, max_bytes: int, attempts: int = 3) -> None:
+def _download(url: str, destination: Path, *, max_bytes: int) -> None:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "avibe-model-hub-engine-release-guard/1"},
     )
-    for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as output:
-                downloaded = 0
-                while chunk := response.read(1024 * 1024):
-                    downloaded += len(chunk)
-                    if downloaded > max_bytes:
-                        raise ReleaseGuardError(f"release asset exceeds its size limit: {url}")
-                    output.write(chunk)
-            return
-        except ReleaseGuardError:
-            destination.unlink(missing_ok=True)
-            raise
-        except urllib.error.HTTPError as exc:
-            destination.unlink(missing_ok=True)
-            retryable = exc.code == 429 or 500 <= exc.code < 600
-            if not retryable or attempt == attempts:
-                raise ReleaseGuardError(f"release asset download failed ({exc.code}): {url}") from exc
-        except (OSError, urllib.error.URLError) as exc:
-            destination.unlink(missing_ok=True)
-            if attempt == attempts:
-                raise ReleaseGuardError(f"release asset download failed: {url}: {exc}") from exc
-        time.sleep(float(attempt))
+    try:
+        download_to_path(request, destination, max_bytes=max_bytes)
+    except ValueError as exc:
+        raise ReleaseGuardError(f"release asset exceeds its size limit: {url}") from exc
+    except urllib.error.HTTPError as exc:
+        raise ReleaseGuardError(f"release asset download failed ({exc.code}): {url}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise ReleaseGuardError(f"release asset download failed: {url}: {exc}") from exc
 
 
 def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:

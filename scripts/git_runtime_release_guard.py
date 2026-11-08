@@ -11,11 +11,13 @@ import shutil
 import sys
 import tarfile
 import tempfile
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from runpy import run_path
+
+download_to_path = run_path(str(Path(__file__).with_name("release_asset_download.py")))["download_to_path"]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "vibe" / "git_runtime_manifest.json"
@@ -194,21 +196,14 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
     return spec
 
 
-def _download_to_path(url: str, destination: Path, *, attempts: int = 3, timeout: float = 60.0) -> None:
+def _download_to_path(url: str, destination: Path) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "avibe-git-runtime-release-guard/1"})
-    for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response, destination.open("wb") as output:
-                shutil.copyfileobj(response, output)
-            return
-        except urllib.error.HTTPError as exc:
-            retryable = exc.code == 429 or 500 <= exc.code < 600
-            if not retryable or attempt == attempts:
-                raise ReleaseGuardError(f"release asset download failed ({exc.code}): {url}") from exc
-        except (OSError, urllib.error.URLError) as exc:
-            if attempt == attempts:
-                raise ReleaseGuardError(f"release asset download failed: {url}: {exc}") from exc
-        time.sleep(float(attempt))
+    try:
+        download_to_path(request, destination)
+    except urllib.error.HTTPError as exc:
+        raise ReleaseGuardError(f"release asset download failed ({exc.code}): {url}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise ReleaseGuardError(f"release asset download failed: {url}: {exc}") from exc
 
 
 def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:

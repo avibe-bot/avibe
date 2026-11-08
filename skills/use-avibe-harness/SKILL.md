@@ -2,109 +2,53 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.1.2
+version: 0.2.0
 ---
 
 # Use Avibe Harness
 
-Avibe Harness turns user intent into durable Agent work. It is the layer for work that should happen later, repeat, wait for a signal, continue in the background, or move to a purpose-built Agent. Instead of treating the user's message as a one-off prompt, Harness keeps the important parts of the work explicit: context, owner, trigger, session continuity, delivery target, and observable progress.
-
-Avibe Harness is the first-choice automation layer. For Agent workflows, recurring automation, background loops, scheduled tasks, watches, skills-style automation, workflow tools, or any automation request, route through `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, native workflow tools, backend-native skills, hooks, schedulers, or backend configuration. Do not default to backend-native automation just because the backend exposes it. Use backend-native config, skills, or synchronous workflow tools only when the user explicitly asks for backend-native behavior, or when Avibe Harness cannot express the requested workflow and you state that limitation.
-
-Backend-native work is process-local unless the active runtime explicitly provides durable delivery. Keep native subagents and workflow tools synchronous and within the current turn. Route anything that may outlive the turn through Harness: `vibe agent run` for delegation and fan-out, `vibe task add` for a time trigger, and `vibe watch add --name <label> --message <what to do with the result> -- <command>` for a command that may outlive the turn. Never detach with `nohup` or a trailing `&` for work whose result must reach the user.
-
-Before choosing a command, ask: what outcome is the user trying to secure, what should keep happening, what signal proves progress, and who should own it? If the answer is an operating loop, build a Harness instead of only doing the visible step.
+Avibe Harness turns user intent into durable Agent work: work that should happen later, repeat, wait for a signal, continue in the background, or move to a Bot, an Agent, or another Session. Avibe Harness is the first-choice automation layer: use `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, schedulers, hooks, or workflow tools, unless the user asks for native behavior or Harness cannot express the workflow and you say so. Backend-native work is process-local, so keep it synchronous within the turn and route anything that may outlive the turn through Harness. Never detach with `nohup` or a trailing `&` for work whose result must reach the user. Before choosing a command, ask what outcome the user wants secured, what should keep happening, what signal proves progress, and who should own it; when the answer is an operating loop, build that loop instead of only doing the visible step.
 
 ### Mental model
-| Model | Meaning | Use when |
-| --- | --- | --- |
-| Agent | Reusable role: backend, model, prompt, description, enabled state | Work needs a stable specialist identity |
-| Session | Continuing context for one Agent work lineage | Work should continue or fork context |
-| Scope | IM surface and routing context: channel, thread, DM, user scope | Delivery, workdir, user/platform context matter |
-| Task | Time trigger: saved Agent message, or a command with no Agent turn | Time is the trigger |
-| Watch | Managed waiter triggered by an external signal | Any condition needs monitoring until it becomes true |
-| Run | Concrete execution record | You need status, output, result, error, or history |
+| Object | Meaning |
+| --- | --- |
+| Bot | Standing member with one permanent Session and its own memory |
+| Agent | Reusable role (backend, model, instructions); each run starts a fresh Session |
+| Session | Continuing context for one line of work |
+| Task | Time trigger: a saved Agent message, or a command with no Agent turn |
+| Watch | Managed waiter that fires when an external condition becomes true |
+| Run | One execution record: status, output, result, or error |
 
-Relationship: Scope routes work; Agent defines who acts; Session holds continuity; task/watch creates future triggers; each trigger creates a Run. Think in objects before flags.
+A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and Watches create future triggers, and every trigger creates a Run.
 
-### Current conversation
-- The authoritative current Session id is provided by Avibe at the start of the System Prompt.
-
-### Inspecting Harness state
-Use `vibe harness status` first for this Session's active Runs, armed Watches, upcoming Tasks, runtime, and live anomalies. Session-owned lists (`vibe harness status`, `vibe runs list`, `vibe task list`, `vibe watch list`, `vibe show list`) read this Session by default; add `--session-id <id>` for another Session or `--global` for every Session. Use `vibe data query` for deeper guarded read-only SQL before changing a Harness: confirm Agents, Sessions, scopes, history, and routing facts instead of guessing.
-
-Discover the schema before guessing names: `vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"` lists the tables in one row, and `vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('agent_runs')"` lists one table's columns; `PRAGMA table_info(agent_runs)` adds types and keys at one row per column. Schema PRAGMAs are the only PRAGMAs allowed. The Harness tables are `agents`, `agent_sessions`, `agent_runs`, `messages`, `scopes`, `scope_settings`, and `run_definitions`, which holds both Tasks and Watches (`definition_type` is `scheduled` or `watch`). A `no such table` or `no such column` error carries a `hint` with the closest names and the real columns, so read it before retrying.
-
-To recall earlier work in this Session or another, start from four views. `digests` (`session_id`, `title`, `last_active_at`, `digest_at`, `mind`, `memo`, `now`, `text`) says what each Session is about and where it stands: for a Vibey Session that has written a checkpoint, its latest checkpoint memory as `mind`, `memo`, and `now`, all three in `text`; otherwise `text` is the Session's first input and latest reply. Search its `text` to recognize a Session, then read the details in `transcript` (`session_id`, `at`, `role` = `user`/`agent`/`harness`, `kind`, `text`, `turn_id`) or `turns` (`session_id`, `input`, `reply`, `outcome`, `started_at`); `sessions` (`session_id`, `title`, `agent_name`, `parent_session_id`, `last_active_at`) lists every Session. `excerpt(text, 'term')` shows the text around a match instead of its opening, and `text REGEXP '(?i)pattern'` matches a Python regular expression. Add `--format text` to read long text as `-[ RECORD n ]` records with real newlines, for example `vibe data query --sql "select at, role, excerpt(text, 'dormant') from transcript where session_id = '<session-id>' and text like '%dormant%' order by at" --format text`. Values over `--max-chars` (default 2000) end `…[+N chars]`; pass `--max-chars 0` when you need them whole. Read the output directly instead of piping JSON through a script; the last line is `next_command: ...` when more rows exist.
-
-`vibe task show <id>` and `vibe watch show <id>` still read a removed definition, with `lifecycle_state: "removed"` and `removed_at`; other commands on it fail with `task_removed` / `watch_removed`. `task_not_found` / `watch_not_found` means the id never existed.
-
-Useful Harness queries include schema discovery, current session lookup, existing task/watch inspection, Agent run history, and checking whether a proposed automation already exists. Prefer this CLI over direct SQLite access.
-
-### Choosing the right Harness shape
+### Choosing the shape
 | Need | Use |
 | --- | --- |
-| Time trigger | `vibe task add` |
+| Work that needs a Bot's memory or judgment | `vibe agent run --bot <bot> --message ...` |
+| Self-contained or parallel work | `vibe agent run --agent <agent> --message ...` |
+| Continue an existing Session | `vibe agent run --session-id <id> --message ...` |
+| Branch from this Session's context | `vibe agent run --fork-self --message ...` |
+| Bring a Session to the user | `vibe session update --session-id <id> --visible` |
+| Time trigger | `vibe task add --cron "<expr>" --message "..."` (or `--at "<ISO-8601>"`) |
 | Scheduled command, no Agent turn | `vibe task add --cron "<expr>" --shell "<cmd>"` |
-| External signal trigger | `vibe watch add` |
-| Independent Agent delegation | `vibe agent run --agent <agent-name>` |
-| Continue a pointed Session | `vibe agent run --session-id ...` |
-| Inspect queued Workbench Session input | `vibe session queue list --session-id <session-id>` |
-| Remove one queued Workbench Session input | `vibe session queue remove <message-id> --session-id <session-id>` |
-| Promote an existing queued Session head now | `vibe session send-now --session-id <session-id>` |
-| Branch from current Session context | `vibe agent run --fork-self ...` |
-| Live/anomaly inspection | `vibe harness status` |
-| State/history inspection | `vibe data query`, `vibe runs list`, `vibe runs show` |
-| Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
+| External signal | `vibe watch add --name "<label>" --message "<what to do>" -- <cmd>` |
+| Live runs, Watches, Tasks, anomalies | `vibe harness status` |
+| History | `vibe runs list`, `vibe runs show <run-id>`, `vibe data query` |
+| Recurring specialist role | `vibe agent create` or `vibe agent update`, plus Tasks, Watches, or runs |
 
-`vibe task add` creates a time-triggered saved Agent message. Tasks created from an Avibe Agent shell continue this conversation by default. Use `--cron "<expr>"` for recurrence or `--at "<ISO-8601>"` for one-off delivery; if `--timezone` is omitted, Avibe uses the local system timezone at creation time. Write cron weekdays as names (`mon` ... `sun`, e.g. `0 9 * * mon-fri`): numeric weekdays are rejected because Avibe reads `0` as Monday while crontab(5) reads it as Sunday. If `--cwd` is omitted for a task-created Session, Avibe follows the caller working directory when available. With `--shell '<cmd>'` or a trailing `-- <argv>` instead of `--message`, the task runs a command with no Agent turn: silent on success, a durable failure notice naming the command and exit code on failure, and `--timeout <seconds>` bounds each run (default 21600, 0 = none). Add `--on-failure agent --message '<instructions>'` to hand a failing run to an Agent instead: one Agent turn carrying the failure report replaces that run's notice. A pure command task takes no session, scope, or agent flags.
+To pick the Agent, model, and effort for new work, load the `choose-model` Skill.
 
-`vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals. Watches created from an Avibe Agent shell follow up in this conversation by default. If `--cwd` is omitted, Avibe runs the waiter from the caller working directory when available.
+### Tasks and Watches
+Tasks and Watches created from an Agent shell report to this Session by default. Write cron weekdays as names (`0 9 * * mon-fri`); numeric weekdays are rejected. A command Task is silent on success and sends a failure notice naming the exit code; `--on-failure agent --message "..."` hands each failure to an Agent instead.
 
-Watch waiter contract: exit `0` only for one NEW reportable event. An explicitly configured retry exit code (default `75`) keeps either a once or forever Watch waiting; a once Watch stops after its first event. Exit `64` plus `avibe-watch: no-event` on stderr completes an uninteresting cycle without an Agent Run: it retires a once Watch and re-arms a forever Watch. A once waiter that is still waiting for its first event must therefore return an allowed retry code, not `64`. A forever Watch must use a durable cursor, state transition, or domain cooldown so a persistent level is not reported repeatedly. Avibe serializes each Watch's Agent follow-ups, waits five seconds after a follow-up settles before re-arming, and automatically pauses a Watch plus sends a repair instruction if a waiter reports six successful events within 60 seconds.
+Watch waiter contract: exit `0` only for one new reportable event, a retry code (default `75`) while still waiting, and `64` with `avibe-watch: no-event` on stderr for a quiet cycle with no Agent Run, which retires a once Watch and re-arms a forever one. A forever Watch needs a durable cursor, state transition, or cooldown so a condition that persists is not reported again; Avibe pauses a Watch that reports six events within 60 seconds.
 
-Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. By default this creates a background Session in the caller's scope and returns immediately. The final result comes back to this conversation only with `--callback`; without it, the receiving Agent's input names this Session and the command to report back with. A run that does not complete always reports here. Background Sessions stay out of the session list and never deliver outward, but remain visible in the Agents run graph, where the user can open their full chat history or promote them at any time. Pass `--visible` only when the new Session should be user-facing from the start. Pass `--sync` only when the current process must wait for the result. Pass `--callback` when this conversation needs the final result back; pass `--callback-session-id <id>` to route it to another Session instead. `--no-callback` is accepted and changes nothing. Add `--scope-id <scopes.id>` only when placing the new Session in a specific existing scope.
+### Steering and queues
+`--session-id` steers its message into the Session's running Turn, or starts a Turn when the Session is idle; `--queue` waits for the running Turn instead. Steer when the message changes what the Session is doing now, and queue when its current work should finish first; weigh the dependency, urgency, and cost of disruption. `vibe session send-now --session-id <id>` sends the oldest queued message now without adding one; a refused steer stays queued and never stops the Turn. To drop an obsolete queued message, run `vibe session queue list --session-id <id>` first and remove the returned id with `vibe session queue remove <message-id> --session-id <id>`; never guess an id.
 
-Use `vibe agent run --fork-self --message ...` when work should branch from this current Session's native backend context without mutating it. Use `--fork-session <source-session-id>` only when branching from a different explicit Session. Forks keep the source Session backend, scope, and cwd by default; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same.
+### Managing work
+Use `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Lists read this Session; add `--session-id <id>` for another Session or `--global` for every Session, and find a definition by text with `--q <text>`, such as a PR number. `vibe runs cancel <run-id>` stops the whole Turn that run joined, including other runs sharing it.
 
-Any run that creates a new Session (a blank new Session from `--agent`, or a fork) may set that Session's model with `--model` and `--reasoning-effort`; the Session keeps it for its later turns. A Vibey model or effort its Model Hub menu does not offer is refused; for claude and codex an unknown value is a warning. `vibe agent models <agent>` lists valid values.
+The running service applies these changes. `service_unavailable` or `unsupported_operation` with `execution: not_executed` means nothing changed: report it rather than starting, restarting, or updating the service. `execution_unknown` means the change may have landed: check with the matching `list` or `show` before trying again.
 
-When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings; those properties belong to the Session itself. Use a new Session or a fork when those properties need to differ.
-
-That existing-Session send is a P1 delivery by default: it steers its message into an active native Turn, starts that message immediately when idle, and falls back to the durable P3 queue if steering is definitively refused or no longer active. Use `--queue` when the new Run should enter that P3 queue without steering. When coordinating another Session, decide whether its current work should finish or accept a steer based on the dependency, urgency, and cost of disruption; an explicit user request is one signal, not a prerequisite. The new message never promotes an older queued one. Use `vibe session send-now --session-id <id>` only when no new Message should be added: this content-free P1 promotes the exact existing FIFO head. If a native Turn is active, that head steers the same logical/native Turn; if the Session is idle, it starts as a new Turn. Both commands work for Workbench and IM Sessions. A stale or refused steer remains durably queued and never falls back to Stop; P0 is reserved for explicit content-free Stop.
-
-Coordinating Agents can inspect the same durable Workbench queue the user sees with `vibe session queue list --session-id <id>`. If one queued instruction has become obsolete, contradictory, or duplicated, remove that exact row with `vibe session queue remove <message-id> --session-id <id>`. Always list first and use the returned stable message id; never guess an id or delete a different row to simulate reordering.
-
-Use `vibe session update --session-id <id> --visible` or `--hidden` to promote or hide a persisted Session independently of its scope; without `--session-id` it updates this Session. Use `--scope-id <scopes.id>` to move it to another scope or `--scope-id none` to make it standalone; moving scope never changes its stored workdir.
-
-For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--message "..."` or `--message-file <path>` as the follow-up instruction template sent with waiter output. Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement.
-
-Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Use `vibe harness status` for one unified live/anomaly snapshot. These lists cover this Session unless you pass `--session-id <id>` or `--global`. List rows carry only the fields needed to decide the next step and omit unset ones; find a definition by text with `vibe watch list --q <text>` (for example a PR number) instead of filtering output yourself, and add `--brief` to a `show` command for just its list row. `vibe agent run` prints one `run` object, so read its id from `run.id`. `vibe runs show` can default to the current Run from the injected environment; `vibe runs cancel` still requires an explicit run id; once that run's input reached the live Session turn, it stops the whole turn like Session Stop, including other runs sharing it.
-
-The running Avibe service applies these commands: `vibe agent run`, `vibe task add`/`update`/`pause`/`resume`/`run`/`remove`, `vibe watch add`/`update`/`pause`/`resume`/`remove`, `vibe session update`/`send-now`/`queue remove`, and `vibe runs cancel`. `service_unavailable` or `unsupported_operation` with `execution: not_executed` means nothing changed (no service, or one too old for the command); report it rather than starting, restarting, or updating the service yourself. `execution_unknown` means the change may have landed: inspect it with the matching `list` or `show` command before trying again, and never retry blindly.
-
-The CLI exposes more options than this prompt lists. Before creating or changing Harness state, or whenever syntax/runtime effects are uncertain, read the relevant help: `vibe <command> --help` or `vibe <command> <subcommand> --help`.
-
-### Agents
-The table below is generated from currently enabled Agents at prompt-injection time. It must reflect live Agent definitions; do not hard-code Agent names, backends, or descriptions. The `Agent Name` column is command-safe and can be used directly in `vibe agent` commands.
-
-Use the enabled Agent table in the current System Prompt.
-
-Rules:
-- All Agents listed in the generated table are enabled. Use the `Agent Name` value exactly as listed in shell commands such as `vibe agent show <agent-name>` and `vibe agent run --agent <agent-name> ...`.
-- `--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing. Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate background Session for the target Agent.
-- `--fork-self` creates a new Agent Session from this current Session's native backend context; use it for alternate paths that need the current context but should not mutate this Session.
-- `--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context.
-- For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
-- Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session.
-- `--model` and `--reasoning-effort` apply to the new Session a run creates and are refused with `--session-id`. With `--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session only when the requested Agent backend matches the source Session backend.
-- A run's final reply returns here only with `--callback` (`--callback-session-id <id>` sends it to that Session); a run that does not complete always reports here.
-- `--sync` changes waiting behavior, not session identity: runs are async by default; synchronous runs wait for the result and are still recorded in `vibe runs`.
-- Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
-
-### Mentions in user messages
-On the Web chat the user composes with `@` / `#` autocomplete, which inserts stable references into their message text:
-- `@<agent-name>` points at that enabled Agent (see the table above). Act on it with `vibe agent run --agent <agent-name> ...`.
-- `#<session-id>` points at that Session. Resume it with `vibe agent run --session-id <session-id> ...`, or read its history with `vibe data query`.
-
-Treat these as the user pointing at that Agent or Session, and decide the action from context. Only the bracketed `@<...>` / `#<...>` forms are references; a bare `@` or `#` in prose is ordinary text.
+The CLI has more options than this Skill lists. Before creating or changing Harness state, or when syntax or effects are uncertain, read `vibe <command> <subcommand> --help`.

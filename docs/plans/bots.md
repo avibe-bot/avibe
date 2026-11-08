@@ -117,7 +117,8 @@ own. A Session has none of these; a Bot has all three.
   - *A failure always reaches the sender.* When the target run ends failed,
     cancelled, or interrupted, the sending Session gets a notice
     (`[Harness: agent run <run> did not complete in @<bot:x>]`) with the
-    reason. A completed run sends nothing unless a callback was asked for.
+    reason. A completed Run sends no eager result callback unless one was asked
+    for; D14 separately covers a Session that later goes idle without reporting.
   - *Requests are traceable.* The receiver's input names the sender and the
     run (`[Harness: agent run <run> from @<bot:main>]`), so a later report can
     refer to it.
@@ -167,6 +168,13 @@ own. A Session has none of these; a Bot has all three.
   Without automatic callbacks, a message between Bots is always one a Bot chose
   to send.
 - CLI examples in the prompts get parser-backed contract tests.
+- **Handing out work is resident; the Harness Skill is not** (owner decision,
+  2026-11-08). Every Bot dispatches on most Turns, so a short Bot-only section
+  ("Handing out work" below) says whom to hand work to, what a brief must
+  say, how to choose the model, how to bring a Session to the front, and how
+  to follow up. The `use-avibe-harness` Skill (about 4k tokens) stays out of
+  the Bot prompt, and a Bot loads it only to set a Task or Watch. The section
+  says a dispatched Session reports back and never asks for `--callback`.
 
 ### D5. Web surfaces
 
@@ -324,9 +332,10 @@ the way an engineer maintains a project.
 
 - `~/.avibe/bots/<handle>/` is each Bot's working directory, its memory, and a
   Git repository with `.git` in place.
-- It starts with `git init` and nothing else: no template, no prescribed
-  layout. The Bot creates its `AGENTS.md` when it first has something worth
-  keeping.
+- It starts with `git init` and nothing else: no template, nothing
+  pre-created. The Bot creates its `AGENTS.md` when it first has something
+  worth keeping, and the folders of the recommended layout below as it needs
+  them.
 - Avibe commits automatically before each Turn (changes by others,
   attributed) and after it (the Bot's own changes, with the input's summary).
   The Bot is not taught to commit; it uses Git only to trace or undo. History
@@ -334,9 +343,11 @@ the way an engineer maintains a project.
 - Who the Bot is belongs to the user (the Agent definition); what it learns
   belongs to the Bot (the directory). The Bot cannot redefine itself by
   editing memory.
-- One writer at a time: the Bot's permanent Session while it runs; the memory
-  Bot only while that Bot has no running Turn. Forks only read it and report
-  what is worth keeping in their result.
+- Writers (owner decision, 2026-11-08, narrowing "one writer"): the Bot's
+  permanent Session writes its memory files; a Session it dispatches into a
+  matter's folder writes only inside that folder; the memory Bot writes only
+  while that Bot has no running Turn. Forks write nothing and report what is
+  worth keeping in their result.
 - Forks keep the Bot's working directory, so their system prompt and cached
   prefix match the source; a Project's instructions go into the fork's first
   input instead.
@@ -352,10 +363,39 @@ Layout:
 ~/.avibe/AGENTS.md                 the user's global rules (every Vibey Agent loads it)
 ~/.avibe/bots/AGENTS.md            shared memory: the user's portrait and context (written by the memory Bot, loaded by every Bot)
 ~/.avibe/bots/memory/              the memory Bot's directory: full portrait, evidence, progress
-~/.avibe/bots/<handle>/AGENTS.md   each Bot's own memory
+~/.avibe/bots/<handle>/AGENTS.md   each Bot's own memory: its index
+~/.avibe/bots/<handle>/matters/<YYYYMMDD-subject>/AGENTS.md   one file per matter (recommended)
+~/.avibe/bots/<handle>/projects/<name>.md                    the Bot's note on a Project (recommended)
 ```
 
-Each file has one author: the user, the memory Bot, or the Bot itself.
+Each file has one author: the user, the memory Bot, or the Bot itself. A
+matter's folder also holds the work of the Sessions dispatched into it.
+
+Recommended layout (owner decision, 2026-11-08, replacing "no prescribed
+layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
+
+- **Matters.** One folder per matter the Bot follows, Project or not, in
+  `matters/`, named by date and subject. Its `AGENTS.md` is the matter's file:
+  the goal, what the Bot agreed with the user, the Sessions on it and what each
+  owns, and where it stands. The Bot's `AGENTS.md` lists the open matters, one
+  line each.
+- **Where a matter is worked.** A matter with a Project is worked there; one
+  without is worked scope-less in its folder, which is how a Bot's dispatch
+  already behaves (it inherits the Bot's directory and no scope). A brief
+  matter gets no Project; a matter gets one only once it is really managed as
+  a project.
+- **Finished matters** keep their folders where they are, because their
+  Sessions recorded that directory; they are only dropped from the index.
+- **Project notes.** For each Project the Bot works in, a note in `projects/`:
+  what the Project is to the user, its standing Sessions and what each owns,
+  and how work is handed out there. It is not the Project's own `AGENTS.md`,
+  which is for the Sessions working there, loads into each of them, and may
+  sit in a shared repository; each Bot's view of a Project is its own. Matter
+  files link to the note, not the other way.
+- **The instruction loader is unchanged.** It loads every ancestor's
+  `AGENTS.md`, so a worker in a matter folder also loads the Bot's index (and
+  the shared layer); that is intended. The matter folder's own `AGENTS.md`, as
+  the worker's nearest file, keeps workers from writing into the Bot's index.
 
 ### D8. Shared layer and the user portrait
 
@@ -376,8 +416,25 @@ Each file has one author: the user, the memory Bot, or the Bot itself.
 ### D9. The main Bot
 
 - Its job is to talk with the user, decide with them, and hand work to the
-  Session that does it, then follow it through. It does not do the work
-  itself.
+  Sessions that do it, then follow it through. Apart from maintaining its
+  memory, it does nothing itself (owner decision, 2026-11-05).
+- The boundary (owner-approved wording, 2026-11-06): "Whatever the user brings
+  is a matter to run, brief or lasting. Answer from what you know and
+  remember; anything that takes finding out or getting done goes to a Session,
+  in a Project that fits how long the matter will last." The prompt lists no
+  concrete actions: Avibe users are personal-agent users, not only
+  programmers.
+- The strictness is the main Bot's, in its own section. Whether custom Bots
+  should be as strict is not settled; they get the identity, memory, and
+  handing-out sections, and their definition decides how they work.
+- Lead Sessions (owner decision, 2026-11-08): each lasting Project gets a
+  lead Session that coordinates its work, named in the main Bot's note on the
+  Project, and handed over to a fresh one when its context grows long. A
+  Project's lead is usually a Project Session, not a Bot: Bots are scarce
+  (D12). When an area needs a standing relationship with the user (they talk
+  to it often, it outlives single pieces of work or spans Projects, it needs a
+  memory of its own), the main Bot suggests a Bot for it, and the user
+  decides.
 - Its memory holds what the user entrusts to it: what they ask it to
   remember, the matters it follows, and the Sessions handling them. Live state
   is queried, not copied.
@@ -498,6 +555,60 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   writes it any more, and no migration removes it. `PATCH /api/bots/{handle}`
   and `vibe bot update` no longer take a position.
 
+### D14. Idle-delegate safety net (phase 2, owner decision 2026-11-08)
+
+- An accepted A→B Harness message opens a delegation unless A is answering B.
+  Any Agent-authored return, including progress, closes the reverse pair without
+  opening another delegation. Once B answers A, B's progress, final, and follow-up
+  messages stay answers until A sends again (orchestrator clarification,
+  2026-11-08); a previously notified pair is still answerable. Avibe never
+  attributes replies to turns. A later request from A re-arms A→B.
+  Trade-off: a genuine new request from B after answering A has no reverse
+  safety-net reminder; its message still reaches A normally. A's answer to that
+  question is indistinguishable from a new A→B request and re-arms the pair, so
+  A can receive a notice if B then stays quiet. Avoiding that would require the
+  reply attribution this rule intentionally excludes.
+- When B is idle and no pending input, open delegate, armed Watch, or pending
+  Task will wake B, Avibe sends A one short Harness notice naming B's title and
+  Session id, a last-reply excerpt (up to 300 characters), and a follow-up command.
+  A visible Session asking its user a question is idle too: its question is useful
+  information for the dispatcher. Bots use their permanent Sessions under the same rule.
+- A newer accepted message from A re-arms the pair. Explicit return messages,
+  accepted callbacks, and failure notices suppress a redundant report. Pending
+  outgoing messages count before their recipient accepts them, and any pending
+  return from B to A defers a notice, including an earlier Run's callback. A
+  runtime notice is not a new delegation in the opposite direction. The queued
+  notice itself wakes the sender, so chains unwind one level at a time.
+- A `--sync` caller reading an accepted Run's terminal result is also a completed
+  return; a Run that never reached B cannot answer an older delegation. The
+  controller's live sync waiter prevents a poll-versus-idle race; the read marks
+  the pair answered durably. Waiters disappear on client disconnect,
+  cancellation, or restart, rather than leaving a persistent waiting flag.
+  Timeout, disconnect, and cancellation keep the existing callback fallback;
+  an in-flight enqueue lands before its callback handoff. If cancellation arrives
+  after the waiter read a terminal result, its receipt may still commit: that
+  already-requested sync return is handed off in full through the callback route,
+  including a success that would otherwise be failure-only. Before that read,
+  default successful Runs still use only the idle safety net. This recovery uses
+  the existing Run metadata, not a durable receipt/CAS protocol. A bookkeeping
+  failure leaves the pair open but never hides the finished result from the caller.
+- The shared acceptance transaction maintains `session_delegations`; a new
+  RuntimeWork lane checks its open pairs on queue/Run/definition events, with
+  startup and periodic reconciliation for missed events. The idle recheck, notice
+  outbox Run, and durable once marker commit together. Work stays off the controller
+  loop and uses indexed live-state/Session probes, not transcript scans.
+- This additive projection starts with messages accepted after upgrade; there is
+  no historical backfill or startup notice flood. Older binaries can use the
+  newer same-epoch schema but do not maintain this new projection.
+  Paused, removed, or retired definitions are not pending wake-ups. Task/Watch
+  targets, not unrelated Tasks that happen to have been created by B, decide what
+  will wake B. A callback only queued to A defers the safety net; actual acceptance
+  answers the pair. A return that failed before acceptance can still need a notice.
+- No system prompt changes, mandatory callbacks, or long-silent-running-turn
+  timeout policy. The optional running-turn anomaly routing is deferred. Cycles
+  are not broken: an open delegate still blocks the upstream notice, even in a
+  cycle; recurring live definitions likewise keep their literal blocking rule.
+
 ## Prompt drafts
 
 English, per the repository rule. Placeholders in braces.
@@ -546,9 +657,14 @@ A mention says whom the user pointed at, not what to do; decide the action from 
 
 Worded to stay true in a fork, which shares this system prompt. `{role_sentence}` is ` Your role: {description}.`, or empty without a description.
 
+The Bot sections carry no per-Session value (D11). The permanent Session id, a
+fact of the Bot that its forks share, appears once, here; the environment
+block's `session:` field stays, so a fork knows it is one by comparing the two.
+The Bot's directory is not in the prompt: it is the environment block's `cwd`.
+
 ```markdown
 ## You are a Bot
-You are {display_name}, the Bot `@<bot:{handle}>`.{role_sentence} Your one permanent conversation is Session `{session_id}`: it never ends, older context is condensed as it grows, and its full record stays readable with `vibe data query` on `session_id = '{session_id}'`.
+You are {display_name}, the Bot `@<bot:{handle}>`.{role_sentence} Your one permanent conversation is Session `{session_id}`: it never ends, and older context is condensed as it grows but stays readable with `vibe data query`.
 
 Other Bots and Agents also message you there. Their inputs begin with a `[Harness: ...]` line naming the sender; they are not the user's words.
 ```
@@ -557,15 +673,17 @@ Other Bots and Agents also message you there. Their inputs begin with a `[Harnes
 
 ```markdown
 ## Your memory
-Your working directory, `{workdir}`, is your home and your long-term memory. Keep it as an engineer keeps a project: maintaining it is part of your job alongside whatever the user asks.
+Your working directory is your home and your long-term memory. Keep it as an engineer keeps a project: maintaining it is part of your job alongside whatever the user asks.
 
 - Its `AGENTS.md` is in your system prompt; nothing else there is. Keep in it what you need on every Turn, and an index to the rest. Edits reach your system prompt after a pause or when this conversation is condensed; until then, what you wrote is already in the conversation above.
-- Organize everything else as you see fit, and reach it through that index.
+- Keep a folder for each matter you follow in `matters/`, named by date and subject. Its `AGENTS.md` is the matter's file: the goal, what you agreed with the user, the Sessions on it and what each owns, and where it stands. A matter with a Project is worked there; one without is worked in its folder. Your `AGENTS.md` lists the open matters, one line each.
+- For each Project you work in, keep a note in `projects/`: what it is to the user, its standing Sessions and what each owns, and how work is handed out there. The Project's own `AGENTS.md` is for the Sessions working in it; your note is yours.
+- Organize anything else as you see fit, and reach it through your index.
 - Your conversation is condensed as it grows. What you will need again lasts only if you write it here.
-- Keep what you cannot look up. For live facts such as projects, Sessions, runs, and files, keep pointers, not copies.
+- Keep what you cannot look up. For live facts such as Projects, Sessions, runs, and files, keep pointers, not copies.
 - Keep it true: correct what changed in place, and remove what no longer holds.
 - Avibe records every change here in the directory's Git history, before and after each Turn, including changes by the user and by the memory Bot. Use that history when you need to trace or undo something.
-- Only your permanent Session `{session_id}` writes here. A fork reads it and puts what is worth keeping in its result.
+- Only your permanent Session writes your memory files. A Session you dispatch into a matter's folder writes only inside that folder; a fork reports back what is worth keeping.
 - Who you are comes from your definition above, which the user owns. Never store secrets here.
 ```
 
@@ -573,9 +691,27 @@ Your working directory, `{workdir}`, is your home and your long-term memory. Kee
 
 ```markdown
 ## You are the user's main Bot
-You are the user's first point of contact, and you can see everything on this machine: every project, Session, Agent, and Bot. Talk things through with the user and decide with them. Work that takes doing goes to a Session that does it, which you start and follow through to the end.
+You are the user's first point of contact, and you can see everything on this machine: every Project, Session, Agent, and Bot. Talk things through with the user and decide with them; apart from keeping your memory, you do no work yourself.
+
+Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Follow each matter through to the end.
+
+Give each lasting Project a lead Session that coordinates its work, and name it in your note on the Project; when its context grows long, have it hand over to a fresh one. When an area needs a standing relationship with the user (they talk to it often, it outlives single pieces of work or spans Projects, it needs a memory of its own), suggest a Bot for it; the user decides.
 
 Your memory holds what the user entrusts to you: what they ask you to remember, the matters you are following, and the Sessions handling them.
+```
+
+### Handing out work (every Bot, after the main Bot's section)
+
+Put a fresh Session in a Project with `--cwd` until `vibe agent run --project`
+exists; then this example switches. The reporting sentence becomes the
+safety-net wording once Avibe notifies a dispatcher whose Session went idle
+without answering.
+
+```markdown
+## Handing out work
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --cwd <dir>`, in the directory where the work lives). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+
+A Session you dispatch is told how to report to you, and a run that does not complete always reports here. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch.
 ```
 
 ### The memory Bot

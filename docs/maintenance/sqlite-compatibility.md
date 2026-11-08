@@ -1,15 +1,18 @@
 # SQLite compatibility epoch
 
 Implementation of section A in [the downtime plan](../plans/sqlite-upgrade-downtime.md).
-The bridge and mechanical migration classification are implemented. Snapshot-free
-upgrade activation and the released-predecessor reader contract remain separate
-follow-up work; all upgrade snapshots are still conservative.
+The bridge, mechanical migration classification, and gated no-copy path share the
+same preflight. No-copy is enabled only in a build whose immediately previous
+published binary passes the real protocol/reader/writer contract. Builds with an
+unverified or pre-protocol predecessor keep conservative upgrade snapshots.
 
 ## Change contract
 
 - Revision `20261108_0076` establishes integer `state_meta.compatibility_epoch = 1`.
-  Its schema is otherwise unchanged. Existing non-empty databases still get a
-  fresh verified snapshot on upgrade; fresh databases need no snapshot.
+  Its schema is otherwise unchanged. Entering the bridge from a non-empty
+  pre-protocol database always gets a fresh snapshot (clone verification is
+  deferred until restore; online-backup copies are verified immediately); a marker created
+  by this upgrade cannot opt that same upgrade out. Fresh databases need no snapshot.
 - `storage.migrations.preflight_database` is the common decision owner.
   `MigrationPreflight.compatible_open` means the installed binary may use the
   newer schema as-is, not run Alembic against it. A full unknown exact revision
@@ -25,6 +28,13 @@ follow-up work; all upgrade snapshots are still conservative.
   successful admission per process/path/inode, matching the existing importer
   process-lifetime contract. File replacement is rechecked. Breaking upgrades
   require **all** controller/Web/CLI writers stopped; this is not a lease.
+- `MigrationPreflight.skip_snapshot` omits the copy, **not** the migration. The
+  exact pending revision pair remains present and every migration still runs.
+  It requires the four release conditions below and already-complete importer
+  receipts; missing receipts mean unclassified repair/import work and keep the
+  conservative path. A no-copy bootstrap returns without backup validation,
+  receipt adoption, import replay, report-only row scans or an added full-file
+  integrity scan. Existing transaction and final-schema checks remain.
 - A known forward upgrade may lack the new binary's columns until its migrations
   run. An epoch marker on a known graph must match the epoch declared by that
   revision's ancestry. A supported unknown revision is the only intentional
@@ -62,8 +72,8 @@ lane. The bridge by itself does not claim any projection capability.
 **Bridge release (R0)** means the first release of any kind, RC or stable, whose
 binaries implement protocol v1. A prerelease establishes the bridge for each
 DB it opens; the per-DB integer marker is the authority, not a version number.
-The next release containing this implementation carries the bridge, and later
-stable releases carry the same protocol. This PR cuts no release or version.
+`gh-v3.2.5rc19`, published on 2026-11-08, establishes that bridge; later stable
+releases carry the same protocol. This implementation cuts no release or version.
 
 **First no-copy release (R1)** means a later release containing no-copy activation.
 The owner clarified the gate on 2026-11-08: all four conditions must hold:
@@ -82,7 +92,104 @@ Rolling back to a pre-protocol binary requires the bridge-time backup with all
 writers stopped; restoring it discards later writes. **Once that backup expires,
 rollback to a pre-bridge binary is unsupported.**
 
+### One predecessor, one build literal
+
+`scripts/sqlite_predecessor_contract.py` selects the immediately previous
+**published** GitHub release by publication time, including RCs and releases
+with an unchanged migration graph. It verifies that release's wheel digest,
+installs the actual wheel in an isolated environment, and checks the imported
+version/package path. It never substitutes current source for that binary.
+Every probe process gets a test-owned HOME/Avibe/XDG tree and no caller routing
+or credentials. No service is started.
+
+The probe uses real settings, Sessions, Harness records, Message and trace
+readers/writers. It upgrades populated predecessor state, writes candidate rows,
+then exercises the older binary against same-epoch future state with independent
+tables and nullable/defaulted columns. Existing new values must survive whole-row
+upserts and load/save; omitted columns must take server defaults. It checks
+stored type/JSON interpretation and unknown extensions in extensible metadata,
+then reopens with the candidate. A simulated `INSERT OR REPLACE` loss and JSON
+loss are negative harness regressions. This does **not** make arbitrary new
+closed-schema settings meanings additive: semantic changes still need review
+and a breaking boundary.
+
+The existing migration-guard CI job runs this contract. The existing publisher
+runs it again immediately before packaging, and `--activate` fills just
+`storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
+`None` disables the capability; pre-protocol or unsupported predecessors leave
+it `None`, with an explicit **not-applicable**, never a passing rollback claim.
+The source literal is now `1` after the actual `gh-v3.2.5rc19` wheel passed at
+epoch 1 (SHA-256 `e19c6b0bcfcbbdb6716842653c25c5231cf5d7600fd69fda0a3cb4f4bf2630be`).
+CI rechecks an activated literal against the actual published predecessor;
+the publisher independently fills or clears it before packaging.
+A failed applicable reader/writer test stops the build. The literal ships in the
+wheel/sdist; there is no runtime network check, config switch, per-DB lineage or
+separate attestation registry. Local source-fixture tests validate the harness,
+not published-predecessor capability.
+
+### Existing backup lifecycle
+
+No-copy creates no backup attempt and changes no prior receipt or expiry clock.
+A restart cannot adopt a receipt whose exact target no longer matches the live
+stamp. Age maintenance may accept a **known, proven-additive, same-epoch** path
+from a ready receipt's target to the live stamp, so additive upgrades do not
+freeze otherwise eligible expiry. Failed, unconfirmed, restored and wrong-inode
+receipts remain protected; the original 72-hour clock and exact-position count
+retention are unchanged.
+
+### Physical verification and restore
+
+Conservative/breaking upgrades still take a fresh rollback copy. A filesystem
+clone is made only after checkpointing under SQLite's exclusive writer lock;
+its independent COW file preserves the source bytes, including any pre-existing
+bad pages. It is **not physically verified at creation**. The existing backup
+manifest records `copy_method` and `verification.status = "deferred"`. When COW
+is unavailable, the SQLite online-backup path still runs `PRAGMA quick_check`
+before publishing its copy and records a creation-time pass.
+
+Neither post-migration lifecycle completion runs a full live-database scan.
+Their exact revision checks, `migrated`/`validated` transitions, service readiness,
+72-hour expiry clock and first/last-copy position retention remain. In these
+receipts, `validated` means application-state validation completed, **not** that
+the rollback copy passed a physical scan. The manifest's separate `verification`
+field is the latest physical-verification result. Unverified clones may expire
+under the same successful-upgrade policy; deferring verification does not extend
+retention or guarantee detection of dormant corruption during startup.
+
+`quick_check` is not proof of migration correctness. Migration writes still use
+SQLite transactions, per-revision epoch checks and final schema checks. A bad
+page encountered by a modern migration causes that transaction to fail and roll
+back; unaccessed bad pages may remain undiscovered. The importer retains its own
+`integrity_check` when it actually imports JSON/background state. No background
+scan, new startup readiness gate or change to historical migration transactions
+is introduced here.
+
+Every restore through `storage.backups.restore_sqlite_backup` checks the **staged
+candidate** before `_swap_live_database`, even when that copy passed a prior
+check. The existing manifest is required to record the latest restore pass or
+failure durably before promotion. A failed check leaves the live database and
+its WAL/SHM untouched, removes staging files, and refuses that candidate. Its
+error names the next older recognized directory backup, ordered by recorded
+sequence (legacy timestamps only when no sequence exists), excluding known failed
+copies. That is a suggestion, **not a verified or binary-compatible fallback**:
+no older backup is automatically restored. Target-storage/access failures are not
+proof of corruption: an incomplete attempt preserves the last completed physical
+check (pass or failure), or records `incomplete` if none exists. A check that passed
+before a target fsync failure retains its physical pass. Such faults neither hide
+a healthy candidate nor clear a known corruption result; resolve the storage/access
+problem and retry the same copy rather than losing newer writes. With no older
+eligible copy, corruption/missing-source errors ask for manual recovery while
+retaining the live database and backup evidence.
+Stop all writers before restoring; choosing an older point discards newer writes.
+As before, a restore attempt revokes prior expiry authority even when it fails;
+a successful physical check cannot revive an old readiness/expiry clock.
+
 ## Mechanical classification
+
+Prefer additive **expand/contract** changes: add the new representation, dual-write
+while old readers remain supported, and remove the old representation in a later
+release with the required breaking boundary. In-place rewrites and other breaking
+migrations are exceptions; explain why an additive rollout cannot meet the need.
 
 `storage.migration_policy` interprets a small literal Python grammar and rebuilds
 the corresponding Alembic operation objects without executing migration code.
@@ -124,16 +231,12 @@ conditional or other epoch rebindings are not literal declarations. Additive
 revisions do not declare an epoch boundary. Released migrations are not relabeled.
 None of this gate skips a runtime snapshot by itself.
 
-Remaining A work:
-
-1. The immediately previous release's real reader/writer contract test. Before
-   the bridge is released, that previous release does not implement this protocol
-   and is **not** a supported binary rollback target.
-2. Additive no-copy activation with valid existing bridge marker only, plus
-   exact-attempt backup/expiry tests and synthetic-volume latency evidence.
-   No receipt adoption or expiry-clock resets on the no-copy path.
-3. Align public English/Chinese upgrade documentation for the bridge and its
-   later activation. No public claim of a released snapshot-free path before then.
+Release-cadence dependency: the immediately previous published binary must
+contain the bridge and pass the real contract before a no-copy build can activate.
+The actual RC19 wheel has passed at epoch 1; a local bridge fixture alone would
+not prove a released rollback target. Public English and Chinese documentation
+must distinguish the conservative bridge from later verified no-copy releases;
+no release is created by this implementation.
 
 ## Validation
 
@@ -146,5 +249,18 @@ migration, readiness, backup expiry, locking and release-graph tests remain in
 place. Frozen historical downgrade tests reconstruct their pre-bridge fixture
 using `tests/migration_helpers.py`; that helper is not a product downgrade API.
 
+`tests/test_sqlite_no_copy.py` owns snapshot omission, conservative fallbacks,
+crash/resume, stale-attempt refusal and original-clock expiry across additive
+successors. `tests/test_sqlite_predecessor_contract.py` checks predecessor
+selection, fixture isolation and loss-detection in the probe; the separately
+executed published-wheel probe supplies release evidence.
+
+`tests/test_sqlite_snapshot.py` owns clone/online-copy verification and corrupt-page
+restore refusal. `tests/test_state_backups.py` covers staged restore preservation,
+write-order fallback hints without automatic restore, and crash/durability
+boundaries. `tests/test_sqlite_backup_expiry.py` covers scan-free exact-target
+lifecycle completion, fresh restore evidence (including receipt I/O failures),
+and unchanged expiry/readiness semantics.
+
 No live database, restart, release, remote operation or retention change is
-part of bridge validation.
+part of this validation.

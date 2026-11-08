@@ -885,7 +885,7 @@ def test_agent_run_sync_waits_for_run_result(tmp_path: Path, capsys) -> None:
 
     wait_calls: list[tuple[str, float | None]] = []
 
-    def _wait_for_result(_store, run_id: str, *, wait_timeout: float | None) -> dict:
+    def _wait_for_result(_store, run_id: str, *, wait_timeout: float | None, on_terminal_read=None) -> dict:
         wait_calls.append((run_id, wait_timeout))
         return {"id": "done", "status": "succeeded"}
 
@@ -915,7 +915,7 @@ def test_agent_run_sync_wait_timeout_is_passed_to_waiter(tmp_path: Path, capsys)
     )
     wait_timeouts: list[float | None] = []
 
-    def _wait_for_result(_store, _run_id: str, *, wait_timeout: float | None) -> dict:
+    def _wait_for_result(_store, _run_id: str, *, wait_timeout: float | None, on_terminal_read=None) -> dict:
         wait_timeouts.append(wait_timeout)
         return {"id": "done", "status": "succeeded"}
 

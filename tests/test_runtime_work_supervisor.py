@@ -876,7 +876,7 @@ async def test_concurrent_stop_callers_join_the_same_blocked_scan() -> None:
 @pytest.mark.parametrize(
     ("event_type", "expected"),
     [
-        (QUEUE_UPDATED_EVENT, {RuntimeWorkLane.SESSION_DELIVERIES}),
+        (QUEUE_UPDATED_EVENT, {RuntimeWorkLane.SESSION_DELIVERIES, RuntimeWorkLane.DELEGATION_SAFETY_NET}),
         (
             RUNS_UPDATED_EVENT,
             {
@@ -884,6 +884,7 @@ async def test_concurrent_stop_callers_join_the_same_blocked_scan() -> None:
                 RuntimeWorkLane.RUN_CALLBACKS,
                 RuntimeWorkLane.FAILURE_NOTICES,
                 RuntimeWorkLane.STALE_RUNS,
+                RuntimeWorkLane.DELEGATION_SAFETY_NET,
             },
         ),
         (VAULTS_UPDATED_EVENT, {RuntimeWorkLane.VAULT_CALLBACKS}),
@@ -892,6 +893,7 @@ async def test_concurrent_stop_callers_join_the_same_blocked_scan() -> None:
             {
                 RuntimeWorkLane.TASK_DEFINITIONS,
                 RuntimeWorkLane.WATCH_DEFINITIONS,
+                RuntimeWorkLane.DELEGATION_SAFETY_NET,
             },
         ),
     ],

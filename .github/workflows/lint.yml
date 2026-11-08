@@ -751,6 +751,11 @@ jobs:
             exit 1
           fi
 
+      - name: Exercise the immediately previous published SQLite reader and writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/sqlite_predecessor_contract.py --repo "$GITHUB_REPOSITORY"
+
       # Read by scenario-evidence, which proves each covered scenario row's
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
@@ -1295,9 +1300,14 @@ jobs:
       # copy of upstream's archive, and run them.
       - name: Verify the managed ripgrep installs from its Windows zip
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $env:AVIBE_TEST_RIPGREP_ZIPS = Join-Path $env:RUNNER_TEMP "ripgrep-zips"
-          python -c "import json, os, pathlib, urllib.request; target = pathlib.Path(os.environ['AVIBE_TEST_RIPGREP_ZIPS']); target.mkdir(exist_ok=True); archives = json.load(open('vibe/ripgrep_runtime_manifest.json'))['archives']; [urllib.request.urlretrieve(entry['url'], target / entry['name']) for tag, entry in archives.items() if tag.startswith('win32-')]"
+          python -c "import json, os, pathlib; from scripts.release_asset_download import download_to_path; target = pathlib.Path(os.environ['AVIBE_TEST_RIPGREP_ZIPS']); target.mkdir(exist_ok=True); archives = json.load(open('vibe/ripgrep_runtime_manifest.json'))['archives']; [download_to_path(entry['url'], target / entry['name'], max_bytes=entry['size']) for tag, entry in archives.items() if tag.startswith('win32-')]"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned ripgrep Windows fixture download failed; refusing to run tests without fixture archives."
+          }
           python -m pytest -q -ra tests/test_ripgrep_runtime.py -k "pinned_windows_zip or six_platform or zip_entry"
 
   # Vibey's tools on real Windows: what the Linux shards cannot show is how

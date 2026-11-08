@@ -4,6 +4,7 @@ import WebKit
 enum MobileAuthTransportOperation: CaseIterable, Equatable {
     case requestOTP
     case verifyOTP
+    case signInWithPassword
     case fetchSession
     case passkeyChallenge
     case verifySecondFactor
@@ -13,6 +14,8 @@ enum MobileAuthTransportOperation: CaseIterable, Equatable {
 enum MobileAuthTransportStage: String, CaseIterable, Equatable {
     case request
     case verify
+    /// Supabase's password grant, `POST /auth/v1/token?grant_type=password`.
+    case token
     case callback
     case session
     case challenge
@@ -99,6 +102,29 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             throw Self.mappedError(for: .verifyOTP, response: response)
         }
         return try decodeDiscovery(response)
+    }
+
+    func signInWithPassword(
+        email: String,
+        password: String
+    ) async throws -> MobilePasswordSignInDiscovery {
+        let response = try await evaluateJSON(
+            Self.passwordSignInScript,
+            operation: .signInWithPassword,
+            arguments: [
+                "email": email,
+                "password": password,
+            ]
+        )
+        guard response.boolean("ok") else {
+            throw Self.mappedError(for: .signInWithPassword, response: response)
+        }
+        return MobilePasswordSignInDiscovery(
+            discovery: try decodeDiscovery(response),
+            weakPasswordReasons: Self.decodeWeakPasswordReasons(
+                response["weakPassword"]
+            )
+        )
     }
 
     func fetchSession() async throws -> MobileSessionDiscovery? {
@@ -277,6 +303,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             return deadlines.logoutMilliseconds
         case .requestOTP,
              .verifyOTP,
+             .signInWithPassword,
              .fetchSession,
              .passkeyChallenge,
              .verifySecondFactor:
@@ -343,6 +370,26 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         )
     }
 
+    /// Reads Supabase's `weak_password` as the script passed it on: `nil` when
+    /// absent; reasons this app does not know are skipped.
+    static func decodeWeakPasswordReasons(
+        _ value: Any?
+    ) -> [MobileWeakPasswordReason]? {
+        guard let object = value as? [String: Any] else {
+            return nil
+        }
+        var reasons: [MobileWeakPasswordReason] = []
+        for case let rawReason as String in object["reasons"] as? [Any] ?? [] {
+            if
+                let reason = MobileWeakPasswordReason(rawValue: rawReason),
+                !reasons.contains(reason)
+            {
+                reasons.append(reason)
+            }
+        }
+        return reasons
+    }
+
     private func decodeSnapshot(
         _ object: [String: Any]
     ) throws -> MobileSessionSnapshot {
@@ -371,6 +418,8 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
             status == 429,
             operation == .requestOTP
                 || operation == .verifyOTP && stage == MobileAuthTransportStage.verify.rawValue
+                || operation == .signInWithPassword
+                    && stage == MobileAuthTransportStage.token.rawValue
                 || operation == .verifySecondFactor
                     && stage == MobileAuthTransportStage.secondFactor.rawValue
         {
@@ -406,6 +455,25 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                     ?? "The verification code is invalid or expired.",
                 retryAfterSeconds: retryAfter
             )
+        case .signInWithPassword:
+            // Fixed messages only: nothing from this exchange is echoed.
+            if status == 401, stage == MobileAuthTransportStage.session.rawValue {
+                return .signedOut
+            }
+            guard
+                stage == MobileAuthTransportStage.token.rawValue,
+                let status,
+                (400..<500).contains(status)
+            else {
+                return .network
+            }
+            if
+                status == 400,
+                response.string("code") == MobileAccountError.emailNotConfirmed.code
+            {
+                return .emailNotConfirmed
+            }
+            return .invalidCredentials
         case .passkeyChallenge:
             guard stage == MobileAuthTransportStage.challenge.rawValue else {
                 return .network
@@ -706,14 +774,92 @@ extension MobileAuthTransport: WKNavigationDelegate {
             );
           }
 
+        \(callbackBody(tokens: "verified"))
+
+        \(sessionDiscoveryBody)
+        """
+    )
+
+    // Supabase's password grant, modeled on the OTP verify script. The
+    // password is a script argument sent only in the grant's body; the result
+    // carries neither it nor any provider message, and no stage logs.
+    private static let passwordSignInScript = boundedScript(
+        initialStage: .token,
+        body: """
+          let config;
+          try {
+            config = JSON.parse(document.body.textContent || "{}");
+          } catch {
+            return failed("invalid_response", 0, "Authentication configuration is invalid.");
+          }
+          if (!config.supabase_url || !config.supabase_anon_key) {
+            return failed("configuration", 503, "Authentication is unavailable.");
+          }
+          const tokenEndpoint = new URL("/auth/v1/token", config.supabase_url);
+          tokenEndpoint.searchParams.set("grant_type", "password");
+          const tokenResponse = await boundedFetch(tokenEndpoint, {
+            method: "POST",
+            credentials: "omit",
+            headers: {
+              "apikey": config.supabase_anon_key,
+              "Authorization": `Bearer ${config.supabase_anon_key}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({email, password})
+          });
+          const granted = await tokenResponse.json().catch(() => null);
+          if (!tokenResponse.ok) {
+            // Supabase names the error `code` (API version 2024-01-01) or
+            // `error_code` beside a numeric `code` (older responses).
+            const errorCode = [granted?.error_code, granted?.code, granted?.error]
+              .find((value) => typeof value === "string") ?? null;
+            return JSON.stringify({
+              ok: false,
+              stage,
+              status: tokenResponse.status,
+              code: errorCode,
+              retryAfter: Number(tokenResponse.headers.get("retry-after")) || null
+            });
+          }
+          if (!granted?.access_token || !granted?.refresh_token) {
+            return failed(
+              "invalid_response",
+              tokenResponse.status,
+              "Sign-in did not return a session."
+            );
+          }
+          const weakPassword = granted.weak_password && typeof granted.weak_password === "object"
+            ? {
+                reasons: Array.isArray(granted.weak_password.reasons)
+                  ? granted.weak_password.reasons.filter((reason) => typeof reason === "string")
+                  : []
+              }
+            : null;
+
+        \(callbackBody(tokens: "granted"))
+
+          const discover = async () => {
+        \(sessionDiscoveryBody)
+          };
+          const discovered = JSON.parse(await discover());
+          if (discovered.ok && weakPassword) discovered.weakPassword = weakPassword;
+          return JSON.stringify(discovered);
+        """
+    )
+
+    // Posts a Supabase session's access/refresh pair to the control plane's
+    // `/auth/callback`, which issues the account cookies. `tokens` names the
+    // script variable holding the provider's session answer.
+    private static func callbackBody(tokens: String) -> String {
+        """
           stage = "callback";
           const callbackResponse = await boundedFetch(new URL("/auth/callback", window.location.origin), {
             method: "POST",
             credentials: "same-origin",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
-              access_token: verified.access_token,
-              refresh_token: verified.refresh_token
+              access_token: \(tokens).access_token,
+              refresh_token: \(tokens).refresh_token
             })
           });
           if (!callbackResponse.ok) {
@@ -735,10 +881,8 @@ extension MobileAuthTransport: WKNavigationDelegate {
               message: callbackPayload.message || callbackPayload.error || "Session callback failed."
             });
           }
-
-        \(sessionDiscoveryBody)
         """
-    )
+    }
 
     // Reads the account session. `401` is signed out; `403
     // two_factor_required` is a signed-in session that still owes the second

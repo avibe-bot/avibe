@@ -58,17 +58,19 @@ jobs:
       # The packaged engine manifest, with this runner's asset downloaded and
       # verified, so every scenario installs the pinned engine offline.
       - name: Prepare the pinned engine offline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python - <<'EOF'
-          import hashlib, json, os, pathlib, urllib.request
+          import hashlib, json, os, pathlib
+          from scripts.release_asset_download import download_to_path
 
           manifest = json.loads(pathlib.Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text())
           root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "model-hub-engine"
           root.mkdir(parents=True, exist_ok=True)
           (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
           archive = root / asset["url"].rsplit("/", 1)[1]
-          with urllib.request.urlopen(asset["url"], timeout=300) as response:
-              archive.write_bytes(response.read())
+          download_to_path(asset["url"], archive, max_bytes=asset["size_bytes"])
           digest = hashlib.sha256(archive.read_bytes()).hexdigest()
           if digest != asset["sha256"] or archive.stat().st_size != asset["size_bytes"]:
               raise SystemExit(f"engine archive does not match the manifest: {digest}")

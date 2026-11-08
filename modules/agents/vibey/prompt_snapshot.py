@@ -55,6 +55,7 @@ COMPONENT_TIERS = {
     "bot-identity-prompt": 1,
     "bot-memory-prompt": 1,
     "bot-main-prompt": 1,
+    "bot-harness-prompt": 1,
     "harness-agents-prompt": 2,
     "skills-catalog": 2,
     "skills-more-notice": 2,

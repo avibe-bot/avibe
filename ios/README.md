@@ -217,7 +217,8 @@ The app bundles the approved `mobile-app/*` React flow and exposes a separate
 Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
-`auth.verifySecondFactor`, `auth.verifyPasskey`, `session.refresh`,
+`auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
+`session.refresh`,
 `session.selectInstance`, `session.logout`, `app.returnToInstance`, and the
 closed `app.openExternal` allowlist (the two install guides and avibe.bot's
 Account security page). Instance documents, child windows, Show Pages, and
@@ -248,7 +249,8 @@ same docked-keyboard frame handling.
 The hidden account transport is a native-owned `WKWebView` with no message
 handler. It loads only the configured control-plane auth configuration and runs
 fixed scripts in `WKContentWorld.defaultClient`: public Supabase OTP requests,
-the existing `/auth/callback`, the mobile session GET/DELETE endpoints, and the
+the Supabase password grant, the existing `/auth/callback`, the mobile session
+GET/DELETE endpoints, and the
 second-factor `POST /api/two-factor/passkey-challenge` and
 `POST /api/two-factor/verify`. The
 isolated world is defense in depth, not a separate security process. The actual
@@ -312,8 +314,9 @@ account.
 The bundled page also admits one token-owning account operation at a time.
 Every interactive control consumes the derived lock, and only the current token
 may apply an async result or release the page for another operation.
-Signed-out bootstrap, a stored-selection account mismatch, and failed OTP
-verification also rotate to a fresh store before another account attempt.
+Signed-out bootstrap, a stored-selection account mismatch, and a failed OTP
+verification or password sign-in also rotate to a fresh store before another
+account attempt.
 Successful first delivery leaves resend available unless the provider returns
 `Retry-After`; successful resends use the approved client cooldown, while any
 provider cooldown takes precedence. A verification network failure keeps the
@@ -344,14 +347,16 @@ An account with avibe.bot two-step verification passes its second factor in
 the app after the email code (`docs/plans/2026-11-07-mobile-two-factor.md`,
 design frames `mobile-app/two-factor/*`). The flow depends on avibe-backend's
 `403 two_factor_required` session answer and its
-`apple-app-site-association` file.
+`apple-app-site-association` file. A password sign-in reaches the same
+second factor.
 
 - `GET /api/mobile/session` answers `403 {"error":"two_factor_required",
-  "email","gate","methods"}` for a session that passed the email code and owes
-  the second factor; `401` still alone means signed out. The transport reports
-  it as a signed-in discovery, so `auth.verifyOtp`, `session.bootstrap`, and
-  `session.refresh` return `{status: "twoFactorRequired", email, gate,
-  methods}` and nothing rotates the store. `email` falls back to the address
+  "email","gate","methods"}` for a session that passed the email code or
+  password and owes the second factor; `401` still alone means signed out. The
+  transport reports it as a signed-in discovery, so `auth.verifyOtp`,
+  `auth.signInWithPassword`, `session.bootstrap`, and `session.refresh` return
+  `{status: "twoFactorRequired", email, gate, methods}` and nothing rotates the
+  store. `email` falls back to the address
   typed in this sign-in and is `null` when neither is known. Unknown method
   kinds are skipped.
 - `auth.verifySecondFactor({method: "totp" | "recovery", code})` posts the code
@@ -388,6 +393,57 @@ signing. Simulator CI builds without signing, so it compiles the entitlement
 but cannot exercise a system passkey. That check needs a signed build on a
 device (or a simulator with the domain in developer mode) and an account with a
 passkey, and remains manual.
+
+### Password sign-in
+
+An account that set a password on avibe.bot (Account security) can sign in
+with it instead of the email code (`docs/plans/2026-11-08-mobile-password-sign-in.md`,
+design frames `mobile-app/password/*`). The email code stays the primary path
+and the only way to create an account in the app.
+
+- The email step offers "Sign in with password" under Send verification code;
+  both validate the email first. The password step is identifier-first: it
+  shows the email with Change email and carries it in a visually hidden,
+  read-only `autocomplete="username"` field beside the
+  `autocomplete="current-password"` field, so iCloud Keychain can match the
+  saved avibe.bot login through the existing `webcredentials:avibe.bot`
+  association. The only client check is a non-empty password; nothing
+  auto-submits.
+- `auth.signInWithPassword({email, password})` returns the same session state
+  as `auth.verifyOtp`, plus `weak_password: {reasons}` (`length`,
+  `characters`, `pwned`) when Supabase accepted a password that no longer
+  meets avibe.bot's rules. Its errors are `invalid_credentials` (a grant
+  `400`, or any other grant `4xx`; Supabase also answers this for an account
+  that never set a password), `email_not_confirmed` (a grant `400` with that
+  code), `rate_limited` with `retry_after_seconds` from `Retry-After` when
+  present (the page then waits 60 seconds), and `network`. A session `401`
+  stays the explicit signed-out answer. Every failed attempt rotates to a
+  fresh store, as a failed OTP verify does.
+- The transport's fixed script posts `{email, password}` to
+  `{supabase_url}/auth/v1/token?grant_type=password` with the anon key as
+  `apikey` and bearer and `credentials: "omit"`, then posts the session pair
+  to `/auth/callback` and runs the shared `/api/mobile/session` read, which
+  reports `403 two_factor_required` to the existing two-step flow. It shares
+  the OTP scripts' deadline, origin, and redirect rules. The password is a
+  transient script argument: it is sent only in the grant's body and never
+  returned, persisted, or logged, and errors carry fixed native messages
+  rather than provider text. A bridge request's description, dump, and any
+  log line built from it name parameters, never their values. The page keeps
+  the password only in the password step's field state, which unmounts on
+  success and whenever the step is left.
+- "Use an email code instead" and the forgot page's Send verification code
+  call `auth.requestOtp` for the same email and enter the code step. Forgot
+  password's Open in Safari opens `https://avibe.bot/app/account/security`,
+  already on the `app.openExternal` allowlist; avibe.bot has no separate
+  reset page.
+- A weak password shows one non-blocking notice after any second factor and
+  before the instances. Its `pwned` copy names the data breach; other reasons
+  name the 8-character rule.
+
+The page follows the approved default composition on every height and lets
+the shared viewport scroll, as the shipped code and two-step screens do; the
+password form scrolls its Sign in action above the keyboard while the field
+has focus.
 
 Coordinator tests inject an in-memory named-store registry. Integration tests
 that require real named stores use suite-scoped `UserDefaults`, track every UUID

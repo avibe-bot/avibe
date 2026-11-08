@@ -6,6 +6,7 @@ on:
     paths:
       - "vibe/git_runtime_manifest.json"
       - "scripts/git_runtime_release_guard.py"
+      - "scripts/release_asset_download.py"
       - ".github/workflows/git-runtime-release-guard.yml"
   schedule:
     - cron: "17 */6 * * *"
@@ -38,6 +39,8 @@ jobs:
       - name: Fetch and verify published assets
         id: probe
         continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/git_runtime_release_guard.py fetch \
             --output-dir "$RUNNER_TEMP/git-runtime-release"
@@ -123,6 +126,8 @@ jobs:
 
       - name: Verify recovered release
         if: steps.probe.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/git_runtime_release_guard.py fetch \
             --output-dir "$RUNNER_TEMP/git-runtime-release"

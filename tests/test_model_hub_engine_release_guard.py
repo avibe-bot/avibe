@@ -150,10 +150,8 @@ def _run_workflow_go_pin_step(tmp_path: Path, build: dict | None) -> tuple[subpr
     staged = tmp_path / "workflow"
     (staged / "scripts").mkdir(parents=True)
     (staged / "vibe/model_hub_runtime").mkdir(parents=True)
-    shutil.copy2(
-        guard.REPO_ROOT / "scripts/model_hub_engine_release_guard.py",
-        staged / "scripts/model_hub_engine_release_guard.py",
-    )
+    for name in ("model_hub_engine_release_guard.py", "release_asset_download.py"):
+        shutil.copy2(guard.REPO_ROOT / "scripts" / name, staged / "scripts" / name)
     manifest = staged / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
     payload = {"build": build} if build is not None else {}
     manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")

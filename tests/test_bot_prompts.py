@@ -34,11 +34,10 @@ _ROSTER = [
 
 _MAIN = BotPromptInfo(
     handle="main", display_name="", role="The user's main Bot and first point of contact.",
-    session_id="ses_main", workdir="/home/u/.avibe/bots/main", builtin=True,
+    session_id="ses_main", builtin=True,
 )
 _CSO = BotPromptInfo(
-    handle="cso", display_name="首席安全官", role="Reviews security risks",
-    session_id="ses_cso", workdir="/home/u/.avibe/bots/cso",
+    handle="cso", display_name="首席安全官", role="Reviews security risks", session_id="ses_cso",
 )
 
 
@@ -59,7 +58,7 @@ def test_the_roster_lists_each_bot_once_as_a_bot():
 
 def test_bot_sections_appear_only_for_a_bot_and_the_main_section_only_for_the_main_bot():
     worker = _blocks(enabled_agents=_ROSTER)
-    assert not {"bot-identity-prompt", "bot-memory-prompt", "bot-main-prompt"} & set(worker)
+    assert not {"bot-identity-prompt", "bot-memory-prompt", "bot-main-prompt", "bot-harness-prompt"} & set(worker)
     assert "session-title-prompt" in worker
 
     main = _blocks(enabled_agents=_ROSTER, bot=_MAIN)
@@ -67,8 +66,12 @@ def test_bot_sections_appear_only_for_a_bot_and_the_main_section_only_for_the_ma
         main["bot-identity-prompt"]
     )
     assert "Session `ses_main`" in main["bot-identity-prompt"]
-    assert "`/home/u/.avibe/bots/main`" in main["bot-memory-prompt"]
+    # The permanent Session is named once; the directory is the environment block's cwd, not a prompt value.
+    assert "".join(text for module, text in main.items() if module.startswith("bot-")).count("ses_main") == 1
     assert "## You are the user's main Bot" in main["bot-main-prompt"]
+    assert [module for module in main if module.startswith("bot-")] == [
+        "bot-identity-prompt", "bot-memory-prompt", "bot-main-prompt", "bot-harness-prompt",
+    ]
     # A Bot's Session is titled by its display name.
     assert "session-title-prompt" not in main
 
@@ -76,7 +79,7 @@ def test_bot_sections_appear_only_for_a_bot_and_the_main_section_only_for_the_ma
     assert "You are 首席安全官, the Bot `@<bot:cso>`. Your role: Reviews security risks. Your one" in (
         cso["bot-identity-prompt"]
     )
-    assert "bot-main-prompt" not in cso
+    assert "bot-main-prompt" not in cso and "bot-harness-prompt" in cso
 
 
 def test_a_bots_sections_are_byte_stable_across_its_turns_and_its_forks():
@@ -95,38 +98,59 @@ def test_a_bots_sections_are_byte_stable_across_its_turns_and_its_forks():
     assert order.index("bot-memory-prompt") < order.index("session-start-prompt")
 
 
-def test_prompt_cli_examples_parse_against_the_real_cli():
-    """Every `vibe agent run` the roster, mention, and Bot sections teach is a live caller, and a `--bot`
-    example carries no flag `--bot` refuses."""
+def _argv(example: str) -> list[str]:
+    # A placeholder is a value; `...` after a flag is its value, and a trailing one stands for the rest.
+    tokens = shlex.split(re.sub(r"<[^>]+>", "x", example))
+    return [
+        "x" if token == "..." else token
+        for index, token in enumerate(tokens)
+        if token != "..." or tokens[index - 1].startswith("--")
+    ]
+
+
+def test_prompt_cli_examples_parse_against_the_real_cli(capsys):
+    """Every `vibe` command the roster, mention, and Bot sections teach is a live caller: an example parses, a bare
+    command name is a real command, a flag "Handing out work" names on its own is a `vibe agent run` flag, and a
+    `--bot` example carries no flag `--bot` refuses."""
     blocks = _blocks(enabled_agents=_ROSTER, bot=_MAIN)
-    text = blocks["harness-agents-prompt"] + blocks["bot-identity-prompt"]
-    examples = re.findall(r"`(vibe agent run [^`]+)`", text)
+    text = blocks["harness-agents-prompt"] + "".join(t for module, t in blocks.items() if module.startswith("bot-"))
+    fragments = re.findall(r"`(--[a-z][^`]*)`", blocks["bot-harness-prompt"])
+    examples = re.findall(r"`(vibe [^`]+)`", text) + [f"vibe agent run {f}" for f in fragments if " " in f]
     assert any("--bot" in example for example in examples)
     refused = {attr for attr, _flag in cli._BOT_RUN_CONFLICTS}
     parser = cli.build_parser()
     for example in examples:
-        # A placeholder is a value; `...` after a flag is its value, and a trailing one stands for the rest.
-        tokens = shlex.split(re.sub(r"<[^>]+>", "x", example))
-        argv = [
-            "x" if token == "..." else token
-            for index, token in enumerate(tokens)
-            if token != "..." or tokens[index - 1].startswith("--")
-        ]
-        if "--message" not in argv:
+        argv = _argv(example)[1:]
+        if not any(token.startswith("-") or token == "x" for token in argv):
+            with pytest.raises(SystemExit) as named:
+                parser.parse_args([*argv, "--help"])
+            assert named.value.code == 0, example
+            continue
+        if argv[:2] == ["agent", "run"] and "--message" not in argv:
             argv += ["--message", "x"]
-        args = parser.parse_args(argv[1:])
-        if args.bot:
+        args = parser.parse_args(argv)
+        if getattr(args, "bot", None):
             assert not [attr for attr in refused if getattr(args, attr, None) not in (None, False, "")], example
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["agent", "run", "--help"])
+    run_flags = set(re.findall(r"(?<![\w-])--[a-z][a-z-]*", capsys.readouterr().out))
+    assert {"--queue", "--visible", "--model"} <= run_flags
+    for fragment in fragments:
+        assert set(re.findall(r"--[a-z][a-z-]*", fragment)) <= run_flags, fragment
 
 
 def test_bots_get_no_messaging_guidance_in_their_system_prompt():
     """bots.md D4 (2026-11-03): where a result goes is said on each input, not in the system prompt."""
-    identity = _blocks(enabled_agents=_ROSTER, bot=_CSO)["bot-identity-prompt"]
+    bot = _blocks(enabled_agents=_ROSTER, bot=_CSO)
+    identity = bot["bot-identity-prompt"]
     assert "begin with a `[Harness: ...]` line naming the sender" in identity
     roster = _blocks(enabled_agents=_ROSTER)["harness-agents-prompt"]
     bot_rules = roster[roster.index("Bot rules:"): roster.index("Agent rules:")]
     for text in (identity, bot_rules):
         assert "callback" not in text and "report" not in text and "silent" not in text
+    # Handing out work says a dispatched Session reports back, never to ask for a callback (owner, 2026-11-08).
+    assert "callback" not in bot["bot-harness-prompt"]
 
 
 @pytest.fixture()
@@ -148,8 +172,7 @@ def test_a_turn_runs_as_a_bot_only_in_the_bots_directory(bots, tmp_path):
     vibey = bots.store.get_builtin_default_agent_for_backend("vibey")
     info = bot_for_turn(bots.store, agent_id=main.agent.id, cwd=str(tmp_path / "bots" / "main"))
     assert info == BotPromptInfo(
-        handle="main", display_name="", role=main.role, session_id="ses_main",
-        workdir=str(tmp_path / "bots" / "main"), builtin=True,
+        handle="main", display_name="", role=main.role, session_id="ses_main", builtin=True,
     )
     # A fresh --agent Session of the Bot's Agent elsewhere, or another Agent in the directory, is a worker.
     assert bot_for_turn(bots.store, agent_id=main.agent.id, cwd=str(tmp_path)) is None

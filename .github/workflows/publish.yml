@@ -179,10 +179,12 @@ jobs:
           sparse-checkout: |
             scripts/github_release.py
             scripts/show_runtime_manifest_asset.py
+            scripts/release_asset_download.py
             scripts/build_retired_companion.py
             scripts/release_package_version.py
             scripts/ci_scenario_evidence.py
             scripts/pytest_collection.py
+            .github/actions/sqlite-predecessor-contract/action.yml
             .github/workflows/publish.yml
             tests/scenarios/**/catalog.yaml
             tests/test_distribution_artifacts.py
@@ -283,6 +285,11 @@ jobs:
       - name: Install pinned uv
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+
+      - name: Verify the published predecessor before enabling SQLite no-copy
+        uses: ./release-automation/.github/actions/sqlite-predecessor-contract
+        with:
+          release-tag: ${{ needs.resolve-tag.outputs.tag }}
 
       - name: Build Python distributions
         run: |

@@ -43,29 +43,20 @@ def _embedded_cli_examples(body: str) -> list[str]:
     return sorted(found)
 
 
-def test_avibe_compatibility_skill_teaches_current_harness_defaults() -> None:
-    reference = ROOT / "skills/use-avibe/references/harness.md"
-    assert reference in _use_avibe_references()
-    for path in ("skills/use-avibe/references/harness.md",):
-        body = _read(path)
+def test_use_avibe_routes_harness_work_to_the_harness_skill() -> None:
+    """Harness rules have one source: `use-avibe` points to `use-avibe-harness`.
 
-        assert "Runs are async by default" in body
-        assert "pass `--sync` only when" in body
-        assert "Omit the target when the work should continue here." in body
-        assert "vibe agent run --agent '<agent-name>' --message '...'" in body
-        assert "from an Avibe Agent shell" in body
-        assert "vibe task add --cron '<expr>' --message '...'" in body
-        # A scheduled command task is not a saved message: no Agent turn fires.
-        assert "vibe task add --cron '<expr>' --shell '<command>'" in body
-        assert (
-            "vibe task add --cron '<expr>' --shell '<command>' "
-            "--on-failure agent --message '<what to do>'"
-        ) in body
-        assert "vibe watch add --message '...' -- <cmd>" in body
-        assert "vibe agent run --agent '<agent-name>' --same-scope --message '...'" in body
-        assert "Avibe uses the command's current working directory" in body
-        assert "Forks keep the source Session cwd by default" in body
-        assert "follows the caller or source Session cwd" not in body
+    A second copy in `use-avibe` drifted from the first, so the operations Skill
+    routes Harness work to the Harness Skill instead of restating its rules.
+    """
+
+    entry = _read("skills/use-avibe/SKILL.md")
+    row = next(line for line in entry.splitlines() if "manage watches or Session queues" in line)
+    assert "Load the `use-avibe-harness` Skill" in row
+    for path in _use_avibe_references():
+        body = path.read_text()
+        for rule in ("Watch waiter contract", "vibe session send-now", "vibe session queue remove"):
+            assert rule not in body, f"{path.relative_to(ROOT)} restates Harness rule {rule!r}"
 
 
 def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
@@ -133,6 +124,7 @@ def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
     for path in (
         "skills/use-avibe/SKILL.md",
         "skills/use-avibe-harness/SKILL.md",
+        "skills/choose-model/SKILL.md",
         "skills/background-watch-hook/SKILL.md",
         *(path.relative_to(ROOT).as_posix() for path in _use_avibe_references()),
     ):
@@ -171,12 +163,16 @@ def test_use_avibe_harness_owns_the_extracted_harness_protocol() -> None:
     assert "Never detach with `nohup` or a trailing `&`" in body
     assert "live backend-native tool policy" not in body
     assert "### Mental model" in body
-    assert "### Inspecting Harness state" in body
-    assert "### Choosing the right Harness shape" in body
+    assert "### Choosing the shape" in body
     assert "Watch waiter contract" in body
-    assert "That existing-Session send is a P1 delivery by default" in body
-    assert "### Agents" in body
-    assert "### Mentions in user messages" in body
+    assert "`--queue` waits for the running Turn instead" in body
+    assert "`vibe agent run --bot <bot> --message ...`" in body
+    # The resident roster (core/prompts/harness-agents.md) owns the Bot and Agent
+    # rules and typed mentions; a copy here went stale once, without `--bot`.
+    assert "### Agents" not in body
+    assert "### Mentions" not in body
+    # Loaded on demand, so it stays near the reviewed ~1.3k-token budget.
+    assert len(body) <= 6000, len(body)
 
 
 def test_background_watch_skill_defaults_to_current_session() -> None:
@@ -313,5 +309,4 @@ def test_no_guidance_says_a_run_returns_its_result_by_default() -> None:
         body = " ".join(path.read_text().split()).lower()
         for text in stale:
             assert text.lower() not in body, f"{path.relative_to(ROOT)} still says {text!r}"
-    for path in ("core/prompts/harness-agents.md", "skills/use-avibe-harness/SKILL.md", "skills/use-avibe/references/harness.md"):
-        assert "only with `--callback`" in _read(path), path
+    assert "only with `--callback`" in _read("core/prompts/harness-agents.md")

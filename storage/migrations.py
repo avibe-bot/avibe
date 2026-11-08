@@ -27,10 +27,11 @@ from storage.backups import (
     prune_state_backups,
 )
 from storage.compatibility import (
-    BRIDGE_REVISION, CompatibilityEpochError, read_compatibility_epoch, require_supported_compatibility_epoch,
+    BRIDGE_REVISION, VERIFIED_PREDECESSOR_EPOCH, CompatibilityEpochError,
+    read_compatibility_epoch, require_supported_compatibility_epoch,
 )
 from storage.db import create_sqlite_engine, sqlite_url
-from storage.migration_policy import declared_migration_epoch
+from storage.migration_policy import classify_migration, declared_migration_epoch
 from storage.lock import MigrationFileLock, migration_lock_path_for
 
 
@@ -78,6 +79,7 @@ class MigrationPreflight:
     compatible_open: bool = False
     compatibility_epoch: int | None = None
     backup_revisions: tuple[set[str], set[str]] | None = None
+    skip_snapshot: bool = False
 
 
 HEAD_TABLES = INITIAL_TABLES | {
@@ -89,6 +91,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "message_deliveries",
     "session_turns",
     "session_turn_replies",
+    "session_delegations",
     "agent_events",
     "session_digests",
     "skill_usage_daily",
@@ -184,6 +187,9 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "session_delegations": {
+        "sender_session_id", "recipient_session_id", "message_id", "run_id", "state", "notice_run_id", "updated_at",
+    },
     "vault_secrets": {"fields"},
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
     "show_page_access_entries": {
@@ -309,6 +315,29 @@ def declared_compatibility_epoch(script: ScriptDirectory, revisions: set[str]) -
     return max(epochs)
 
 
+def is_proven_additive_successor(
+    current_revisions: set[str], target_revisions: set[str], epoch: int | None,
+    *, script: ScriptDirectory | None = None,
+) -> bool:
+    """Exact same-epoch forward path, shared by no-copy admission and old-copy expiry."""
+    if epoch is None or not current_revisions or current_revisions == target_revisions:
+        return False
+    try:
+        script = script or _script_directory(alembic_config())
+        known = {item.revision for item in script.walk_revisions(base=BRIDGE_REVISION)}
+        if not current_revisions.issubset(known) or not target_revisions or not target_revisions.issubset(known):
+            return False
+        pending = tuple(script.iterate_revisions(tuple(target_revisions), tuple(current_revisions)))
+        return (
+            bool(pending)
+            and declared_compatibility_epoch(script, current_revisions) == epoch
+            and declared_compatibility_epoch(script, target_revisions) == epoch
+            and all(classify_migration(item.path).permitted == "additive" for item in pending)
+        )
+    except (CommandError, RevisionError, CompatibilityEpochError, OSError):
+        return False
+
+
 def run_migrations(
     db_path: Path | None = None,
     *,
@@ -366,7 +395,7 @@ def _run_migrations_locked(
         return decision
     backup_revisions = decision.backup_revisions
     backup_attempt: str | None = None
-    if backup_revisions is not None:
+    if backup_revisions is not None and not decision.skip_snapshot:
         _current_revisions, target_revisions = backup_revisions
         backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
         backup_attempt = begin_sqlite_backup_migration(target_db, backup_path)
@@ -381,7 +410,7 @@ def _run_migrations_locked(
             complete_sqlite_backup_migration(target_db, backup_attempt)
         except OSError:
             logger.warning("SQLite migration completed without expiry evidence; retaining backups", exc_info=True)
-    if prune_backups_after_upgrade:
+    if prune_backups_after_upgrade and not decision.skip_snapshot:
         prune_state_backups(target_db.parent / "backups", json_retention=None)
     return decision
 
@@ -402,6 +431,7 @@ def preflight_database(
     installed_heads = set(script.get_heads())
     target_revisions: set[str] = set()
     current_revisions: set[str] = set()
+    skip_snapshot = False
     try:
         target_revisions = {item.revision for item in script.get_revisions(revision)}
         # An ordinary connection preserves SQLite's hot-journal recovery. BEGIN
@@ -456,6 +486,15 @@ def preflight_database(
                 bridge_descendants = {item.revision for item in script.walk_revisions(base=BRIDGE_REVISION)}
                 if current_revisions & bridge_descendants:
                     raise CompatibilityEpochError("bridge schema is missing compatibility_epoch")
+            if (
+                epoch is not None and epoch == VERIFIED_PREDECESSOR_EPOCH
+                and is_proven_additive_successor(current_revisions, target_revisions, epoch, script=script)
+            ):
+                # Incomplete importer work is unclassified, not an additive DDL
+                # batch. Observe its existing receipts on this same snapshot.
+                from storage.importer import completed_sqlite_imports
+
+                skip_snapshot = completed_sqlite_imports(conn)
     except (CommandError, RevisionError, CompatibilityEpochError) as exc:
         from vibe import __version__
 
@@ -476,7 +515,7 @@ def preflight_database(
         (current_revisions, target_revisions)
         if tables - {"alembic_version"} and current_revisions != target_revisions else None
     )
-    return MigrationPreflight(compatibility_epoch=epoch, backup_revisions=backup)
+    return MigrationPreflight(compatibility_epoch=epoch, backup_revisions=backup, skip_snapshot=skip_snapshot)
 
 
 def _compatible_schema_problem(conn: sqlite3.Connection) -> str | None:

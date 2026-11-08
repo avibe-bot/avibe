@@ -459,6 +459,45 @@ scenarios:
       assertion for avibe.bot needs the associated domain on a signed build and
       a real account with a passkey, so it remains a manual device check.
     owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-158
+    name: Bundled iOS sign-in accepts the avibe.bot password as the alternative first factor
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: ios
+    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-158 signs in with the avibe.bot password and reaches the instances
+    reason: >-
+      The bundled page owns the approved password/* screens and consumes the
+      native auth.signInWithPassword state. The collected Vitest case drives
+      the email step's password link, the identifier-first password step with
+      its hidden username field and show/hide toggle, submission by Return,
+      session discovery, and authorized selection. As for AUTH-SETUP-148, the
+      Python auth_setup harness drives IM backend auth and cannot reach the
+      bundled page or WebKit, so this case is the iOS password sign-in closed
+      loop. Focused cases in the same
+      file own each failure copy and rate-limit wait, the password clearing on
+      Change email, Back, and leaving the step, the email code fallback
+      through auth.requestOtp, the forgot page, and the one weak-password
+      notice after any second factor. AUTH-SETUP-149 covers every password
+      failure code.
+  - id: AUTH-SETUP-159
+    name: Native password grant keeps the password inside the hidden transport
+    status: partial
+    kind: authorization
+    layer: contract
+    missing_layer: hosted-supabase-and-physical-device
+    backend: ios
+    reason: >-
+      Hermetic real-WKWebView XCTest owns the fixed password-grant script
+      (anon apikey and bearer, credentials omitted, the existing callback and
+      session read), redirect rejection, the stage-accurate error mapping with
+      Retry-After, weak_password pass-through, the 403 two_factor_required
+      answer, and the password's absence from every other request, result,
+      and error; coordinator tests own store rotation after a failed attempt.
+      The catalog citation checker does not collect Swift XCTest. iCloud
+      Keychain fill and save, and a real invalid_credentials answer for an
+      account without a password, need a signed build and remain manual.
+    owning_layer: iOS XCTest plus physical-device acceptance
   - id: AUTH-SETUP-404
     name: Verified limited Show Page identity admits and denies a revoked guest lease
     status: covered

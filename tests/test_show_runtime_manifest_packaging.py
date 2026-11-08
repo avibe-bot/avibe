@@ -108,7 +108,7 @@ def test_prepare_manifest_verifies_release_asset_digest_and_writes_output(tmp_pa
     ).encode()
 
     def opener(request, timeout):
-        assert timeout == 30
+        assert timeout == 10
         return _Response(manifest_content if request.full_url == asset_url else release_content)
 
     output = tmp_path / "vibe" / "show_runtime_manifest.json"
