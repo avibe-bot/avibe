@@ -192,14 +192,17 @@ def test_an_agent_run_input_says_where_its_result_goes(tmp_path, metadata, hint)
 def test_harness_hint_omits_reverse_dispatch_report_target():
     from core.agent_input import harness_hint
 
-    assert harness_hint(
-        {
-            "source_kind": "agent",
-            "source_actor": "sescaller01",
-            "suppress_report_hint": True,
-        },
-        receiver="sesreceiver01",
-    ) == ""
+    spec = {
+        "task_trigger_kind": "agent_run",
+        "source_kind": "agent",
+        "source_actor": "sescaller01",
+    }
+    assert harness_hint(spec, receiver="sesreceiver01") == (
+        "No callback. When the work is done or you need a decision, you can report to #sescaller01 with "
+        "`vibe agent run --session-id sescaller01 --message ...`."
+    )
+    spec["suppress_report_hint"] = True
+    assert harness_hint(spec, receiver="sesreceiver01") == ""
 
 
 def test_a_merged_batch_names_each_distinct_report_target_once():

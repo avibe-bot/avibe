@@ -5378,9 +5378,9 @@ class SQLiteBackgroundTaskStore:
             if retired_delivery or (status == "queued" and not delivery_id):
                 values["status"] = "canceled"
                 values["completed_at"] = now
-            if suppress_callback and str(row["callback_session_id"] or "").strip() and str(
-                row["callback_status"] or ""
-            ).strip() not in {"sent", "skipped"}:
+            if suppress_callback and status not in TERMINAL_RUN_STATUSES and str(
+                row["callback_session_id"] or ""
+            ).strip() and str(row["callback_status"] or "").strip() not in {"sent", "skipped"}:
                 values.update(
                     callback_status="skipped",
                     callback_error=None,
