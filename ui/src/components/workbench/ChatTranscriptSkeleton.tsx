@@ -95,7 +95,7 @@ export function ChatPageSkeleton({ onBack }: { onBack: () => void }) {
       className="fixed inset-x-0 bottom-0 top-[var(--macos-stale-login-session-notice-h,0px)] z-40 flex flex-col bg-background md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent"
     >
       {/* The header bar as ChatHeaderBar draws it: the way back, and the title's place. */}
-      <div className="h-[calc(3.5rem+env(safe-area-inset-top))] shrink-0 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:h-auto md:bg-surface/70 md:px-8 md:py-2.5 md:pt-2.5">
+      <div className="h-[calc(2.75rem+env(safe-area-inset-top))] shrink-0 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:h-auto md:bg-surface/70 md:px-8 md:py-2.5 md:pt-2.5">
         <div className="mx-auto flex h-full w-full max-w-(--chat-column-w) items-center gap-3 md:h-auto">
           <Button type="button" variant="outline" size="icon" onClick={onBack} aria-label={t('chat.back')} className="size-7 shrink-0">
             <ArrowLeft className="size-3.5" />
@@ -110,7 +110,7 @@ export function ChatPageSkeleton({ onBack }: { onBack: () => void }) {
           <TranscriptSkeleton />
         </div>
       </div>
-      <div className="shrink-0 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 md:px-8 md:pb-4">
+      <div className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 md:px-8 md:pb-4">
         <div className="mx-auto w-full max-w-(--chat-column-w)">
           <Skeleton className="h-[104px] w-full rounded-2xl" />
         </div>

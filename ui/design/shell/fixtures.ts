@@ -48,6 +48,9 @@ export interface WorkbenchFixtures {
   botStatus?: Record<string, BotRuntimeStatus>;
   /** The page is the Avibe desktop app's own window (`isDesktopShell()`), not a browser tab. */
   desktopShell?: boolean;
+  /** The page runs in the Avibe phone app (`window.avibeNative`, `hasNativeCapability()`), with these
+   *  capabilities and versions; its calls answer nothing and it sends no events. */
+  nativeShell?: Record<string, number>;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
   storage?: Record<string, string>;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches.
@@ -80,6 +83,13 @@ export function apiResponses(fixtures: WorkbenchFixtures = {}): Record<string, u
 }
 
 export const owner = OWNER_INSTANCE_CAPABILITIES;
+
+/** The phone app's bridge, as `ios/Avibe/NativeBridge.swift` advertises it (`nativeShell`). */
+export const IOS_APP_CAPABILITIES = { accountPresentation: 2, app: 1, haptics: 1, keyboardResizesViewport: 1, viewport: 1, voice: 1 };
+
+/** The owner's phone as a frame draws it: iPhone 17 Pro, 402×874pt, the Dynamic Island's 62pt above
+ *  and the home indicator's 34pt below, the page drawn edge to edge (the phone app, a Home Screen web app). */
+export const IPHONE_17_PRO = { width: 402, height: 874, safeArea: { top: 62, bottom: 34 } };
 
 /** What the server reports for these Bots (docs/plans/bots.md D12): every Bot but the main one takes one of five places. */
 export const botLimitOf = (bots: readonly Bot[]): BotLimit => ({ count: bots.filter((each) => !each.builtin).length, max: 5 });

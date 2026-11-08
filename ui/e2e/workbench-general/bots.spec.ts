@@ -1216,12 +1216,12 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.getByRole('button', { name: '在 中文项目 里新建会话' })).toBeVisible();
     await page.screenshot({ animations: 'disabled', path: `${SHOTS}/bots-phone-workbench-${theme}.png` });
 
-    // The brand header stays the brand (logo and name, as before), 56px tall, with no
+    // The brand header stays the brand (logo and name, as before), 44px tall, with no
     // page action in it; the tab names the page for assistive tech only. New project
     // sits on the Projects title row, and both sections are titled alike.
     const brand = page.locator('header').filter({ has: page.getByRole('link', { name: /Avibe/ }) });
     await expect(brand).toBeVisible();
-    expect((await brand.boundingBox())!.height).toBeCloseTo(56, 0);
+    expect((await brand.boundingBox())!.height).toBeCloseTo(44, 0);
     await expect(brand.getByRole('heading', { name: '工作台', level: 1 })).toHaveClass(/sr-only/);
     await expect(brand.getByRole('link', { name: /Avibe/ })).toHaveAttribute('href', '/');
     await expect(brand.getByRole('button')).toHaveCount(0);

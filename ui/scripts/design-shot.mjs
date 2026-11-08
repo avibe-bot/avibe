@@ -61,6 +61,11 @@ async function shoot(frame, t) {
   try {
     await page.setViewportSize({ width: frame.width, height: frame.height });
     if (frame.reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' });
+    // A phone drawn edge to edge: the browser reports its insets to `env(safe-area-inset-*)`.
+    if (frame.safeArea) {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: frame.safeArea.top, bottom: frame.safeArea.bottom, left: 0, right: 0 } });
+    }
     await page.goto(`${base}design.html?frame=${encodeURIComponent(frame.id)}&theme=${t}&lang=${lang}`);
     const ready = await page.waitForSelector('body[data-design-ready]', { timeout: 15_000 }).then(() => true, () => false);
     if (!ready) {
@@ -183,7 +188,7 @@ if (manifestPath && shots.length) {
   const fresh = new Map(
     shots.map((s) => [
       key({ ...s, canvas }),
-      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length || s.press), hash: s.hash, src: relative(dirname(manifestPath), s.png).split('\\').join('/'), canvas },
+      { id: s.id, file: s.file, title: s.title, status: s.status, theme: s.theme, lang, width: s.width, height: s.height, interaction: Boolean(s.hover || s.click?.length || s.press || s.safeArea), hash: s.hash, src: relative(dirname(manifestPath), s.png).split('\\').join('/'), canvas },
     ]),
   );
   const kept = previous.filter((s) => (s.canvas ?? 'canvas') !== canvas || (known.has(s.id) && !fresh.has(key(s))));

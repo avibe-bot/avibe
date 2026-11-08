@@ -8,6 +8,8 @@ export type DesignLang = 'zh' | 'en';
 export type FrameStatus = 'proposed' | 'approved' | 'shipped';
 /** Where a frame's router starts. */
 export type FrameRoute = string | { pathname: string; search?: string; state?: unknown };
+/** A phone's safe-area insets in CSS px: the status bar or Dynamic Island above, the home indicator below. */
+export type FrameSafeArea = { top: number; bottom: number };
 
 export interface FrameSpec {
   /** Unique within its file; the frame id is `<file path under frames/>/<name>`. */
@@ -46,6 +48,11 @@ export interface FrameSpec {
    *  `src/index.css`): the canvas starts it again every `replay` ms, so it loops. The screenshot shows
    *  where it settles. */
   replay?: number;
+  /** The device's safe-area insets, for a phone that draws the page edge to edge (the phone app, a
+   *  Home Screen web app): the screenshot has the browser report them, so `env(safe-area-inset-*)`
+   *  reads them as that phone does. The canvas, a plain browser, reads 0, so an exported page shows
+   *  such a frame as its screenshot. */
+  safeArea?: FrameSafeArea;
   render: () => ReactNode;
 }
 

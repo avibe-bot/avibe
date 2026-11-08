@@ -1,6 +1,7 @@
 // Home v4 (owner, 2026-11-03; shipped): the home inside the shipped AppShell, brand-new, partly set
 // up, everything set up, and a member without Bots, on the desktop app at three window sizes (the
-// centering depends on the height) and on two phones, plus browser and native-shell phones with the
+// centering depends on the height) and on two phones, plus the phone app on an iPhone 17 Pro drawn edge
+// to edge (its safe area: 62pt above, 34pt below), and browser and native-shell phones with the
 // keyboard up. What each state shows comes from the facts the home reads (the main Bot's backend,
 // this device's push, the desktop app's Computer Use, the config's chat apps, Avibe Cloud pairing)
 // and the account's home preferences, served by the fixtures below. The layout's rules are in
@@ -11,7 +12,7 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { frames, type FrameSpec } from '../../frame';
 import { SoftKeyboard } from '../../shell/HeldComposer';
-import type { WorkbenchFixtures } from '../../shell/fixtures';
+import { IOS_APP_CAPABILITIES, IPHONE_17_PRO, type WorkbenchFixtures } from '../../shell/fixtures';
 import { agentsApi, aloneFixtures, mainRunningFixtures, teamFixtures } from '../../shell/teamFixtures';
 import { homeFactsApi, phoneShell, workbenchFixtures, type HomeFacts } from '../workbench/fixtures';
 
@@ -77,16 +78,7 @@ const nativeFixtures = workbenchFixtures({
     authenticated: true,
     email: 'max@example.com',
   },
-}, STATES[2].base);
-
-const nativeHome = () => (
-  <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
-    <MobileBrandHeader nativeAccountAction />
-    <div className="min-h-0 flex-1 overflow-hidden px-4">
-      <Workbench />
-    </div>
-  </div>
-);
+}, { ...STATES[2].base, nativeShell: IOS_APP_CAPABILITIES });
 
 /**
  * The keyboard-up phone states (rule 8 in `HomeLayout`) are drawn without a script: above the
@@ -102,8 +94,8 @@ const keyboardUp = (nativeShell: boolean) => () => (
         <div
           className={
             nativeShell
-              ? 'flex h-[calc(100dvh-3.5rem)] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
-              : 'flex h-[calc(100dvh-3.5rem-var(--mobile-nav-clearance))] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
+              ? 'flex h-[calc(100dvh-2.75rem)] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
+              : 'flex h-[calc(100dvh-2.75rem-var(--mobile-nav-clearance))] shrink-0 flex-col px-4 [&_[data-home-space=below]]:hidden'
           }
         >
           <Workbench />
@@ -141,13 +133,12 @@ const designFrames = frames([
   ...stateFrames,
   {
     name: 'e-native-phone',
-    title: '首页 · iOS App · 账户头像进入账号与实例',
-    width: 390,
-    height: 844,
+    title: '首页 · iOS App（iPhone 17 Pro，安全区 62/34）· 账户头像进入账号与实例，底栏贴近底部',
+    ...IPHONE_17_PRO,
     status: 'shipped',
     route: '/',
     fixtures: nativeFixtures,
-    render: nativeHome,
+    render: home,
   },
   {
     name: 'y-browser-keyboard-phone',

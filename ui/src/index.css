@@ -25,17 +25,21 @@
   }
 }
 
-/* How much bottom room the fixed mobile tab bar needs: its own height, the
-   home-indicator inset, and a small gap. The shell's scroll area pads by it so
-   the last row can always be scrolled clear, and a control pinned to the bottom
-   of that scroll area offsets by it so it rests just above the bar. Two
-   consumers, one number — the pair drifting apart is what leaves a button under
-   the bar. */
+/* The fixed mobile tab bar's geometry, one chain so nothing above the bar keeps a number of its own.
+   `--mobile-nav-pad-bottom` is the bar's bottom padding. On a phone with a home indicator the
+   indicator's inset takes the place of the bar's own 0.5rem rather than adding to it, and the tab's
+   0.5rem below its label reaches 0.25rem into it, so the labels end 0.25rem above the inset, about
+   38px above the screen's edge with a 34px inset, where a native tab bar's do. Without an inset (a
+   Safari tab with its toolbar shown, a phone without a home indicator) it stays 0.5rem.
+   `--mobile-nav-height` is the bar's own height: the bar is drawn this tall, and a sheet or control
+   above the bar starts here. `--mobile-nav-clearance` is the bottom room the bar needs, its height
+   and a small gap: the shell's scroll area pads by it so the last row can always be scrolled clear,
+   and a control pinned to the bottom of that scroll area offsets by it so it rests just above the
+   bar. */
 :root {
-  --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
-  /* The tab bar's own height with the inset: the bar is drawn this tall, and a sheet or control
-     above the bar starts here. */
-  --mobile-nav-height: calc(5rem + env(safe-area-inset-bottom));
+  --mobile-nav-pad-bottom: max(0.5rem, env(safe-area-inset-bottom) - 0.25rem);
+  --mobile-nav-height: calc(4.5rem + var(--mobile-nav-pad-bottom));
+  --mobile-nav-clearance: calc(var(--mobile-nav-height) + 0.5rem);
   /* How far the circle in the middle of the tab bar (the main Bot) rises above the bar's top
      edge. The bar lifts the circle by it, and a sheet that ends at the bar pads its foot by it
      plus its own spacing, so the sheet's last row never sits under the circle. */

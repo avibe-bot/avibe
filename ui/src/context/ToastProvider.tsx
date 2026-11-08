@@ -173,7 +173,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           so a toast raised from inside a modal painted behind the overlay. */}
       <div
         data-settings-interaction-owner="true"
-        className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] right-4 z-[100] flex flex-col gap-2 md:bottom-4"
+        className="fixed bottom-(--mobile-nav-clearance) right-4 z-[100] flex flex-col gap-2 md:bottom-4"
       >
         {toasts.map((toast) => (
           <ToastCard key={toast.id} toast={toast} joins={toasts.some((other) => other.id < toast.id && !other.leaving)} onDismiss={dismissToast} onGone={remove} register={register}>
