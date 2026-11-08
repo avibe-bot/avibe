@@ -20341,6 +20341,12 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    # Projects mirror the Web surface: catalog reads are Viewer work, while
+    # creating and editing the instance's Projects are Member work.
+    ("project", "list"): "viewer",
+    ("project", "show"): "viewer",
+    ("project", "create"): "member",
+    ("project", "update"): "member",
     # Agents: discovery, selection and running are use; the definition lifecycle
     # is management, admitted before any builtin synchronization or import.
     ("agent", "list"): "editor",
