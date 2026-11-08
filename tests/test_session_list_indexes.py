@@ -13,7 +13,7 @@ from storage import migrations
 @pytest.mark.no_sqlite_template
 def test_session_list_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path):
     path = tmp_path / "upgrade.sqlite"
-    migrations.run_migrations(path, revision="20261108_0076")
+    migrations.run_migrations(path, revision="20261108_0079")
     with sqlite3.connect(path) as conn:
         conn.execute(
             "insert into agent_runs (id, run_type, status, session_id, source_kind, source_actor, "
@@ -50,7 +50,7 @@ def test_session_list_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path
             "id",
         ]
 
-    command.downgrade(migrations.alembic_config(path), "20261108_0076")
+    command.downgrade(migrations.alembic_config(path), "20261108_0079")
     with sqlite3.connect(path) as conn:
         assert conn.execute("select * from agent_runs").fetchall() == before_rows
         assert conn.execute(

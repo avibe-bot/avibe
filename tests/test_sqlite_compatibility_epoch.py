@@ -313,7 +313,8 @@ def test_sqlite_busy_is_not_misdiagnosed_as_an_incompatible_epoch(bridge_db, mon
 
 @pytest.mark.parametrize("epoch", ["2", "true", "null", '"1"'])
 def test_same_head_fast_probe_cannot_bypass_epoch_refusal(bridge_db, epoch):
-    _future(bridge_db, stamp="20261108_0079", epoch=epoch)
+    current_head = ScriptDirectory.from_config(migrations.alembic_config(bridge_db)).get_current_head()
+    _future(bridge_db, stamp=current_head, epoch=epoch)
     assert not importer.probe_current_sqlite_state(bridge_db)
     before = _snapshot(bridge_db)
     with pytest.raises(migrations.IncompatibleDatabaseRevisionError, match="compatibility_epoch"):
