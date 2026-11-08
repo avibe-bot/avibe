@@ -1,7 +1,7 @@
 {
   "fixture_id": "instance-webpush-nonascii-v1",
   "request_fixture": "tests/fixtures/push/instance-webpush-request.json",
-  "request_sha256": "04b5397d8dbe47443b4b28f5232fc16792b449a7482884124ecd64f0dbe07f88",
+  "request_sha256": "b99c30ffcf4990cd76966cfbc54b2fdc6c2e93419e8c7a4bfdf8bc8bb0ea3855",
   "request_body_sha256": "0669c7deb693ad80151362b223effcba80e83bb9a518fa9d4c41db5041e98b28",
   "receiver_private_key": "q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94",
   "auth_secret": "BTBZMqHH6r4Tts7J_aSIgg",

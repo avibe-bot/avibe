@@ -28,6 +28,14 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+def _header(request: dict, name: str) -> str:
+    expected = name.lower()
+    for key, value in request["headers"].items():
+        if key.lower() == expected:
+            return value
+    raise AssertionError(f"missing header {name}")
+
+
 def test_frozen_request_links_to_private_receiver_companion():
     request_bytes = REQUEST_PATH.read_bytes()
     request = json.loads(request_bytes)
@@ -68,5 +76,16 @@ def test_real_serializer_and_pywebpush_capture_is_decryptable():
 
     assert captured["method"] == "POST"
     assert captured["endpoint"] == generator.ENDPOINT
-    assert captured["headers"]["content-encoding"] == "aes128gcm"
+    assert _header(captured, "content-encoding") == "aes128gcm"
+    assert _header(captured, "ttl") == "43200"
+    assert "urgency" not in {key.lower() for key in captured["headers"]}
+    assert "topic" not in {key.lower() for key in captured["headers"]}
+    authorization = _header(captured, "authorization")
+    token = authorization.split(" t=", 1)[1].split(",", 1)[0]
+    claims = json.loads(_b64url_decode(token.split(".")[1]))
+    assert claims == {
+        "aud": "https://avibe.bot",
+        "exp": generator.TEST_CLOCK + 12 * 60 * 60,
+        "sub": "mailto:notifications@avibe.bot",
+    }
     assert json.loads(plaintext.decode("utf-8")) == receiver["expected"]

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, utils
+from cryptography.hazmat.primitives.asymmetric import ec
 
 FIXTURE_ID = "instance-webpush-nonascii-v1"
 TEST_CLOCK = 1_794_096_000
@@ -51,7 +51,7 @@ def _receiver_public_key() -> str:
     )
 
 
-def _vapid_private_key() -> Any:
+def _vapid_keys() -> Any:
     private_key = ec.derive_private_key(
         int.from_bytes(_b64url_decode(VAPID_PRIVATE_KEY), "big"),
         ec.SECP256R1(),
@@ -61,27 +61,21 @@ def _vapid_private_key() -> Any:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    from py_vapid import Vapid
+    from core.web_push import VapidKeys
 
-    return Vapid.from_pem(pem)
-
-
-def _deterministic_vapid_sign(claims: dict[str, Any], key: Any) -> str:
-    """Sign RFC 8292 claims with cryptography's deterministic ECDSA mode."""
-
-    from py_vapid.utils import b64urlencode, num_to_bytes
-
-    header = b64urlencode(b'{"typ":"JWT","alg":"ES256"}')
-    encoded_claims = b64urlencode(
-        json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return VapidKeys(
+        public_key=_receiver_public_key_from_private(private_key),
+        private_key_pem=pem.decode("ascii"),
     )
-    token = f"{header}.{encoded_claims}"
-    signature = key.sign(
-        token.encode("utf-8"),
-        ec.ECDSA(hashes.SHA256(), deterministic_signing=True),
+
+
+def _receiver_public_key_from_private(private_key: Any) -> str:
+    return _b64url_encode(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
     )
-    r, s = utils.decode_dss_signature(signature)
-    return f"{token}.{b64urlencode(num_to_bytes(r, 32) + num_to_bytes(s, 32))}"
 
 
 def capture_request() -> dict[str, Any]:
@@ -89,12 +83,13 @@ def capture_request() -> dict[str, Any]:
     import py_vapid
     import pywebpush
 
-    from core.web_push import serialize_notification_payload
+    from core.web_push import send_web_push
 
     original_generate_private_key = pywebpush.ec.generate_private_key
     original_entropy = http_ece.os.urandom
     original_clock = pywebpush.time.time
-    original_vapid_sign = py_vapid.sign
+    original_post = pywebpush.requests.post
+    original_from_pem_bound = py_vapid.Vapid.from_pem
     fixed_ecdh_private_key = ec.derive_private_key(
         int.from_bytes(FIXED_ECDH_PRIVATE_SCALAR, "big"),
         ec.SECP256R1(),
@@ -106,23 +101,41 @@ def capture_request() -> dict[str, Any]:
         reason = "Created"
         headers: dict[str, str] = {}
 
-    class CaptureSession:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict[str, Any]]] = []
-
-        def post(self, endpoint: str, **kwargs: Any) -> Response:
-            self.calls.append((endpoint, kwargs))
-            return Response()
+    calls: list[tuple[str, dict[str, Any]]] = []
 
     def fixed_generate_private_key(curve: Any, backend: Any = None) -> Any:
         if curve.name == "secp256r1":
             return fixed_ecdh_private_key
         return original_generate_private_key(curve, backend)
 
+    def capture_post(endpoint: str, **kwargs: Any) -> Response:
+        calls.append((endpoint, kwargs))
+        return Response()
+
+    class DeterministicPrivateKey:
+        def __init__(self, delegate: Any) -> None:
+            self.delegate = delegate
+
+        def public_key(self) -> Any:
+            return self.delegate.public_key()
+
+        def sign(self, data: bytes, algorithm: Any) -> bytes:
+            del algorithm
+            return self.delegate.sign(
+                data,
+                ec.ECDSA(hashes.SHA256(), deterministic_signing=True),
+            )
+
+    def deterministic_from_pem(_cls: Any, private_key: bytes) -> Any:
+        signer = original_from_pem_bound(private_key)
+        signer._private_key = DeterministicPrivateKey(signer.private_key)
+        return signer
+
     pywebpush.ec.generate_private_key = fixed_generate_private_key
     http_ece.os.urandom = lambda size: FIXED_SALT if size == 16 else original_entropy(size)
     pywebpush.time.time = lambda: TEST_CLOCK
-    py_vapid.sign = _deterministic_vapid_sign
+    pywebpush.requests.post = capture_post
+    py_vapid.Vapid.from_pem = classmethod(deterministic_from_pem)
     try:
         payload = {
             "title": "任务完成",
@@ -134,29 +147,18 @@ def capture_request() -> dict[str, Any]:
             "badge_count": 3,
             "category": "sessions",
         }
-        session = CaptureSession()
-        pywebpush.webpush(
-            subscription_info={
+        send_web_push(
+            subscription={
                 "endpoint": ENDPOINT,
-                "keys": {
-                    "p256dh": _receiver_public_key(),
-                    "auth": AUTH_SECRET,
-                },
+                "p256dh": _receiver_public_key(),
+                "auth": AUTH_SECRET,
             },
-            data=serialize_notification_payload(payload),
-            vapid_private_key=_vapid_private_key(),
-            vapid_claims={
-                "sub": "mailto:notifications@avibe.bot",
-                "aud": "https://avibe.bot",
-                "exp": TEST_CLOCK + 4 * 60 * 60,
-            },
-            ttl=43_200,
-            headers={"Urgency": "normal", "Topic": "session:ses_123"},
-            requests_session=session,
+            payload=payload,
+            vapid_keys=_vapid_keys(),
         )
-        if len(session.calls) != 1:
-            raise AssertionError(f"expected one captured request, got {len(session.calls)}")
-        endpoint, request = session.calls[0]
+        if len(calls) != 1:
+            raise AssertionError(f"expected one captured request, got {len(calls)}")
+        endpoint, request = calls[0]
         return {
             "fixture_id": FIXTURE_ID,
             "test_clock": TEST_CLOCK,
@@ -169,7 +171,8 @@ def capture_request() -> dict[str, Any]:
         pywebpush.ec.generate_private_key = original_generate_private_key
         http_ece.os.urandom = original_entropy
         pywebpush.time.time = original_clock
-        py_vapid.sign = original_vapid_sign
+        pywebpush.requests.post = original_post
+        del py_vapid.Vapid.from_pem
 
 
 def serialize_request(request: dict[str, Any]) -> bytes:
