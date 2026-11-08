@@ -380,6 +380,61 @@ const standAt = async (page: Page, screensUp: number) => {
   await page.waitForTimeout(400);
 };
 
+test('an explicit jump to latest clears an old anchor takeback before a reader scroll', async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await open(page, 'delay=0&count=60', { imagesHeldUntil: held });
+  await setTop(page, 0);
+  await expect(transcript(page).locator('[data-message-id]')).toHaveCount(60);
+  await transcript(page).evaluate((el) => {
+    const image = [...el.querySelectorAll('img')].find((img) => !img.complete || img.naturalHeight === 0)!;
+    const row = image.closest<HTMLElement>('[data-message-id]')!;
+    el.scrollTop += row.getBoundingClientRect().bottom - el.getBoundingClientRect().top + el.clientHeight * 2;
+  });
+  await page.waitForTimeout(100);
+  await transcript(page).evaluate((el) => {
+    const fling = { stop: false };
+    (window as unknown as { takebackFling: typeof fling }).takebackFling = fling;
+    const step = () => {
+      if (fling.stop || el.scrollTop <= 0) return;
+      el.scrollTop -= 3;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+  await page.waitForTimeout(150);
+  release();
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { (window as unknown as { takebackFling: { stop: boolean } }).takebackFling.stop = true; });
+  await nextFrames(page);
+
+  await page.evaluate(() => {
+    const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
+    const block = (event: Event) => event.stopImmediatePropagation();
+    el.addEventListener('scroll', block, true);
+    (window.__scrollLab as ScrollLab & { releaseScrollEvent?: () => void }).releaseScrollEvent = () => {
+      el.removeEventListener('scroll', block, true);
+      el.dispatchEvent(new Event('scroll'));
+    };
+  });
+  await toLatest(page).click();
+  await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
+  await page.evaluate(() => window.__scrollLab.start());
+  await page.evaluate(() => {
+    const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
+    el.scrollTop -= 120;
+    window.__scrollLab.push('A row lands while the reader scroll event is queued.');
+  });
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    const lab = window.__scrollLab as ScrollLab & { releaseScrollEvent?: () => void };
+    lab.releaseScrollEvent?.();
+    delete lab.releaseScrollEvent;
+  });
+  const { writes } = await stop(page);
+  expect(restoreWrites(writes)).toEqual([]);
+});
+
 test('the way back to the latest message is a quick glide that slows as it lands, then follows the tail', async ({ page }) => {
   // All 50 rows are in the first window: nothing older to load.
   await open(page, 'delay=0&images=0&count=50');

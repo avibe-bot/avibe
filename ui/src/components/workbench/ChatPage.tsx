@@ -5396,6 +5396,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     if (!el) return;
     el.scrollTop = el.scrollHeight;
     lastScrollTopRef.current = Math.max(0, el.scrollTop);
+    takebackRef.current = null;
     setFollowingTail(true);
     anchorRef.current = null;
     setShowJump(false);
