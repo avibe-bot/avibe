@@ -75,6 +75,7 @@ def test_all_collection_commands_share_bounded_pagination_contract() -> None:
         ("runs", "list"),
         ("session", "list"),
         ("session", "queue", "list"),
+        ("project", "list"),
         ("vault", "list"),
         ("vault", "find"),
         ("vault", "tags"),

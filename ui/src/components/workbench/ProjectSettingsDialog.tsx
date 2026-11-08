@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { useEffect, useState } from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { FileText } from 'lucide-react';
 
@@ -8,13 +9,14 @@ import type { ProjectDefaultAgent, VibeAgentBrief, WorkbenchProject } from '../.
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { Button } from '../ui/button';
+import { Input } from '../ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { InfoHint } from '../ui/info-hint';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch } from './AgentRoutePicker';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 
-// Per-project settings. Three sections:
+// Per-project settings. Four sections:
 //   1. Working directory (read-only) — where the Agent runs.
 //   2. Default Agent (backend + model + effort) — new sessions in this project
 //      inherit it; cleared = follow the global default. Reuses the same
@@ -22,6 +24,32 @@ import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 //      (no Save button), matching how the chat header patches a session.
 //   3. A button that opens the existing "Edit AGENTS.md" editor (the project's
 //      guidance prompt), which lives as a file in the project folder.
+const ProjectDescriptionField: React.FC<{
+  projectId: string;
+  description?: string;
+  updateProjectDescription: (projectId: string, description: string) => Promise<void>;
+  t: TFunction;
+}> = ({ projectId, description, updateProjectDescription, t }) => {
+  const [draft, setDraft] = useState(description ?? '');
+
+  return (
+    <section className="flex flex-col gap-1.5">
+      <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.descriptionField.label')}</span>
+      <Input
+        value={draft}
+        placeholder={t('projectSettings.descriptionField.placeholder')}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          if (draft !== (description ?? '')) {
+            void updateProjectDescription(projectId, draft.trim());
+          }
+        }}
+      />
+      <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.descriptionField.hint')}</span>
+    </section>
+  );
+};
+
 export const ProjectSettingsDialog: React.FC<{
   project: WorkbenchProject;
   open: boolean;
@@ -29,7 +57,7 @@ export const ProjectSettingsDialog: React.FC<{
 }> = ({ project, open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const { setProjectDefaultAgent, isSavingDefaultAgent } = useWorkbenchProjectsActions();
+  const { setProjectDefaultAgent, isSavingDefaultAgent, updateProjectDescription } = useWorkbenchProjectsActions();
   const { capabilities } = useInstanceAuthorization();
   const canManageProjects = capabilities.can_manage_projects;
   const canEditAgentsMd = canManageProjects;
@@ -98,7 +126,18 @@ export const ProjectSettingsDialog: React.FC<{
               <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.workdir.hint')}</span>
             </section>
 
-            {/* 2. Default Agent (backend + model + effort). */}
+            {/* 2. Short description, included in Bot Project catalogs. */}
+            {canManageProjects ? (
+              <ProjectDescriptionField
+                key={`${project.id}:${open ? 'open' : 'closed'}`}
+                projectId={project.id}
+                description={project.description}
+                updateProjectDescription={updateProjectDescription}
+                t={t}
+              />
+            ) : null}
+
+            {/* 3. Default Agent (backend + model + effort). */}
             {canEditDefaultAgent ? (
             <section className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
@@ -124,7 +163,7 @@ export const ProjectSettingsDialog: React.FC<{
             </section>
             ) : null}
 
-            {/* 3. Project guidance prompt → the existing AGENTS.md editor. */}
+            {/* 4. Project guidance prompt → the existing AGENTS.md editor. */}
             {canEditAgentsMd ? (
             <section className="flex flex-col gap-1.5">
               <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.guidance.label')}</span>

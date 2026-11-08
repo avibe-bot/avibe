@@ -1609,6 +1609,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [acceptProjectsMutation, api, commitProjectFields],
   );
 
+  const updateProjectDescription = useCallback(
+    async (projectId: string, description: string) => {
+      try {
+        const updated = await api.updateProject(projectId, { description });
+        acceptProjectsMutation();
+        commitProjectFields(projectId, { description: updated.description });
+      } catch (err) {
+        console.error('[workbench] update project description failed', err);
+      }
+    },
+    [acceptProjectsMutation, api, commitProjectFields],
+  );
   const forkSession = useCallback(
     async (projectId: string | null, sessionId: string): Promise<WorkbenchSession | null> => {
       // A standalone session (no project-bound scope, so `project_id: null`) has no
@@ -1963,6 +1975,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       createSessionForProject,
       forkSession,
       renameProject,
+      updateProjectDescription,
       reorderProjects,
       isReorderingProjects,
       setProjectDefaultAgent,
@@ -1989,6 +2002,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       createSessionForProject,
       forkSession,
       renameProject,
+      updateProjectDescription,
       reorderProjects,
       isReorderingProjects,
       setProjectDefaultAgent,

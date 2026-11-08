@@ -831,13 +831,14 @@ export type ApiContextType = {
     limit?: number;
     cache?: boolean;
   }) => Promise<WorkbenchProjectsBootstrap>;
-  createProject: (payload: { folder_path: string; display_name?: string }) => Promise<WorkbenchProject>;
+  createProject: (payload: { folder_path: string; display_name?: string; description?: string }) => Promise<WorkbenchProject>;
   // Default-Agent fields accept null to CLEAR the project default (back to the
   // global default); omit a field to leave it untouched.
   updateProject: (
     projectId: string,
     payload: {
       display_name?: string;
+      description?: string | null;
       folder_path?: string;
       agent_backend?: string | null;
       agent_id?: string | null;
@@ -1106,6 +1107,7 @@ export type WorkbenchProject = {
   id: string;
   scope_id: string;
   display_name: string;
+  description?: string;
   folder_path: string;
   created_at: string;
   last_active_at: string | null;

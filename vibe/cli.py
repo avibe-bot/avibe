@@ -2139,7 +2139,7 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Inside an Agent shell a new Session takes the caller's scope and current directory.
+        Inside an Agent shell, new Sessions use the caller's scope and directory.
         Only --callback returns the final reply; a run that fails still tells the caller.
         --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
           apply only to a new or forked Session.
@@ -2147,7 +2147,6 @@ def _agent_run_examples_text() -> str:
         Examples:
           vibe agent run --agent reviewer --message 'Review the latest deployment result.'
           vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
-          vibe agent run --fork-self --message 'Explore the alternate fix from this context.'
         """
     )
 
@@ -3416,6 +3415,23 @@ def _legacy_scope_key_from_target(value: Optional[str]) -> str:
 
 
 def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Optional[str]) -> Optional[str]:
+    project_name = (getattr(args, "project", None) or "").strip()
+    if project_name:
+        from storage import projects_service
+
+        try:
+            with _projects_cli_engine(read_only=True).connect() as conn:
+                project = projects_service.resolve_project_target(conn, project_name)
+        except LookupError as exc:
+            raise TaskCliError(
+                str(exc),
+                code="project_not_found",
+                hint="List active Projects with `vibe project list`, or choose a different Project.",
+                help_command="vibe agent run --help",
+                details={"project": project_name},
+            ) from exc
+        args._resolved_project_workdir = project["workdir"]
+        return project["scope_id"]
     raw_scope_id = (getattr(args, "scope_id", None) or "").strip()
     if raw_scope_id:
         return _validate_existing_scope_id(raw_scope_id, help_command="vibe agent run --help").session_scope
@@ -6138,6 +6154,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     fork_self = bool(getattr(args, "fork_self", False))
     same_scope = bool(getattr(args, "same_scope", False))
     scope_id = (getattr(args, "scope_id", None) or "").strip()
+    project = (getattr(args, "project", None) or "").strip()
     visibility = (getattr(args, "visibility", None) or "").strip()
     close_after = bool(getattr(args, "close_after", False))
     if _agent_run_is_async(args) and getattr(args, "wait_timeout", None) is not None:
@@ -6161,11 +6178,11 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Pass --callback-session-id to have the final reply return to that Session, or leave both out for no callback.",
             help_command=help_command,
         )
-    if same_scope and scope_id:
+    if sum(bool(value) for value in (same_scope, bool(scope_id), bool(project))) > 1:
         raise TaskCliError(
-            "use either --same-scope or --scope-id, not both",
+            "use only one of --same-scope, --scope-id, or --project",
             code="conflicting_scope_placement",
-            hint="Use --same-scope to reuse the caller/source scope, or --scope-id to place the new Session explicitly.",
+            hint="Use --project to place a new Session in a named Project, or use one of the lower-level scope options.",
             help_command=help_command,
         )
     if fork_self and fork_session:
@@ -6192,7 +6209,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="An existing Session keeps its model; change it in the Web UI's Session model picker. To run on another model now, start a new Session (--agent <name> --model ...) or fork this one (--fork-session <id> --model ...).",
             help_command=help_command,
         )
-    if session_id and (same_scope or scope_id):
+    if session_id and (same_scope or scope_id or project):
         raise TaskCliError(
             "scope placement flags only apply when creating a new Session",
             code="scope_with_existing_session",
@@ -6214,7 +6231,21 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             help_command=help_command,
         )
     if fork_session or fork_self:
+        if project:
+            raise TaskCliError(
+                "--project cannot be combined with a fork",
+                code="project_with_fork",
+                hint="Fork the source Session without --project, or start a new Session with --project to place it in that directory.",
+                help_command=help_command,
+            )
         return "fork"
+    if project and (getattr(args, "cwd", None) or "").strip():
+        raise TaskCliError(
+            "--cwd cannot be combined with --project",
+            code="project_with_cwd",
+            hint="The Project supplies the Session working directory; omit --cwd.",
+            help_command=help_command,
+        )
     if session_id:
         return "existing"
     return "none"
@@ -6496,6 +6527,9 @@ def _resolve_run_cwd(
     Session gets its own Show workspace from the reservation service.
     Existing and forked sessions keep their own cwd, so ``--cwd`` is an error.
     """
+    project_workdir = str(getattr(args, "_resolved_project_workdir", "") or "")
+    if project_workdir:
+        return project_workdir
     raw = (getattr(args, "cwd", None) or "").strip()
     if session_policy in {"existing", "fork"}:
         if raw:
@@ -6721,7 +6755,11 @@ def _stored_session_workdir(task, metadata: Optional[dict]) -> Optional[str]:
 
 
 def _has_modern_scope_target(args) -> bool:
-    return bool((getattr(args, "scope_id", None) or "").strip()) or bool(getattr(args, "same_scope", False))
+    return (
+        bool((getattr(args, "scope_id", None) or "").strip())
+        or bool(getattr(args, "same_scope", False))
+        or bool((getattr(args, "project", None) or "").strip())
+    )
 
 
 def _session_creation_metadata_from_caller(caller_context) -> dict:
@@ -7164,6 +7202,7 @@ _BOT_RUN_CONFLICTS = (
     ("reasoning_effort", "--reasoning-effort"),
     ("same_scope", "--same-scope"),
     ("scope_id", "--scope-id"),
+    ("project", "--project"),
     ("visibility", "--visible"),
     ("cwd", "--cwd"),
     ("close_after", "--close-after"),
@@ -7208,6 +7247,144 @@ def _resolve_bot_run_target(args) -> None:
         ) from exc
     args.session_id = bot.session_id
     args.queue = True
+
+
+def _projects_cli_engine(*, read_only: bool = False):
+    _ensure_cli_sqlite_state()
+    from storage.db import create_sqlite_engine
+
+    return create_sqlite_engine(paths.get_sqlite_state_path(), read_only=read_only)
+
+
+def _project_cli_payload(project: Mapping[str, Any], *, recent_sessions: Any = None) -> dict[str, Any]:
+    payload = {
+        "id": project.get("id"),
+        "name": project.get("display_name") or project.get("id"),
+        "path": project.get("folder_path") or "",
+        "description": project.get("description") or "",
+        "enabled": not bool(project.get("archived")),
+    }
+    if recent_sessions is not None:
+        payload["recent_sessions"] = recent_sessions
+    return payload
+
+
+def cmd_project_list(args):
+    from core.managed_skills import CATALOG_PAGE_SIZE
+    from core.system_prompt_injection import project_catalog_page
+    from storage import projects_service
+
+    try:
+        page_request = _page_request_from_args(args, help_command="vibe project list --help")
+        with _projects_cli_engine(read_only=True).connect() as conn:
+            projects = projects_service.list_projects(
+                conn, creation_order=True, authorization_context=None
+            )
+        page_size = page_request.limit or CATALOG_PAGE_SIZE
+        items, next_page = project_catalog_page(
+            projects,
+            page_request.page,
+            page_size=page_size,
+        )
+        payload = {
+            "projects": [_project_cli_payload(project) for project in items],
+            "pagination": {
+                "page": page_request.page,
+                "returned": len(items),
+                "has_more": next_page is not None,
+                "next_page": next_page,
+            },
+        }
+        if next_page is not None:
+            payload["next_page"] = next_page
+        _print_cli_payload("projects", **payload)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
+def cmd_project_show(args):
+    from storage import projects_service, workbench_sessions_service
+
+    try:
+        with _projects_cli_engine(read_only=True).connect() as conn:
+            target = projects_service.resolve_project_target(
+                conn, args.name, active_only=False, require_workdir=False
+            )
+            project = projects_service.get_project(conn, target["id"], authorization_context=None)
+            sessions = workbench_sessions_service.list_project_sessions_for_cli(
+                conn,
+                scope_id=project["scope_id"],
+                status="active",
+                limit=10,
+                authorization_context=None,
+            )
+        _print_cli_payload("project", project=_project_cli_payload(project, recent_sessions=sessions))
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
+def cmd_project_create(args):
+    from storage import projects_service
+
+    try:
+        name = " ".join(str(args.name or "").split())
+        if not name:
+            raise TaskCliError("project name is required", code="project_name_required")
+        raw_path = getattr(args, "path", None)
+        if raw_path:
+            folder = Path(raw_path).expanduser().resolve()
+            if not folder.is_dir():
+                raise TaskCliError(f"project path is not an existing directory: {folder}", code="project_path_not_found")
+        else:
+            root = Path(os.environ.get("AVIBE_PROJECTS_DIR") or (Path.home() / "Projects")).expanduser().resolve()
+            folder = root / name
+            folder.mkdir(parents=True, exist_ok=False)
+        description = getattr(args, "description", None)
+        with _projects_cli_engine().begin() as conn:
+            project = projects_service.create_project(
+                conn,
+                str(folder),
+                display_name=name,
+                description=description if description is not None else projects_service._UNSET,
+                authorization_context=None,
+            )
+        _print_cli_payload("project", project=_project_cli_payload(project))
+        return 0
+    except FileExistsError as exc:
+        _print_task_error(TaskCliError(f"project path already exists: {exc.filename}", code="project_path_exists"))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
+def cmd_project_update(args):
+    from storage import projects_service
+
+    try:
+        kwargs: dict[str, Any] = {}
+        if getattr(args, "new_name", None) is not None:
+            kwargs["display_name"] = args.new_name
+        if getattr(args, "path", None) is not None:
+            kwargs["folder_path"] = args.path
+        if hasattr(args, "description"):
+            kwargs["description"] = args.description
+        if not kwargs:
+            raise TaskCliError("at least one project field is required", code="project_update_empty")
+        with _projects_cli_engine().begin() as conn:
+            target = projects_service.resolve_project_target(
+                conn, args.name, active_only=False, require_workdir=False
+            )
+            project = projects_service.update_project(conn, target["id"], authorization_context=None, **kwargs)
+        _print_cli_payload("project", project=_project_cli_payload(project))
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
 
 
 def cmd_agent_run(args):
@@ -8458,52 +8635,6 @@ def _session_row(payload: dict, *, brief: bool) -> dict:
     return {key: value for key, value in payload.items() if key not in _SESSION_GET_OMIT}
 
 
-def _resolve_session_list_project(conn, value: str) -> str:
-    """Resolve a Project name (or id) for the session list's narrow filter.
-
-    The PROJECT lane owns the shared resolver. Until that contract lands on
-    master, use the existing visible-project projection with the same exact
-    name/id, whitespace, creation-order, and disabled-target semantics. Listing
-    Sessions does not require the Project to have a working directory.
-    """
-
-    from storage import projects_service
-
-    requested = " ".join(str(value or "").split())
-    if not requested:
-        raise TaskCliError(
-            "Project name is required",
-            code="invalid_project",
-            hint="Pass a Project name or id.",
-            help_command="vibe session list --help",
-        )
-    projects = projects_service.list_projects(conn, include_archived=True)
-    exact = [
-        project
-        for project in projects
-        if str(project.get("id") or "") == requested
-        or str(project.get("display_name") or "") == requested
-    ]
-    if not exact:
-        raise TaskCliError(
-            f"Project not found: {requested}",
-            code="project_not_found",
-            hint="Pass an existing Project name or id.",
-            help_command="vibe session list --help",
-            details={"project": requested},
-        )
-    project = min(exact, key=lambda item: (str(item["created_at"]), str(item["scope_id"])))
-    if project["archived"]:
-        raise TaskCliError(
-            f"Project is disabled: {requested}",
-            code="project_disabled",
-            hint="Enable the Project before listing its Sessions.",
-            help_command="vibe session list --help",
-            details={"project": requested},
-        )
-    return str(project["id"])
-
-
 def _validate_session_type(platform: str) -> None:
     from config.platform_registry import PLATFORM_REGISTRY
 
@@ -8547,7 +8678,17 @@ def cmd_session_list(args):
 
         engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
-            project_id = _resolve_session_list_project(conn, project_name) if project_name is not None else None
+            project_id = None
+            if project_name is not None:
+                from storage import projects_service
+
+                target = projects_service.resolve_project_target(
+                    conn,
+                    project_name,
+                    active_only=True,
+                    require_workdir=False,
+                )
+                project_id = target["id"]
             result = sessions_service.list_sessions_page(
                 conn,
                 platform=platform,
@@ -18510,6 +18651,35 @@ def build_parser():
         help="Print a machine-readable result with the output path and capture backend.",
     )
 
+    project_parser = subparsers.add_parser(
+        "project",
+        help="Manage Projects",
+        description="Create, inspect, and update local work Projects.",
+        error_help_command="vibe project --help",
+    )
+    project_subparsers = project_parser.add_subparsers(
+        dest="project_command",
+        metavar="{list,show,create,update}",
+    )
+    project_subparsers.required = True
+    project_list_parser = project_subparsers.add_parser("list", help="List active Projects")
+    project_list_parser.add_argument("--page", type=int, default=1, help="Catalog page (default: 1)")
+    project_list_parser.add_argument("--limit", type=int, default=25, help="Rows per catalog page (default: 25)")
+    _add_json_noop(project_list_parser)
+    project_show_parser = project_subparsers.add_parser("show", help="Show a Project and recent Sessions")
+    project_show_parser.add_argument("name", help="Project name or id")
+    _add_json_noop(project_show_parser)
+    project_create_parser = project_subparsers.add_parser("create", help="Create or register a Project")
+    project_create_parser.add_argument("name", help="Project name")
+    project_create_parser.add_argument("--path", help="Register an existing directory instead of creating ~/Projects/<name>")
+    project_create_parser.add_argument("--description", default=argparse.SUPPRESS, help="Short Project description")
+    _add_json_noop(project_create_parser)
+    project_update_parser = project_subparsers.add_parser("update", help="Update a Project")
+    project_update_parser.add_argument("name", help="Project name or id")
+    project_update_parser.add_argument("--name", dest="new_name", help="New Project name")
+    project_update_parser.add_argument("--path", help="New existing Project directory")
+    project_update_parser.add_argument("--description", default=argparse.SUPPRESS, help="Short Project description; empty clears it")
+    _add_json_noop(project_update_parser)
     agent_parser = subparsers.add_parser(
         "agent",
         help="Manage Avibe Agents",
@@ -18642,6 +18812,7 @@ def build_parser():
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the caller Session")
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place the new Session in the caller's scope")
     agent_run_parser.add_argument("--scope-id", metavar="ID", help="Place the new Session in this scopes.id")
+    agent_run_parser.add_argument("--project", metavar="NAME", help="New Session Project placement")
     agent_run_parser.add_argument(
         "--visible",
         dest="visibility",
@@ -20298,6 +20469,12 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    # Projects mirror the Web surface: catalog reads are Viewer work, while
+    # creating and editing the instance's Projects are Member work.
+    ("project", "list"): "viewer",
+    ("project", "show"): "viewer",
+    ("project", "create"): "member",
+    ("project", "update"): "member",
     # Agents: discovery, selection and running are use; the definition lifecycle
     # is management, admitted before any builtin synchronization or import.
     ("agent", "list"): "editor",
@@ -20650,6 +20827,17 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if args.remote_command == "stop":
             sys.exit(cmd_remote_stop(args))
         parser.error("remote command is invalid")
+    if args.command == "project":
+        commands = {
+            "list": cmd_project_list,
+            "show": cmd_project_show,
+            "create": cmd_project_create,
+            "update": cmd_project_update,
+        }
+        command = commands.get(args.project_command)
+        if command is None:
+            parser.error("project command is required")
+        sys.exit(command(args))
     if args.command == "agent":
         if args.agent_command == "list":
             sys.exit(cmd_agent_list(args))
