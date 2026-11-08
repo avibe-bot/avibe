@@ -407,7 +407,8 @@ always-on prompt retains their routing rules plus content that must reflect the
 current runtime: Show Page Cloud availability and active history mode,
 backend-specific safety boundaries, Session identity, the live Agent Catalog,
 and mention semantics. `use-avibe` remains the broader Avibe configuration and
-operations playbook; it is not the Harness module owner.
+operations playbook; it is not the Harness module owner, and it routes Harness
+work to `use-avibe-harness` instead of keeping its own copy of the rules.
 
 ## 13. Ownership
 

@@ -2,7 +2,7 @@
 name: use-avibe
 slug: use-avibe
 description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state. Also use it to report an Avibe bug, send product feedback, or file a feature request from the current conversation.
-version: 0.9.3
+version: 0.9.4
 ---
 
 # Use Avibe
@@ -79,7 +79,7 @@ Paths below are relative to this Skill directory; scripts remain under
 | Change global defaults, platform credentials, proxies, or discover IM channels | [Global configuration and platforms](references/global-config.md) |
 | Change channel/DM routing, models, cwd, visibility, mention policy, or bind users | [Scopes and routing](references/scopes-and-routing.md) |
 | Pair, inspect, repair, or control the Avibe Cloud tunnel | [Remote access](references/remote-access.md) |
-| Run or delegate Agent work, schedule tasks, manage watches or Session queues | [Agent Harness](references/harness.md) |
+| Run or delegate Agent work, schedule tasks, manage watches or Session queues | Load the `use-avibe-harness` Skill |
 | Choose backend/subagent settings or change native OpenCode, Claude, or Codex config | [Backends](references/backends.md) |
 | Inspect runtime paths, logs, or health; restart or upgrade the service | [Operations and troubleshooting](references/operations.md) |
 | Turn a problem or a wish in this conversation into a bug report, feedback, or feature request | [Feedback and feature requests](references/feedback.md) |

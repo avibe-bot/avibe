@@ -88,6 +88,7 @@ def test_studio_catalog_contains_runtime_modules_and_builtin_skills() -> None:
     assert {document["name"] for document in skills} == {
         "agent-prompt-audit",
         "background-watch-hook",
+        "choose-model",
         "computer-use",
         "use-avibe",
         "use-avibe-harness",
