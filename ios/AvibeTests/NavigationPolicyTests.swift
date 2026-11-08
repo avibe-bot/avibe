@@ -426,6 +426,16 @@ final class NavigationPolicyTests: XCTestCase {
             .navigationHistoryChanged
         )
         XCTAssertEqual(
+            try NativeBridgeRequest.parse(
+                [
+                    "method": "appearance.colorSchemeChanged",
+                    "params": ["scheme": "light"],
+                ]
+            ).get().method,
+            .appearanceColorSchemeChanged
+        )
+        XCTAssertNil(NativeShellMetadata.capabilities["appearance"])
+        XCTAssertEqual(
             NativeBridgeRequest.parse(["method": "app.instances"]).failure,
             .unsupported
         )
@@ -496,25 +506,27 @@ final class NavigationPolicyTests: XCTestCase {
         let primaryConstraints = factory.install(
             primary,
             in: primaryContainer,
-            bottomEdge: .container
+            extent: .container
         )
         let childConstraints = factory.install(
             child,
             in: childContainer,
-            bottomEdge: .safeArea
+            extent: .safeArea
         )
 
         XCTAssertTrue(factory.isManaging(primary))
         XCTAssertTrue(factory.isManaging(child))
-        assertBottomConstraint(
+        assertVerticalConstraints(
             primaryConstraints,
             webView: primary,
-            to: primaryContainer
+            top: primaryContainer,
+            bottom: primaryContainer
         )
-        assertBottomConstraint(
+        assertVerticalConstraints(
             childConstraints,
             webView: child,
-            to: childContainer.safeAreaLayoutGuide
+            top: childContainer.safeAreaLayoutGuide,
+            bottom: childContainer.safeAreaLayoutGuide
         )
         XCTAssertTrue(
             primary.configuration.userContentController
@@ -777,7 +789,7 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    func testFactoryRestsThePrimaryOnTheWindowBottomAndAChildOnTheSafeArea() async throws {
+    func testFactoryPinsThePrimaryToTheWindowEdgesAndAChildToTheSafeArea() async throws {
         let rootViewController = UIViewController()
         let window = try await makeHomeIndicatorWindow(
             rootViewController: rootViewController
@@ -786,6 +798,12 @@ final class NavigationPolicyTests: XCTestCase {
             window.rootViewController = nil
             window.isHidden = true
         }
+        let safeAreaTop = window.safeAreaInsets.top
+        XCTAssertGreaterThan(
+            safeAreaTop,
+            0,
+            "Top-edge checks need a device with a status bar inset."
+        )
         let factory = WebViewFactory(
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent()
@@ -796,18 +814,21 @@ final class NavigationPolicyTests: XCTestCase {
             configuration: primary.configuration,
             delegate: delegate
         )
-        let installations: [
-            (WKWebView, KeyboardViewportLayoutController.BottomEdge)
-        ] = [(primary, .container), (child, .safeArea)]
-        for (webView, bottomEdge) in installations {
+        let installations: [(WKWebView, WebViewExtent)] = [
+            (primary, .container),
+            (child, .safeArea),
+        ]
+        for (webView, extent) in installations {
             let containerView = UIView(frame: rootViewController.view.bounds)
             containerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             rootViewController.view.addSubview(containerView)
-            factory.install(webView, in: containerView, bottomEdge: bottomEdge)
+            factory.install(webView, in: containerView, extent: extent)
         }
         let windowBottom = window.bounds.maxY
         let safeAreaBottom = windowBottom - window.safeAreaInsets.bottom
 
+        XCTAssertEqual(top(of: primary, in: window), window.bounds.minY, accuracy: 0.5)
+        XCTAssertEqual(top(of: child, in: window), safeAreaTop, accuracy: 0.5)
         XCTAssertEqual(bottom(of: primary, in: window), windowBottom, accuracy: 0.5)
         XCTAssertEqual(bottom(of: child, in: window), safeAreaBottom, accuracy: 0.5)
 
@@ -986,7 +1007,264 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    func testBrowserRouteLetsThePrimaryWebViewReachTheWindowBottom() async throws {
+    func testWorkbenchDrawsUnderTheStatusBarAndChildWindowsKeepTheSafeArea() async throws {
+        let instanceServer = try LocalHTTPServer { request in
+            switch request.path {
+            case "/child":
+                return LocalHTTPResponse.html(
+                    FullBleedFixture.ordinaryDocument(title: "Child")
+                )
+            default:
+                return LocalHTTPResponse.html(
+                    FullBleedFixture.topEdgeWorkbenchDocument
+                )
+            }
+        }
+        let authServer = try LocalHTTPServer { _ in
+            LocalHTTPResponse.html(FullBleedFixture.ordinaryDocument(title: "Consent"))
+        }
+        let instanceBaseURL = try await instanceServer.start()
+        let authBaseURL = try await authServer.start()
+        defer {
+            instanceServer.stop()
+            authServer.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: instanceBaseURL, requiresHTTPS: false)
+        )
+        let authOrigin = try XCTUnwrap(
+            WebOrigin(url: authBaseURL, requiresHTTPS: false)
+        )
+        let controller = makeRuntimeController(
+            instanceOrigin: instanceOrigin,
+            navigationPolicy: NavigationPolicy(
+                instanceOrigins: [instanceOrigin],
+                authenticationOrigins: [authOrigin]
+            )
+        )
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: controller
+        )
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let statusBarInset = window.safeAreaInsets.top
+        XCTAssertGreaterThan(
+            statusBarInset,
+            0,
+            "Top-edge checks need a device with a status bar inset."
+        )
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        XCTAssertEqual(top(of: webView, in: window), window.bounds.minY, accuracy: 0.5)
+
+        // The locked AppShell pads the status bar once, through env().
+        try await waitForTitle("Workbench", in: webView)
+        try await waitUntil {
+            let padding = await self.padding(.top, of: "#app-header", in: webView)
+            let headerTop = try? await webView.evaluateJavaScript(
+                "document.querySelector('#app-header').getBoundingClientRect().top"
+            ) as? Double
+            return abs((padding ?? -1) - statusBarInset) < 0.5
+                && webView.scrollView.adjustedContentInset.top == 0
+                && headerTop.map { abs($0) < 0.5 } == true
+        }
+
+        // A child window keeps the safe area, here below its navigation bar,
+        // and cannot drive the status bar.
+        _ = try await webView.evaluateJavaScript(
+            "document.querySelector('#open-child').click()"
+        )
+        var popupNavigation: UINavigationController?
+        try await waitUntil {
+            popupNavigation = controller.presentedViewController
+                as? UINavigationController
+            return popupNavigation != nil
+        }
+        let popupController = try XCTUnwrap(popupNavigation?.topViewController)
+        var childWebView: WKWebView?
+        try await waitUntil {
+            guard
+                let popupView = popupController.viewIfLoaded,
+                popupView.window != nil,
+                let child = popupView.subviews.compactMap({ $0 as? WKWebView }).first
+            else {
+                return false
+            }
+            popupView.layoutIfNeeded()
+            childWebView = child
+            let safeAreaTop = popupView.safeAreaLayoutGuide.layoutFrame.minY
+            return safeAreaTop > 0 && abs(child.frame.minY - safeAreaTop) < 0.5
+        }
+        let child = try XCTUnwrap(childWebView)
+        XCTAssertEqual(
+            child.frame.minY,
+            popupController.view.safeAreaLayoutGuide.layoutFrame.minY,
+            accuracy: 0.5
+        )
+        try await waitForTitle("Child", in: child)
+        let childSchemeResult = try await child.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeNative.call(
+                "appearance.colorSchemeChanged",
+                {scheme: "dark"}
+              );
+              return "accepted";
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(childSchemeResult, "forbidden")
+        XCTAssertNil(controller.pageColorScheme)
+        popupNavigation?.dismiss(animated: false)
+        try await waitUntil {
+            controller.presentedViewController == nil
+        }
+
+        // An unlocked document keeps WebKit's automatic top inset.
+        webView.load(
+            URLRequest(url: authBaseURL.appendingPathComponent("consent"))
+        )
+        try await waitForTitle("Consent", in: webView)
+        try await waitUntil {
+            let padding = await self.padding(.top, of: "#first", in: webView)
+            return padding == 0
+                && abs(
+                    webView.scrollView.adjustedContentInset.top - statusBarInset
+                ) < 0.5
+        }
+    }
+
+    /// The owner's report: an explicit Web theme that differs from the
+    /// system. The status bar text follows the page, live, while the WebView
+    /// keeps the system appearance, so `prefers-color-scheme` stays the
+    /// system's and a page that follows the system can still follow it.
+    @MainActor
+    func testPageSchemeDrivesTheStatusBarWhileTheWebViewKeepsTheSystemAppearance() async throws {
+        let server = try LocalHTTPServer { _ in
+            LocalHTTPResponse.html(FullBleedFixture.themedDocument)
+        }
+        let baseURL = try await server.start()
+        defer {
+            server.stop()
+        }
+        let instanceOrigin = try XCTUnwrap(
+            WebOrigin(url: baseURL, requiresHTTPS: false)
+        )
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first
+        )
+        // The scene's own appearance stands in for the system setting.
+        scene.traitOverrides.userInterfaceStyle = .dark
+        defer {
+            scene.traitOverrides.remove(UITraitUserInterfaceStyle.self)
+        }
+        var runtimeController: WebViewController?
+        var reportedSchemes: [PageColorScheme?] = []
+        let hostingController = UIHostingController(
+            rootView: WebViewContainer(
+                instanceOrigin: instanceOrigin,
+                websiteDataStore: .nonPersistent(),
+                showAccount: {},
+                accountFallbackVisibilityChanged: { _ in },
+                pageColorSchemeChanged: { reportedSchemes.append($0) },
+                didCreateController: { runtimeController = $0 },
+                didReleaseWebViews: { _ in },
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            .ignoresSafeArea()
+        )
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: hostingController
+        )
+        defer {
+            _ = runtimeController?.invalidateForAccountTransition()
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let controller = try XCTUnwrap(runtimeController)
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        try await waitForTitle("Themed", in: webView)
+
+        func expectStatusBar(
+            page scheme: PageColorScheme,
+            style: UIStatusBarStyle,
+            systemDark: Bool,
+            line: UInt = #line
+        ) async throws {
+            let systemStyle: UIUserInterfaceStyle = systemDark ? .dark : .light
+            try await waitUntil {
+                let prefersDark = try? await webView.evaluateJavaScript(
+                    "matchMedia('(prefers-color-scheme: dark)').matches"
+                ) as? Bool
+                return controller.pageColorScheme == scheme
+                    && scene.statusBarManager?.statusBarStyle == style
+                    && webView.traitCollection.userInterfaceStyle == systemStyle
+                    && prefersDark == systemDark
+            }
+            XCTAssertTrue(hostingController.childForStatusBarStyle === controller, line: line)
+            XCTAssertEqual(controller.preferredStatusBarStyle, style, line: line)
+            XCTAssertEqual(reportedSchemes.last ?? nil, scheme, line: line)
+            // Nothing overrides the WebView's appearance.
+            XCTAssertEqual(controller.overrideUserInterfaceStyle, .unspecified, line: line)
+            XCTAssertEqual(webView.overrideUserInterfaceStyle, .unspecified, line: line)
+            XCTAssertFalse(
+                controller.traitOverrides.contains(UITraitUserInterfaceStyle.self),
+                line: line
+            )
+        }
+        func setTheme(_ theme: String?) async throws {
+            _ = try await webView.callAsyncJavaScript(
+                """
+                if (theme === null) {
+                  document.documentElement.removeAttribute("data-theme");
+                } else {
+                  document.documentElement.setAttribute("data-theme", theme);
+                }
+                return true;
+                """,
+                arguments: ["theme": theme ?? NSNull()],
+                in: nil,
+                contentWorld: .page
+            )
+        }
+
+        // Explicit light theme while the system is dark.
+        try await setTheme("light")
+        try await expectStatusBar(page: .light, style: .darkContent, systemDark: true)
+        // A live switch to the dark theme.
+        try await setTheme("dark")
+        try await expectStatusBar(page: .dark, style: .lightContent, systemDark: true)
+        // The system turns light under an explicit dark theme.
+        scene.traitOverrides.userInterfaceStyle = .light
+        try await expectStatusBar(page: .dark, style: .lightContent, systemDark: false)
+        // A live switch to the light theme.
+        try await setTheme("light")
+        try await expectStatusBar(page: .light, style: .darkContent, systemDark: false)
+        // The system theme follows live system changes both ways.
+        try await setTheme(nil)
+        try await expectStatusBar(page: .light, style: .darkContent, systemDark: false)
+        scene.traitOverrides.userInterfaceStyle = .dark
+        try await expectStatusBar(page: .dark, style: .lightContent, systemDark: true)
+        scene.traitOverrides.userInterfaceStyle = .light
+        try await expectStatusBar(page: .light, style: .darkContent, systemDark: false)
+    }
+
+    @MainActor
+    func testBrowserRouteLetsThePrimaryWebViewReachTheWindowTopAndBottom() async throws {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
@@ -1074,13 +1352,147 @@ final class NavigationPolicyTests: XCTestCase {
         }
         let webView = try XCTUnwrap(runtimeWebView)
         try await waitUntil {
-            abs(self.bottom(of: webView, in: window) - window.bounds.maxY) < 0.5
+            abs(self.top(of: webView, in: window) - window.bounds.minY) < 0.5
+                && abs(self.bottom(of: webView, in: window) - window.bounds.maxY) < 0.5
         }
+        XCTAssertGreaterThan(window.safeAreaInsets.top, 0)
+        XCTAssertEqual(
+            top(of: webView, in: window),
+            window.bounds.minY,
+            accuracy: 0.5
+        )
         XCTAssertEqual(
             bottom(of: webView, in: window),
             window.bounds.maxY,
             accuracy: 0.5
         )
+    }
+
+    /// SwiftUI's root hosting controller hands the status bar to its newest
+    /// representable controller. The bundled sign-in page follows the system
+    /// theme, and so does its status bar; over a runtime, the runtime
+    /// controller owns it until Account covers that runtime.
+    @MainActor
+    func testRootViewHandsTheStatusBarToTheSurfaceOnTop() async throws {
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                return .json(
+                    """
+                    {
+                      "account": {
+                        "id": "account",
+                        "email": "max@example.com"
+                      },
+                      "instances": [
+                        {
+                          "id": "instance",
+                          "name": "Unreachable",
+                          "host": "status-bar.invalid",
+                          "url": "https://status-bar.invalid",
+                          "relationship": "owner",
+                          "owner_email": "max@example.com",
+                          "available": true
+                        }
+                      ]
+                    }
+                    """
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let storeCleanup = NamedDataStoreCleanup()
+        addTeardownBlock {
+            _ = await storeCleanup.remove()
+        }
+        let appModel = AppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: baseURL
+            )
+        )
+        storeCleanup.identifier = appModel.websiteDataStore.identifier
+        let hostingController = UIHostingController(
+            rootView: RootView().environmentObject(appModel)
+        )
+        let window = try await makeHomeIndicatorWindow(
+            rootViewController: hostingController
+        )
+        let scene = try XCTUnwrap(window.windowScene)
+        defer {
+            scene.traitOverrides.remove(UITraitUserInterfaceStyle.self)
+            if let runtimeController = primaryRuntimeWebView(
+                in: hostingController.view
+            )?.superview?.next as? WebViewController {
+                appModel.recordRuntimeReleaseBarrier(
+                    runtimeController.invalidateForAccountTransition()
+                )
+            }
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+
+        // Sign-in: the bundled page and the status bar follow the system.
+        for style in [UIUserInterfaceStyle.dark, .light] {
+            scene.traitOverrides.userInterfaceStyle = style
+            try await waitUntil {
+                guard
+                    let onboarding = hostingController.childForStatusBarStyle
+                        as? MobileOnboardingViewController,
+                    let page = onboarding.viewIfLoaded?.subviews
+                        .compactMap({ $0 as? WKWebView }).first
+                else {
+                    return false
+                }
+                return onboarding.preferredStatusBarStyle == .default
+                    && scene.statusBarManager?.statusBarStyle == .default
+                    && page.traitCollection.userInterfaceStyle == style
+                    && onboarding.overrideUserInterfaceStyle == .unspecified
+            }
+        }
+
+        // A runtime owns the status bar; its page has not reported a scheme.
+        try await waitUntil {
+            (
+                try? appModel.mobileSessionCoordinator.selectInstance(
+                    id: "instance"
+                )
+            ) != nil
+        }
+        var runtime: WebViewController?
+        try await waitUntil {
+            runtime = hostingController.childForStatusBarStyle
+                as? WebViewController
+            return runtime != nil
+        }
+        let runtimeController = try XCTUnwrap(runtime)
+        XCTAssertNil(runtimeController.pageColorScheme)
+        XCTAssertEqual(runtimeController.preferredStatusBarStyle, .default)
+
+        // Account covers the runtime and takes the status bar, then hands it
+        // back to the same runtime.
+        appModel.showAccount()
+        try await waitUntil {
+            hostingController.childForStatusBarStyle
+                is MobileOnboardingViewController
+        }
+        XCTAssertTrue(appModel.route.coversRuntime)
+        XCTAssertTrue(appModel.returnToRuntime())
+        try await waitUntil {
+            hostingController.childForStatusBarStyle === runtimeController
+        }
     }
 
     @MainActor
@@ -2301,20 +2713,29 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    private func assertBottomConstraint(
+    private func assertVerticalConstraints(
         _ constraints: [NSLayoutConstraint],
         webView: WKWebView,
-        to anchorOwner: AnyObject,
+        top topOwner: AnyObject,
+        bottom bottomOwner: AnyObject,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let hasBottomConstraint = constraints.contains { constraint in
-            constraint.firstItem === webView
-                && constraint.firstAttribute == .bottom
-                && constraint.secondItem === anchorOwner
-                && constraint.secondAttribute == .bottom
+        for (attribute, owner) in [(NSLayoutConstraint.Attribute.top, topOwner), (.bottom, bottomOwner)] {
+            let pinned = constraints.contains { constraint in
+                constraint.firstItem === webView
+                    && constraint.firstAttribute == attribute
+                    && constraint.secondItem === owner
+                    && constraint.secondAttribute == attribute
+            }
+            XCTAssertTrue(pinned, "\(attribute.rawValue)", file: file, line: line)
         }
-        XCTAssertTrue(hasBottomConstraint, file: file, line: line)
+    }
+
+    @MainActor
+    private func top(of view: UIView, in window: UIWindow) -> CGFloat {
+        window.layoutIfNeeded()
+        return view.convert(view.bounds, to: window).minY
     }
 
     @MainActor
@@ -2344,14 +2765,28 @@ final class NavigationPolicyTests: XCTestCase {
         of selector: String,
         in webView: WKWebView
     ) async -> CGFloat? {
+        await padding(.bottom, of: selector, in: webView)
+    }
+
+    private enum PaddingSide: String {
+        case top = "paddingTop"
+        case bottom = "paddingBottom"
+    }
+
+    @MainActor
+    private func padding(
+        _ side: PaddingSide,
+        of selector: String,
+        in webView: WKWebView
+    ) async -> CGFloat? {
         let value = try? await webView.callAsyncJavaScript(
             """
             const element = document.querySelector(selector);
             return element
-              ? parseFloat(getComputedStyle(element).paddingBottom)
+              ? parseFloat(getComputedStyle(element)[side])
               : -1;
             """,
-            arguments: ["selector": selector],
+            arguments: ["selector": selector, "side": side.rawValue],
             in: nil,
             contentWorld: .page
         )
@@ -2427,6 +2862,59 @@ private enum FullBleedFixture {
         </html>
         """
 
+    /// A locked AppShell whose header pads the status bar, as
+    /// `MobileBrandHeader` does, and which opens a child window.
+    static let topEdgeWorkbenchDocument = """
+        <!doctype html>
+        <html>
+          <head>
+            <meta name="viewport" content="\(workbenchViewport)">
+            <title>Workbench</title>
+            <style>
+              html, body { margin: 0; height: 100%; overflow: hidden; }
+              #app-header {
+                position: fixed;
+                left: 0;
+                right: 0;
+                top: 0;
+                height: 44px;
+                padding-top: env(safe-area-inset-top);
+                background: #f4f6fb;
+              }
+              #open-child { position: fixed; top: 200px; left: 16px; }
+            </style>
+          </head>
+          <body>
+            <header id="app-header"></header>
+            <button id="open-child" onclick="window.open('/child', '_blank')">Open</button>
+            <script>
+              window.avibeNative.call("viewport.setOuterScrollLocked", {locked: true});
+            </script>
+          </body>
+        </html>
+        """
+
+    /// The theme rules of `ui/src/index.css`: dark by default, light under a
+    /// light system unless the dark theme is picked, and an explicit light
+    /// theme.
+    static let themedDocument = """
+        <!doctype html>
+        <html>
+          <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Themed</title>
+            <style>
+              :root, [data-theme="dark"] { color-scheme: dark; background: #080812; }
+              @media (prefers-color-scheme: light) {
+                :root:not([data-theme="dark"]) { color-scheme: light; background: #f4f6fb; }
+              }
+              [data-theme="light"] { color-scheme: light; background: #f4f6fb; }
+            </style>
+          </head>
+          <body></body>
+        </html>
+        """
+
     static func ordinaryDocument(title: String) -> String {
         """
         <!doctype html>
@@ -2436,6 +2924,7 @@ private enum FullBleedFixture {
             <title>\(title)</title>
           </head>
           <body style="margin: 0">
+            <p id="first" style="margin: 0; padding-top: env(safe-area-inset-top)">Start</p>
             <div style="height: 3000px"></div>
             <p id="last" style="padding-bottom: env(safe-area-inset-bottom)">End</p>
           </body>

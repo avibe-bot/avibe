@@ -750,6 +750,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
+                "appearance.colorSchemeChanged",
                 "app.info",
                 "app.openExternal",
                 "app.setAccountActionAvailable",

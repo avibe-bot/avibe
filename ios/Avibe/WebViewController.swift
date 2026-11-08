@@ -297,12 +297,36 @@ final class KeyboardViewportLayoutController: NSObject {
     }
 }
 
+/// How far an installed WebView reaches vertically. Both edges follow one
+/// fact, whether the page reserves the safe areas itself, because a document
+/// does that only by declaring `viewport-fit=cover`, which applies to every
+/// edge at once. A mixed extent would leave one edge unreserved or reserved
+/// twice.
+enum WebViewExtent {
+    /// The container's top and bottom: the page draws behind the status bar
+    /// and the Home indicator and reserves them through `env()`.
+    case container
+    /// The container's safe-area top and bottom, for documents the shell
+    /// does not expect to reserve the safe areas.
+    case safeArea
+
+    var bottomEdge: KeyboardViewportLayoutController.BottomEdge {
+        switch self {
+        case .container:
+            return .container
+        case .safeArea:
+            return .safeArea
+        }
+    }
+}
+
 @MainActor
 final class WebViewFactory {
     private let instanceOrigin: WebOrigin
     private let websiteDataStore: WKWebsiteDataStore
     private let setAccountActionAvailable: (WKWebView, Bool) -> Bool
     private let historyDidChange: (WKWebView) -> Bool
+    private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
@@ -318,6 +342,7 @@ final class WebViewFactory {
         },
         setAccountActionAvailable: setAccountActionAvailable,
         historyDidChange: historyDidChange,
+        colorSchemeDidChange: colorSchemeDidChange,
         showAccount: showAccount
     )
 
@@ -326,12 +351,14 @@ final class WebViewFactory {
         websiteDataStore: WKWebsiteDataStore,
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
+        colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {}
     ) {
         self.instanceOrigin = instanceOrigin
         self.websiteDataStore = websiteDataStore
         self.setAccountActionAvailable = setAccountActionAvailable
         self.historyDidChange = historyDidChange
+        self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
     }
 
@@ -355,13 +382,14 @@ final class WebViewFactory {
         return webView
     }
 
-    /// Pins `webView` to the container's safe area except at the bottom, where
-    /// it rests on `bottomEdge` and ends at a docked keyboard's top.
+    /// Pins `webView` between the container's safe-area sides, from the top
+    /// `extent` names to its bottom, which also ends at a docked keyboard's
+    /// top.
     @discardableResult
     func install(
         _ webView: WKWebView,
         in containerView: UIView,
-        bottomEdge: KeyboardViewportLayoutController.BottomEdge
+        extent: WebViewExtent
     ) -> [NSLayoutConstraint] {
         precondition(isManaging(webView))
         containerView.addSubview(webView)
@@ -369,14 +397,19 @@ final class WebViewFactory {
             KeyboardViewportLayoutController(
                 contentView: webView,
                 containerView: containerView,
-                bottomEdge: bottomEdge
+                bottomEdge: extent.bottomEdge
             )
         keyboardViewportLayoutControllers[ObjectIdentifier(webView)] =
             keyboardViewportLayoutController
+        let topAnchor: NSLayoutYAxisAnchor
+        switch extent {
+        case .container:
+            topAnchor = containerView.topAnchor
+        case .safeArea:
+            topAnchor = containerView.safeAreaLayoutGuide.topAnchor
+        }
         let constraints = [
-            webView.topAnchor.constraint(
-                equalTo: containerView.safeAreaLayoutGuide.topAnchor
-            ),
+            webView.topAnchor.constraint(equalTo: topAnchor),
             webView.leadingAnchor.constraint(
                 equalTo: containerView.safeAreaLayoutGuide.leadingAnchor
             ),
@@ -467,6 +500,14 @@ final class WebViewController: UIViewController {
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
     private let accountFallbackVisibilityChanged: (Bool) -> Void
+    private let pageColorSchemeChanged: (PageColorScheme?) -> Void
+    private var reportedPageColorScheme: PageColorScheme?
+    private var primaryLoadFailed = false
+    /// The scheme of the primary page on screen, or nil while it is unknown
+    /// or the load-failure view covers it. It drives the status bar and the
+    /// native chrome only; the WebViews keep the system appearance, so a page
+    /// that follows the system never sees its own report come back.
+    private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
@@ -508,6 +549,9 @@ final class WebViewController: UIViewController {
             historyDidChange: { [weak self] sourceWebView in
                 self?.historyDidChange(in: sourceWebView) ?? false
             },
+            colorSchemeDidChange: { [weak self] sourceWebView, scheme in
+                self?.colorSchemeDidChange(scheme, in: sourceWebView) ?? false
+            },
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
             }
@@ -532,6 +576,7 @@ final class WebViewController: UIViewController {
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
+        pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -543,6 +588,7 @@ final class WebViewController: UIViewController {
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
+        self.pageColorSchemeChanged = pageColorSchemeChanged
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
@@ -577,12 +623,12 @@ final class WebViewController: UIViewController {
             return
         }
         let factory = makeWebViewFactory()
-        // The instance page spans the Home indicator strip and reserves it
-        // through `env(safe-area-inset-bottom)`.
+        // The instance page spans the status bar and the Home indicator
+        // strip; its AppShell reserves them through `env(safe-area-inset-*)`.
         factory.install(
             makePrimaryWebView(),
             in: view,
-            bottomEdge: .container
+            extent: .container
         )
 
         NotificationCenter.default.addObserver(
@@ -766,6 +812,45 @@ final class WebViewController: UIViewController {
         }
         updateBackNavigationGesture(in: webView)
         return true
+    }
+
+    private func colorSchemeDidChange(
+        _ scheme: PageColorScheme?,
+        in webView: WKWebView
+    ) -> Bool {
+        guard isPrimaryWebView(webView) else {
+            return false
+        }
+        setPageColorScheme(scheme)
+        return true
+    }
+
+    private func setPageColorScheme(_ scheme: PageColorScheme?) {
+        reportedPageColorScheme = scheme
+        updatePageColorScheme()
+    }
+
+    private func updatePageColorScheme() {
+        let scheme = primaryLoadFailed ? nil : reportedPageColorScheme
+        guard pageColorScheme != scheme else {
+            return
+        }
+        pageColorScheme = scheme
+        setNeedsStatusBarAppearanceUpdate()
+        pageColorSchemeChanged(scheme)
+    }
+
+    /// SwiftUI's hosting controller forwards the status bar to this
+    /// controller, so the text follows the page rather than the system.
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        switch pageColorScheme {
+        case .light:
+            return .darkContent
+        case .dark:
+            return .lightContent
+        case nil:
+            return .default
+        }
     }
 
     private func resetAccountActionForNavigationCommit() {
@@ -958,6 +1043,8 @@ final class WebViewController: UIViewController {
             accountFallbackWorkItem?.cancel()
             accountFallbackWorkItem = nil
             accountFallbackVisibilityChanged(false)
+            primaryLoadFailed = true
+            updatePageColorScheme()
             didFailLoading()
         }
     }
@@ -1581,6 +1668,8 @@ extension WebViewController: WKNavigationDelegate {
             accountFallbackWorkItem?.cancel()
             accountFallbackWorkItem = nil
             accountFallbackVisibilityChanged(false)
+            primaryLoadFailed = false
+            updatePageColorScheme()
             didStartLoading()
         }
     }
@@ -1594,6 +1683,13 @@ extension WebViewController: WKNavigationDelegate {
             blockedBackForwardNavigation = false
             resetAccountActionForNavigationCommit()
             updateBackNavigationGesture(in: webView)
+            // Another origin has no shell script to report its scheme. An
+            // instance document reports its own, so until then the status
+            // bar keeps matching the page still on screen.
+            if webView.url.flatMap({ WebOrigin(url: $0, requiresHTTPS: false) })
+                != instanceOrigin {
+                setPageColorScheme(nil)
+            }
         }
     }
 
@@ -2019,9 +2115,9 @@ private final class PopupWebViewController: UIViewController {
         guard let webView, let webViewFactory else {
             return
         }
-        // A child shows arbitrary origins under native chrome, so it keeps the
-        // Home indicator strip outside its page.
-        webViewFactory.install(webView, in: view, bottomEdge: .safeArea)
+        // A child shows arbitrary origins under native chrome, so it keeps
+        // the safe areas outside its page.
+        webViewFactory.install(webView, in: view, extent: .safeArea)
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: String(localized: "common.done"),
             style: .done,

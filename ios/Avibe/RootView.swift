@@ -40,6 +40,21 @@ private struct BrowserScreen: View {
     @State private var isLoading = true
     @State private var failed = false
     @State private var showsAccountFallback = false
+    @State private var pageColorScheme: PageColorScheme?
+
+    /// The scheme of what the status bar sits over: the page's own once it
+    /// is known, otherwise the system's. The WebView itself always keeps
+    /// the system appearance.
+    private var chromeColorScheme: ColorScheme {
+        switch pageColorScheme {
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        case nil:
+            return colorScheme
+        }
+    }
 
     var body: some View {
         let instance = runtime.instance
@@ -52,6 +67,7 @@ private struct BrowserScreen: View {
                         showAccount: appModel.showAccount,
                         showInstancePicker: appModel.showInstancePicker
                     )
+                    .environment(\.colorScheme, chromeColorScheme)
                 }
 
                 ZStack {
@@ -61,6 +77,9 @@ private struct BrowserScreen: View {
                         showAccount: appModel.showAccount,
                         accountFallbackVisibilityChanged: {
                             showsAccountFallback = $0
+                        },
+                        pageColorSchemeChanged: {
+                            pageColorScheme = $0
                         },
                         didCreateController: {
                             appModel.registerRuntimeController($0, for: runtime)
@@ -85,8 +104,10 @@ private struct BrowserScreen: View {
                     .id(reloadID)
                     .ignoresSafeArea(.keyboard)
                     // The controller decides where the page ends; the Web
-                    // UI reserves the Home indicator strip itself.
-                    .ignoresSafeArea(.container, edges: .bottom)
+                    // UI reserves the status bar and the Home indicator
+                    // strip itself. Below the legacy toolbar the top edge
+                    // is not the screen's, so the page starts there.
+                    .ignoresSafeArea(.container, edges: [.top, .bottom])
 
                     if isLoading && !failed {
                         ProgressView("browser.loading")
@@ -118,12 +139,15 @@ private struct BrowserScreen: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color(uiColor: .systemBackground))
+                        .background(
+                            Color(uiColor: .systemBackground)
+                                .ignoresSafeArea(.container, edges: .top)
+                        )
                     }
                 }
             }
             .background(
-                runtimeHeaderBackground(for: colorScheme)
+                runtimeHeaderBackground(for: chromeColorScheme)
                     .ignoresSafeArea(.container, edges: .top)
             )
         } else {

@@ -181,7 +181,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               }}
             >
               <DialogTitle className="sr-only">{t('chat.media.preview')}</DialogTitle>
-          <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+          <div className="absolute right-4 top-[calc(1rem+env(safe-area-inset-top))] z-10 flex items-center gap-2">
             {/* Zoom buttons: a pointer-device affordance (touch zooms by pinch).
                 stopPropagation so clicking a control doesn't also close the viewer. */}
             <Button

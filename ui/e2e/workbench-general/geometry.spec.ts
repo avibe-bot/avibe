@@ -544,6 +544,123 @@ test.describe('phone chrome on the safe area', () => {
   }
 });
 
+/**
+ * The phone app draws the page under the status bar, so a surface that starts at the window's top
+ * on a phone clears it through `env(safe-area-inset-top)`: the setup header, the image viewer's
+ * controls, the configuration-repair notice and Model Hub's default-routing drawer. Desktop, a
+ * Safari tab and a Home Screen web app (no `viewport-fit=cover`) report no top inset, and there
+ * every one of them stays where it was. Measured with the browser reporting each inset.
+ */
+test.describe('phone surfaces under the status bar', () => {
+  const CHAT = 'ses_top_inset';
+  const turnState = {
+    in_flight: false, foreground: 'idle', native_turn_started: false, pending_input_count: 0,
+    background_activities: [], pending_activity_output_count: 0, connection: 'connected',
+  };
+  const session = {
+    id: CHAT, scope_id: null, project_id: null, title: 'Top inset', agent_id: 'agt-vibey', agent_name: 'vibey',
+    agent_backend: 'vibey', agent_variant: 'vibey', model: null, reasoning_effort: null, speed: null,
+    status: 'active', agent_status: 'idle', pinned: false, visibility: 'foreground', workdir: '/fixture',
+    native_session_id: null, metadata: {}, created_at: '2026-11-08T00:00:00Z', updated_at: '2026-11-08T00:00:00Z',
+  };
+  const imageMessage = {
+    id: 'msg-image', scope_id: null, session_id: CHAT, platform: 'avibe', author: 'user', type: 'user',
+    source: 'user', author_id: null, author_name: null, native_message_id: null, parent_native_message_id: null,
+    projection: null, text: 'image', metadata: {},
+    content: { attachments: [{ url: '/api/media/med_top', name: 'top.svg', mime: 'image/svg+xml', width: 64, height: 48 }] },
+    created_at: '2026-11-08T00:00:00Z', updated_at: '2026-11-08T00:00:00Z', delivered_at: '2026-11-08T00:00:01Z', read_at: null,
+  };
+  const image = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48"><rect width="64" height="48" fill="#0891b2"/></svg>';
+
+  for (const top of [0, 62]) {
+    const phone = async (page: import('@playwright/test').Page) => {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top, bottom: 0, left: 0, right: 0 } });
+      await page.setViewportSize(NARROW);
+    };
+
+    test(`keeps the setup header's brand below the status bar (top inset ${top})`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await phone(page);
+      await open(page, '/setup');
+      const header = page.locator('.onboarding-shell > header');
+      await expect(header.locator('.onboarding-brand')).toBeVisible();
+      const geometry = await header.evaluate((node) => {
+        const box = node.getBoundingClientRect();
+        const brand = node.querySelector('.onboarding-brand')!.getBoundingClientRect();
+        return { top: box.top, height: box.height, brandCenter: brand.top + brand.height / 2 };
+      });
+      expect(geometry.top, 'the header still starts at the top').toBeCloseTo(0, 1);
+      expect(geometry.height - top, 'the header keeps its 82px below the inset').toBeCloseTo(82, 1);
+      expect(geometry.brandCenter - top, 'the brand stays centred in those 82px').toBeCloseTo(41, 1);
+      expect(denied).toEqual([]);
+    });
+
+    test(`keeps the configuration-repair notice below the status bar (top inset ${top})`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await page.route('**/api/config', (route) => route.fulfill({
+        json: { ...config('en'), config_recovery: { required: true, warnings: [] } },
+      }));
+      await phone(page);
+      await open(page, '/');
+      const notice = page.getByRole('alert').filter({ hasText: 'Configuration repair required' });
+      await expect(notice).toBeVisible();
+      const noticeTop = await notice.evaluate((node) => node.getBoundingClientRect().top);
+      expect(noticeTop - top, 'the notice keeps its 8px below the inset').toBeCloseTo(8, 1);
+      expect(denied).toEqual([]);
+    });
+
+    test(`keeps the image viewer's controls below the status bar (top inset ${top})`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: false } }));
+      await page.route(`**/api/sessions/${CHAT}/bootstrap`, (route) => route.fulfill({ json: {
+        session, capabilities: { can_chat: true }, agents: [], default_agent_name: 'vibey', config: { ui: {} },
+        messages: [imageMessage], queued: [], next_after_id: null, next_before_id: null,
+        draft: { text: '', updated_at: null }, turn_state: turnState,
+      } }));
+      await page.route(`**/api/sessions/${CHAT}`, (route) => route.fulfill({ json: session }));
+      await page.route(`**/api/sessions/${CHAT}/turn-state`, (route) => route.fulfill({ json: turnState }));
+      await page.route(`**/api/sessions/${CHAT}/activity**`, (route) => route.fulfill({ json: { groups: [] } }));
+      await page.route('**/api/media/med_top', (route) => route.fulfill({ status: 200, contentType: 'image/svg+xml', body: image }));
+      await phone(page);
+      await open(page, `/chat/${CHAT}`);
+      const inlineImage = page.locator('span img[src="/api/media/med_top"]');
+      await expect(inlineImage).toHaveJSProperty('naturalWidth', 64);
+      await inlineImage.click({ position: { x: 8, y: 8 } });
+      const viewer = page.locator('[role="dialog"]:has(img[src^="/api/media/"])');
+      const close = viewer.getByRole('button', { name: 'Close' });
+      await expect(close).toBeVisible();
+      const controlsTop = await close.evaluate((node) => node.parentElement!.getBoundingClientRect().top);
+      expect(controlsTop - top, 'the controls keep their 16px below the inset').toBeCloseTo(16, 1);
+      expect(denied).toEqual([]);
+    });
+
+    test(`keeps the default-routing drawer's head below the status bar (top inset ${top})`, async ({ page }) => {
+      const { denied, unexpectedModelReads } = await serveModelHub(page);
+      // The drawer reads the agent's current order when it opens.
+      await page.route('**/api/models/agents/codex/sources', (route) => {
+        expect(route.request().method()).toBe('GET');
+        return route.fulfill({ json: { agent: MODEL_HUB_AGENT } });
+      });
+      await phone(page);
+      await open(page, '/settings/models');
+      const card = page.locator('[data-agent-backend="codex"]');
+      await expect(card).toBeVisible();
+      await card.getByRole('button', { name: 'Default routing' }).click();
+      const drawer = page.locator('.model-hub-order-drawer');
+      await expect(drawer).toBeVisible();
+      const geometry = await drawer.evaluate((node) => ({
+        top: node.getBoundingClientRect().top,
+        head: node.querySelector('.model-hub-order-head')!.getBoundingClientRect().top,
+      }));
+      expect(geometry.top, 'the drawer still runs from the top').toBeCloseTo(0, 1);
+      expect(geometry.head, 'its head starts below the inset').toBeCloseTo(top, 1);
+      expect(denied).toEqual([]);
+      expect(unexpectedModelReads).toEqual([]);
+    });
+  }
+});
+
 test.describe('settings overlay geometry', () => {
   test('opens as a standalone zero-offset surface and gives the home back its draft on close', async ({ page }) => {
     const denied = await serveProduct(page);
