@@ -66,6 +66,38 @@ enum MobileSessionDiscovery: Equatable {
     case secondFactorRequired(MobileSecondFactorRequirement)
 }
 
+/// Why Supabase still accepted a password that no longer meets avibe.bot's
+/// rules (`weak_password.reasons`).
+enum MobileWeakPasswordReason: String, Equatable {
+    case length
+    case characters
+    case pwned
+}
+
+/// What a password sign-in found. `weakPasswordReasons` is `nil` unless
+/// Supabase reported `weak_password`.
+struct MobilePasswordSignInDiscovery: Equatable {
+    let discovery: MobileSessionDiscovery
+    let weakPasswordReasons: [MobileWeakPasswordReason]?
+}
+
+/// `auth.signInWithPassword`'s answer: the session state of `auth.verifyOtp`,
+/// plus `weak_password` when Supabase reported one.
+struct MobilePasswordSignInResult: Equatable {
+    let state: MobileSessionState
+    let weakPasswordReasons: [MobileWeakPasswordReason]?
+
+    var jsonObject: [String: Any] {
+        var object = state.jsonObject
+        if let weakPasswordReasons {
+            object["weak_password"] = [
+                "reasons": weakPasswordReasons.map(\.rawValue),
+            ]
+        }
+        return object
+    }
+}
+
 enum MobileSecondFactorCodeMethod: String, Equatable {
     case totp
     case recovery
@@ -189,6 +221,15 @@ struct MobileAccountError: Error, Equatable {
     static let secondFactorInvalid = MobileAccountError(
         code: "invalid",
         message: "The second factor was not accepted."
+    )
+    /// A wrong email or password, or an account that never set a password.
+    static let invalidCredentials = MobileAccountError(
+        code: "invalid_credentials",
+        message: "The email or password was not accepted."
+    )
+    static let emailNotConfirmed = MobileAccountError(
+        code: "email_not_confirmed",
+        message: "The account's email address is not confirmed."
     )
     static let passkeyCancelled = MobileAccountError(
         code: "passkey_cancelled",
@@ -394,6 +435,13 @@ final class AccountWebsiteDataStore {
 protocol MobileAuthTransporting: AnyObject {
     func requestOTP(email: String) async throws -> Int
     func verifyOTP(email: String, code: String) async throws -> MobileSessionDiscovery
+    /// Supabase's password grant, then the same callback and session read as
+    /// `verifyOTP`. The password is sent only to the grant; it is never
+    /// returned, logged, or kept. Throws `signedOut` for the session's `401`.
+    func signInWithPassword(
+        email: String,
+        password: String
+    ) async throws -> MobilePasswordSignInDiscovery
     /// `nil` means signed out (`401`).
     func fetchSession() async throws -> MobileSessionDiscovery?
     /// Throws `signedOut` for `401` and `passkeyUnavailable` when the account
@@ -564,6 +612,53 @@ final class MobileSessionCoordinator {
             } catch {
                 if self.generation == loginGeneration {
                     await self.replaceWithFreshSignedOutStore()
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Signs in with the account's avibe.bot password. The answer is the same
+    /// as `verifyOTP`'s, so it may owe the second factor. Every failed attempt
+    /// rotates to a fresh store; the session's `401` is the explicit
+    /// signed-out answer.
+    func signInWithPassword(
+        email: String,
+        password: String
+    ) async throws -> MobilePasswordSignInResult {
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidEmail(normalizedEmail), !password.isEmpty else {
+            throw MobileAccountError.invalidRequest
+        }
+        return try await runExclusive {
+            let loginGeneration = self.beginAccountTransition(
+                clearSelection: true
+            )
+            do {
+                let result = try await self.requireTransport().signInWithPassword(
+                    email: normalizedEmail,
+                    password: password
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                self.clearStoredSelection()
+                self.signedOutStoreIsFresh = false
+                self.secondFactorEmail = normalizedEmail
+                return MobilePasswordSignInResult(
+                    state: self.state(for: result.discovery),
+                    weakPasswordReasons: result.weakPasswordReasons
+                )
+            } catch {
+                guard self.generation == loginGeneration else {
+                    throw error
+                }
+                await self.replaceWithFreshSignedOutStore()
+                if (error as? MobileAccountError)?.code
+                    == MobileAccountError.signedOut.code
+                {
+                    return MobilePasswordSignInResult(
+                        state: .signedOut,
+                        weakPasswordReasons: nil
+                    )
                 }
                 throw error
             }

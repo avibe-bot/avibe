@@ -118,6 +118,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case sessionBootstrap = "session.bootstrap"
     case authRequestOTP = "auth.requestOtp"
     case authVerifyOTP = "auth.verifyOtp"
+    case authSignInWithPassword = "auth.signInWithPassword"
     case authVerifySecondFactor = "auth.verifySecondFactor"
     case authVerifyPasskey = "auth.verifyPasskey"
     case sessionRefresh = "session.refresh"
@@ -151,6 +152,36 @@ struct MobileBridgeRequest {
             method: method,
             params: rawParams as? [String: Any] ?? [:]
         )
+    }
+}
+
+// A request may carry a password or a code, so its descriptions, dumps, and any
+// log line built from it name the parameters and never their values.
+extension MobileBridgeRequest: CustomStringConvertible,
+    CustomDebugStringConvertible,
+    CustomReflectable
+{
+    var description: String {
+        "MobileBridgeRequest(method: \(method.rawValue), params: [\(parameterNames.joined(separator: ", "))])"
+    }
+
+    var debugDescription: String {
+        description
+    }
+
+    var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "method": method.rawValue,
+                "params": parameterNames,
+            ],
+            displayStyle: .struct
+        )
+    }
+
+    private var parameterNames: [String] {
+        params.keys.sorted()
     }
 }
 
@@ -298,6 +329,18 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         code: code
                     )
                     reply(replyHandler, result: state.jsonObject)
+                case .authSignInWithPassword:
+                    guard
+                        let email = request.params["email"] as? String,
+                        let password = request.params["password"] as? String
+                    else {
+                        throw MobileAccountError.invalidRequest
+                    }
+                    let result = try await coordinator.signInWithPassword(
+                        email: email,
+                        password: password
+                    )
+                    reply(replyHandler, result: result.jsonObject)
                 case .authVerifySecondFactor:
                     guard
                         let rawMethod = request.params["method"] as? String,

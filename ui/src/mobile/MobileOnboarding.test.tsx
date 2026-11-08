@@ -4,7 +4,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { MobileBridgeError, MobileSessionState } from './bridge';
+import type {
+  MobileBridgeError,
+  MobilePasswordSignInResult,
+  MobileSessionState,
+} from './bridge';
 
 const mobile = vi.hoisted(() => ({
   bootstrap: vi.fn<() => Promise<MobileSessionState>>(),
@@ -14,6 +18,9 @@ const mobile = vi.hoisted(() => ({
   requestOtp: vi.fn(),
   returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
+  signInWithPassword: vi.fn<
+    (email: string, password: string) => Promise<MobilePasswordSignInResult>
+  >(),
   verifyOtp: vi.fn<() => Promise<MobileSessionState>>(),
   verifyPasskey: vi.fn<() => Promise<MobileSessionState>>(),
   verifySecondFactor: vi.fn<(method: string, code: string) => Promise<MobileSessionState>>(),
@@ -28,6 +35,7 @@ vi.mock('./bridge', () => ({
   requestMobileOtp: mobile.requestOtp,
   returnToMobileInstance: mobile.returnToInstance,
   selectMobileInstance: mobile.selectInstance,
+  signInMobileWithPassword: mobile.signInWithPassword,
   verifyMobileOtp: mobile.verifyOtp,
   verifyMobilePasskey: mobile.verifyPasskey,
   verifyMobileSecondFactor: mobile.verifySecondFactor,
@@ -110,6 +118,7 @@ const resetMobileMocks = () => {
   mobile.requestOtp.mockReset();
   mobile.returnToInstance.mockReset();
   mobile.selectInstance.mockReset();
+  mobile.signInWithPassword.mockReset();
   mobile.verifyOtp.mockReset();
   mobile.verifyPasskey.mockReset();
   mobile.verifySecondFactor.mockReset();
@@ -119,6 +128,7 @@ const resetMobileMocks = () => {
   mobile.requestOtp.mockResolvedValue({ cooldown_seconds: 0 });
   mobile.returnToInstance.mockResolvedValue(null);
   mobile.selectInstance.mockResolvedValue({ instance: signedIn().instances[0] });
+  mobile.signInWithPassword.mockResolvedValue(signedIn());
   mobile.verifyOtp.mockResolvedValue(signedIn());
   mobile.verifyPasskey.mockResolvedValue(signedIn());
   mobile.verifySecondFactor.mockResolvedValue(signedIn());
@@ -136,7 +146,7 @@ const deferred = <T,>() => {
 
 const enabledInteractiveControls = (): HTMLElement[] => [
   ...document.querySelectorAll<HTMLElement>(
-    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]',
+    'button:not(:disabled), input:not(:disabled):not([readonly]), select:not(:disabled), textarea:not(:disabled), a[href]',
   ),
 ];
 
@@ -152,6 +162,8 @@ type FailureOperation =
   | 'request'
   | 'resend'
   | 'verify'
+  | 'password'
+  | 'passwordCode'
   | 'passkey'
   | 'totp'
   | 'recovery'
@@ -166,6 +178,8 @@ const bridgeErrorCodes = [
   'invalid_email',
   'email_address_invalid',
   'invalid_or_expired',
+  'invalid_credentials',
+  'email_not_confirmed',
   'invalid',
   'passkey_cancelled',
   'passkey_unavailable',
@@ -188,8 +202,14 @@ const expectedErrorKey = (
   operation: FailureOperation,
   code: typeof bridgeErrorCodes[number],
 ): string => {
+  if (operation === 'password') {
+    if (code === 'invalid_credentials') return 'mobileApp.password.invalid';
+    if (code === 'email_not_confirmed') return 'mobileApp.password.unconfirmed';
+    if (code === 'rate_limited') return 'mobileApp.password.rateLimited';
+    return 'mobileApp.errors.network';
+  }
   if (
-    (operation === 'request' || operation === 'resend')
+    (operation === 'request' || operation === 'resend' || operation === 'passwordCode')
     && (code === 'invalid_email' || code === 'email_address_invalid')
   ) {
     return 'mobileApp.email.invalid';
@@ -226,6 +246,17 @@ const reachCode = async (): Promise<HTMLInputElement> => {
   });
   fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
   return await screen.findByLabelText('mobileApp.code.label') as HTMLInputElement;
+};
+
+/** Opens the password step for a valid email and returns its password field. */
+const reachPassword = async (email = 'alex@example.com'): Promise<HTMLInputElement> => {
+  render(<MobileOnboarding />);
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+    target: { value: email },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+  return await screen.findByLabelText('mobileApp.password.label') as HTMLInputElement;
 };
 
 /** Lets pending promise callbacks and re-renders run. */
@@ -299,6 +330,8 @@ describe('mobile onboarding', () => {
       'request',
       'resend',
       'verify',
+      'password',
+      'passwordCode',
       'passkey',
       'totp',
       'recovery',
@@ -363,6 +396,20 @@ describe('mobile onboarding', () => {
           fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
             target: { value: '123456' },
           });
+          break;
+        case 'password':
+        case 'passwordCode':
+          if (operation === 'password') {
+            mobile.signInWithPassword.mockRejectedValueOnce(error);
+          } else {
+            mobile.requestOtp.mockRejectedValueOnce(error);
+          }
+          fireEvent.change(await reachPassword(), { target: { value: 'correct-horse' } });
+          fireEvent.click(screen.getByRole('button', {
+            name: operation === 'password'
+              ? 'mobileApp.password.signIn'
+              : 'mobileApp.password.useCode',
+          }));
           break;
         case 'passkey':
           mobile.bootstrap.mockResolvedValueOnce(owed());
@@ -448,6 +495,13 @@ describe('mobile onboarding', () => {
         case 'verify':
           expect(screen.getByLabelText('mobileApp.code.label')).toBeTruthy();
           break;
+        case 'password':
+        case 'passwordCode':
+          expect(
+            (screen.getByLabelText('mobileApp.password.label') as HTMLInputElement).value,
+          ).toBe('correct-horse');
+          expect(screen.getByText('alex@example.com')).toBeTruthy();
+          break;
         case 'passkey':
           expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.usePasskey' })).toBeTruthy();
           break;
@@ -479,7 +533,7 @@ describe('mobile onboarding', () => {
           break;
         }
 
-        const expectedRequestCalls = operation === 'request'
+        const expectedRequestCalls = operation === 'request' || operation === 'passwordCode'
           ? 1
           : operation === 'resend'
             ? 2
@@ -1341,5 +1395,330 @@ describe('mobile onboarding', () => {
       name: 'mobileApp.instances.switchTitle',
     })).toBeTruthy();
     expect(mobile.returnToInstance).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('mobile password sign-in', () => {
+  const codeWayControl = () => screen.getByRole('button', { name: 'mobileApp.password.useCode' });
+  // An error the email code fixes promotes its way in from a link to an outline button.
+  const codeWayIsButton = () => !codeWayControl().className.includes('underline');
+
+  it('AUTH-SETUP-158 signs in with the avibe.bot password and reaches the instances', async () => {
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    // The email step keeps the code as its primary action and offers the password under it.
+    expect(screen.getByRole('button', { name: 'mobileApp.email.send' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+      target: { value: ' alex@example.com ' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+
+    const password = await screen.findByLabelText('mobileApp.password.label') as HTMLInputElement;
+    expect(screen.getByRole('heading', { name: 'mobileApp.password.title' })).toBeTruthy();
+    expect(screen.getByText('alex@example.com')).toBeTruthy();
+    // Identifier-first: the saved login matches the email through a hidden username field.
+    const username = document.querySelector<HTMLInputElement>('input[autocomplete="username"]');
+    expect(username?.value).toBe('alex@example.com');
+    expect(username?.readOnly).toBe(true);
+    expect(username?.getAttribute('aria-hidden')).toBe('true');
+    expect(username?.tabIndex).toBe(-1);
+    expect(username?.form).toBe(password.form);
+    expect(password.type).toBe('password');
+    expect(password.getAttribute('autocomplete')).toBe('current-password');
+    expect(password.getAttribute('autocapitalize')).toBe('none');
+    expect(password.getAttribute('spellcheck')).toBe('false');
+    expect(password.getAttribute('enterkeyhint')).toBe('go');
+    expect(password.getAttribute('aria-describedby')).toBe('mobile-login-password-feedback');
+
+    // The only client check is a non-empty password, and nothing submits on its own.
+    const signIn = screen.getByRole('button', { name: 'mobileApp.password.signIn' }) as HTMLButtonElement;
+    expect(signIn.disabled).toBe(true);
+    fireEvent.submit(password);
+    fireEvent.change(password, { target: { value: 'correct horse' } });
+    await settle();
+    expect(signIn.disabled).toBe(false);
+    expect(mobile.signInWithPassword).not.toHaveBeenCalled();
+
+    const toggle = screen.getByRole('button', { name: 'mobileApp.password.show' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(toggle);
+    expect(password.type).toBe('text');
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'mobileApp.password.show' })).toBe(toggle);
+    fireEvent.click(toggle);
+    expect(password.type).toBe('password');
+
+    // Return submits the form.
+    fireEvent.submit(password);
+    fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
+    await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+    expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
+    expect(mobile.signInWithPassword).toHaveBeenCalledWith('alex@example.com', 'correct horse');
+    expect(mobile.requestOtp).not.toHaveBeenCalled();
+    expect(mobile.verifyOtp).not.toHaveBeenCalled();
+  });
+
+  it('validates the email before either way in', async () => {
+    render(<MobileOnboarding />);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    const email = screen.getByLabelText('mobileApp.email.label');
+    fireEvent.change(email, { target: { value: 'max@' } });
+
+    for (const way of ['mobileApp.password.entry', 'mobileApp.email.send']) {
+      fireEvent.click(screen.getByRole('button', { name: way }));
+      expect((await screen.findByRole('alert')).textContent, way).toBe('mobileApp.email.invalid');
+      expect(email.getAttribute('aria-invalid'), way).toBe('true');
+      expect(screen.queryByLabelText('mobileApp.password.label'), way).toBeNull();
+      fireEvent.change(email, { target: { value: 'max@' } });
+    }
+    expect(mobile.requestOtp).not.toHaveBeenCalled();
+    expect(mobile.signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it('keeps the email and password through each failure and shows its copy', async () => {
+    const cases = [
+      { error: { code: 'invalid_credentials' }, alert: 'mobileApp.password.invalid', marked: true, codeFixes: true, wait: 0 },
+      { error: { code: 'email_not_confirmed' }, alert: 'mobileApp.password.unconfirmed', marked: false, codeFixes: true, wait: 0 },
+      { error: { code: 'rate_limited', retry_after_seconds: 45 }, alert: 'mobileApp.password.rateLimited', marked: false, codeFixes: false, wait: 45 },
+      { error: { code: 'rate_limited' }, alert: 'mobileApp.password.rateLimited', marked: false, codeFixes: false, wait: 60 },
+      { error: { code: 'network' }, alert: 'mobileApp.errors.network', marked: false, codeFixes: false, wait: 0 },
+      { error: { code: 'unexpected_provider_code' }, alert: 'mobileApp.errors.network', marked: false, codeFixes: false, wait: 0 },
+      // A session that answered signed out right after the callback stays on this step.
+      { result: { status: 'signedOut' } as const, alert: 'mobileApp.errors.network', marked: false, codeFixes: false, wait: 0 },
+    ];
+
+    for (const testCase of cases) {
+      cleanup();
+      resetMobileMocks();
+      if (testCase.result) {
+        mobile.signInWithPassword.mockResolvedValueOnce(testCase.result);
+      } else {
+        mobile.signInWithPassword.mockRejectedValueOnce({ message: 'rejected', ...testCase.error });
+      }
+      const password = await reachPassword();
+      fireEvent.change(password, { target: { value: 'correct-horse' } });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent, testCase.alert).toBe(testCase.alert);
+      expect(alert.parentElement?.id).toBe('mobile-login-password-feedback');
+      expect(password.value, testCase.alert).toBe('correct-horse');
+      expect(password.disabled, testCase.alert).toBe(false);
+      expect(screen.getByText('alex@example.com')).toBeTruthy();
+      expect(password.getAttribute('aria-invalid'), testCase.alert).toBe(testCase.marked ? 'true' : null);
+      expect(codeWayIsButton(), testCase.alert).toBe(testCase.codeFixes);
+      const signIn = screen.getByRole('button', {
+        name: testCase.wait > 0
+          ? `mobileApp.password.retryIn:${testCase.wait}`
+          : 'mobileApp.password.signIn',
+      }) as HTMLButtonElement;
+      expect(signIn.disabled, testCase.alert).toBe(testCase.wait > 0);
+      expect(mobile.requestOtp).not.toHaveBeenCalled();
+    }
+  });
+
+  it('waits out a password rate limit before Sign in is offered again', async () => {
+    mobile.signInWithPassword
+      .mockRejectedValueOnce({ code: 'rate_limited', message: 'slow down', retry_after_seconds: 1 })
+      .mockResolvedValueOnce(signedIn());
+    const password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+
+    const waiting = await screen.findByRole('button', { name: 'mobileApp.password.retryIn:1' });
+    fireEvent.submit(password);
+    // Editing stays allowed while Sign in waits.
+    fireEvent.change(password, { target: { value: 'correct-horse-2' } });
+    expect(password.value).toBe('correct-horse-2');
+    expect((waiting as HTMLButtonElement).disabled).toBe(true);
+    expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(await screen.findByRole(
+      'button',
+      { name: 'mobileApp.password.signIn' },
+      { timeout: 3_000 },
+    ));
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.signInWithPassword).toHaveBeenLastCalledWith('alex@example.com', 'correct-horse-2');
+  });
+
+  it('locks every control while signing in', async () => {
+    const signIn = deferred<MobilePasswordSignInResult>();
+    mobile.signInWithPassword.mockReturnValueOnce(signIn.promise);
+    const password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+
+    const busy = screen.getByRole('button', { name: 'mobileApp.password.signingIn' });
+    expect(busy.parentElement?.getAttribute('aria-busy')).toBe('true');
+    expectScreenLocked();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.changeEmail' }));
+    fireEvent.click(codeWayControl());
+    fireEvent.submit(password);
+    expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
+    expect(mobile.requestOtp).not.toHaveBeenCalled();
+
+    signIn.resolve(signedIn());
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+  });
+
+  it('clears the password and its error on Change email, Back, and leaving the step', async () => {
+    const leaves = [
+      { name: 'change email', leave: () => fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.changeEmail' })) },
+      { name: 'back', leave: () => fireEvent.click(screen.getByRole('button', { name: 'common.back' })) },
+      { name: 'forgot', leave: () => fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.forgot' })) },
+    ];
+    for (const { name, leave } of leaves) {
+      cleanup();
+      resetMobileMocks();
+      mobile.signInWithPassword.mockRejectedValueOnce({ code: 'invalid_credentials', message: 'wrong' });
+      const password = await reachPassword();
+      fireEvent.change(password, { target: { value: 'correct-horse' } });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.show' }));
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+      await screen.findByRole('alert');
+
+      leave();
+      if (name === 'forgot') {
+        await screen.findByRole('heading', { name: 'mobileApp.password.forgotTitle' });
+        expect(screen.queryByRole('alert'), name).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+      } else {
+        // The email is kept.
+        const email = await screen.findByLabelText('mobileApp.email.label') as HTMLInputElement;
+        expect(email.value, name).toBe('alex@example.com');
+        expect(screen.queryByRole('alert'), name).toBeNull();
+        fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+      }
+
+      const again = await screen.findByLabelText('mobileApp.password.label') as HTMLInputElement;
+      expect(again.value, name).toBe('');
+      expect(again.type, name).toBe('password');
+      expect(screen.queryByRole('alert'), name).toBeNull();
+      expect(document.body.innerHTML, name).not.toContain('correct-horse');
+    }
+  });
+
+  it('uses an email code instead through the existing request for the same email', async () => {
+    const request = deferred<{ cooldown_seconds: number }>();
+    mobile.requestOtp.mockReturnValueOnce(request.promise);
+    mobile.signInWithPassword.mockRejectedValueOnce({ code: 'invalid_credentials', message: 'wrong' });
+    const password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+    await screen.findByRole('alert');
+    expect(codeWayIsButton()).toBe(true);
+
+    fireEvent.click(codeWayControl());
+    expect(mobile.requestOtp).toHaveBeenCalledWith('alex@example.com');
+    expect(screen.getByRole('button', { name: 'mobileApp.email.sending' })).toBeTruthy();
+    expectScreenLocked();
+
+    request.resolve({ cooldown_seconds: 0 });
+    const code = await screen.findByLabelText('mobileApp.code.label');
+    expect(screen.getByText('alex@example.com')).toBeTruthy();
+    expect(document.body.innerHTML).not.toContain('correct-horse');
+    // The approved code step: the sixth digit sends it.
+    fireEvent.change(code, { target: { value: '123456' } });
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '123456');
+    expect(mobile.requestOtp).toHaveBeenCalledTimes(1);
+    expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers a code or Account security in Safari when the password is forgotten', async () => {
+    await reachPassword();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.forgot' }));
+    expect(await screen.findByRole('heading', { name: 'mobileApp.password.forgotTitle' })).toBeTruthy();
+    expect(screen.getByText('alex@example.com')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.openInSafari' }));
+    expect(mobile.openExternal).toHaveBeenCalledWith('https://avibe.bot/app/account/security');
+
+    mobile.requestOtp.mockRejectedValueOnce({ code: 'network', message: 'offline' });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.errors.network');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+    expect(await screen.findByLabelText('mobileApp.code.label')).toBeTruthy();
+    expect(mobile.requestOtp).toHaveBeenCalledTimes(2);
+    expect(mobile.requestOtp).toHaveBeenLastCalledWith('alex@example.com');
+    expect(mobile.signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it('shows a weak-password notice once, after the second factor and before the instances', async () => {
+    mobile.signInWithPassword.mockResolvedValueOnce({
+      ...owed({ methods: ['totp'] }),
+      weak_password: { reasons: ['pwned'] },
+    });
+    const password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+
+    // The second factor comes first, unchanged.
+    const code = await screen.findByLabelText('mobileApp.twoFactor.totpLabel');
+    expect(screen.queryByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeNull();
+    fireEvent.change(code, { target: { value: '287082' } });
+
+    expect(await screen.findByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeTruthy();
+    expect(mobile.verifySecondFactor).toHaveBeenCalledWith('totp', '287082');
+    expect(screen.getByText('mobileApp.password.weakPwned')).toBeTruthy();
+    expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.changeInSafari' }));
+    expect(mobile.openExternal).toHaveBeenCalledWith('https://avibe.bot/app/account/security');
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.continue' }));
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    // Once: a later session read goes straight to the instances.
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.instances.refresh' }));
+    await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(screen.queryByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeNull();
+    expect(screen.getByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+  });
+
+  it('names the password rules for other weak reasons and skips the notice without one', async () => {
+    mobile.signInWithPassword.mockResolvedValueOnce({
+      ...signedIn(),
+      weak_password: { reasons: ['length'] },
+    });
+    let password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'short' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+    expect(await screen.findByText('mobileApp.password.weakRules')).toBeTruthy();
+    expect(screen.queryByText('mobileApp.password.weakPwned')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'common.continue' }));
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    cleanup();
+
+    resetMobileMocks();
+    password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeNull();
+  });
+
+  it('drops a pending weak-password notice when the sign-in ends before the instances', async () => {
+    mobile.signInWithPassword.mockResolvedValueOnce({
+      ...owed({ methods: ['totp'] }),
+      weak_password: { reasons: ['pwned'] },
+    });
+    const password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
+
+    // A new email sign-in owes no notice for the old password.
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
+      target: { value: 'alex@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+    fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), {
+      target: { value: '123456' },
+    });
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'mobileApp.password.weakTitle' })).toBeNull();
+    expect(mobile.logout).toHaveBeenCalledTimes(1);
   });
 });
