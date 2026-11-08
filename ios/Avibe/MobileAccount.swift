@@ -453,6 +453,9 @@ protocol MobileAuthTransporting: AnyObject {
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
     func logout() async throws
+    func pushManagementRequest(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse
     func cancelAll() async
     func invalidate() -> WebsiteDataStoreReleaseBarrier?
 }
@@ -481,6 +484,7 @@ final class MobileSessionCoordinator {
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
     ]
+    private let onPreparePushLogout: @MainActor () async -> Void
 
     private var transport: MobileAuthTransporting?
     private var snapshot: MobileSessionSnapshot?
@@ -504,6 +508,14 @@ final class MobileSessionCoordinator {
         transport != nil
     }
 
+    var currentAccount: MobileAccount? {
+        snapshot?.account
+    }
+
+    var currentInstances: [MobileInstance] {
+        snapshot?.instances ?? []
+    }
+
     init(
         defaults: UserDefaults = .standard,
         controlPlane: MobileControlPlaneConfiguration = MobileControlPlaneConfiguration(),
@@ -515,7 +527,8 @@ final class MobileSessionCoordinator {
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
-        ]
+        ],
+        onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -525,6 +538,7 @@ final class MobileSessionCoordinator {
             ?? MobilePasskeyAuthenticator()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
+        self.onPreparePushLogout = onPreparePushLogout
         transport = nil
     }
 
@@ -790,6 +804,7 @@ final class MobileSessionCoordinator {
     }
 
     func logout() async throws -> MobileSessionState {
+        await onPreparePushLogout()
         let resetToken = try beginReset()
         defer { finishReset(resetToken) }
         beginAccountTransition(clearSelection: true)
@@ -805,6 +820,26 @@ final class MobileSessionCoordinator {
         signedOutStoreIsFresh = true
         activateAccountSurface()
         return .signedOut
+    }
+
+    func pushManagementRequest(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse {
+        let wasActive = transport != nil
+        return try await runExclusive {
+            let requestGeneration = self.generation
+            self.activateAccountSurface()
+            defer {
+                if !wasActive {
+                    self.deactivateAccountSurface()
+                }
+            }
+            let response = try await self.requireTransport().pushManagementRequest(
+                request
+            )
+            try self.requireCurrentGeneration(requestGeneration)
+            return response
+        }
     }
 
     private func completeSecondFactor(

@@ -9,6 +9,7 @@ enum MobileAuthTransportOperation: CaseIterable, Equatable {
     case passkeyChallenge
     case verifySecondFactor
     case logout
+    case pushManagement
 }
 
 enum MobileAuthTransportStage: String, CaseIterable, Equatable {
@@ -190,6 +191,28 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         }
     }
 
+    func pushManagementRequest(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse {
+        let response = try await evaluateJSON(
+            Self.pushManagementScript,
+            operation: .pushManagement,
+            arguments: [
+                "method": request.method,
+                "path": request.path,
+                "headers": request.headers,
+                "body": request.body.map { String(decoding: $0, as: UTF8.self) } ?? NSNull(),
+            ]
+        )
+        guard
+            let statusCode = response.integer("status"),
+            let body = response["body"] as? [String: Any]
+        else {
+            throw MobileAccountError.network
+        }
+        return PushManagementResponse(statusCode: statusCode, body: body)
+    }
+
     func cancelAll() async {
         _ = try? await webView?.callAsyncJavaScript(
             """
@@ -307,6 +330,8 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
              .fetchSession,
              .passkeyChallenge,
              .verifySecondFactor:
+            return deadlines.requestMilliseconds
+        case .pushManagement:
             return deadlines.requestMilliseconds
         }
     }
@@ -501,7 +526,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
                 return .network
             }
             return .secondFactorInvalid
-        case .fetchSession, .logout:
+        case .fetchSession, .logout, .pushManagement:
             return .network
         }
     }
@@ -1007,6 +1032,31 @@ extension MobileAuthTransport: WKNavigationDelegate {
             status: response.status,
             code: payload.code || payload.error || null,
             message: payload.message || payload.error || null
+          });
+        """
+    )
+
+    private static let pushManagementScript = boundedScript(
+        initialStage: .request,
+        body: """
+          const response = await boundedFetch(new URL(path, window.location.origin), {
+            method,
+            credentials: "same-origin",
+            cache: "no-store",
+            headers,
+            body: body === null ? undefined : body
+          });
+          const text = await response.text();
+          let payload = {};
+          try {
+            const parsed = text ? JSON.parse(text) : {};
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              payload = parsed;
+            }
+          } catch {}
+          return JSON.stringify({
+            status: response.status,
+            body: payload
           });
         """
     )

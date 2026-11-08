@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiContextType } from '@/context/ApiContext';
-import { disableWebPush, enableWebPush, webPushSubscriptionUsesVapidKey } from './webPush';
+import {
+  disableWebPush,
+  enableWebPush,
+  webPushSubscriptionUsesVapidKey,
+} from './webPush';
 
 describe('web push recovery', () => {
   afterEach(() => {
@@ -165,6 +169,40 @@ describe('web push recovery', () => {
     expect(await disableWebPush(api)).toBe(true);
     expect(subscription.unsubscribe).toHaveBeenCalledOnce();
     expect(api.unsubscribeWebPush).toHaveBeenCalledWith(subscription.endpoint, 'device-1');
+  });
+
+  it('passes the current VAPID key when disabling a native subscription', async () => {
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call: vi.fn(async (method: string, params: Record<string, unknown>) => {
+          if (method === 'push.status') {
+            expect(params).toEqual({ vapidPublicKey: 'AQIDBA' });
+            return {
+              state: 'on',
+              endpoint: 'https://avibe.bot/api/push/apns/registration',
+              keys: { p256dh: 'key', auth: 'auth' },
+            };
+          }
+          if (method === 'push.unsubscribe') return { revoked: true };
+          throw new Error(`unexpected method ${method}`);
+        }),
+        on: vi.fn(() => () => undefined),
+      },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      unsubscribeWebPush: vi.fn(async () => ({ ok: true, disabled: true })),
+    } as unknown as ApiContextType;
+
+    expect(await disableWebPush(api)).toBe(true);
+    expect(api.getWebPushVapidPublicKey).toHaveBeenCalledOnce();
+    expect(api.unsubscribeWebPush).toHaveBeenCalledWith(
+      'https://avibe.bot/api/push/apns/registration',
+    );
   });
 
   it('keeps the browser subscription when the server cannot record an opt-out', async () => {

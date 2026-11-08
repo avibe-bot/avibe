@@ -74,6 +74,7 @@ private struct BrowserScreen: View {
                     WebViewContainer(
                         instanceOrigin: instanceOrigin,
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
+                        pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
                         accountFallbackVisibilityChanged: {
                             showsAccountFallback = $0
@@ -94,6 +95,7 @@ private struct BrowserScreen: View {
                         didFinishLoading: {
                             isLoading = false
                             failed = false
+                            appModel.didFinishRuntimeLoading()
                         },
                         didFailLoading: {
                             isLoading = false

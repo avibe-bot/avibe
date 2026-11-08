@@ -170,6 +170,34 @@ final class PushNotificationTests: XCTestCase {
         )
         assertFallback(result)
     }
+
+    func testNSEKeepsFallbackForPendingRegistrationKey() throws {
+        let receiver = try loadReceiverFixture()
+        let result = try processThroughNSE(
+            receiver: receiver,
+            privateKey: try XCTUnwrap(
+                PushBase64URL.decode(receiver.receiverPrivateKey)
+            ),
+            generation: receiver.expectedNative.bindGeneration,
+            state: .pending,
+            pendingRevoke: false
+        )
+        assertFallback(result)
+    }
+
+    func testNSEKeepsFallbackForPendingRetireKey() throws {
+        let receiver = try loadReceiverFixture()
+        let result = try processThroughNSE(
+            receiver: receiver,
+            privateKey: try XCTUnwrap(
+                PushBase64URL.decode(receiver.receiverPrivateKey)
+            ),
+            generation: receiver.expectedNative.bindGeneration,
+            state: .retiring,
+            pendingRevoke: true
+        )
+        assertFallback(result)
+    }
 }
 
 private extension PushNotificationTests {
@@ -239,7 +267,9 @@ private extension PushNotificationTests {
     func processThroughNSE(
         receiver: ReceiverFixture,
         privateKey: Data,
-        generation: Int64
+        generation: Int64,
+        state: PushKeyRecord.State = .active,
+        pendingRevoke: Bool = false
     ) throws -> UNNotificationContent {
         let envelope = try XCTUnwrap(
             try JSONSerialization.jsonObject(
@@ -261,8 +291,8 @@ private extension PushNotificationTests {
                     PushBase64URL.decode(receiver.authSecret)
                 ),
                 vapidKeyHash: String(repeating: "a", count: 64),
-                state: .active,
-                pendingRevoke: false,
+                state: state,
+                pendingRevoke: pendingRevoke,
                 replacementRegistrationIDs: []
             )
         )

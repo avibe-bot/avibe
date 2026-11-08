@@ -16,6 +16,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
 
     let instanceOrigin: WebOrigin
     let websiteDataStore: WKWebsiteDataStore
+    let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
@@ -25,6 +26,33 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let didFinishLoading: () -> Void
     let didFailLoading: () -> Void
 
+    init(
+        instanceOrigin: WebOrigin,
+        websiteDataStore: WKWebsiteDataStore,
+        pushCoordinator: NativePushCoordinator? = nil,
+        showAccount: @escaping () -> Void,
+        accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
+        pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
+        didCreateController: @escaping (WebViewController) -> Void,
+        didReleaseWebViews: @escaping (WebsiteDataStoreReleaseBarrier) -> Void,
+        didStartLoading: @escaping () -> Void,
+        didFinishLoading: @escaping () -> Void,
+        didFailLoading: @escaping () -> Void
+    ) {
+        self.instanceOrigin = instanceOrigin
+        self.websiteDataStore = websiteDataStore
+        self.pushCoordinator = pushCoordinator
+        self.showAccount = showAccount
+        self.accountFallbackVisibilityChanged =
+            accountFallbackVisibilityChanged
+        self.pageColorSchemeChanged = pageColorSchemeChanged
+        self.didCreateController = didCreateController
+        self.didReleaseWebViews = didReleaseWebViews
+        self.didStartLoading = didStartLoading
+        self.didFinishLoading = didFinishLoading
+        self.didFailLoading = didFailLoading
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(didReleaseWebViews: didReleaseWebViews)
     }
@@ -33,6 +61,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         let controller = WebViewController(
             instanceOrigin: instanceOrigin,
             websiteDataStore: websiteDataStore,
+            pushCoordinator: pushCoordinator,
             showAccount: showAccount,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,

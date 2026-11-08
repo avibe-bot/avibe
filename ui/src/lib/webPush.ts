@@ -1,5 +1,11 @@
 import type { ApiContextType } from '@/context/ApiContext';
 import { isIosDevice, isStandalonePwa } from './platform';
+import {
+  hasNativeCapability,
+  nativePushStatus,
+  nativePushSubscribe,
+  nativePushUnsubscribe,
+} from './native';
 
 const WEB_PUSH_DEVICE_ID_KEY = 'vibe.webPush.deviceId';
 const WEB_PUSH_ENDPOINTS_KEY = 'vibe.webPush.endpoints';
@@ -114,6 +120,9 @@ export function getWebPushSupportState(): WebPushSupportState {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return { supported: false, reason: 'unsupported' };
   }
+  if (hasNativeCapability('push')) {
+    return { supported: true, standalone: true, requiresStandalone: false };
+  }
   const hasApis = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   if (!hasApis) return { supported: false, reason: 'unsupported' };
   const standalone = isStandalonePwa();
@@ -152,6 +161,35 @@ export async function enableWebPush(
   api: ApiContextType,
   options: EnableWebPushOptions = {},
 ): Promise<PushSubscriptionJSON> {
+  if (hasNativeCapability('push')) {
+    const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
+    const existing = await nativePushStatus(publicKey);
+    if (existing?.state === 'on' && !options.forceResubscribe) {
+      return {
+        endpoint: existing.endpoint,
+        keys: existing.keys,
+      };
+    }
+    const subscription = await nativePushSubscribe(publicKey);
+    if (!subscription) throw new Error('native_push_unavailable');
+    const previousEndpoints = [
+      ...(existing?.state === 'on' ? [existing.endpoint] : []),
+      ...await getRememberedWebPushEndpoints(),
+    ];
+    const result = await api.subscribeWebPush(
+      subscription,
+      'iPhone App',
+      undefined,
+      previousEndpoints,
+      options.recoverOnly,
+    );
+    if (options.recoverOnly && !result.accepted) {
+      await nativePushUnsubscribe();
+      throw new Error('recovery_not_authorized');
+    }
+    await rememberWebPushEndpoint(subscription.endpoint);
+    return subscription;
+  }
   const support = getWebPushSupportState();
   if (!support.supported) {
     throw new Error(support.reason);
@@ -205,6 +243,17 @@ export async function enableWebPush(
 }
 
 export async function disableWebPush(api: ApiContextType): Promise<boolean> {
+  if (hasNativeCapability('push')) {
+    const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
+    const status = await nativePushStatus(publicKey);
+    if (status?.state !== 'on') return false;
+    await api.unsubscribeWebPush(status.endpoint);
+    const revoked = await nativePushUnsubscribe();
+    if (revoked) {
+      await rememberWebPushEndpoint(status.endpoint);
+    }
+    return true;
+  }
   const subscription = await getExistingWebPushSubscription();
   const endpoint = subscription?.endpoint;
   if (endpoint) {
@@ -224,6 +273,15 @@ export async function disableWebPush(api: ApiContextType): Promise<boolean> {
  * `enableWebPush`'s job.
  */
 export async function readWebPushDeviceState(api: ApiContextType): Promise<'on' | 'off' | 'unavailable'> {
+  if (hasNativeCapability('push')) {
+    try {
+      const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
+      const status = await nativePushStatus(publicKey);
+      return status?.state === 'on' ? 'on' : 'off';
+    } catch {
+      return 'unavailable';
+    }
+  }
   if (!getWebPushSupportState().supported) return 'unavailable';
   try {
     const existing = await getExistingWebPushSubscription();

@@ -4,11 +4,19 @@ export type NativeCapability =
   | 'app'
   | 'haptics'
   | 'keyboardResizesViewport'
+  | 'push'
   | 'viewport'
   | 'voice';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
+export type NativePushSubscription = {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+};
+export type NativePushStatus =
+  | { state: 'unavailable' | 'off' }
+  | ({ state: 'on' } & NativePushSubscription);
 
 export type NativeBridgeError = {
   code: string;
@@ -172,4 +180,62 @@ export async function nativeVoicePermission(): Promise<NativeVoicePermission | n
   } catch {
     return null;
   }
+}
+
+export async function nativePushStatus(
+  vapidPublicKey?: string,
+): Promise<NativePushStatus | null> {
+  try {
+    return await callNative<NativePushStatus>(
+      'push',
+      'push.status',
+      vapidPublicKey ? { vapidPublicKey } : {},
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function nativePushSubscribe(
+  vapidPublicKey: string,
+): Promise<NativePushSubscription | null> {
+  try {
+    return await callNative<NativePushSubscription>(
+      'push',
+      'push.subscribe',
+      { vapidPublicKey },
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function nativePushUnsubscribe(): Promise<boolean> {
+  try {
+    const result = await callNative<{ revoked: boolean }>(
+      'push',
+      'push.unsubscribe',
+    );
+    return result?.revoked === true;
+  } catch {
+    return false;
+  }
+}
+
+export function onNativePushOpened(
+  handler: (path: string) => void,
+): () => void {
+  const native = bridge();
+  if (!native || (native.capabilities.push ?? 0) < 1) return () => undefined;
+  return native.on('push.opened', (payload) => {
+    if (
+      payload
+      && typeof payload === 'object'
+      && 'url' in payload
+      && typeof payload.url === 'string'
+      && payload.url.startsWith('/')
+    ) {
+      handler(payload.url);
+    }
+  });
 }

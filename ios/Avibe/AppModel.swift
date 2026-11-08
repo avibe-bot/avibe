@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
+    private var pendingPushOpenedURL: String?
 
     private lazy var sessionCoordinator = MobileSessionCoordinator(
         defaults: defaults,
@@ -65,11 +66,38 @@ final class AppModel: ObservableObject {
         },
         onPrepareAccountTransition: { [weak self] in
             self?.prepareForAccountTransition() ?? []
+        },
+        onPreparePushLogout: { [weak self] in
+            await self?.nativePushCoordinator.prepareForLogout()
+        }
+    )
+
+    private lazy var nativePushCoordinator = NativePushCoordinator(
+        managementRequest: { [weak self] request in
+            guard let self else {
+                throw NativePushError.unavailable
+            }
+            return try await self.mobileSessionCoordinator.pushManagementRequest(
+                request
+            )
+        },
+        accountProvider: { [weak self] in
+            self?.mobileSessionCoordinator.currentAccount
+        },
+        onTap: { [weak self] tap in
+            self?.handlePushTap(tap)
+        },
+        onTapRecovery: { [weak self] in
+            self?.showInstancePicker()
         }
     )
 
     var mobileSessionCoordinator: MobileSessionCoordinator {
         sessionCoordinator
+    }
+
+    var pushCoordinator: NativePushCoordinator {
+        nativePushCoordinator
     }
 
     var runtimeWebsiteDataStore: WKWebsiteDataStore {
@@ -83,6 +111,7 @@ final class AppModel: ObservableObject {
         self.defaults = defaults
         self.controlPlane = controlPlane
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        _ = nativePushCoordinator
 
         Task { [weak self] in
             await self?.bootstrap()
@@ -184,9 +213,60 @@ final class AppModel: ObservableObject {
         guard sessionCoordinator.isCurrentRuntime(runtime) else {
             return
         }
+        nativePushCoordinator.resumeAfterAccountActivation()
         stopRuntime()
         runtimeIdentity += 1
         route = .browser(runtime)
+    }
+
+    func didFinishRuntimeLoading() {
+        guard
+            let pendingPushOpenedURL,
+            let runtimeController
+        else {
+            return
+        }
+        self.pendingPushOpenedURL = nil
+        runtimeController.deliverPushOpened(path: pendingPushOpenedURL)
+    }
+
+    private func handlePushTap(_ tap: PushNotificationTap) {
+        guard
+            let account = sessionCoordinator.currentAccount,
+            account.id == tap.accountID,
+            let instance = sessionCoordinator.currentInstances.first(where: {
+                $0.available
+                    && WebOrigin(url: $0.url)?.serialized == tap.instanceOrigin
+            }),
+            Self.isSafeInstancePath(tap.url)
+        else {
+            pendingPushOpenedURL = nil
+            showInstancePicker()
+            return
+        }
+        pendingPushOpenedURL = tap.url
+        do {
+            _ = try sessionCoordinator.selectInstance(id: instance.id)
+        } catch {
+            pendingPushOpenedURL = nil
+            showInstancePicker()
+        }
+    }
+
+    private static func isSafeInstancePath(_ value: String) -> Bool {
+        guard
+            !value.isEmpty,
+            value.first == "/",
+            !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+            let components = URLComponents(string: value),
+            components.scheme == nil,
+            components.host == nil,
+            components.user == nil,
+            components.password == nil
+        else {
+            return false
+        }
+        return true
     }
 
     private func prepareForAccountTransition() -> [

@@ -23,6 +23,7 @@ COMPLETE = {
     "IOS_DISTRIBUTION_P12_BASE64": "cDEy",
     "IOS_DISTRIBUTION_P12_PASSWORD": " pass word ",
     "IOS_APP_STORE_PROFILE_BASE64": "cHJvZmlsZQ==",
+    "IOS_NOTIFICATION_SERVICE_PROFILE_BASE64": "bm90aWZpY2F0aW9uLXByb2ZpbGU=",
     "IOS_APPLE_TEAM_ID": testflight.TEAM_ID,
     "IOS_APP_STORE_CONNECT_KEY_ID": "ABCDE12345",
     "IOS_APP_STORE_CONNECT_ISSUER_ID": "01234567-89ab-cdef-0123-456789abcdef",
@@ -39,7 +40,9 @@ def app_store_profile(**overrides) -> dict:
         "DeveloperCertificates": [b"certificate-der"],
         "Entitlements": {
             "application-identifier": testflight.APPLICATION_IDENTIFIER,
-            "com.apple.developer.associated-domains": "*",
+            "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+            "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+            "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
             "get-task-allow": False,
         },
     }
@@ -91,7 +94,10 @@ def test_a_current_app_store_profile_for_this_app_is_accepted():
         ({"ExpirationDate": NOW - timedelta(seconds=1)}, "expired"),
         ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios"}}, "associated-domains"),
         ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios",
-                           "com.apple.developer.associated-domains": "*", "get-task-allow": True}}, "debugging"),
+                           "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+                           "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+                           "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
+                           "get-task-allow": True}}, "debugging"),
     ],
     ids=["team", "app", "devices", "expired", "associated-domains", "debuggable"],
 )
@@ -141,13 +147,33 @@ def signed(info=None, entitlements=None):
     base_info = {"CFBundleIdentifier": "bot.avibe.ios", "CFBundleVersion": "7.1",
                  "CFBundleShortVersionString": "0.1.0", "ITSAppUsesNonExemptEncryption": False}
     base_entitlements = {"application-identifier": "68B2SQ6YK3.bot.avibe.ios", "get-task-allow": False,
-                         "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"]}
+                         "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+                         "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+                         "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP]}
     return {**base_info, **(info or {})}, {**base_entitlements, **(entitlements or {})}
 
 
 def test_a_distribution_signed_app_with_its_entitlements_passes():
     info, entitlements = signed()
     testflight.check_signed_app(info, entitlements, build="7.1")
+
+
+def test_a_distribution_signed_notification_service_with_shared_entitlements_passes():
+    info, entitlements = signed(
+        info={"CFBundleIdentifier": testflight.NOTIFICATION_SERVICE_BUNDLE_ID},
+        entitlements={
+            "application-identifier": testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+            "com.apple.developer.associated-domains": [],
+        },
+    )
+    testflight.check_signed_bundle(
+        info,
+        entitlements,
+        bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
+        application_identifier=testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+        required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+        build="7.1",
+    )
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             .passkeyChallenge: [.challenge],
             .verifySecondFactor: [.secondFactor, .session],
             .logout: [.logout],
+            .pushManagement: [.request],
         ]
         XCTAssertEqual(
             Set(stagesByOperation.keys),

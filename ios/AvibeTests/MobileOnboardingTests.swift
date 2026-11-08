@@ -759,6 +759,9 @@ final class MobileOnboardingTests: XCTestCase {
                 "haptics.notify",
                 "haptics.selection",
                 "navigation.historyChanged",
+                "push.status",
+                "push.subscribe",
+                "push.unsubscribe",
                 "viewport.setOuterScrollLocked",
                 "voice.permission",
             ]
@@ -2176,6 +2179,11 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     private(set) var passwordAttempts: [(email: String, password: String)] = []
     var logoutError: Error?
     var logoutHandler: () async throws -> Void = {}
+    var pushManagementHandler: (
+        PushManagementRequest
+    ) async throws -> PushManagementResponse = { _ in
+        PushManagementResponse(statusCode: 200, body: [:])
+    }
     var requestOTPHandler: (String) async throws -> Int = { _ in 60 }
     var verifyOTPHandler: (
         String,
@@ -2235,6 +2243,12 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         if let logoutError {
             throw logoutError
         }
+    }
+
+    func pushManagementRequest(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse {
+        try await pushManagementHandler(request)
     }
 
     func cancelAll() async {

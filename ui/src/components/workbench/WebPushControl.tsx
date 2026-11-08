@@ -14,10 +14,12 @@ import {
   getRememberedWebPushEndpoints,
   getExistingWebPushSubscription,
   getWebPushSupportState,
+  readWebPushDeviceState,
   rememberWebPushEndpoint,
   webPushSubscriptionUsesVapidKey,
   type WebPushSupportState,
 } from '@/lib/webPush';
+import { hasNativeCapability, nativePushStatus } from '@/lib/native';
 
 type Status = 'checking' | 'unsupported' | 'needs_install' | 'disabled' | 'enabled';
 
@@ -35,6 +37,11 @@ export const WebPushControl: React.FC = () => {
   const refresh = async () => {
     const nextSupport = getWebPushSupportState();
     setSupport(nextSupport);
+    if (hasNativeCapability('push')) {
+      const nativeState = await readWebPushDeviceState(api);
+      setStatus(nativeState === 'on' ? 'enabled' : nativeState === 'off' ? 'disabled' : 'unsupported');
+      return;
+    }
     if (!nextSupport.supported) {
       setStatus(nextSupport.reason === 'ios_requires_standalone' ? 'needs_install' : 'unsupported');
       return;
@@ -125,7 +132,14 @@ export const WebPushControl: React.FC = () => {
     setTesting(true);
     try {
       const subscription = await getExistingWebPushSubscription();
-      if (!subscription?.endpoint) {
+      const nativeStatus = hasNativeCapability('push')
+        ? await api
+          .getWebPushVapidPublicKey()
+          .then(({ public_key }) => nativePushStatus(public_key))
+        : null;
+      const endpoint = subscription?.endpoint
+        ?? (nativeStatus?.state === 'on' ? nativeStatus.endpoint : null);
+      if (!endpoint) {
         showToast(t('workbench.inbox.notifications.testFailed', { count: 0 }), 'error');
         await refresh();
         return;
@@ -134,7 +148,7 @@ export const WebPushControl: React.FC = () => {
         title: t('workbench.inbox.notifications.testTitle'),
         body: t('workbench.inbox.notifications.testBody'),
         url: '/inbox',
-        endpoint: subscription.endpoint,
+        endpoint,
       });
       if (result.ok) {
         const blocked = result.normal_delivery;

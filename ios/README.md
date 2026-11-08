@@ -214,7 +214,7 @@ a page-cache restore. A layer that declares its own scheme is therefore a
 body-level layer. It is not an advertised capability either. Only the primary
 WebView's report drives the status bar; a child receives `forbidden`.
 
-The PR 2 method surface is fixed:
+The native bridge method surface is fixed:
 
 | Capability | Method | Result |
 | --- | --- | --- |
@@ -226,8 +226,16 @@ The PR 2 method surface is fixed:
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
 | `keyboardResizesViewport: 1` | No method | Declares that UIKit shrinks this WebView to the docked keyboard frame and returns it to its resting edge (the screen bottom for the primary, the safe-area bottom for a child) when the keyboard leaves |
+| `push: 1` | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" | "off" | "on", endpoint?, keys?}`; read-only and scoped to the current account, bind generation, instance origin, and VAPID key |
+| `push: 1` | `push.subscribe({vapidPublicKey})` | `{endpoint, keys: {p256dh, auth}}`; the Web UI submits this subscription through the existing instance API |
+| `push: 1` | `push.unsubscribe()` | `{revoked: boolean}`; native confirms the concrete registration revoke or retains it for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
+
+After a validated notification tap, the native shell emits
+`push.opened({url})` to the selected instance's primary WebView. The event
+contains only a same-origin path, query, and fragment; invalid, unavailable,
+or mismatched notification context opens the instance recovery surface.
 
 Covering the runtime instead of closing it did not change any capability
 number: `app.showAccount()` keeps its parameters and `null` result, and no Web
@@ -588,7 +596,7 @@ pinned to Xcode 26.6.
 | Web content process termination | The primary WebView reloads the configured instance; a terminated child closes. |
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
-| Notification and Service Worker | Unsupported in this shell configuration. Browser Web Push controls and readiness prompts are hidden when `isNativeShell()` is true; native push is Phase 1. |
+| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. |
 | Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
 | Installation guidance | `InstallHint` and Show Page "Add to Home Screen" guidance are hidden in the native shell. |
 | PWA app launch suppression | Not reused. New-context launches use the shell's recursive child WebViews. |
@@ -629,7 +637,7 @@ bridge and do not run these Web UI branches.
 | `useIosKeyboardInset` | `keyboardResizesViewport: 1` | Browser correction disabled; UIKit owns viewport resizing. | Same. An older shell without the capability keeps the correction in both. |
 | Workbench outer-scroll lock | `viewport: 1` | Mounted AppShell locks its own WebView. | Same. |
 | Installation prompts | `isNativeShell()` | `InstallHint` and Show Page Add to Home Screen are hidden. | Same. |
-| Web Push surfaces | `isNativeShell()` | Setup gap, Settings toggle, and notification menu omit browser push. | Same. |
+| Web Push surfaces | `push: 1` | Browser `PushManager` is omitted; notification controls use the native push bridge and the existing Web-owned subscription/reconciliation flow. | Same. |
 | Haptics | `haptics: 1` | Native haptics for hold-to-talk and accepted sends. | Same. |
 | Voice permission probe | `voice: 1` | Reads native permission state before browser fallback. | Same. |
 | Account presentation | `accountPresentation: 1/2` | Capability 1 opens the bundled account surface over the runtime. Capability 2 renders and registers the current AppShell header avatar, suppressing the native fallback; older Web UI gets the delayed fallback bar. | Capability 1 remains available, but capability-2 registration is rejected because child content cannot control primary chrome. |

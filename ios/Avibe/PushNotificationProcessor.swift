@@ -41,7 +41,8 @@ struct PushNotificationProcessor {
             let ciphertext = envelope["ct"] as? String,
             let ciphertextData = PushBase64URL.decode(ciphertext),
             let record = try? keychain.loadRecord(kid: kid),
-            record.state != .retiring || !record.pendingRevoke,
+            record.state == .active
+                || (record.state == .retiring && !record.pendingRevoke),
             record.accountGeneration == generationStore.generation,
             let privateKey = try? P256KeyAgreementPrivateKey(
                 rawRepresentation: record.privateKey

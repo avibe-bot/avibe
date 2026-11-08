@@ -328,6 +328,7 @@ final class WebViewFactory {
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let pushCoordinator: NativePushCoordinator?
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
     ] = [:]
@@ -343,7 +344,33 @@ final class WebViewFactory {
         setAccountActionAvailable: setAccountActionAvailable,
         historyDidChange: historyDidChange,
         colorSchemeDidChange: colorSchemeDidChange,
-        showAccount: showAccount
+        showAccount: showAccount,
+        pushStatus: { [weak self] vapidPublicKey, origin in
+            guard let coordinator = self?.pushCoordinator else {
+                return ["state": "unavailable"]
+            }
+            return try coordinator.status(
+                vapidPublicKey: vapidPublicKey,
+                instanceOrigin: origin.serialized
+            )
+        },
+        pushSubscribe: { [weak self] vapidPublicKey, origin in
+            guard let coordinator = self?.pushCoordinator else {
+                throw NativePushError.unavailable
+            }
+            return try await coordinator.subscribe(
+                vapidPublicKey: vapidPublicKey,
+                instanceOrigin: origin.serialized
+            )
+        },
+        pushUnsubscribe: { [weak self] origin in
+            guard let coordinator = self?.pushCoordinator else {
+                throw NativePushError.unavailable
+            }
+            return try await coordinator.unsubscribe(
+                instanceOrigin: origin.serialized
+            )
+        }
     )
 
     init(
@@ -352,7 +379,8 @@ final class WebViewFactory {
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
-        showAccount: @escaping () -> Void = {}
+        showAccount: @escaping () -> Void = {},
+        pushCoordinator: NativePushCoordinator? = nil
     ) {
         self.instanceOrigin = instanceOrigin
         self.websiteDataStore = websiteDataStore
@@ -360,6 +388,7 @@ final class WebViewFactory {
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.pushCoordinator = pushCoordinator
     }
 
     func makeWebView<Delegate: WKNavigationDelegate & WKUIDelegate>(
@@ -510,6 +539,7 @@ final class WebViewController: UIViewController {
     private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
+    private let pushCoordinator: NativePushCoordinator?
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -554,7 +584,8 @@ final class WebViewController: UIViewController {
             },
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
-            }
+            },
+            pushCoordinator: pushCoordinator
         )
         retainedWebViewFactory = factory
         return factory
@@ -573,6 +604,7 @@ final class WebViewController: UIViewController {
     init(
         instanceOrigin: WebOrigin,
         websiteDataStore: WKWebsiteDataStore,
+        pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
@@ -583,6 +615,7 @@ final class WebViewController: UIViewController {
     ) {
         self.instanceOrigin = instanceOrigin
         self.websiteDataStore = websiteDataStore
+        self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
@@ -597,6 +630,7 @@ final class WebViewController: UIViewController {
 
     convenience init(
         instanceOrigin: WebOrigin,
+        pushCoordinator: NativePushCoordinator? = nil,
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -604,6 +638,7 @@ final class WebViewController: UIViewController {
         self.init(
             instanceOrigin: instanceOrigin,
             websiteDataStore: .default(),
+            pushCoordinator: pushCoordinator,
             didStartLoading: didStartLoading,
             didFinishLoading: didFinishLoading,
             didFailLoading: didFailLoading
@@ -711,6 +746,27 @@ final class WebViewController: UIViewController {
             return
         }
         retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+    }
+
+    func deliverPushOpened(path: String) {
+        guard
+            let webView = retainedWebView,
+            isPrimaryWebView(webView),
+            let data = try? JSONSerialization.data(
+                withJSONObject: [path],
+                options: [.sortedKeys]
+            ),
+            let encoded = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+        webView.evaluateJavaScript(
+            """
+            window.dispatchEvent(new CustomEvent("avibe:native:push.opened", {
+              detail: { url: \(encoded.dropFirst().dropLast()) }
+            }));
+            """
+        )
     }
 
     private func showAccountIfActive() {
