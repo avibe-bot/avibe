@@ -147,14 +147,14 @@ def test_every_harness_input_names_its_source_on_its_first_line(tmp_path, trigge
         pytest.param(
             {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main",
              "callback_mode": "failure"},
-            "No callback. When the work is done, you can report to @<bot:main> with "
+            "No callback. When the work is done or you need a decision, you can report to @<bot:main> with "
             "`vibe agent run --bot main --message ...`.",
             id="bot-sender",
         ),
         pytest.param(
             {"source_kind": "agent", "source_actor": "sescaller01", "callback_session_id": "sescaller01",
              "callback_mode": "failure"},
-            "No callback. When the work is done, you can report to #sescaller01 with "
+            "No callback. When the work is done or you need a decision, you can report to #sescaller01 with "
             "`vibe agent run --session-id sescaller01 --message ...`.",
             id="session-sender",
         ),
@@ -189,10 +189,23 @@ def test_an_agent_run_input_says_where_its_result_goes(tmp_path, metadata, hint)
     assert lines[1:] == ([f"[{hint}]"] if hint else []) + ["Review the login flow."]
 
 
+def test_harness_hint_omits_reverse_dispatch_report_target():
+    from core.agent_input import harness_hint
+
+    assert harness_hint(
+        {
+            "source_kind": "agent",
+            "source_actor": "sescaller01",
+            "suppress_report_hint": True,
+        },
+        receiver="sesreceiver01",
+    ) == ""
+
+
 def test_a_merged_batch_names_each_distinct_report_target_once():
     from core.agent_input import harness_hints
 
-    bot = "No callback. When the work is done, you can report to @<bot:main> with `vibe agent run --bot main --message ...`."
+    bot = "No callback. When the work is done or you need a decision, you can report to @<bot:main> with `vibe agent run --bot main --message ...`."
     assert harness_hints({"harness_hints": [bot, "", bot]}) == (bot,)
 
 

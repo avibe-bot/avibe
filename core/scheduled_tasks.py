@@ -128,6 +128,7 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     compute_next_run_at,
+    has_agent_run_dispatch,
     notice_write_expectation,
     owed_notice_eligible,
     require_task_resumable,
@@ -3503,9 +3504,9 @@ class TaskExecutionStore:
             return []
         return self._sqlite.record_run_activity(run_ids)
 
-    def cancel_run(self, run_id: str) -> bool:
+    def cancel_run(self, run_id: str, *, suppress_callback: bool = False) -> bool:
         if self._sqlite is not None:
-            return self._sqlite.cancel_run(run_id)
+            return self._sqlite.cancel_run(run_id, suppress_callback=suppress_callback)
         now = _utc_now_iso()
         pending_path = self._request_path(run_id, state="pending")
         if pending_path.exists():
@@ -3523,6 +3524,15 @@ class TaskExecutionStore:
                     "cancel_requested_at": now,
                     "completed_at": now,
                     "updated_at": now,
+                    **(
+                        {
+                            "callback_status": "skipped",
+                            "callback_error": None,
+                            "callback_completed_at": now,
+                        }
+                        if suppress_callback
+                        else {}
+                    ),
                 }
             )
             completed_path = self._request_path(run_id, state="completed")
@@ -3544,13 +3554,28 @@ class TaskExecutionStore:
                     "cancel_requested": True,
                     "cancel_requested_at": now,
                     "updated_at": now,
+                    **(
+                        {
+                            "callback_status": "skipped",
+                            "callback_error": None,
+                            "callback_completed_at": now,
+                        }
+                        if suppress_callback
+                        else {}
+                    ),
                 }
             )
             write_atomic(processing_path, json.dumps(payload, indent=2))
             return True
         return False
 
-    def mark_run_canceled(self, run_id: str, *, completed_at: Optional[str] = None) -> bool:
+    def mark_run_canceled(
+        self,
+        run_id: str,
+        *,
+        completed_at: Optional[str] = None,
+        suppress_callback: bool = False,
+    ) -> bool:
         now = completed_at or _utc_now_iso()
         existing = self.get_run(run_id)
         if existing is None:
@@ -3564,6 +3589,15 @@ class TaskExecutionStore:
                 updated_at=now,
                 cancel_requested=True,
                 cancel_requested_at=cancel_requested_at,
+                **(
+                    {
+                        "callback_status": "skipped",
+                        "callback_error": None,
+                        "callback_completed_at": now,
+                    }
+                    if suppress_callback
+                    else {}
+                ),
             )
             return True
 
@@ -3585,6 +3619,15 @@ class TaskExecutionStore:
                     "cancel_requested_at": payload.get("cancel_requested_at") or now,
                     "completed_at": now,
                     "updated_at": now,
+                    **(
+                        {
+                            "callback_status": "skipped",
+                            "callback_error": None,
+                            "callback_completed_at": now,
+                        }
+                        if suppress_callback
+                        else {}
+                    ),
                 }
             )
             completed_path = self._request_path(run_id, state="completed")
@@ -8159,11 +8202,14 @@ class ScheduledTaskService:
             )
         if status in {"failed", "canceled"}:
             terminal_message = self._did_not_complete_text(run, status=status)
+            # A callback failure is the same notice as the failure-only route. It
+            # names the run as incomplete rather than presenting the failure as a
+            # normal result callback.
             terminal_callback = enqueue_session_callback(
                 self.request_store,
                 session_id=callback_session_id,
                 message=terminal_message,
-                source_actor=f"{run_id}:terminal:{status}",
+                source_actor=f"{run_id}{AGENT_RUN_FAILURE_NOTICE_ACTOR_MARKER}{status}",
                 source_session_id=str(run.get("session_id") or "").strip() or None,
                 parent_run_id=run_id or None,
                 metadata=callback_metadata,
@@ -8197,8 +8243,8 @@ class ScheduledTaskService:
         metadata = run.get("metadata") if isinstance(run.get("metadata"), Mapping) else {}
         reason = str(metadata.get("interrupt_reason") or "").strip()
         if reason and not str(run.get("error") or "").strip():
-            label = self._t(failure_notices.notice_reason_i18n_key(reason))
-            text = "\n\n".join(part for part in (text, self._t("harness.run.fallbackResult.reason", reason=label)) if part)
+            label = i18n_t(failure_notices.notice_reason_i18n_key(reason), "en")
+            text = "\n\n".join(part for part in (text, i18n_t("harness.run.fallbackResult.reason", "en", reason=label)) if part)
         return text
 
     def _fallback_callback_result(self, run: dict[str, Any], *, status: str) -> str:
@@ -8213,13 +8259,13 @@ class ScheduledTaskService:
         if result_text and status in {"canceled", "failed"}:
             # The Agent's reply was recorded before the Run ended this way; the
             # caller gets it with the outcome instead of being told it never came.
-            parts = [self._t(f"harness.run.fallbackResult.{status}WithResult"), *parts, result_text]
+            parts = [i18n_t(f"harness.run.fallbackResult.{status}WithResult", "en"), *parts, result_text]
         if parts:
             return "\n\n".join(part.strip() for part in parts if part and part.strip())
         if status == "canceled":
-            return self._t("harness.run.fallbackResult.canceled")
+            return i18n_t("harness.run.fallbackResult.canceled", "en")
         if status == "failed":
-            return self._t("harness.run.fallbackResult.failed")
+            return i18n_t("harness.run.fallbackResult.failed", "en")
         return ""
 
     def _execution_lock_key(self, request: TaskExecutionRequest) -> Optional[str]:
@@ -11664,6 +11710,14 @@ class ScheduledTaskService:
         definition_name, definition_prompt = await self._store_step(
             self._definition_display_fields, task_id
         )
+        source_kind = (metadata or {}).get("source_kind")
+        source_actor = (metadata or {}).get("source_actor")
+        suppress_report_hint = await self._store_step(
+            self._has_agent_run_dispatch,
+            source_kind=source_kind,
+            dispatcher_session_id=session_id,
+            recipient_session_id=source_actor,
+        )
 
         return MessageContext(
             user_id=session_target_context["user_id"],
@@ -11722,8 +11776,8 @@ class ScheduledTaskService:
                 "close_after": bool(
                     (metadata or {}).get(AGENT_RUN_CLOSE_AFTER_METADATA_KEY)
                 ),
-                "source_kind": (metadata or {}).get("source_kind"),
-                "source_actor": (metadata or {}).get("source_actor"),
+                "source_kind": source_kind,
+                "source_actor": source_actor,
                 "source_session_id": (metadata or {}).get("source_session_id"),
                 "source_session_title": (metadata or {}).get("source_session_title"),
                 "vault_request_type": (metadata or {}).get("vault_request_type"),
@@ -11731,6 +11785,7 @@ class ScheduledTaskService:
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
                 "callback_mode": (metadata or {}).get(AGENT_RUN_CALLBACK_MODE_METADATA_KEY),
+                "suppress_report_hint": suppress_report_hint,
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (
                     {
@@ -11753,6 +11808,31 @@ class ScheduledTaskService:
                 ),
             },
         )
+
+    def _has_agent_run_dispatch(
+        self,
+        *,
+        source_kind: Any,
+        dispatcher_session_id: Optional[str],
+        recipient_session_id: Optional[str],
+    ) -> bool:
+        """Probe the indexed Run history for a reverse Session dispatch."""
+
+        dispatcher = str(dispatcher_session_id or "").strip()
+        recipient = str(recipient_session_id or "").strip()
+        if str(source_kind or "").strip() != "agent":
+            return False
+        if not dispatcher or not recipient or dispatcher == recipient:
+            return False
+        backend = self.request_store.sqlite_backend
+        if backend is None:
+            return False
+        with backend.engine.connect() as conn:
+            return has_agent_run_dispatch(
+                conn,
+                dispatcher_session_id=dispatcher,
+                recipient_session_id=recipient,
+            )
 
     def _definition_display_fields(
         self, definition_id: Optional[str]

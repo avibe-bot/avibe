@@ -7070,9 +7070,72 @@ def test_a_run_that_did_not_complete_always_tells_its_sender(
         return
     assert [run["message"] for run in told] == [expected_body]
     assert told[0]["session_id"] == caller_session_id
-    marker = "notice" if mode else "terminal"
+    marker = "notice"
     assert told[0]["source_actor"] == f"{request.id}:{marker}:{original['status']}"
     assert original["callback_status"] == "sent"
+
+
+def test_sender_canceling_its_own_run_does_not_receive_failure_notice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        source_kind="agent",
+        source_actor=caller_session_id,
+        callback_session_id=caller_session_id,
+        metadata={"callback_mode": "failure"},
+    )
+
+    from vibe.cli import _runs_cancel
+
+    invocation = SimpleNamespace(
+        stores=SimpleNamespace(request_store=request_store, session_turns=None),
+        caller_env={"AVIBE_SESSION_ID": caller_session_id},
+    )
+    result = _runs_cancel(SimpleNamespace(run_id=request.id), invocation)
+    assert result["cancel_result"]["code"] == "queued_canceled"
+    assert request_store.get_run(request.id)["callback_status"] == "skipped"
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    asyncio.run(service._drain_callbacks())
+    assert [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ] == []
+
+
+def test_callback_failure_notice_body_stays_in_english(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="codex",
+        source_kind="agent",
+        source_actor="ses_sender",
+        callback_session_id=caller_session_id,
+    )
+    assert request_store.claim(request.id) is not None
+    request_store.complete(request, ok=False, interrupt_reason="restarted", session_id="target-session")
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    service._t = lambda *_args, **_kwargs: "本地化失败正文"
+
+    asyncio.run(service._drain_callbacks())
+
+    callback = next(
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    )
+    assert callback["source_actor"] == f"{request.id}:notice:failed"
+    assert callback["message"] == "The run failed before producing a result.\n\nReason: the service restarted."
 
 
 def test_one_terminal_turn_callbacks_once_per_callback_session(
@@ -8237,7 +8300,7 @@ def test_agent_run_callbacks_only_terminal_status_after_partial_output(
         if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
     ]
     assert [run["message"] for run in callback_runs] == [expected_message]
-    assert callback_runs[0]["source_actor"] == f"{request.id}:terminal:{terminal_status}"
+    assert callback_runs[0]["source_actor"] == f"{request.id}:notice:{terminal_status}"
     assert callback_runs[0]["metadata"]["source_session_id"] == "target-session"
     assert original["callback_run_id"] == callback_runs[0]["id"]
 
@@ -8404,7 +8467,7 @@ def test_failed_run_records_error_and_enqueues_one_terminal_callback(
         if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
     ]
     assert [run["message"] for run in callback_runs] == ["Error: provider unavailable"]
-    assert callback_runs[0]["source_actor"] == f"{request.id}:terminal:failed"
+    assert callback_runs[0]["source_actor"] == f"{request.id}:notice:failed"
 
 
 def test_deferred_failure_preserves_error_through_later_output(

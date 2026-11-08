@@ -76,6 +76,7 @@ from storage.db import get_cached_sqlite_engine
 from storage.background import (
     OWED_FAILURE_NOTICE_KEY,
     apply_live_agent_run_cancellation_in_connection,
+    has_agent_run_dispatch,
     normalize_run_status,
     run_update_event_transaction,
 )
@@ -2679,6 +2680,9 @@ class SessionTurnManager:
             resolve_attachment_specs,
         )
 
+        receiver_session_id = str(context.platform_specific.get("agent_session_id") or "").strip()
+        harness_sources = _batch_harness_sources(first, payloads)
+        harness_hints = []
         with self._sqlite_engine().connect() as conn:
             specs = resolve_attachment_specs(
                 conn,
@@ -2692,6 +2696,21 @@ class SessionTurnManager:
                     for run_id in delivery_store.agent_run_ids_for_delivery(conn, row)
                 )
             )
+            for spec in harness_sources:
+                hint_spec = spec
+                if (
+                    "suppress_report_hint" not in spec
+                    and str(spec.get("source_kind") or "").strip() == "agent"
+                ):
+                    hint_spec = {
+                        **spec,
+                        "suppress_report_hint": has_agent_run_dispatch(
+                            conn,
+                            dispatcher_session_id=receiver_session_id,
+                            recipient_session_id=str(spec.get("source_actor") or "").strip(),
+                        ),
+                    }
+                harness_hints.append(harness_hint(hint_spec, receiver=receiver_session_id))
         context.files = file_attachments_from_specs(specs)
         context.platform_specific.update(
             {
@@ -2744,12 +2763,9 @@ class SessionTurnManager:
                 # One sender label per Delivery, in FIFO order: a merged batch of Agent
                 # Runs or callbacks shares a merge key but not a sender, and the leader's
                 # provenance alone would attribute every body to the first one.
-                "harness_sources": [harness_source(spec) for spec in _batch_harness_sources(first, payloads)],
+                "harness_sources": [harness_source(spec) for spec in harness_sources],
                 # And where each one's result goes, named once per distinct hint (``harness_hints``).
-                "harness_hints": [
-                    harness_hint(spec, receiver=context.platform_specific.get("agent_session_id"))
-                    for spec in _batch_harness_sources(first, payloads)
-                ],
+                "harness_hints": harness_hints,
                 "message_content": {
                     "text": "\n".join(
                         str(payload.get("text") or "")

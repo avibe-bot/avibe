@@ -9,7 +9,7 @@ from sqlalchemy import event
 
 from storage import migrations
 
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import SQLiteBackgroundTaskStore, has_agent_run_dispatch
 from storage.pagination import PageRequest
 
 
@@ -62,6 +62,48 @@ def test_session_run_page_seeks_all_ownership_arms(tmp_path: Path, sqlite_db_fac
             assert not any("SCAN agent_runs" in detail for detail in plan), plan
             for keys in ("session_id=?", "callback_session_id=?", "source_kind=? AND source_actor=?"):
                 assert any("SEARCH agent_runs" in detail and keys in detail for detail in plan), plan
+
+
+def test_report_hint_reverse_dispatch_probe_uses_source_actor_index(tmp_path: Path, sqlite_db_factory):
+    """The report-hint decision is one bounded indexed Run probe, not a history scan."""
+    path = sqlite_db_factory(tmp_path / "runs.sqlite")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "insert into agent_runs "
+            "(id, run_type, status, session_id, source_kind, source_actor, created_at, updated_at, metadata_json) "
+            "values ('reverse-dispatch', 'agent_run', 'succeeded', 'ses_sender', 'agent', 'ses_receiver', "
+            "'2026-11-08T00:00:00Z', '2026-11-08T00:00:00Z', '{}')"
+        )
+    statements = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT") and "FROM agent_runs" in statement:
+            statements.append((statement, parameters))
+
+    store = SQLiteBackgroundTaskStore(path, read_only=True)
+    event.listen(store.engine, "before_cursor_execute", record)
+    try:
+        with store.engine.connect() as conn:
+            assert has_agent_run_dispatch(
+                conn,
+                dispatcher_session_id="ses_receiver",
+                recipient_session_id="ses_sender",
+            )
+    finally:
+        event.remove(store.engine, "before_cursor_execute", record)
+        store.close()
+
+    assert len(statements) == 1
+    with sqlite3.connect(path) as conn:
+        plan = [
+            row[-1]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN " + statements[0][0],
+                statements[0][1],
+            )
+        ]
+    assert any("SEARCH agent_runs USING INDEX ix_agent_runs_source_actor" in detail for detail in plan), plan
+    assert not any("SCAN agent_runs" in detail for detail in plan), plan
 
 
 @pytest.mark.no_sqlite_template

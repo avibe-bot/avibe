@@ -369,6 +369,32 @@ DEFINITION_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
     "finished": ("finished",),
 }
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
+
+
+def has_agent_run_dispatch(
+    conn: Any,
+    *,
+    dispatcher_session_id: str,
+    recipient_session_id: str,
+) -> bool:
+    """Whether one Session has ever dispatched an Agent Run into another.
+
+    This is the pre-delegation-ledger fallback for the Harness report-hint decision.
+    The source-actor index bounds the lookup to the dispatcher's Runs; the recipient
+    Session is a residual predicate, and ``LIMIT 1`` keeps the probe one indexed seek.
+    """
+
+    dispatcher = str(dispatcher_session_id or "").strip()
+    recipient = str(recipient_session_id or "").strip()
+    if not dispatcher or not recipient or dispatcher == recipient:
+        return False
+    return conn.execute(
+        select(agent_runs.c.id)
+        .where(agent_runs.c.source_kind == "agent")
+        .where(agent_runs.c.source_actor == dispatcher)
+        .where(agent_runs.c.session_id == recipient)
+        .limit(1)
+    ).first() is not None
 # run_definitions.definition_type -> the user-facing kind the UI routes on.
 # The column says "scheduled"; every surface calls that thing a task.
 _DEFINITION_KINDS = {"scheduled": "task", "watch": "watch"}
@@ -5332,7 +5358,13 @@ class SQLiteBackgroundTaskStore:
             rows = list(conn.execute(stmt).mappings())
             return [self._run_from_row(row) for row in rows]
 
-    def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        requested_at: Optional[str] = None,
+        suppress_callback: bool = False,
+    ) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
         rows_to_publish: list[dict[str, Any]] = []
@@ -5371,6 +5403,14 @@ class SQLiteBackgroundTaskStore:
             if retired_delivery or (status == "queued" and not delivery_id):
                 values["status"] = "canceled"
                 values["completed_at"] = now
+            if suppress_callback and str(row["callback_session_id"] or "").strip() and str(
+                row["callback_status"] or ""
+            ).strip() not in {"sent", "skipped"}:
+                values.update(
+                    callback_status="skipped",
+                    callback_error=None,
+                    callback_completed_at=now,
+                )
             result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
