@@ -365,6 +365,7 @@ jobs:
             scripts/release_asset_download.py
             scripts/build_retired_companion.py
             scripts/release_package_version.py
+            .github/actions/sqlite-predecessor-contract/action.yml
             tests/test_distribution_artifacts.py
           sparse-checkout-cone-mode: false
 
@@ -412,10 +413,20 @@ jobs:
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
-      - name: Build Python distributions
+      - name: Install build and test dependencies
+        run: pip install -e . build pytest
+
+      - name: Install pinned uv
         run: |
-          pip install -e . build pytest
-          python -m build
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+
+      - name: Verify the published predecessor before building Python distributions
+        uses: ./release-automation/.github/actions/sqlite-predecessor-contract
+        with:
+          release-tag: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Build Python distributions
+        run: python -m build
 
       - name: Verify Python distribution asset matrix
         run: |

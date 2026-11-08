@@ -1,0 +1,23 @@
+name: Verify published SQLite predecessor
+
+description: Run the real predecessor reader/writer contract before packaging
+
+inputs:
+  release-tag:
+    description: Release tag whose immediately previous published binary is verified
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run predecessor contract
+      # Historical source tags without this contract retain their original behavior.
+      if: hashFiles('scripts/sqlite_predecessor_contract.py') != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ inputs.release-tag }}
+      run: |
+        set -euo pipefail
+        python scripts/sqlite_predecessor_contract.py \
+          --repo "$GITHUB_REPOSITORY" --release-tag "$RELEASE_TAG" --activate

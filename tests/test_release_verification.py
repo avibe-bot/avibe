@@ -311,6 +311,80 @@ elif args[:2] == ["release", "download"]:
         assert "finalize" in calls[-1]
 
 
+def test_release_workflows_gate_predecessor_contract_before_python_packaging():
+    action_path = ".github/actions/sqlite-predecessor-contract"
+    expected_tags = {
+        ("publish.yml", "build"): "${{ needs.resolve-tag.outputs.tag }}",
+        ("release_ai.yml", "build-assets"): "${{ github.event.inputs.tag || github.ref_name }}",
+    }
+    builders = set()
+    for path in (ROOT / ".github/workflows").glob("*.y*ml"):
+        # lint builds CI-only artifacts; every other wheel-producing workflow
+        # must use the release gate, including future release entry points.
+        if path.name == "lint.yml":
+            continue
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in workflow["jobs"].items():
+            steps = job.get("steps", [])
+            builds = [step for step in steps if re.search(
+                r"\b(?:python(?:3)? -m build|uv build|pip wheel)\b", step.get("run", ""),
+            )]
+            if not builds:
+                continue
+            builders.add((path.name, job_name))
+            gate, = [step for step in steps if step.get("uses") == f"./release-automation/{action_path}"]
+            assert not gate.get("if") and not gate.get("continue-on-error")
+            assert not job.get("continue-on-error")
+            assert gate["with"]["release-tag"] == expected_tags[(path.name, job_name)]
+            checkout, = [step for step in steps if step.get("with", {}).get("path") == "release-automation"]
+            assert f"{action_path}/action.yml" in checkout["with"]["sparse-checkout"].splitlines()
+            dependencies = _step(job, "Install build and test dependencies")
+            uv = _step(job, "Install pinned uv")
+            assert "pip install -e . build pytest" in dependencies["run"]
+            assert uv["run"] == _step(_job("publish.yml", "build"), "Install pinned uv")["run"]
+            assert steps.index(checkout) < steps.index(gate)
+            assert steps.index(dependencies) < steps.index(gate)
+            assert steps.index(uv) < steps.index(gate)
+            for build in builds:
+                assert steps.index(gate) < steps.index(build)
+                assert not build.get("if")
+    assert builders == set(expected_tags)
+
+
+@pytest.mark.parametrize("status", [0, 42])
+def test_shared_predecessor_action_propagates_contract_failure(tmp_path, status):
+    action = yaml.safe_load(
+        (ROOT / ".github/actions/sqlite-predecessor-contract/action.yml").read_text(encoding="utf-8")
+    )
+    assert action["inputs"]["release-tag"]["required"] is True
+    assert action["runs"]["using"] == "composite"
+    step, = action["runs"]["steps"]
+    assert step["shell"] == "bash" and not step.get("continue-on-error")
+    # Preserve the existing historical-tag exception in one shared location.
+    assert step["if"] == "hashFiles('scripts/sqlite_predecessor_contract.py') != ''"
+    assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "RELEASE_TAG": "${{ inputs.release-tag }}"}
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "sqlite_predecessor_contract.py").write_text(
+        "import json, pathlib, sys\n"
+        "pathlib.Path('arguments.json').write_text(json.dumps(sys.argv[1:]))\n"
+        f"raise SystemExit({status})\n"
+    )
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    (binaries / "python").symlink_to(sys.executable)
+    result = subprocess.run(
+        ["bash", "-c", step["run"] + "\ntouch packaging-reached"], cwd=tmp_path,
+        env={"PATH": f"{binaries}:{os.defpath}", "GITHUB_REPOSITORY": "fixture/repo",
+             "RELEASE_TAG": "gh-v3.2.5rc22", "GH_TOKEN": "fixture"}, capture_output=True, text=True,
+    )
+    assert result.returncode == status, result.stdout + result.stderr
+    assert json.loads((tmp_path / "arguments.json").read_text()) == [
+        "--repo", "fixture/repo", "--release-tag", "gh-v3.2.5rc22", "--activate",
+    ]
+    assert (tmp_path / "packaging-reached").exists() == (status == 0)
+
+
 def _job(workflow_name: str, job_name: str) -> dict:
     workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text(encoding="utf-8"))
     return workflow["jobs"][job_name]
@@ -340,7 +414,7 @@ def test_official_finalization_serializes_cross_version_decision_and_publication
     assert not job.get("continue-on-error")
 
 
-@pytest.mark.parametrize("workflow_name", ["lint.yml", "publish.yml", "desktop-shell.yml", "model-hub-e2e.yml"])
+@pytest.mark.parametrize("workflow_name", ["lint.yml", "publish.yml", "release_ai.yml", "desktop-shell.yml", "model-hub-e2e.yml"])
 def test_workflow_uv_pins_match_regression_tooling(workflow_name):
     """A tool-only bump must also reach every CI installer and its cache key."""
     requirements = (ROOT / "scripts/requirements-regression.txt").read_text()
