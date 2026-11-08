@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '../support/browserTest';
 
-import type { LabFrame, LabWrite } from './recorder';
+import type { LabFrame, LabWrite, ScrollLab } from './recorder';
 
 // The shipped ChatPage on a long conversation of mixed rows (fixture.tsx). Each
 // test drives real input where the engine offers it (touch in Chromium, the
@@ -230,7 +230,19 @@ test('an image that lands above the reader while they scroll is compensated, not
 test('the reader\'s own scroll is not written back when a row lands before its scroll event', async ({ page }) => {
   // No images: a late one above the reader is a real shift, compensated by design.
   await open(page, 'delay=0&images=0');
-  await setTop(page, 4000);
+  await page.evaluate(() => {
+    const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
+    const block = (event: Event) => event.stopImmediatePropagation();
+    const release = () => {
+      el.removeEventListener('scroll', block, true);
+      el.dispatchEvent(new Event('scroll'));
+    };
+    // Hold the initial reader move too: the product must see the position
+    // before its scroll event, not a later move after it already unpinned.
+    el.addEventListener('scroll', block, true);
+    (window.__scrollLab as ScrollLab & { releaseScrollEvent?: () => void }).releaseScrollEvent = release;
+    el.scrollTop = 4000;
+  });
   await page.waitForTimeout(200);
   await record(page);
   // Asynchronous scrolling (iOS, WebKit) moves the position first and delivers
@@ -243,6 +255,11 @@ test('the reader\'s own scroll is not written back when a row lands before its s
     });
     await page.waitForTimeout(120);
   }
+  await page.evaluate(() => {
+    const lab = window.__scrollLab as ScrollLab & { releaseScrollEvent?: () => void };
+    lab.releaseScrollEvent?.();
+    delete lab.releaseScrollEvent;
+  });
   const { writes } = await stop(page);
   expect(restoreWrites(writes)).toEqual([]);
 });
