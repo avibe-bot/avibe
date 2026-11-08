@@ -21,6 +21,28 @@ from core.handlers.model_hub.adapter import SearchResponse
 from vibe import __version__
 
 ENDPOINT = "https://mcp.parallel.ai/mcp"
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+class _SearchResponse(httpx2.Response):
+    """Bound decoded JSON and SSE before the SDK accumulates or parses them."""
+
+    async def aiter_bytes(self, chunk_size: int | None = None):
+        size = 0
+        async for chunk in super().aiter_bytes(chunk_size):
+            size += len(chunk)
+            if size > _MAX_RESPONSE_BYTES:
+                raise httpx2.StreamError("Model Hub search response exceeds 8 MiB")
+            yield chunk
+
+
+class _SearchTransport(httpx2.AsyncHTTPTransport):
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        upstream = await super().handle_async_request(request)
+        return _SearchResponse(
+            upstream.status_code, headers=upstream.headers,
+            stream=upstream.stream, extensions=upstream.extensions,
+        )
 
 
 async def search_parallel(
@@ -66,6 +88,7 @@ async def search_parallel(
         # Keep the SDK's timeouts and lifetime, with Model Hub's direct egress.
         async with httpx2.AsyncClient(
             headers={"User-Agent": f"Avibe/{__version__}"}, trust_env=False,
+            transport=_SearchTransport(trust_env=False), max_redirects=0,
             timeout=httpx2.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
         ) as http:
             http.event_hooks = {"request": [prepare], "response": [received]}

@@ -8,8 +8,10 @@ other tools. Requests use Avibe's direct connection with certificate verificatio
 and ignore environment proxies.
 
 Parallel starts outside the execution chain. Existing Exa defaults, saved
-orders and opt-outs stay in effect. Once elected, use the existing service
-switch and search order controls to disable or reorder it. The saved V2 setting
+orders and opt-outs stay in effect. To try Parallel first, move it to the top
+of the search order. For models with native search, also turn off **Prefer the
+model's own search** to use that order. You can disable Parallel with its service
+switch. The saved V2 setting
 is `model_hub.hosted_tools.web_search.services.src_parallelkeyless` with
 `enabled: true`; removing that override restores the unelected default.
 There is no credentialed Parallel mode: explicit credentials are rejected.

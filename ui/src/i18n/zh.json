@@ -2820,7 +2820,7 @@
         "orderNative": "模型不能自带搜索时，按此顺序执行，失败换下一个。",
         "orderAll": "所有模型都按此顺序执行，失败换下一个。",
         "orderAuto": "自动：搜索服务在前，模型代搜在后。",
-        "orderAutoKeyless": "自动：已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可上下调整。",
+        "orderAutoKeyless": "自动：已添加的搜索服务 → 已启用的官方 DeepSeek → 已启用的 Exa（免费） → 已启用的 Parallel（免费） → 模型代搜。可上下调整。",
         "orderCustom": "已手动调整顺序。",
         "kind": "搜索服务",
         "modelKind": "模型代搜",

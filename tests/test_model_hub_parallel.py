@@ -4,6 +4,7 @@ Synthetic HTTP responses protect consent, bounded excerpts, header coverage and
 cleanup. Existing Exa fixtures cannot catch a Parallel schema or dispatch error.
 """
 import asyncio
+import gzip
 import json
 from dataclasses import replace
 
@@ -232,3 +233,51 @@ async def test_parallel_ignores_environment_https_proxy(monkeypatch):
             assert proxy_lines == []
         finally:
             await adapter._keyless_exa_client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('boundary', ['redirect', 'oversize'])
+async def test_parallel_rejects_redirects_and_oversized_responses(monkeypatch, boundary):
+    """MH-SEARCH-SERVICES-001: the SDK must honor Model Hub's transport limits before parsing.
+
+    A small valid result can hide a large HTTP body. A same-origin redirect
+    still leaves the configured endpoint, including during session teardown.
+    """
+    received = []
+
+    async def peer(request):
+        message = await request.json() if request.method == 'POST' else {}
+        received.append((request.path, message.get('method') or request.method))
+        if request.path == '/other':
+            return web.Response(status=204)
+        if boundary == 'redirect' and request.method == 'DELETE':
+            return web.Response(status=307, headers={'Location': '/other'})
+        if message.get('method') != 'initialize':
+            return web.Response(status=503)
+        reply = {'jsonrpc': '2.0', 'id': message['id'], 'result': {
+            'protocolVersion': message['params']['protocolVersion'],
+            'capabilities': {'tools': {}}, 'serverInfo': {'name': 'small', 'version': '1'},
+        }}
+        if boundary == 'redirect':
+            return web.json_response(reply, headers={'Mcp-Session-Id': 'synthetic-session'})
+        # Count decoded bytes, before the SDK's JSON parser discards whitespace.
+        body = gzip.compress(b' ' * (8 * 1024 * 1024) + json.dumps(reply).encode())
+        return web.Response(body=body, content_type='application/json', headers={'Content-Encoding': 'gzip'})
+
+    app = web.Application()
+    app.router.add_route('*', '/{path}', peer)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    try:
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        monkeypatch.setattr(parallel_mcp, 'ENDPOINT', f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
+        answer = await asyncio.wait_for(parallel_mcp.search_parallel({'objective': 'private query'}), 3)
+    finally:
+        await runner.cleanup()
+    if boundary == 'redirect':
+        assert ('/mcp', 'DELETE') in received
+        assert all(path == '/mcp' for path, _ in received), received
+    else:
+        assert received == [('/mcp', 'initialize')]
+    assert not answer.on_sent_fired

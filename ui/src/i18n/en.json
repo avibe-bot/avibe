@@ -2820,7 +2820,7 @@
         "orderNative": "Used when the model can't search natively; a failure tries the next.",
         "orderAll": "Every model uses this order; a failure tries the next.",
         "orderAuto": "Automatic: search services first, then model executors.",
-        "orderAutoKeyless": "Automatic: your added search services → enabled official DeepSeek → Exa (free) → model executors; use the arrows to reorder.",
+        "orderAutoKeyless": "Automatic: your added search services → enabled official DeepSeek → Exa (free) if enabled → Parallel (free) if enabled → model executors. Use the arrows to reorder.",
         "orderCustom": "Customized order.",
         "kind": "Search service",
         "modelKind": "Model executor",
