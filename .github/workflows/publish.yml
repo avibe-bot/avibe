@@ -179,6 +179,7 @@ jobs:
           sparse-checkout: |
             scripts/github_release.py
             scripts/show_runtime_manifest_asset.py
+            scripts/release_asset_download.py
             scripts/build_retired_companion.py
             scripts/release_package_version.py
             scripts/ci_scenario_evidence.py

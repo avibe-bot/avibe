@@ -14,11 +14,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from runpy import run_path
 import struct
 import subprocess
 import tempfile
-import urllib.request
 import zipfile
+
+download_to_path = run_path(str(Path(__file__).with_name("release_asset_download.py")))["download_to_path"]
 
 SIGNER_VERSION = "0.1.9"
 SIGNER_ARCHIVE_URL = (
@@ -46,11 +48,7 @@ def download_signer(destination: Path) -> Path:
     """Download and extract exactly the pinned upstream Windows binary."""
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / SIGNER_ARCHIVE_NAME
-    with urllib.request.urlopen(SIGNER_ARCHIVE_URL, timeout=120) as response, archive.open("wb") as stream:
-        for block in iter(lambda: response.read(1024 * 1024), b""):
-            if not block:
-                break
-            stream.write(block)
+    download_to_path(SIGNER_ARCHIVE_URL, archive)
     if sha256(archive) != SIGNER_ARCHIVE_SHA256:
         raise SigningError("pinned Certum signer archive digest mismatch")
 

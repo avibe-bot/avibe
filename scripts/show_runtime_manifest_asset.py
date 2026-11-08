@@ -26,6 +26,7 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _NODE_REQUIREMENT_CLAUSE_RE = re.compile(r"(?:\^|>=)?\d+\.\d+\.\d+")
 UrlOpener = Callable[..., Any]
+read_bytes = run_path(str(Path(__file__).with_name("release_asset_download.py")))["read_bytes"]
 latest_official_release = run_path(
     str(Path(__file__).with_name("release_package_version.py"))
 )["latest_official_release"]
@@ -195,5 +196,4 @@ def _read_bytes(url: str, *, opener: UrlOpener, accept: str = "application/octet
         url,
         headers=headers,
     )
-    with opener(request, timeout=30) as response:
-        return response.read()
+    return read_bytes(request, opener=opener)

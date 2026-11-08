@@ -6,6 +6,7 @@ on:
     paths:
       - "vibe/git_runtime_manifest.json"
       - "scripts/git_runtime_release_guard.py"
+      - "scripts/release_asset_download.py"
       - ".github/workflows/git-runtime-release-guard.yml"
   schedule:
     - cron: "17 */6 * * *"

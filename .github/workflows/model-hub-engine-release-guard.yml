@@ -8,6 +8,7 @@ on:
       - "patches/model-hub-cpa-*/**"
       - "scripts/build_model_hub_engine.py"
       - "scripts/model_hub_engine_release_guard.py"
+      - "scripts/release_asset_download.py"
       - ".github/workflows/model-hub-engine-release-guard.yml"
   schedule:
     - cron: "23 */6 * * *"
