@@ -18,6 +18,11 @@ VIBEY_TOOL_PROJECTION_EPOCH = 2
 SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1, VIBEY_TOOL_PROJECTION_EPOCH})
 BRIDGE_REVISION = "20261108_0076"
 PRE_BRIDGE_REVISION = "20261107_0075"
+# Activate only after exercising the immediately previous published wheel (RC19
+# verified epoch 1). CI rechecks that contract; the publisher overwrites the
+# literal from its own probe before packaging. None keeps unverified builds
+# conservative. This is binary capability, not a persisted DB marker/version gate.
+VERIFIED_PREDECESSOR_EPOCH: int | None = 1
 
 
 class CompatibilityEpochError(ValueError):

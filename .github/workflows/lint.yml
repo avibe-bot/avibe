@@ -751,6 +751,11 @@ jobs:
             exit 1
           fi
 
+      - name: Exercise the immediately previous published SQLite reader and writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/sqlite_predecessor_contract.py --repo "$GITHUB_REPOSITORY"
+
       # Read by scenario-evidence, which proves each covered scenario row's
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
