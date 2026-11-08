@@ -138,7 +138,7 @@ interface AvibeNative {
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
 | `composer` | `composer.attach({surface, sessionId, draft, placeholder, busy, disabled, actions})`, `composer.update({...})`, `composer.detach()`, `composer.insertMention({trigger, value, data})`, `composer.setText({text})`, `composer.focus()`, `composer.voicePreview({text})`, `composer.voiceCommit({text})`, `composer.voiceRestore()` | `composer.change({text, references})`, `composer.submit({text, references, files})`, `composer.stop`, `composer.trigger({trigger, query, active})`, `composer.voice({phase})`, `composer.files({files})`, `composer.action({id})`, `composer.layout({height})` |
-| [`push`](ios-push-relay-contract.md) | `push.status()` → `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` | `push.opened({url})` |
+| [`push`](ios-push-relay-contract.md) | `push.status()` → `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` → `{revoked: boolean}` | `push.opened({url})` |
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
@@ -542,17 +542,23 @@ earlier sealed-endpoint sketch in this section.
 
 The instance keeps its existing notification gates, RFC 8291 `aes128gcm`
 encryption, RFC 8292 VAPID signing, per-owner `badge_count`, and 404/410
-subscription disabling. The relay uses a stateful random registration ID,
-binds it to an installation and VAPID public-key hash, forwards ciphertext to
+subscription disabling. The relay uses fresh stateful registration IDs, binds
+each one to an installation and VAPID public-key hash, forwards ciphertext to
 APNs without decryption, and returns the status mappings that the instance
-already understands.
+already understands. Account-cookie authentication is limited to installation
+binding; later management uses a rotatable native-only installation
+credential. Delayed revokes carry concrete registration IDs, and provider
+updates use one persisted monotonic generation.
 
 The contract also fixes the 2800-byte UTF-8 plaintext budget, the compact
-APNs envelope, the app-group Keychain record, the Notification Service
+APNs envelope, the shared Keychain record, the Notification Service
 Extension fallback, same-origin tap routing, account lifecycle, RFC 8291
 Appendix A fixture, and the required non-ASCII end-to-end test. Product and
 security review is required because this is a new ciphertext forwarding
 channel through `avibe.bot`, even though the relay cannot read the content.
+Phase 1 explicitly accepts that an offline logout has no fixed remote-revoke
+deadline: generic and possibly audible fallback alerts may continue until a
+later app execution successfully reaches the relay.
 
 ## 9. Voice
 
