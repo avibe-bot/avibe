@@ -8444,6 +8444,66 @@ def test_save_state_does_not_move_last_active_at_of_any_existing_row(tmp_path: P
         service.close()
 
 
+@pytest.mark.parametrize("scope_key", ["slack::metadata-roundtrip", ""])
+def test_session_load_save_preserves_metadata_owned_by_other_writers(tmp_path: Path, scope_key: str) -> None:
+    """The legacy state projection omits metadata; saving it must not erase it.
+
+    Existing save-state tests protect route identity and activity timestamps,
+    but miss runtime markers and per-session settings outside that projection.
+    A marker committed after load must survive too, not a stale Python merge.
+    """
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    project_base = str(tmp_path / "project")
+    native_id = "metadata-roundtrip-native"
+    original = {
+        "speed": "fast", "project_base": project_base,
+        "unknown_extension": {"nested": [1, False, None, "未来"]}, "keep_null": None,
+    }
+    marker = {"thread_id": native_id, "strategy": "fallback", "sha256": "a" * 64}
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, scope_key, now="2026-11-08T00:00:00Z")
+            session_id = create_agent_session_row(
+                conn, scope_id=scope_id, agent_backend="codex", agent_variant="codex",
+                session_anchor="metadata-roundtrip", native_session_id=native_id,
+                workdir=str(tmp_path / "project" / "work"), metadata=original,
+                now="2026-11-08T00:00:00Z", require_workdir=False,
+            )
+        loaded = service.load_state()
+        assert service.set_agent_session_runtime_marker(
+            session_id, backend="codex", native_session_id=native_id,
+            key="codex_prompt_strategy", value=marker,
+        )
+        service.save_state(loaded)
+        with service.engine.connect() as conn:
+            stored = conn.execute(select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)).scalar_one()
+        assert json.loads(stored) == {**original, "codex_prompt_strategy": marker, "legacy_scope_key": scope_key}
+        assert service.get_agent_session_runtime_marker(
+            session_id, backend="codex", native_session_id=native_id, key="codex_prompt_strategy",
+        ) == marker
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("stored_metadata", ["null", "not-json", "[]", '"legacy"'])
+def test_legacy_save_still_accepts_non_object_metadata(tmp_path: Path, stored_metadata: str) -> None:
+    """The merge must retain the old repair behavior for legacy metadata shapes."""
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        session_id = service.bind_agent_session(
+            scope_key="slack::legacy-metadata", agent_name="codex",
+            session_anchor="legacy-metadata", native_session_id="legacy-native", workdir=str(tmp_path),
+        )
+        with service.engine.begin() as conn:
+            conn.execute(agent_sessions.update().where(agent_sessions.c.id == session_id).values(metadata_json=stored_metadata))
+        service.save_state(service.load_state())
+        with service.engine.connect() as conn:
+            stored = conn.execute(select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)).scalar_one()
+        assert json.loads(stored) == {"legacy_scope_key": "slack::legacy-metadata"}
+    finally:
+        service.close()
+
+
 def test_startup_mapping_migration_does_not_restamp_sessions_without_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
