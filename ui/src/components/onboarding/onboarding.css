@@ -336,15 +336,16 @@
 
 /* The top bar is full-bleed: the logo lockup and the language button sit at the
    window's own gutter, which is what the reference draws at every size, while
-   the composition below keeps its capped column. */
+   the composition below keeps its capped column. Under a phone's status bar it
+   grows by the safe-area inset, which is 0 everywhere else. */
 .onboarding-shell > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-shrink: 0;
-  height: var(--ob-header-h);
+  height: calc(var(--ob-header-h) + env(safe-area-inset-top));
   width: 100%;
-  padding: 0 var(--ob-header-pad);
+  padding: env(safe-area-inset-top) var(--ob-header-pad) 0;
 }
 .onboarding-brand {
   display: flex;

@@ -18,6 +18,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let websiteDataStore: WKWebsiteDataStore
     let showAccount: () -> Void
     let accountFallbackVisibilityChanged: (Bool) -> Void
+    let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let didCreateController: (WebViewController) -> Void
     let didReleaseWebViews: (WebsiteDataStoreReleaseBarrier) -> Void
     let didStartLoading: () -> Void
@@ -35,6 +36,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             showAccount: showAccount,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
+            pageColorSchemeChanged: pageColorSchemeChanged,
             didStartLoading: didStartLoading,
             didFinishLoading: didFinishLoading,
             didFailLoading: didFailLoading

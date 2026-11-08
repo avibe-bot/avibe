@@ -75,14 +75,17 @@ and Web resizing cannot both run.
   that rotation; their ledger entries are retried at the next launch or
   rotation.
 - Primary and child WebViews are created through one factory and pinned to the
-  container safe area at the top, leading, and trailing edges. At the bottom,
-  the factory's `install` takes the edge a WebView rests on. The primary
-  runtime WebView rests on the container bottom, and the SwiftUI browser route
-  lets that container reach the screen bottom, so the instance page also
-  covers the Home indicator strip and reserves it through
-  `env(safe-area-inset-bottom)`. A child window shows arbitrary origins under
-  native chrome and rests on the safe-area bottom. One shared native viewport
-  owner consumes keyboard end-frame notifications for runtime, popup, and
+  container safe area at the leading and trailing edges. Vertically, the
+  factory's `install` takes one extent for both edges, because a document
+  reserves the safe areas itself only by declaring `viewport-fit=cover`, which
+  covers every edge at once. The primary runtime WebView spans the container
+  top and bottom, and the SwiftUI browser route lets that container reach the
+  screen top and bottom, so the instance page draws behind the status bar and
+  the Home indicator and reserves them through `env(safe-area-inset-*)`. Under
+  the old-Web account fallback toolbar the container starts below the toolbar,
+  so the page does too. A child window shows arbitrary origins under native
+  chrome and spans the safe area, below its navigation bar. One shared native
+  viewport owner consumes keyboard end-frame notifications for runtime, popup, and
   bundled onboarding WebViews. It moves the bottom constraint only for a
   docked frame that overlaps the safe-area bottom, measures the overlap from
   the resting edge so the WebView ends at the keyboard top, follows the system
@@ -92,20 +95,44 @@ and Web resizing cannot both run.
   last frame, discarding that frame only when the window bounds changed.
 - The shell never sets `contentInsetAdjustmentBehavior`: once an app sets it,
   WKWebView stops deriving it from each document's `viewport-fit`. WebKit
-  therefore gives an ordinary document the automatic inset above the Home
-  indicator with `env(safe-area-inset-bottom)` at 0, and gives a
-  `viewport-fit=cover` document no inset and the real value through `env()`.
+  therefore gives an ordinary document the automatic insets below the status
+  bar and above the Home indicator with `env(safe-area-inset-*)` at 0, and
+  gives a `viewport-fit=cover` document no inset and the real values through
+  `env()`.
   The instance `ui/index.html` does not declare `viewport-fit`, and Safari and
   the Home Screen app keep that declaration. While an instance document holds
   the outer-scroll lock described below, the bridge script appends
   `viewport-fit=cover` to its viewport declaration, unless the document
   already declares `viewport-fit`, and restores the declaration on release.
   Only the Workbench AppShell requests that lock, and it reserves every
-  safe-area edge through `env()`, so the locked document's tab bar, composer,
-  drawers, and dialogs pad the Home indicator exactly once. The declaration
+  safe-area edge through `env()`, so the locked document's headers, tab bar,
+  composer, drawers, and dialogs pad the status bar and the Home indicator
+  exactly once. The declaration
   lives in the shell's bridge script, so already-deployed instances receive it
   without a Web change. Authentication, consent, and other unlocked documents
   keep their own declaration and WebKit's automatic inset.
+- The status bar text follows the effective theme of the surface under it, not
+  the system appearance. SwiftUI's root hosting controller hands
+  `childForStatusBarStyle` to its newest representable controller, as long as
+  nothing in the app sets `preferredColorScheme`. Over a runtime that is
+  `WebViewController`, which returns `.darkContent` for a light page,
+  `.lightContent` for a dark page, and `.default` while the page's scheme is
+  unknown or the load-failure view covers it. When Account covers the runtime,
+  the bundled page's controller is newer and keeps `.default`, matching that
+  page's system theme. The shell's bridge script reads the computed
+  `color-scheme` of the element the primary document draws at the top of the
+  viewport. That inherits the root's, which the Web stylesheet sets per
+  theme, unless a layer that is dark in every theme, such as the image viewer
+  or the search palette, declares `color-scheme: dark` itself. The script
+  reports the result through the internal `appearance.colorSchemeChanged`
+  signal described below. Deployed instances need no Web change for the
+  theme; the dark-layer declarations arrive with the Web UI. Only native presentation follows the page: the status
+  bar, the strip behind it, and the old-Web fallback toolbar. No WebView's
+  appearance is overridden, so `prefers-color-scheme` stays the system's and a
+  page that follows the system keeps following it. Before the first report,
+  the opaque WebView draws the system background under a `.default` status
+  bar. An instance reload keeps the last scheme until the new document reports
+  its own, and a commit to another origin resets it.
 - Outer scrolling uses WebKit defaults until an instance-origin Workbench
   document requests `viewport.setOuterScrollLocked({locked: true})` for its
   own WebView. Each WebView keeps independent lock state. The lock is released
@@ -177,6 +204,15 @@ The document-start bridge also reports the internal
 history data. The trusted primary-main-frame handler uses it only to reread
 WebKit's current and immediate back items; the controller rejects child
 WebViews, and those native origin checks remain the gesture authority.
+The same script reports the internal `appearance.colorSchemeChanged`
+signal with `{scheme: "light" | "dark" | null}` when the computed
+`color-scheme` at the top of the viewport changes. It rereads it, at most
+once per frame, on root attribute mutations, body child insertions and
+removals (the layers dialogs, viewers, and palettes portal in), stylesheet
+loads, and `prefers-color-scheme` changes, and directly on document load and
+a page-cache restore. A layer that declares its own scheme is therefore a
+body-level layer. It is not an advertised capability either. Only the primary
+WebView's report drives the status bar; a child receives `forbidden`.
 
 The PR 2 method surface is fixed:
 
@@ -537,7 +573,7 @@ pinned to Xcode 26.6.
 | `allowsAirPlayForMediaPlayback`, `allowsPictureInPictureMediaPlayback` | WebKit `true` defaults. | API ledger; media UI is a device check. |
 | `suppressesIncrementalRendering`, `ignoresViewportScaleLimits` | WebKit `false` defaults. Pages render incrementally and retain author viewport limits. | API ledger and simulator build. |
 | `allowsInlinePredictions`, `supportsAdaptiveImageGlyph`, `writingToolsBehavior` | WebKit defaults. The shell does not add text-system behavior beyond Safari/WebKit. | API ledger; keyboard behavior is a device check. |
-| Managed WebView `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, content offset, and keyboard viewport | WebKit defaults apply independently in every primary or child WebView until its Workbench AppShell requests `viewport.setOuterScrollLocked({locked: true})`. While locked, the shell disables that WebView's outer scrolling and bounce and resets its outer offset on keyboard frame/hide notifications. Unmount, `pagehide`, or that WebView's commit restores the captured defaults; `pageshow` reacquires the lock after a WebKit page-cache restoration. The shell never sets `contentInsetAdjustmentBehavior`, because WKWebView stops deriving it from `viewport-fit` once an app sets it. The bridge script declares `viewport-fit=cover` for a document while it holds the lock, so WebKit uses `.never` for the locked Workbench, whose `env(safe-area-inset-bottom)` is the window inset, and `.always` for every document without a cover declaration, such as authentication pages. The primary rests on the container bottom and a child on the safe-area bottom; each moves to the converted docked keyboard top only while that frame overlaps the safe-area bottom. Geometry and app lifecycle changes recompute from the last frame; a window-bounds change invalidates it before recomputation. The Web UI disables `useIosKeyboardInset` only when `keyboardResizesViewport: 1` is present. | Notification-driven geometry and animation XCTest for both resting edges; key-window XCTest on a Home-indicator simulator for the primary and child resting edges across a docked keyboard, the SwiftUI browser route, a locked Workbench fixture's `env()` padding and zero adjusted inset, the automatic inset after unlock and on instance and authentication documents after a commit, and the bundled page's single padding; per-WebView state XCTest; focused Web lifecycle and capability tests; Debug/Release builds. |
+| Managed WebView `scrollView.isScrollEnabled`, `bounces`, `contentInsetAdjustmentBehavior`, content offset, and keyboard viewport | WebKit defaults apply independently in every primary or child WebView until its Workbench AppShell requests `viewport.setOuterScrollLocked({locked: true})`. While locked, the shell disables that WebView's outer scrolling and bounce and resets its outer offset on keyboard frame/hide notifications. Unmount, `pagehide`, or that WebView's commit restores the captured defaults; `pageshow` reacquires the lock after a WebKit page-cache restoration. The shell never sets `contentInsetAdjustmentBehavior`, because WKWebView stops deriving it from `viewport-fit` once an app sets it. The bridge script declares `viewport-fit=cover` for a document while it holds the lock, so WebKit uses `.never` for the locked Workbench, whose `env(safe-area-inset-*)` values are the window insets, and `.always` for every document without a cover declaration, such as authentication pages. The primary spans the container top and bottom and a child the safe area; the bottom of each moves to the converted docked keyboard top only while that frame overlaps the safe-area bottom. Geometry and app lifecycle changes recompute from the last frame; a window-bounds change invalidates it before recomputation. The Web UI disables `useIosKeyboardInset` only when `keyboardResizesViewport: 1` is present. | Notification-driven geometry and animation XCTest for both resting edges; key-window XCTest on a Dynamic Island simulator for the primary and child top and resting edges across a docked keyboard, the SwiftUI browser route's top and bottom, a presented child below its navigation bar, a locked Workbench fixture's top and bottom `env()` padding and zero adjusted insets, the automatic insets after unlock and on instance and authentication documents after a commit, and the bundled page's single padding; per-WebView state XCTest; focused Web lifecycle and capability tests; Debug/Release builds. |
 | iOS 27 webpage preferences (`securityRestrictionMode`, `alternateRequest`, `overrideReferrer`, `allowsJSHandleCreationInPageWorld`, `globalPrivacyControlEnabled`) | WebKit defaults. No Phase 0a requirement justifies changing requests, referrers, page-world handles, or privacy signals. | Documentation-only until the pinned toolchain exposes the full iOS 27 set. |
 
 ## Web platform outcomes
@@ -575,8 +611,9 @@ bridge and do not run these Web UI branches.
 
 | Area | Primary instance WebView | Child instance WebView | Reason for any difference |
 | --- | --- | --- | --- |
-| Construction and configuration | Shared `WebViewFactory`; native bridge, message handler, delegates, safe-area constraints, keyboard layout, and scroll-lock state are installed together. | Same factory using WebKit's supplied configuration, which preserves `window.opener` and the shared user content controller. | None. |
-| Keyboard viewport | Rests on the container bottom, so the page covers the Home indicator strip and reserves it through `env()`; a docked keyboard ends it at the keyboard top. | Rests on the safe-area bottom, with the same docked-keyboard handling. | A child shows arbitrary origins under native chrome, which do not reserve the Home indicator strip. |
+| Construction and configuration | Shared `WebViewFactory`; native bridge, message handler, delegates, extent constraints, keyboard layout, and scroll-lock state are installed together. | Same factory using WebKit's supplied configuration, which preserves `window.opener` and the shared user content controller. | None. |
+| Extent and keyboard viewport | Spans the container top and bottom, so the page covers the status bar and the Home indicator strip and reserves them through `env()`; a docked keyboard ends it at the keyboard top. | Spans the safe area below its navigation bar, with the same docked-keyboard handling. | A child shows arbitrary origins under native chrome, which do not reserve the safe areas. |
+| Status bar | Its reported page scheme sets the status bar text while it is the newest representable controller. | Its report is rejected; the status bar keeps following the primary page under the sheet. | The primary page is what the status bar sits over. |
 | Outer-scroll lock | The instance main frame can lock only its own WebView; commit resets only that state. | Same, with independent state. | None. |
 | Navigation policy | Instance/authentication stay in the primary; other top-level HTTP(S) destinations open in `SFSafariViewController`. Interactive back is enabled only for an immediate instance-origin item, and cross-origin back-forward traversal is rejected. | Main-frame HTTP(S) navigation stays in the child; the primary interactive gesture remains disabled. | The primary owns selected-instance history admission; a child is already the requested browsing context and keeps its explicit close/back controls. |
 | Subframes and external application schemes | WebKit handles ordinary subframes; external application schemes are cancelled. Trusted top-level application schemes use the system. | Same. | None. |

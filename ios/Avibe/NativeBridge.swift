@@ -59,7 +59,15 @@ struct NativeShellMetadata: Equatable {
     }
 }
 
+/// The color scheme of what the primary instance document draws under the
+/// status bar, as the shell's bridge script reads it.
+enum PageColorScheme: String, Equatable {
+    case light
+    case dark
+}
+
 enum NativeBridgeMethod: String, CaseIterable {
+    case appearanceColorSchemeChanged = "appearance.colorSchemeChanged"
     case appInfo = "app.info"
     case appOpenExternal = "app.openExternal"
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
@@ -182,6 +190,7 @@ enum NativeBridgeConfiguration {
         setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
+        colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {}
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
@@ -193,6 +202,7 @@ enum NativeBridgeConfiguration {
             setOuterScrollLocked: setOuterScrollLocked,
             setAccountActionAvailable: setAccountActionAvailable,
             historyDidChange: historyDidChange,
+            colorSchemeDidChange: colorSchemeDidChange,
             showAccount: showAccount
         )
         controller.addScriptMessageHandler(
@@ -324,6 +334,87 @@ enum NativeBridgeConfiguration {
               on
             })
           });
+
+          // The status bar text follows the scheme of what the page draws
+          // under it: the computed color-scheme of the element at the top of
+          // the viewport. That inherits the root's, which the stylesheet sets
+          // per theme, unless a layer such as a dark image viewer declares
+          // its own. Reading it here keeps deployed instances working with
+          // no Web change. An unknown scheme is reported only once the
+          // document has loaded, so a reload keeps the previous page's
+          // scheme until the new one is known.
+          let reportedScheme;
+          let documentLoaded = false;
+          let reportFrame = 0;
+          const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+          const effectiveScheme = () => {
+            const root = document.documentElement;
+            if (!root) return null;
+            const surface = document.body
+              ? document.elementFromPoint(window.innerWidth / 2, 0) ?? root
+              : root;
+            const tokens = getComputedStyle(surface).getPropertyValue("color-scheme").toLowerCase().split(/\\s+/);
+            const light = tokens.includes("light");
+            const dark = tokens.includes("dark");
+            if (light && dark) return prefersDark.matches ? "dark" : "light";
+            return dark ? "dark" : light ? "light" : null;
+          };
+          const reportScheme = (force = false) => {
+            let scheme;
+            try {
+              scheme = effectiveScheme();
+            } catch {
+              return;
+            }
+            if (scheme === null && !documentLoaded) return;
+            if (!force && scheme === reportedScheme) return;
+            reportedScheme = scheme;
+            void call("appearance.colorSchemeChanged", { scheme }).catch(() => {});
+          };
+          // Coalesced to one read per frame, after layout has caught up.
+          const scheduleReport = () => {
+            if (reportFrame) return;
+            reportFrame = window.requestAnimationFrame(() => {
+              reportFrame = 0;
+              reportScheme();
+            });
+          };
+          // The root's theme attributes, and the body's own children: the
+          // layers a dialog, viewer, or palette portals in and out.
+          const observer = new MutationObserver(scheduleReport);
+          let observingRoot = false;
+          let observingBody = false;
+          const observeDocument = () => {
+            if (!observingRoot && document.documentElement) {
+              observer.observe(document.documentElement, {
+                attributes: true,
+                attributeFilter: ["class", "data-theme", "style"]
+              });
+              observingRoot = true;
+            }
+            if (!observingBody && document.body) {
+              observer.observe(document.body, { childList: true });
+              observingBody = true;
+            }
+            scheduleReport();
+          };
+          observeDocument();
+          document.addEventListener("readystatechange", observeDocument);
+          document.addEventListener("DOMContentLoaded", observeDocument);
+          prefersDark.addEventListener("change", scheduleReport);
+          // Stylesheets that finish loading can set the root's scheme.
+          document.addEventListener("load", (event) => {
+            if (event.target instanceof HTMLLinkElement) scheduleReport();
+          }, true);
+          window.addEventListener("load", () => {
+            documentLoaded = true;
+            reportScheme();
+          });
+          // A page restored from the back-forward cache reports again after
+          // the commit that restored it.
+          window.addEventListener("pageshow", (event) => {
+            if (event.persisted) reportScheme(true);
+          });
         })();
         """
     }
@@ -335,6 +426,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let setOuterScrollLocked: (WKWebView, Bool) -> Bool
     private let setAccountActionAvailable: (WKWebView, Bool) -> Bool
     private let historyDidChange: (WKWebView) -> Bool
+    private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
 
     init(
@@ -343,6 +435,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         setOuterScrollLocked: @escaping (WKWebView, Bool) -> Bool,
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool,
         historyDidChange: @escaping (WKWebView) -> Bool,
+        colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool,
         showAccount: @escaping () -> Void
     ) {
         self.policy = policy
@@ -350,6 +443,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.setOuterScrollLocked = setOuterScrollLocked
         self.setAccountActionAvailable = setAccountActionAvailable
         self.historyDidChange = historyDidChange
+        self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
     }
 
@@ -388,6 +482,29 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
+        case .appearanceColorSchemeChanged:
+            let rawScheme = request.params["scheme"]
+            let scheme = (rawScheme as? String).flatMap(PageColorScheme.init(rawValue:))
+            guard
+                request.params.count == 1,
+                scheme != nil || rawScheme is NSNull
+            else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "appearance.colorSchemeChanged requires a light, dark, or null scheme."
+                    )
+                )
+                return
+            }
+            guard
+                let sourceWebView,
+                colorSchemeDidChange(sourceWebView, scheme)
+            else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: NSNull())
         case .appInfo:
             reply(replyHandler, result: metadata.jsonObject)
         case .appOpenExternal:

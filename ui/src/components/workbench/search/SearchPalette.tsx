@@ -195,7 +195,8 @@ const SearchPresentation = ({ query, setQuery, includeArchived, setIncludeArchiv
   return (
     <Dialog open onOpenChange={(next) => { if (!next && presented.current) onClose(); }}>
       <DialogPortal>
-        <DialogOverlay className="bg-[#05050B]/85" />
+        {/* Dark in every theme, and declared so for the iOS status bar. */}
+        <DialogOverlay className="bg-[#05050B]/85 scheme-dark" />
         <DialogPrimitive.Content
           onKeyDown={onKeyDown}
           onOpenAutoFocus={(e) => {

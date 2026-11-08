@@ -129,14 +129,16 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
         {children}
         {src && (
           <DialogPortal forceMount>
-            {routeSurfaceActive && <DialogOverlay className="bg-black/80 backdrop-blur-sm" />}
+            {/* The viewer is dark in every theme and says so, so the iOS status bar
+                above it turns light. */}
+            {routeSurfaceActive && <DialogOverlay className="bg-black/80 backdrop-blur-sm scheme-dark" />}
             <DialogPrimitive.Content
               forceMount
               aria-describedby={undefined}
               aria-hidden={!routeSurfaceActive || undefined}
               inert={!routeSurfaceActive || undefined}
               className={cn(
-                'fixed inset-0 z-50 flex items-center justify-center p-6 focus:outline-none',
+                'fixed inset-0 z-50 flex items-center justify-center p-6 scheme-dark focus:outline-none',
                 !routeSurfaceActive && 'pointer-events-none invisible',
               )}
               onEscapeKeyDown={(event) => {
@@ -181,7 +183,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               }}
             >
               <DialogTitle className="sr-only">{t('chat.media.preview')}</DialogTitle>
-          <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+          <div className="absolute right-4 top-[calc(1rem+env(safe-area-inset-top))] z-10 flex items-center gap-2">
             {/* Zoom buttons: a pointer-device affordance (touch zooms by pinch).
                 stopPropagation so clicking a control doesn't also close the viewer. */}
             <Button

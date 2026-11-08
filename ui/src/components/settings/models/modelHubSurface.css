@@ -1949,8 +1949,9 @@
   --model-hub-order-width: 460px;
   width: min(var(--model-hub-order-width), 100vw);
   border-left: 1px solid var(--border-strong);
-  /* Clears the desktop shell's overlay title bar (0 elsewhere). */
-  padding-top: var(--shell-titlebar-inset);
+  /* Clears the desktop shell's overlay title bar and a phone's status bar
+     (each 0 elsewhere). */
+  padding-top: calc(var(--shell-titlebar-inset) + env(safe-area-inset-top));
   box-shadow: var(--model-hub-drawer-shadow);
 }
 
