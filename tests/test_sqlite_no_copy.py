@@ -20,6 +20,7 @@ from alembic.script import ScriptDirectory
 from storage import backups, importer, migrations
 from storage.compatibility import BRIDGE_REVISION, PRE_BRIDGE_REVISION
 from storage.db import dispose_cached_sqlite_engines
+from tests.test_sqlite_compatibility_epoch import bridge_graph  # noqa: F401 -- pin the historical bridge graph
 from tests.test_sqlite_backup_expiry import EXPIRES, _attempt
 from tests.test_sqlite_migration_preflight import _snapshot
 
