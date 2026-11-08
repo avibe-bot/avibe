@@ -585,20 +585,42 @@ simulator. Debug and Release use the same generated folder resource; the
 bundled-page XCTest resolves `MobileApp` from the built application bundle and
 executes its React entry through `avibe-app://bundle`.
 
-## TestFlight prerequisites
+## TestFlight
 
-PR builds never sign or upload. A later owner-authorized TestFlight workflow
-must run `npm ci`, `npm run build:mobile`, and the bundle verification in the
-same job before archive or upload. It also needs the one-time setup held by the
-Apple Account Holder:
+PR builds never sign or upload. `.github/workflows/ios-testflight.yml` is the
+only signing path, started by hand (`gh workflow run ios-testflight.yml`, or
+Actions → ios-testflight → Run workflow) and only from `master`. In one job it:
 
-- the registered `bot.avibe.ios` identifier and App Store Connect app record;
-- an Apple Distribution certificate and password;
-- an App Store provisioning profile for the app target;
-- the Apple Team ID;
-- the Associated Domains capability on that App ID, for the
-  `webcredentials:avibe.bot` entitlement (enabled 2026-11-07);
-- a dedicated App Store Connect API key ID, issuer ID, and private key.
+1. runs `npm ci`, `npm run build:mobile`, and the bundle verification;
+2. imports the Apple Distribution identity into a temporary keychain and
+   installs the App Store profile (`ios/scripts/testflight.py prepare`), after
+   checking that the profile is a current App Store profile for
+   `68B2SQ6YK3.bot.avibe.ios`, grants Associated Domains, and was issued for
+   that certificate;
+3. archives the Release configuration with manual signing, using
+   `<run number>.<attempt>` as `CFBundleVersion`;
+4. checks the archived app's bundle, build number, encryption declaration, and
+   distribution entitlements (`verify-archive`);
+5. exports and uploads with the App Store Connect API key;
+6. waits for App Store Connect to process the build and adds it to the internal
+   group `Avibe Internal` (`distribute`); internal testing needs no App Review;
+7. always removes the keychain, profile, and key (`cleanup`).
 
-Those credentials belong in a protected GitHub Environment. They are not
-required for simulator development or this PR's CI.
+`Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
+only the system's HTTPS and passkey cryptography, so builds need no export
+compliance answer before testers can install them.
+
+Repository secrets, set once by the Apple Account Holder:
+
+| Secret | Content |
+| --- | --- |
+| `IOS_APPLE_TEAM_ID` | `68B2SQ6YK3` |
+| `IOS_DISTRIBUTION_P12_BASE64`, `IOS_DISTRIBUTION_P12_PASSWORD` | the Apple Distribution certificate and key |
+| `IOS_APP_STORE_PROFILE_BASE64` | the "Avibe iOS App Store" profile |
+| `IOS_APP_STORE_CONNECT_KEY_ID`, `IOS_APP_STORE_CONNECT_ISSUER_ID`, `IOS_APP_STORE_CONNECT_PRIVATE_KEY` | a dedicated App Store Connect API key |
+
+Changing a capability on the App ID invalidates the profile. Regenerate it in
+the Apple Developer account and replace `IOS_APP_STORE_PROFILE_BASE64`; the
+workflow refuses an expired profile, or one without Associated Domains, before
+it builds. The profile was last regenerated on 2026-11-07, after Associated
+Domains was enabled.

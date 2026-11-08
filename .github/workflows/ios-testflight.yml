@@ -1,0 +1,111 @@
+name: ios-testflight
+
+# Builds the iOS app from master, signs it for App Store distribution, uploads
+# it to App Store Connect, and makes it available to the internal TestFlight
+# group. Internal testing needs no App Review. Started by hand only.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+jobs:
+  testflight:
+    if: github.ref == 'refs/heads/master'
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      # Unique for every run and attempt of this workflow, and increasing.
+      BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Report pinned Apple toolchain
+        run: |
+          set -euo pipefail
+          [ -d "$DEVELOPER_DIR" ] || {
+            echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcodebuild -version
+          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
+            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Build bundled mobile UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build:mobile
+
+      - name: Verify bundled mobile UI
+        run: ios/scripts/verify_mobile_bundle.sh ios/Avibe/Resources/MobileApp
+
+      - name: Import Apple Distribution identity and App Store profile
+        env:
+          IOS_DISTRIBUTION_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+          IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+          IOS_APP_STORE_PROFILE_BASE64: ${{ secrets.IOS_APP_STORE_PROFILE_BASE64 }}
+          IOS_APPLE_TEAM_ID: ${{ secrets.IOS_APPLE_TEAM_ID }}
+          IOS_APP_STORE_CONNECT_KEY_ID: ${{ secrets.IOS_APP_STORE_CONNECT_KEY_ID }}
+          IOS_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.IOS_APP_STORE_CONNECT_ISSUER_ID }}
+          IOS_APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.IOS_APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: python ios/scripts/testflight.py prepare --work-dir "$RUNNER_TEMP/ios-signing" --env-file "$GITHUB_ENV"
+
+      - name: Archive for App Store distribution
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/Avibe.xcodeproj \
+            -scheme Avibe \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Avibe.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM=68B2SQ6YK3 \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $IOS_SIGNING_KEYCHAIN" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            archive
+
+      - name: Verify the archived app's signature
+        run: python ios/scripts/testflight.py verify-archive --archive "$RUNNER_TEMP/Avibe.xcarchive" --build "$BUILD_NUMBER"
+
+      - name: Upload to App Store Connect
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$RUNNER_TEMP/Avibe.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$IOS_EXPORT_OPTIONS" \
+            -authenticationKeyPath "$IOS_ASC_KEY_PATH" \
+            -authenticationKeyID "$IOS_ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$IOS_ASC_ISSUER_ID"
+
+      - name: Make the build available to internal testers
+        run: python ios/scripts/testflight.py distribute --archive "$RUNNER_TEMP/Avibe.xcarchive" --build "$BUILD_NUMBER"
+
+      - name: Remove Apple signing material
+        if: always()
+        run: python ios/scripts/testflight.py cleanup --work-dir "$RUNNER_TEMP/ios-signing"
