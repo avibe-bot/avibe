@@ -1,7 +1,9 @@
 # Mobile password sign-in
 
 Status: approved by the owner on 2026-11-08 at 12:46 Asia/Shanghai, with the
-four decisions below. The design frames are `mobile-app/password/*`.
+four decisions below, and implemented as specified; `ios/README.md` (Password
+sign-in) records the shipped contract. The design frames are
+`mobile-app/password/*`.
 
 ## Background
 

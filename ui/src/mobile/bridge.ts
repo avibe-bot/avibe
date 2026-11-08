@@ -36,6 +36,14 @@ export type MobileSessionState =
       methods: MobileSecondFactorMethod[];
     };
 
+/** Why avibe.bot still accepted a password that no longer meets its rules. */
+export type MobileWeakPasswordReason = 'length' | 'characters' | 'pwned';
+
+/** `auth.verifyOtp`'s state, plus `weak_password` when Supabase reported one. */
+export type MobilePasswordSignInResult = MobileSessionState & {
+  weak_password?: { reasons: MobileWeakPasswordReason[] };
+};
+
 export type MobileBridgeError = {
   code: string;
   message: string;
@@ -106,6 +114,17 @@ export const verifyMobileOtp = (
 ): Promise<MobileSessionState> =>
   call('auth.verifyOtp', { email, code });
 
+/**
+ * Signs in with the account's avibe.bot password. Errors:
+ * `invalid_credentials`, `email_not_confirmed`, `rate_limited` (with
+ * `retry_after_seconds` when avibe.bot sent one), and `network`.
+ */
+export const signInMobileWithPassword = (
+  email: string,
+  password: string,
+): Promise<MobilePasswordSignInResult> =>
+  call('auth.signInWithPassword', { email, password });
+
 export const refreshMobileSession = (): Promise<MobileSessionState> =>
   call('session.refresh');
 
@@ -142,5 +161,8 @@ export const openMobileExternal = (url: string): Promise<{ opened: boolean }> =>
 export const returnToMobileInstance = (): Promise<null> =>
   call('app.returnToInstance');
 
-/** Where an account that must turn on two-step verification sets it up. */
+/**
+ * avibe.bot's Account security page: where an account turns on two-step
+ * verification and sets or changes its password.
+ */
 export const ACCOUNT_SECURITY_URL = 'https://avibe.bot/app/account/security';
