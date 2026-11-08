@@ -67,7 +67,7 @@ def test_session_run_page_seeks_all_ownership_arms(tmp_path: Path, sqlite_db_fac
 @pytest.mark.no_sqlite_template
 def test_session_run_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path):
     """The optimization upgrades deployed databases and downgrades without data loss."""
-    from alembic import command
+    from tests.migration_helpers import downgrade_legacy_schema
 
     path = tmp_path / "upgrade.sqlite"
     migrations.run_migrations(path, revision="20261107_0074")
@@ -85,7 +85,7 @@ def test_session_run_indexes_upgrade_and_downgrade_preserve_rows(tmp_path: Path)
         assert conn.execute("select * from agent_runs").fetchall() == before
         assert [row[2] for row in conn.execute("pragma index_info(ix_agent_runs_callback_session)")] == ["callback_session_id"]
         assert [row[2] for row in conn.execute("pragma index_info(ix_agent_runs_source_actor)")] == ["source_kind", "source_actor"]
-    command.downgrade(migrations.alembic_config(path), "20261107_0074")
+    downgrade_legacy_schema(migrations.alembic_config(path), "20261107_0074")
     with sqlite3.connect(path) as conn:
         assert conn.execute("select * from agent_runs").fetchall() == before
         assert conn.execute("select name, sql from sqlite_master where type='index' order by name").fetchall() == before_indexes

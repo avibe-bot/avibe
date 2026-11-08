@@ -1448,6 +1448,7 @@
       "alembicFound": "Packaged Alembic scripts found: {path}",
       "alembicRevisionsMissing": "No Alembic revision files found under {path}",
       "sqliteRevisionAbsent": "SQLite schema revision is not initialized yet",
+      "sqliteRevisionCompatible": "SQLite schema revision is compatible with this CLI: {revision} (epoch {epoch})",
       "sqliteRevisionKnown": "SQLite schema revision is recognized by this CLI: {revision}",
       "sqliteRevisionUnknown": "SQLite schema revision is newer than or unknown to this CLI: {revision}"
     },

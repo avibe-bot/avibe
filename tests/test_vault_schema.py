@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 from sqlalchemy import inspect, text
 
 from storage.db import create_sqlite_engine
@@ -107,7 +107,7 @@ def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path, mo
 
     monkeypatch.setattr(sqlite3, "connect", legacy_connect)
     monkeypatch.setattr(sqlite3.dbapi2, "connect", legacy_connect)
-    command.downgrade(migrations.alembic_config(db_path), "20261012_0064")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20261012_0064")
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("pragma table_info(vault_secrets)")}
         row = conn.execute(

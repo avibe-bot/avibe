@@ -9,7 +9,7 @@ from typing import Callable, TypeVar
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from config import paths
 from storage import loop_writers
@@ -46,6 +46,26 @@ def sqlite_url(db_path: Path | None = None) -> str:
 def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False) -> Engine:
     """Open normal state, or existing state without creation or journal changes."""
     path = _resolve_sqlite_path(db_path)
+    if path.exists() and path.stat().st_size:
+        # Explicit-path stores also use this factory, sometimes without the
+        # importer. Reject incompatible epochs before even changing WAL mode.
+        from storage.migrations import preflight_database
+
+        identity = (path.stat().st_dev, path.stat().st_ino)
+        with _cached_engine_lock:
+            checked = _checked_sqlite_paths.get(path)
+        if checked != identity:
+            try:
+                preflight_database(path, read_only=read_only)
+            except sqlite3.Error as exc:
+                # Factory callers already handle SQLAlchemy's DBAPI error
+                # hierarchy. Preserve it when the earlier raw-SQLite admission
+                # check observes corruption, busy state or a missing table.
+                raise DBAPIError.instance(
+                    "SQLite compatibility preflight", None, exc, sqlite3.Error, hide_parameters=True,
+                ) from exc
+            with _cached_engine_lock:
+                _checked_sqlite_paths[path] = identity
     if not read_only:
         path.parent.mkdir(parents=True, exist_ok=True)
     # ``hide_parameters`` keeps bound values out of ``str(exc)`` on every
@@ -129,6 +149,9 @@ def retry_sqlite_write(operation: Callable[[], _T]) -> _T:
 
 _cached_engine_lock = RLock()
 _cached_engines: dict[tuple[Path, bool], Engine] = {}
+# Same process-lifetime contract as importer.ensure_sqlite_state. A replacement
+# inode is rechecked; concurrently breaking upgrades require all writers stopped.
+_checked_sqlite_paths: dict[Path, tuple[int, int]] = {}
 
 
 def get_cached_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False) -> Engine:
@@ -158,6 +181,7 @@ def dispose_cached_sqlite_engines() -> None:
     with _cached_engine_lock:
         engines = list(_cached_engines.values())
         _cached_engines.clear()
+        _checked_sqlite_paths.clear()
     for engine in engines:
         engine.dispose()
 

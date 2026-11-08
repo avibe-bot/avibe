@@ -14033,7 +14033,22 @@ def _local_cli_installation_items(*, language: str = "en") -> list[dict]:
             )
 
     sqlite_revision = _current_sqlite_revision()
-    if sqlite_revision is None:
+    compatible_epoch = None
+    if sqlite_revision is not None and sqlite_revision not in recognized_revisions:
+        from storage.migrations import preflight_database
+
+        try:
+            decision = preflight_database(paths.get_sqlite_state_path(), read_only=True)
+            if decision.compatible_open:
+                compatible_epoch = decision.compatibility_epoch
+        except (RuntimeError, sqlite3.Error, OSError):
+            pass
+    if compatible_epoch is not None:
+        _add_doctor_item(
+            items, "pass",
+            i18n_t("doctor.item.sqliteRevisionCompatible", language, revision=sqlite_revision, epoch=compatible_epoch),
+        )
+    elif sqlite_revision is None:
         _add_doctor_item(items, "pass", i18n_t("doctor.item.sqliteRevisionAbsent", language))
     elif sqlite_revision in recognized_revisions:
         _add_doctor_item(

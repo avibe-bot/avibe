@@ -47,9 +47,9 @@ def test_definition_status_index_upgrades_and_downgrades_cleanly(tmp_path: Path)
         _REVISION.CREATE_INDEX_SQL
     )
 
-    from alembic import command
+    from tests.migration_helpers import downgrade_legacy_schema
 
-    command.downgrade(migrations.alembic_config(path), _REVISION.down_revision)
+    downgrade_legacy_schema(migrations.alembic_config(path), _REVISION.down_revision)
     assert _index_sql(path, _REVISION._INDEX) is None
 
 

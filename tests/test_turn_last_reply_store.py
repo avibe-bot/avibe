@@ -12,7 +12,7 @@ import json
 import sqlite3
 
 import pytest
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 from alembic.script import ScriptDirectory
 from sqlalchemy import event, select
 
@@ -222,7 +222,7 @@ async def test_a_released_database_upgrades_and_its_running_turn_ends_without_a_
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("select version_num from alembic_version").fetchone() == (HEAD,)
-    command.downgrade(migrations.alembic_config(path), PREVIOUS_REVISION)
+    downgrade_legacy_schema(migrations.alembic_config(path), PREVIOUS_REVISION)
     with sqlite3.connect(path) as conn:
         tables = {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}
         assert "session_turn_replies" not in tables

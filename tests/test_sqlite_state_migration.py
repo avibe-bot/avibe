@@ -14,6 +14,7 @@ from types import MappingProxyType
 
 import pytest
 from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
@@ -44,7 +45,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261107_0075"
+HEAD_REVISION = "20261108_0076"
 PREVIOUS_HEAD_REVISION = "20261016_0068"
 _SCOPE_ID_DRIFT_TABLES = ("messages", "agent_events", "media_objects")
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
@@ -172,7 +173,7 @@ def test_local_show_access_migration_round_trip_preserves_pages_and_fails_closed
             "select count(*) from show_page_access_entries where page_id = 'private-null'"
         ).fetchone() == (0,)
 
-    command.downgrade(migrations.alembic_config(db_path), "20260815_0054")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260815_0054")
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("pragma table_info(show_pages)")}
         downgraded = dict(
@@ -288,7 +289,7 @@ def test_show_page_access_entry_migration_moves_every_email_row_and_narrows_on_d
         for page_id, value, created_at in sorted(seeded_emails)
     ]
 
-    command.downgrade(migrations.alembic_config(db_path), "20260819_0057")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260819_0057")
     with sqlite3.connect(db_path) as conn:
         restored = conn.execute(
             "select session_id, normalized_email, created_at "
@@ -330,7 +331,7 @@ def test_show_page_access_entry_migration_replay_neither_duplicates_nor_overwrit
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+    run_migrations(db_path, revision="20261107_0075")
     already_migrated = [
         ("replayed", "email", "kept@example.com", None, "2026-08-20T00:00:00Z"),
         ("replayed", "group", "group-7", "org-1", "2026-08-20T00:00:00Z"),
@@ -478,7 +479,7 @@ def test_remote_authorization_context_migration_preserves_legacy_rows_both_direc
         )
     assert legacy == ('{"legacy":true}', 200, None)
 
-    command.downgrade(migrations.alembic_config(db_path), "20260812_0053")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260812_0053")
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
             "select id, claims_json, expires_at from remote_access_authorizations"
@@ -656,7 +657,7 @@ def test_accepted_steer_receipt_migration_preserves_upgrade_and_downgrade_invari
         ).one() == ("reconciling_steer", "accepted")
 
     with pytest.raises(RuntimeError, match="0050 downgrade refused"):
-        command.downgrade(migrations.alembic_config(db_path), "20260809_0049")
+        downgrade_legacy_schema(migrations.alembic_config(db_path), "20260809_0049")
 
     with engine.begin() as conn:
         conn.execute(
@@ -667,7 +668,7 @@ def test_accepted_steer_receipt_migration_preserves_upgrade_and_downgrade_invari
                 current_receipt_json='{"reason":"receipt_persistence_lost"}',
             )
         )
-    command.downgrade(migrations.alembic_config(db_path), "20260809_0049")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260809_0049")
     with engine.connect() as conn:
         assert conn.exec_driver_sql(
             "select state, current_receipt_outcome, current_receipt_json "
@@ -752,7 +753,7 @@ def test_callback_terminal_turn_identity_migration_preserves_rows_and_scope(
         )
         conn.commit()
 
-    command.downgrade(migrations.alembic_config(db_path), "20260811_0050")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260811_0050")
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
             "select name from sqlite_master where type = 'index' and name = ?",
@@ -813,7 +814,7 @@ def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
             "select type from messages where id = ?", ("legacy-vault-waiter",)
         ).fetchone() == ("vault",)
 
-    command.downgrade(migrations.alembic_config(db_path), "20260806_0047")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260806_0047")
 
     with sqlite3.connect(db_path) as conn:
         assert _index_sql(conn, "ix_messages_inbox_activity") == previous_activity
@@ -1202,7 +1203,7 @@ def test_session_queue_hold_removal_is_schema_complete_and_reversible(
     assert not {"queue_hold_state", "queue_hold_version", "queue_held_at"} & columns
     assert version == (HEAD_REVISION,)
 
-    command.downgrade(migrations.alembic_config(db_path), "20260804_0046")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260804_0046")
     with sqlite3.connect(db_path) as conn:
         restored = conn.execute(
             "select queue_hold_state, queue_hold_version, queue_held_at "
@@ -1401,7 +1402,7 @@ def test_delivery_history_default_repair_preserves_rows_and_reverses(tmp_path: P
         ("message_deliveries", "delivery_history_json")
     }
 
-    command.downgrade(migrations.alembic_config(db_path), "20260819_0056")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260819_0056")
     with sqlite3.connect(db_path) as conn:
         assert _schema_fingerprint(conn) == seeded
         assert _delivery_rows(conn) == rows_before
@@ -1579,7 +1580,7 @@ def test_scoped_native_message_identity_upgrade_and_safe_downgrade(
         RuntimeError,
         match="conversation-scoped Message identities would collide",
     ):
-        command.downgrade(migrations.alembic_config(db_path), "20260801_0044")
+        downgrade_legacy_schema(migrations.alembic_config(db_path), "20260801_0044")
 
 
 def test_scoped_native_message_identity_upgrade_preserves_accepted_delivery(
@@ -1680,7 +1681,7 @@ def test_scoped_native_message_identity_upgrade_preserves_accepted_delivery(
     assert message == (scope_id, "1")
     assert foreign_key_errors == []
 
-    command.downgrade(migrations.alembic_config(db_path), "20260801_0044")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260801_0044")
     with engine.connect() as conn:
         assert conn.exec_driver_sql(
             "select message_id, dedupe_key from message_deliveries "
@@ -1854,7 +1855,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     finally:
         engine.dispose()
 
-    command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260729_0042")
     with sqlite3.connect(db_path) as conn:
         tables = {
             row[0]
@@ -2266,7 +2267,7 @@ def test_session_delivery_migration_dedupes_and_avoids_legacy_event_id_collision
     assert [group["status"] for group in groups] == ["done"]
     assert groups[0]["steps"] == 1
 
-    command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260729_0042")
     with sqlite3.connect(db_path) as conn:
         restored_trace = conn.execute(
             "select id, type, content_text from messages "
@@ -2479,7 +2480,7 @@ def test_session_delivery_migration_resolves_legacy_pending_by_its_real_owner(
     finally:
         engine.dispose()
 
-    command.downgrade(migrations.alembic_config(db_path), "20260729_0042")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260729_0042")
     with sqlite3.connect(db_path) as conn:
         restored = conn.execute(
             "select id, type, author from messages where id in "
@@ -2922,7 +2923,7 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
     assert "msg_upgrade_chat" not in upgraded_messages
     assert chat_trace == ("tool_call", "msg_upgrade_chat")
 
-    command.downgrade(migrations.alembic_config(db_path), "20260726_0036")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260726_0036")
 
     with sqlite3.connect(db_path) as conn:
         downgraded = dict(
@@ -3238,7 +3239,7 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
     )
     assert version == (HEAD_REVISION,)
 
-    command.downgrade(migrations.alembic_config(db_path), "20260726_0037")
+    downgrade_legacy_schema(migrations.alembic_config(db_path), "20260726_0037")
 
     with sqlite3.connect(db_path) as conn:
         downgraded_rows = conn.execute(
@@ -3735,7 +3736,7 @@ def test_scope_id_nullability_repair_preserves_rows_and_references(
     engine.dispose()
     assert scope_id is None
 
-    command.downgrade(
+    downgrade_legacy_schema(
         migrations.alembic_config(db_path),
         PREVIOUS_HEAD_REVISION,
     )
