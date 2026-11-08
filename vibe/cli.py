@@ -7798,9 +7798,12 @@ def _record_live_cancel_fallback(
     *,
     reason_code: str,
     suppress_callback: bool = False,
+    restore_callback: bool = False,
     detail: object | None = None,
 ) -> dict:
     store.cancel_run(run_id, suppress_callback=suppress_callback)
+    if restore_callback:
+        store.mark_callback_pending(run_id)
     return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
 
 
@@ -7893,6 +7896,8 @@ async def _cancel_live_agent_run(
     run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
+    restore_callback = suppress_callback and str(run.get("callback_status") or "").strip() == "pending"
+
     async def _cancel_owner(owner):
         kwargs = {"agent_run_id": run_id}
         if suppress_callback:
@@ -7927,6 +7932,7 @@ async def _cancel_live_agent_run(
         run_id,
         controller_result,
         suppress_callback=suppress_callback,
+        restore_callback=restore_callback,
     )
 
 
@@ -7936,6 +7942,7 @@ def _settle_live_cancel(
     controller_result: dict,
     *,
     suppress_callback: bool = False,
+    restore_callback: bool = False,
 ) -> dict:
     """Classify the owner's answer and record the durable half, as the Stop it answered."""
     from storage.background import normalize_run_status
@@ -7970,6 +7977,8 @@ def _settle_live_cancel(
         and isinstance(body, dict)
         and str(body.get("status") or "").strip() == "run_settled"
     ):
+        if restore_callback:
+            store.mark_callback_pending(run_id)
         return {
             "code": "run_already_settled",
             "live_cancel_attempted": False,
@@ -7985,6 +7994,7 @@ def _settle_live_cancel(
             run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
             suppress_callback=suppress_callback,
+            restore_callback=restore_callback,
             detail={
                 "controller_status_code": normalized_status_code,
                 "controller_response": body,
