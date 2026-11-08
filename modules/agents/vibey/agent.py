@@ -1721,17 +1721,23 @@ class VibeyAgent(BaseAgent):
         scans the ordinary static Skill directories.
         """
         from core.managed_skills import managed_skill_project_base
-        from core.system_prompt_injection import bot_for_turn, build_system_prompt_blocks, get_enabled_agents_for_prompt
+        from core.system_prompt_injection import (
+            bot_for_turn,
+            build_system_prompt_blocks,
+            get_enabled_agents_for_prompt,
+            get_enabled_projects_for_prompt,
+        )
 
         context = request.context
         skill_catalog_sink: list[dict] = []
 
         def build() -> list[RenderedPromptBlock]:
             # Every lookup runs here, off the loop: the enabled-Agent list and the Bot read SQLite.
+            bot = bot_for_turn(
+                getattr(self.controller, "vibe_agent_store", None), agent_id=request.vibe_agent_id, cwd=cwd
+            )
             return build_system_prompt_blocks(
-                bot=bot_for_turn(
-                    getattr(self.controller, "vibe_agent_store", None), agent_id=request.vibe_agent_id, cwd=cwd
-                ),
+                bot=bot,
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 backend=BACKEND,
                 include_quick_replies=getattr(self.config, "reply_enhancements", True)
@@ -1739,6 +1745,7 @@ class VibeyAgent(BaseAgent):
                 context=context,
                 fallback_platform=context.platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
+                projects=get_enabled_projects_for_prompt() if bot is not None else None,
                 skills_cwd=cwd or None,
                 skills_project_base=managed_skill_project_base(context),
                 skill_catalog_sink=skill_catalog_sink,

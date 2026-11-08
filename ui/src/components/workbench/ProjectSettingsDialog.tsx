@@ -8,6 +8,7 @@ import type { ProjectDefaultAgent, VibeAgentBrief, WorkbenchProject } from '../.
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { Button } from '../ui/button';
+import { Input } from '../ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { InfoHint } from '../ui/info-hint';
 import { AgentRoutePicker } from './AgentRoutePicker';
@@ -29,13 +30,14 @@ export const ProjectSettingsDialog: React.FC<{
 }> = ({ project, open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const { setProjectDefaultAgent, isSavingDefaultAgent } = useWorkbenchProjectsActions();
+  const { setProjectDefaultAgent, isSavingDefaultAgent, updateProjectDescription } = useWorkbenchProjectsActions();
   const { capabilities } = useInstanceAuthorization();
   const canManageProjects = capabilities.can_manage_projects;
   const canEditAgentsMd = canManageProjects;
   const canEditDefaultAgent = canManageProjects;
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
+  const [description, setDescription] = useState(project.description ?? '');
 
   // Agents feed the picker; fetch once per open (they rarely change).
   useEffect(() => {
@@ -82,7 +84,7 @@ export const ProjectSettingsDialog: React.FC<{
   return (
     <>
       <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-        <DialogContent className="max-w-md">
+        <DialogContent key={`${project.id}:${open ? 'open' : 'closed'}`} className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t('projectSettings.title')}</DialogTitle>
             <DialogDescription>{t('projectSettings.description')}</DialogDescription>
@@ -98,7 +100,25 @@ export const ProjectSettingsDialog: React.FC<{
               <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.workdir.hint')}</span>
             </section>
 
-            {/* 2. Default Agent (backend + model + effort). */}
+            {/* 2. Short description, included in Bot Project catalogs. */}
+            {canManageProjects ? (
+            <section className="flex flex-col gap-1.5">
+              <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.descriptionField.label')}</span>
+              <Input
+                value={description}
+                placeholder={t('projectSettings.descriptionField.placeholder')}
+                onChange={(event) => setDescription(event.target.value)}
+                onBlur={() => {
+                  if (description !== (project.description ?? '')) {
+                    void updateProjectDescription(project.id, description.trim());
+                  }
+                }}
+              />
+              <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.descriptionField.hint')}</span>
+            </section>
+            ) : null}
+
+            {/* 3. Default Agent (backend + model + effort). */}
             {canEditDefaultAgent ? (
             <section className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
@@ -124,7 +144,7 @@ export const ProjectSettingsDialog: React.FC<{
             </section>
             ) : null}
 
-            {/* 3. Project guidance prompt → the existing AGENTS.md editor. */}
+            {/* 4. Project guidance prompt → the existing AGENTS.md editor. */}
             {canEditAgentsMd ? (
             <section className="flex flex-col gap-1.5">
               <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.guidance.label')}</span>

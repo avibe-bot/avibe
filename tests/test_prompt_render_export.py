@@ -152,6 +152,9 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
             "handle": "main", "display_name": "", "role": "The user's main Bot.", "session_id": "ses_main",
             "builtin": True,
         }
+        options["projects"] = [
+            {"name": "Avibe", "description": "Build Avibe."},
+        ]
     return {"backend": backend, "agent_instructions": "Custom {unchanged} instructions", "options": options}
 
 

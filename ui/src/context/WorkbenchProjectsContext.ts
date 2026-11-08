@@ -43,6 +43,7 @@ export interface WorkbenchProjectsActions {
    *  i.e. no project-bound scope) forks with `null` and simply has no row to place. */
   forkSession: (projectId: string | null, sessionId: string) => Promise<WorkbenchSession | null>;
   renameProject: (projectId: string, name: string) => Promise<void>;
+  updateProjectDescription: (projectId: string, description: string) => Promise<void>;
   reorderProjects: (order: string[], expectedOrder: string[]) => Promise<void>;
   isReorderingProjects: boolean;
   /** Set the project's default Agent route (Project Settings): patches the shared
@@ -80,7 +81,7 @@ export interface WorkbenchProjectsActions {
    *  a create begun under the old gate cannot re-seed a tree that was dropped.
    *  `null` means exactly that — the project exists on the server, this document
    *  may no longer be allowed to show it, and the next activation will decide. */
-  createProject: (payload: { folder_path: string; display_name?: string }) => Promise<WorkbenchProject | null>;
+  createProject: (payload: { folder_path: string; display_name?: string; description?: string }) => Promise<WorkbenchProject | null>;
 }
 
 export interface WorkbenchProjectsTree extends WorkbenchProjectsActions {

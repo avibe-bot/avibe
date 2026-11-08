@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import literal_column, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.sql.expression import UnaryExpression
@@ -36,6 +36,8 @@ from vibe.authorization import (
 PROJECT_PLATFORM = "avibe"
 PROJECT_SCOPE_TYPE = "project"
 PROJECT_ORDER_KEY = "workbench.project_order.v1"
+# Canonical per-scope settings bag key for the short Project description.
+PROJECT_DESCRIPTION_KEY = "description"
 
 
 class ProjectOrderConflict(ValueError):
@@ -242,7 +244,30 @@ _PROJECT_COLUMNS = (
     scope_settings.c.agent_variant,
     scope_settings.c.model,
     scope_settings.c.reasoning_effort,
+    scope_settings.c.settings_json,
 )
+
+
+def _settings_object(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _project_description(raw: Any) -> str:
+    return " ".join(str(_settings_object(raw).get(PROJECT_DESCRIPTION_KEY) or "").split())
+
+
+def _set_project_description(raw: Any, description: Any) -> str:
+    settings = _settings_object(raw)
+    normalized = " ".join(str(description or "").split())
+    if normalized:
+        settings[PROJECT_DESCRIPTION_KEY] = normalized
+    else:
+        settings.pop(PROJECT_DESCRIPTION_KEY, None)
+    return json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
 
 
 def _default_agent_from_row(row: Any) -> Optional[dict[str, Any]]:
@@ -278,6 +303,7 @@ def _project_dict(row: Any) -> dict[str, Any]:
         "created_at": row["first_seen_at"],
         "last_active_at": row["last_seen_at"],
         "archived": not enabled,
+        "description": _project_description(row["settings_json"]),
         "default_agent": _default_agent_from_row(row),
         "metadata": metadata,
     }
@@ -320,16 +346,15 @@ def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any
         select(scope_settings.c.scope_id).where(scope_settings.c.scope_id == scope_id)
     ).scalar_one_or_none()
     if has_row is None:
-        conn.execute(
-            scope_settings.insert().values(
-                scope_id=scope_id,
-                enabled=1,
-                settings_version=1,
-                settings_json=json.dumps({}),
-                created_at=now,
-                **values,
-            )
-        )
+        insert_values = {
+            "scope_id": scope_id,
+            "enabled": 1,
+            "settings_version": 1,
+            "settings_json": json.dumps({}),
+            "created_at": now,
+            **values,
+        }
+        conn.execute(scope_settings.insert().values(**insert_values))
     else:
         conn.execute(update(scope_settings).where(scope_settings.c.scope_id == scope_id).values(**values))
 
@@ -469,6 +494,7 @@ def create_project(
     conn: Connection,
     folder_path: str,
     display_name: Optional[str] = None,
+    description: Any = _UNSET,
     *,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -544,7 +570,15 @@ def create_project(
             reasoning_effort=None,
             require_mention=None,
             settings_version=1,
-            settings_json=json.dumps({}),
+            settings_json=(
+                json.dumps(
+                    {PROJECT_DESCRIPTION_KEY: " ".join(str(description or "").split())},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if description is not _UNSET and " ".join(str(description or "").split())
+                else "{}"
+            ),
             created_at=now,
             updated_at=now,
         )
@@ -559,6 +593,7 @@ def update_project(
     *,
     display_name: Optional[str] = None,
     folder_path: Optional[str] = None,
+    description: Any = _UNSET,
     agent_id: Any = _UNSET,
     expected_agent_id: Any = _UNSET,
     agent_name: Any = _UNSET,
@@ -619,6 +654,11 @@ def update_project(
     # Folder + default-Agent columns all live on scope_settings, so batch them
     # into one write.
     settings_values: dict[str, Any] = {}
+    if description is not _UNSET:
+        current_settings = conn.execute(
+            select(scope_settings.c.settings_json).where(scope_settings.c.scope_id == scope_id)
+        ).scalar_one_or_none()
+        settings_values["settings_json"] = _set_project_description(current_settings, description)
     if folder_path is not None:
         settings_values["workdir"] = str(_resolve_folder(folder_path))
     if agent_id is not _UNSET and str(agent_id or "").strip():
@@ -734,6 +774,73 @@ def _project_payload(conn: Connection, scope_id: str) -> dict[str, Any]:
     if row is None:
         raise LookupError(f"Project not found: {scope_id}")
     return _project_dict(row)
+
+
+def list_enabled_projects_for_prompt(conn: Connection) -> list[dict[str, str]]:
+    """Return the path-free enabled Project catalog for Bot system prompts."""
+    # This state store is SQLite and scopes has an implicit insertion rowid. The
+    # timestamp is second-granularity for compatibility, so it cannot order two
+    # Projects created in one transaction; rowid preserves the actual creation
+    # order without adding a schema column or exposing navigation reordering.
+    creation_order = literal_column("scopes.rowid")
+    rows = conn.execute(
+        select(scopes.c.native_id, scopes.c.display_name, scope_settings.c.settings_json)
+        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
+        .where((scope_settings.c.enabled.is_(None)) | (scope_settings.c.enabled == 1))
+        .order_by(creation_order.asc())
+    ).mappings().all()
+    return [
+        {
+            "name": str(row["display_name"] or row["native_id"]),
+            "description": _project_description(row["settings_json"]),
+        }
+        for row in rows
+    ]
+
+
+def resolve_project_target(
+    conn: Connection,
+    name: str,
+    *,
+    active_only: bool = True,
+    require_workdir: bool = True,
+) -> dict[str, str]:
+    """Resolve a Project by public name or stable id for CLI/runtime consumers.
+
+    The service owns the lookup and its user-facing failures so commands such as
+    ``agent run`` and ``session list`` cannot drift in matching or disabled
+    project semantics.
+    """
+    needle = " ".join(str(name or "").split())
+    if not needle:
+        raise LookupError("Project name is required")
+    rows = conn.execute(
+        select(scopes.c.native_id, scopes.c.display_name, scope_settings.c.enabled, scope_settings.c.workdir)
+        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
+        .where((scopes.c.native_id == needle) | (scopes.c.display_name == needle))
+        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
+    ).mappings().all()
+    if not rows:
+        raise LookupError(f"Project not found: {needle}")
+    row = rows[0]
+    if active_only and row["enabled"] is not None and not bool(row["enabled"]):
+        raise LookupError(f"Project is disabled: {needle}")
+    folder = str(row["workdir"] or "").strip()
+    if require_workdir and not folder:
+        raise LookupError(f"Project has no working directory: {needle}")
+    return {
+        "id": str(row["native_id"]),
+        "name": str(row["display_name"] or row["native_id"]),
+        "scope_id": f"{PROJECT_PLATFORM}::{PROJECT_SCOPE_TYPE}::{row['native_id']}",
+        "workdir": folder,
+    }
+
+
+# Backward-compatible name for callers from the first implementation round.
+def resolve_project_for_agent_run(conn: Connection, name: str) -> dict[str, str]:
+    return resolve_project_target(conn, name, active_only=True, require_workdir=True)
 
 
 def make_directory(path: str) -> str:

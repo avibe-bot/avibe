@@ -32,6 +32,7 @@ def choose(previous, candidate, **overrides):
     (Component("file:global", "new", "/home/.avibe/AGENTS.md", True), 1),
     (Component("file:project", "new", "/project/AGENTS.md"), 2),
     (Component("harness-agents-prompt", "new"), 2),
+    (Component("projects-prompt", "new"), 2),
     (Component("skills-catalog", "new"), 2),
     (Component("mcp-catalog", "new"), 2),
     (Component("hosted-tools", "new"), 2),

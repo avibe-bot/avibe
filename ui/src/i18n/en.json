@@ -5087,6 +5087,11 @@
   "projectSettings": {
     "title": "Project settings",
     "description": "Configure where this project runs and which Agent its new sessions use.",
+    "descriptionField": {
+      "label": "Project description",
+      "placeholder": "What lasting work belongs here?",
+      "hint": "Shown to Bots when they choose a Project; filesystem paths stay private."
+    },
     "workdir": {
       "label": "Working directory",
       "hint": "The Agent works inside this directory.",

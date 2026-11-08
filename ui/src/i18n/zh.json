@@ -5087,6 +5087,11 @@
   "projectSettings": {
     "title": "项目设置",
     "description": "设置该项目的工作目录,以及在该项目下新建会话默认使用的 Agent。",
+    "descriptionField": {
+      "label": "项目描述",
+      "placeholder": "这里长期进行什么工作？",
+      "hint": "Bot 选择项目时会看到；文件系统路径不会暴露。"
+    },
     "workdir": {
       "label": "工作目录",
       "hint": "Agent 将在该工作目录下工作。",

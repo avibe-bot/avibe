@@ -57,6 +57,7 @@ COMPONENT_TIERS = {
     "bot-main-prompt": 1,
     "bot-harness-prompt": 1,
     "harness-agents-prompt": 2,
+    "projects-prompt": 2,
     "skills-catalog": 2,
     "skills-more-notice": 2,
     "mcp-catalog": 2,
@@ -70,6 +71,7 @@ OPTIONAL_MODULES = frozenset({
 })
 CATALOG_NAMES = {
     "harness-agents-prompt": "agents",
+    "projects-prompt": "projects",
     "skills-catalog": "skills",
     "skills-more-notice": "skills",
     "mcp-catalog": "mcp",

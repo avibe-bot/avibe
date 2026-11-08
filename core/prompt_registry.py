@@ -94,6 +94,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("vault-routing-prompt", "Vault Routing Prompt", "vault.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-routing-prompt", "Harness Routing Prompt", "harness.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("bots_rows", "enabled_agents_rows")),
+    PromptModule("projects-prompt", "Projects Prompt", "projects-prompt.md", placeholders=("project_rows", "more_notice")),
     PromptModule("project-context-prompt", "Project Context and History Prompt", "project-context.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("mcp-capabilities-prompt", "MCP Capabilities", "mcp.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("mcp-pagination-prompt", "MCP Discovery Pagination", "mcp-pagination.md", trailing_newlines=1),

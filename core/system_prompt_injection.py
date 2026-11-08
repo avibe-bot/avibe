@@ -302,6 +302,47 @@ def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptI
     return rows
 
 
+def get_enabled_projects_for_prompt() -> list[dict[str, str]]:
+    """Read the path-free enabled Project catalog for a Bot's prompt."""
+    try:
+        from storage.db import create_sqlite_engine
+        from storage import projects_service
+        from config import paths
+
+        engine = create_sqlite_engine(paths.get_sqlite_state_path(), read_only=True)
+        try:
+            with engine.connect() as conn:
+                return projects_service.list_enabled_projects_for_prompt(conn)
+        finally:
+            engine.dispose()
+    except Exception as exc:
+        logger.warning("Failed to list enabled Projects for prompt injection: %s", exc)
+        return []
+
+
+def _format_project_rows(projects: Iterable[Any]) -> tuple[str, str]:
+    from core.managed_skills import catalog_page_of
+
+    rows = list(projects)
+    def row_text(project: Any) -> str:
+        if isinstance(project, dict):
+            name = project.get("name") or ""
+            description = project.get("description") or "(no description)"
+        else:
+            name = getattr(project, "name", "")
+            description = getattr(project, "description", "") or "(no description)"
+        return (
+            f"| {_escape_markdown_table_cell(str(name))} | "
+            f"{_escape_markdown_table_cell(str(description))} |\n"
+        )
+
+    page, next_page = catalog_page_of(rows, row_text, 1)
+    more = ""
+    if next_page is not None:
+        more = f"\nMore Projects are available. Run `vibe project list --page {next_page}` to view more.\n"
+    return "".join(row_text(item) for item in page), more
+
+
 def build_system_prompt_blocks(
     *,
     agent_instructions: str = "",
@@ -316,6 +357,7 @@ def build_system_prompt_blocks(
     skills_project_base: str | Path | None = None,
     skill_catalog_sink: list[dict[str, Any]] | None = None,
     bot: BotPromptInfo | None = None,
+    projects: Optional[Iterable[Any]] = None,
     model: str = "",
 ) -> list[RenderedPromptBlock]:
     """The production composition, also exported by the debug command.
@@ -375,6 +417,9 @@ def build_system_prompt_blocks(
             blocks.append(
                 render_prompt_block("harness-agents-prompt", bots_rows=bots_rows, enabled_agents_rows=agent_rows)
             )
+        if bot is not None and projects is not None:
+            project_rows, more_notice = _format_project_rows(projects)
+            blocks.append(render_prompt_block("projects-prompt", project_rows=project_rows, more_notice=more_notice))
     if include_context_guidance:
         blocks.append(render_prompt_block("project-context-prompt"))
     from core.mcp_hub.prompt import build_mcp_prompt_blocks
