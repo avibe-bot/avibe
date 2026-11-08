@@ -7264,18 +7264,19 @@ def _project_cli_payload(project: Mapping[str, Any], *, recent_sessions: Any = N
 
 
 def cmd_project_list(args):
+    from core.system_prompt_injection import project_catalog_page
     from storage import projects_service
 
     page = max(int(getattr(args, "page", 1) or 1), 1)
     try:
         with _projects_cli_engine(read_only=True).connect() as conn:
-            projects = projects_service.list_projects(conn, authorization_context=None)
-        page_size = 50
-        start = (page - 1) * page_size
-        items = projects[start : start + page_size]
+            projects = projects_service.list_projects(
+                conn, creation_order=True, authorization_context=None
+            )
+        items, next_page = project_catalog_page(projects, page)
         payload = {"projects": [_project_cli_payload(project) for project in items]}
-        if start + page_size < len(projects):
-            payload["next_page"] = page + 1
+        if next_page is not None:
+            payload["next_page"] = next_page
         _print_cli_payload("projects", **payload)
         return 0
     except Exception as exc:
@@ -7288,27 +7289,17 @@ def cmd_project_show(args):
 
     try:
         with _projects_cli_engine(read_only=True).connect() as conn:
-            projects = projects_service.list_projects(
-                conn, include_archived=True, authorization_context=None
+            target = projects_service.resolve_project_target(
+                conn, args.name, active_only=False, require_workdir=False
             )
-            match = next(
-                (
-                    project for project in projects
-                    if str(project.get("id")) == args.name
-                    or str(project.get("display_name") or "").casefold() == str(args.name).casefold()
-                ),
-                None,
-            )
-            if match is None:
-                raise LookupError(f"Project not found: {args.name}")
-            project = projects_service.get_project(conn, match["id"], authorization_context=None)
-            sessions = workbench_sessions_service.list_sessions(
+            project = projects_service.get_project(conn, target["id"], authorization_context=None)
+            sessions = workbench_sessions_service.list_project_sessions_for_cli(
                 conn,
                 scope_id=project["scope_id"],
                 status="active",
                 limit=10,
                 authorization_context=None,
-            )["sessions"]
+            )
         _print_cli_payload("project", project=_project_cli_payload(project, recent_sessions=sessions))
         return 0
     except Exception as exc:
@@ -7365,23 +7356,17 @@ def cmd_project_update(args):
         if not kwargs:
             raise TaskCliError("at least one project field is required", code="project_update_empty")
         with _projects_cli_engine().begin() as conn:
-            projects = projects_service.list_projects(conn, include_archived=True, authorization_context=None)
-            match = next(
-                (
-                    project for project in projects
-                    if str(project.get("id")) == args.name
-                    or str(project.get("display_name") or "").casefold() == str(args.name).casefold()
-                ),
-                None,
+            target = projects_service.resolve_project_target(
+                conn, args.name, active_only=False, require_workdir=False
             )
-            if match is None:
-                raise LookupError(f"Project not found: {args.name}")
-            project = projects_service.update_project(conn, match["id"], authorization_context=None, **kwargs)
+            project = projects_service.update_project(conn, target["id"], authorization_context=None, **kwargs)
         _print_cli_payload("project", project=_project_cli_payload(project))
         return 0
     except Exception as exc:
         _print_task_error(exc)
         return 1
+
+
 def cmd_agent_run(args):
     """DB-free client; admission and enqueue belong to the warm controller."""
     from core.control_requests import ADMISSION_SECONDS, failure, new_request

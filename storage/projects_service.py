@@ -364,6 +364,7 @@ def list_projects(
     *,
     include_archived: bool = False,
     navigation_order: bool = False,
+    creation_order: bool = False,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return projects by recency unless a navigation consumer requests saved order."""
@@ -376,7 +377,9 @@ def list_projects(
         )
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
         .order_by(
-            scopes.c.first_seen_at.asc() if navigation_order else scopes.c.last_seen_at.desc(),
+            literal_column("scopes.rowid").asc() if creation_order else (
+                scopes.c.first_seen_at.asc() if navigation_order else scopes.c.last_seen_at.desc()
+            ),
             scopes.c.id.asc(),
         )
     )
@@ -778,24 +781,12 @@ def _project_payload(conn: Connection, scope_id: str) -> dict[str, Any]:
 
 def list_enabled_projects_for_prompt(conn: Connection) -> list[dict[str, str]]:
     """Return the path-free enabled Project catalog for Bot system prompts."""
-    # This state store is SQLite and scopes has an implicit insertion rowid. The
-    # timestamp is second-granularity for compatibility, so it cannot order two
-    # Projects created in one transaction; rowid preserves the actual creation
-    # order without adding a schema column or exposing navigation reordering.
-    creation_order = literal_column("scopes.rowid")
-    rows = conn.execute(
-        select(scopes.c.native_id, scopes.c.display_name, scope_settings.c.settings_json)
-        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
-        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .where((scope_settings.c.enabled.is_(None)) | (scope_settings.c.enabled == 1))
-        .order_by(creation_order.asc())
-    ).mappings().all()
     return [
         {
-            "name": str(row["display_name"] or row["native_id"]),
-            "description": _project_description(row["settings_json"]),
+            "name": project["display_name"] or project["id"],
+            "description": project["description"],
         }
-        for row in rows
+        for project in list_projects(conn, authorization_context=None, creation_order=True)
     ]
 
 
@@ -810,21 +801,35 @@ def resolve_project_target(
 
     The service owns the lookup and its user-facing failures so commands such as
     ``agent run`` and ``session list`` cannot drift in matching or disabled
-    project semantics.
+    project semantics. Exact IDs win; duplicate exact names use the oldest
+    ``scope_settings.created_at`` / scope-id order.
     """
     needle = " ".join(str(name or "").split())
     if not needle:
         raise LookupError("Project name is required")
     rows = conn.execute(
-        select(scopes.c.native_id, scopes.c.display_name, scope_settings.c.enabled, scope_settings.c.workdir)
+        select(
+            scopes.c.native_id,
+            scopes.c.display_name,
+            scope_settings.c.enabled,
+            scope_settings.c.workdir,
+            scope_settings.c.created_at,
+        )
         .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .where((scopes.c.native_id == needle) | (scopes.c.display_name == needle))
-        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
+        .order_by(scope_settings.c.created_at.asc(), scopes.c.id.asc())
     ).mappings().all()
-    if not rows:
-        raise LookupError(f"Project not found: {needle}")
-    row = rows[0]
+    id_matches = [row for row in rows if str(row["native_id"]) == needle]
+    if id_matches:
+        row = id_matches[0]
+    else:
+        name_matches = [
+            row for row in rows
+            if str(row["display_name"] or "").strip() == needle
+        ]
+        if not name_matches:
+            raise LookupError(f"Project not found: {needle}")
+        row = name_matches[0]
     if active_only and row["enabled"] is not None and not bool(row["enabled"]):
         raise LookupError(f"Project is disabled: {needle}")
     folder = str(row["workdir"] or "").strip()

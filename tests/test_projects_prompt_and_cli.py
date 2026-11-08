@@ -5,7 +5,8 @@ import pytest
 from modules.agents.vibey.prompt_snapshot import Component, component_tier
 from core.system_prompt_injection import BotPromptInfo, build_system_prompt_blocks
 from modules.im import MessageContext
-from storage import projects_service
+from storage import projects_service, workbench_sessions_service
+from storage.agent_session_rows import create_agent_session_row
 from storage.importer import ensure_sqlite_state
 from storage.db import create_sqlite_engine
 from vibe import cli
@@ -75,6 +76,30 @@ def test_agent_run_project_resolves_scope_and_workdir_and_reports_unknown(engine
     unknown = build_parser().parse_args(["agent", "run", "--agent", "default", "--project", "Missing", "--message", "Ship it"])
     with pytest.raises(cli.TaskCliError, match="Project not found: Missing"):
         cli._resolve_agent_run_scope_key(unknown, caller_context=None, source_session_id=None)
+
+
+def test_project_show_includes_background_sessions(engine, tmp_path):
+    folder = tmp_path / "project"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, str(folder), display_name="Demo")
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=project["scope_id"],
+            session_anchor="agent-run",
+            agent_backend="codex",
+            workdir=str(folder),
+            visibility="background",
+            title="Background work",
+        )
+        sessions = workbench_sessions_service.list_project_sessions_for_cli(
+            conn,
+            scope_id=project["scope_id"],
+            authorization_context=None,
+        )
+
+    assert [session["id"] for session in sessions] == [session_id]
+    assert sessions[0]["visibility"] == "background"
 
 
 def test_projects_prompt_is_bot_only_ordered_and_path_free():

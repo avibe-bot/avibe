@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { useEffect, useState } from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { FileText } from 'lucide-react';
 
@@ -15,7 +16,7 @@ import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch } from './AgentRoutePicker';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 
-// Per-project settings. Three sections:
+// Per-project settings. Four sections:
 //   1. Working directory (read-only) — where the Agent runs.
 //   2. Default Agent (backend + model + effort) — new sessions in this project
 //      inherit it; cleared = follow the global default. Reuses the same
@@ -23,6 +24,32 @@ import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 //      (no Save button), matching how the chat header patches a session.
 //   3. A button that opens the existing "Edit AGENTS.md" editor (the project's
 //      guidance prompt), which lives as a file in the project folder.
+const ProjectDescriptionField: React.FC<{
+  projectId: string;
+  description?: string;
+  updateProjectDescription: (projectId: string, description: string) => Promise<void>;
+  t: TFunction;
+}> = ({ projectId, description, updateProjectDescription, t }) => {
+  const [draft, setDraft] = useState(description ?? '');
+
+  return (
+    <section className="flex flex-col gap-1.5">
+      <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.descriptionField.label')}</span>
+      <Input
+        value={draft}
+        placeholder={t('projectSettings.descriptionField.placeholder')}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          if (draft !== (description ?? '')) {
+            void updateProjectDescription(projectId, draft.trim());
+          }
+        }}
+      />
+      <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.descriptionField.hint')}</span>
+    </section>
+  );
+};
+
 export const ProjectSettingsDialog: React.FC<{
   project: WorkbenchProject;
   open: boolean;
@@ -37,7 +64,6 @@ export const ProjectSettingsDialog: React.FC<{
   const canEditDefaultAgent = canManageProjects;
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
-  const [description, setDescription] = useState(project.description ?? '');
 
   // Agents feed the picker; fetch once per open (they rarely change).
   useEffect(() => {
@@ -84,7 +110,7 @@ export const ProjectSettingsDialog: React.FC<{
   return (
     <>
       <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-        <DialogContent key={`${project.id}:${open ? 'open' : 'closed'}`} className="max-w-md">
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t('projectSettings.title')}</DialogTitle>
             <DialogDescription>{t('projectSettings.description')}</DialogDescription>
@@ -102,20 +128,13 @@ export const ProjectSettingsDialog: React.FC<{
 
             {/* 2. Short description, included in Bot Project catalogs. */}
             {canManageProjects ? (
-            <section className="flex flex-col gap-1.5">
-              <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.descriptionField.label')}</span>
-              <Input
-                value={description}
-                placeholder={t('projectSettings.descriptionField.placeholder')}
-                onChange={(event) => setDescription(event.target.value)}
-                onBlur={() => {
-                  if (description !== (project.description ?? '')) {
-                    void updateProjectDescription(project.id, description.trim());
-                  }
-                }}
+              <ProjectDescriptionField
+                key={`${project.id}:${open ? 'open' : 'closed'}`}
+                projectId={project.id}
+                description={project.description}
+                updateProjectDescription={updateProjectDescription}
+                t={t}
               />
-              <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.descriptionField.hint')}</span>
-            </section>
             ) : null}
 
             {/* 3. Default Agent (backend + model + effort). */}

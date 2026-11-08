@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from core.message_context import resolve_context_platform
 from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, order_prompt_blocks, render_prompt, render_prompt_block
@@ -320,27 +320,32 @@ def get_enabled_projects_for_prompt() -> list[dict[str, str]]:
         return []
 
 
-def _format_project_rows(projects: Iterable[Any]) -> tuple[str, str]:
+def _project_row_text(project: Any) -> str:
+    if isinstance(project, dict):
+        name = project.get("name") or project.get("display_name") or ""
+        description = project.get("description") or "(no description)"
+    else:
+        name = getattr(project, "name", "")
+        description = getattr(project, "description", "") or "(no description)"
+    return (
+        f"| {_escape_markdown_table_cell(str(name))} | "
+        f"{_escape_markdown_table_cell(str(description))} |\n"
+    )
+
+
+def project_catalog_page(projects: Iterable[Any], page: int = 1) -> tuple[Sequence[Any], int | None]:
     from core.managed_skills import catalog_page_of
 
-    rows = list(projects)
-    def row_text(project: Any) -> str:
-        if isinstance(project, dict):
-            name = project.get("name") or ""
-            description = project.get("description") or "(no description)"
-        else:
-            name = getattr(project, "name", "")
-            description = getattr(project, "description", "") or "(no description)"
-        return (
-            f"| {_escape_markdown_table_cell(str(name))} | "
-            f"{_escape_markdown_table_cell(str(description))} |\n"
-        )
+    return catalog_page_of(list(projects), _project_row_text, page)
 
-    page, next_page = catalog_page_of(rows, row_text, 1)
+
+def _format_project_rows(projects: Iterable[Any]) -> tuple[str, str]:
+    rows = list(projects)
+    page, next_page = project_catalog_page(rows, 1)
     more = ""
     if next_page is not None:
         more = f"\nMore Projects are available. Run `vibe project list --page {next_page}` to view more.\n"
-    return "".join(row_text(item) for item in page), more
+    return "".join(_project_row_text(item) for item in page), more
 
 
 def build_system_prompt_blocks(
