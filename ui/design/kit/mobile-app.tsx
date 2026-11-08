@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Globe, KeyRound, Laptop, MonitorDown, Plus, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, Plus, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -23,6 +23,8 @@ export interface MobileLoginFixture {
   cooldown?: 60 | 15;
   resent?: boolean;
   compact?: boolean;
+  /** `password/*`: the email step also offers password sign-in. */
+  password?: boolean;
 }
 /** The second step after the email code, for an account with two-step verification. */
 export interface MobileSecondFactorFixture {
@@ -32,6 +34,19 @@ export interface MobileSecondFactorFixture {
   code?: string;
   busy?: 'passkey' | 'verifying';
   error?: 'passkey-failed' | 'code-invalid' | 'rate-limited' | 'network';
+  compact?: boolean;
+}
+/** Password sign-in, the alternative first factor for an account that set a password on avibe.bot. */
+export interface MobilePasswordFixture {
+  email: string;
+  password?: string;
+  shown?: boolean;
+  /** The password field has focus (drawn statically: the keyboard-up composition). */
+  focused?: boolean;
+  busy?: boolean;
+  error?: 'invalid-credentials' | 'email-not-confirmed' | 'rate-limited' | 'network';
+  /** Seconds before Sign in is offered again after `rate-limited`; static here. */
+  wait?: number;
   compact?: boolean;
 }
 export type PickerState = 'own' | 'mixed' | 'current' | 'offline' | 'offline-tapped' | 'loading' | 'error' | 'pulling' | 'refreshing';
@@ -65,6 +80,8 @@ function Primary({ children, disabled = false }: { children: ReactNode; disabled
   return <Button variant="brand" size="lg" disabled={disabled} className="w-full gap-3 rounded-full shadow-mint-card-sm">{children}<ArrowRight className="size-4" /></Button>;
 }
 const raised = 'rounded-3xl border border-border bg-surface/80 p-5 shadow-mint-card-sm';
+/** A secondary way through a step, below its primary action. */
+const alternative = 'h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline';
 function PageTitle({ title, subtitle }: { title: string; subtitle?: string }) {
   return <div className="pt-9 pb-7"><h1 className="text-3xl font-semibold leading-tight tracking-tight">{title}</h1>{subtitle && <p className="mt-4 text-sm leading-6 text-muted">{subtitle}</p>}</div>;
 }
@@ -89,7 +106,7 @@ export function WelcomeIntro({ fixture }: { fixture: MobileLoginFixture }) {
   const { step, email, code = '', busy, error, cooldown, resent, compact = false } = fixture;
   const codeStep = step === 'code';
   const invalid = error === 'email-invalid' || error === 'code-invalid' || error === 'code-expired';
-  const notice = error === 'email-invalid' ? t('请填写有效的邮箱以接收验证码。', 'Enter a valid email to receive a verification code.')
+  const notice = error === 'email-invalid' ? (fixture.password ? t('请填写有效的邮箱。', 'Enter a valid email address.') : t('请填写有效的邮箱以接收验证码。', 'Enter a valid email to receive a verification code.'))
     : error === 'code-invalid' || error === 'code-expired' ? t('验证码无效或已过期，请重试或重新发送邮件。', 'Invalid or expired code. Try again or resend the email.')
       : error === 'rate-limited' ? t('请求过于频繁，请稍后再试。', 'Too many requests. Please try again later.')
         : error === 'network' ? t('暂时连不上 avibe.bot。检查网络后重试。', 'Could not reach avibe.bot. Check your connection and retry.')
@@ -103,7 +120,7 @@ export function WelcomeIntro({ fixture }: { fixture: MobileLoginFixture }) {
       <div className="mt-6 text-center text-sm leading-7"><p className="text-muted">{t('没收到验证码？', 'Didn’t receive a code?')}</p><Button variant="link" size="compact" disabled={Boolean(busy) || Boolean(cooldown)} className="h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline">{busy === 'resending' ? t('重新发送中…', 'Resending…') : cooldown ? t(`${cooldown} 秒后可重新发送`, `Resend in ${cooldown}s`) : t('重新发送', 'Resend')}</Button></div>
       <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">{t('可直接粘贴验证码，也可以检查垃圾邮件文件夹。', 'Paste your code here. You can also check your spam folder.')}</p>
     </> : <>
-      <div className="rounded-3xl border border-border bg-surface/70 p-6 shadow-mint-card"><div className="flex flex-col gap-6"><div className="flex flex-col gap-3"><Label htmlFor="mobile-login-email">{t('邮箱', 'Email')}</Label><Input id="mobile-login-email" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} defaultValue={email} placeholder="you@example.com" disabled={Boolean(busy)} aria-invalid={invalid || undefined} aria-describedby="mobile-login-hint mobile-login-feedback" className="h-14 rounded-2xl bg-surface px-4 text-base shadow-sm" /><p id="mobile-login-hint" className="text-xs leading-6 text-muted">{t('新邮箱将自动注册，无需设置密码。', 'New emails create an account automatically. No password needed.')}</p><div id="mobile-login-feedback">{notice && <p role="alert" className="text-xs leading-6 text-destructive-ink">{notice}</p>}</div></div><div aria-busy={busy === 'sending'}><Primary disabled={Boolean(busy)}>{busy === 'sending' ? t('发送中…', 'Sending…') : t('发送验证码', 'Send verification code')}</Primary></div></div></div>
+      <div className="rounded-3xl border border-border bg-surface/70 p-6 shadow-mint-card"><div className="flex flex-col gap-6"><div className="flex flex-col gap-3"><Label htmlFor="mobile-login-email">{t('邮箱', 'Email')}</Label><Input id="mobile-login-email" type="email" inputMode="email" autoComplete="email" autoCapitalize="none" spellCheck={false} defaultValue={email} placeholder="you@example.com" disabled={Boolean(busy)} aria-invalid={invalid || undefined} aria-describedby="mobile-login-hint mobile-login-feedback" className="h-14 rounded-2xl bg-surface px-4 text-base shadow-sm" /><p id="mobile-login-hint" className="text-xs leading-6 text-muted">{t('新邮箱将自动注册，无需设置密码。', 'New emails create an account automatically. No password needed.')}</p><div id="mobile-login-feedback">{notice && <p role="alert" className="text-xs leading-6 text-destructive-ink">{notice}</p>}</div></div><div className="flex flex-col gap-3"><div aria-busy={busy === 'sending'}><Primary disabled={Boolean(busy)}>{busy === 'sending' ? t('发送中…', 'Sending…') : t('发送验证码', 'Send verification code')}</Primary></div>{fixture.password && <Button variant="link" size="compact" disabled={Boolean(busy)} className={cn(alternative, 'gap-2 self-center')}><KeyRound className="size-4" />{t('使用密码登录', 'Sign in with password')}</Button>}</div></div></div>
       <p className="mt-auto pt-8 pb-4 text-center text-xs leading-6 text-muted">{t('验证码会送到你的邮箱，在这里完成登录。', 'We’ll email you a code. Enter it here to sign in.')}</p>
     </>}
   </CloudScreen>;
@@ -174,5 +191,66 @@ export function SecondFactorPage({ fixture }: { fixture: MobileSecondFactorFixtu
     {setup && <><div className={cn(raised, 'text-sm leading-7 text-muted')}>{t('在 avibe.bot 网页的「账号安全」里添加通行密钥或身份验证器 App，完成后回到这里继续。', 'On avibe.bot, open Account security and add a passkey or an authenticator app. Then come back here to continue.')}</div><div className="mt-5 flex flex-col gap-3"><Button variant="brand" size="lg" className="w-full gap-2 rounded-full shadow-mint-card-sm"><ExternalLink className="size-4" />{t('打开 avibe.bot', 'Open avibe.bot')}</Button><Button variant="outline" size="lg" className="w-full gap-2 whitespace-normal rounded-full"><RotateCw className="size-4 shrink-0" />{t('我已开启，继续', 'I’ve turned it on · Continue')}</Button></div></>}
     {alternatives.some(Boolean) && <div className="mt-6 flex flex-col items-center gap-1">{alternatives.filter(Boolean).map(label => <Button key={label as string} variant="link" size="compact" disabled={Boolean(busy)} className="h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline">{label}</Button>)}</div>}
     <div className="mt-auto pt-7 pb-3 text-center"><Button variant="link" size="compact" disabled={Boolean(busy)} className="h-auto px-0 text-xs text-muted underline">{t('使用其他账号登录', 'Sign in with a different account')}</Button></div>
+  </CloudScreen>;
+}
+
+/** The key tile that heads the password pages, the same raised tile as two-step verification. */
+function PageMark({ compact = false, warn = false }: { compact?: boolean; warn?: boolean }) {
+  return <span className={cn('grid place-items-center rounded-3xl border bg-surface/80 shadow-mint-card-sm', warn ? 'border-gold/40' : 'border-border', compact ? 'mb-3 size-14' : 'mb-5 size-16')}>{warn ? <AlertTriangle className="size-7 text-gold-ink" /> : <KeyRound className="size-7 text-mint-ink" />}</span>;
+}
+
+/**
+ * Sign in with the avibe.bot password. The email comes from the email step and
+ * shows complete, with Change email; a visually hidden username field carries it
+ * so the system can match a saved password. Errors that the email code resolves
+ * promote "Use an email code instead" to a button.
+ */
+export function PasswordPage({ fixture }: { fixture: MobilePasswordFixture }) {
+  const t = useCopy();
+  const { email, password = '', shown = false, focused = false, busy = false, error, wait, compact = false } = fixture;
+  const wrong = error === 'invalid-credentials';
+  const codeFixes = wrong || error === 'email-not-confirmed';
+  const notice = wrong ? t('邮箱或密码不正确。还没设置过密码？请改用邮箱验证码登录。', 'Wrong email or password. Haven’t set a password? Use an email code instead.')
+    : error === 'email-not-confirmed' ? t('这个邮箱还没有确认。用邮箱验证码登录，即可完成确认。', 'This email isn’t confirmed yet. Sign in with an email code to confirm it.')
+      : error === 'rate-limited' ? t('尝试次数过多，请稍后再试。', 'Too many attempts. Please try again shortly.')
+        : error === 'network' ? t('暂时连不上 avibe.bot。检查网络后重试。', 'Could not reach avibe.bot. Check your connection and retry.') : null;
+  const useCode = t('改用邮箱验证码登录', 'Use an email code instead');
+  return <CloudScreen><Brand back /><div className={cn('flex flex-col items-center', compact ? 'pt-3 pb-3' : 'pt-8 pb-6')}>{!compact && <PageMark />}<h1 className={cn('text-center font-semibold leading-tight tracking-tight', compact ? 'text-2xl' : 'text-3xl')}>{t('输入密码。', 'Enter your password.')}</h1></div>
+    <div className={cn('text-center', compact ? 'pb-4' : 'pb-7')}>{!compact && <p className="text-sm leading-7 text-muted">{t('登录账号', 'Signing in as')}</p>}<p className="break-all text-sm font-medium leading-6">{email}</p><Button variant="link" size="compact" disabled={busy} className="mt-1 px-0 text-muted underline">{t('修改邮箱', 'Change email')}</Button></div>
+    <form className={cn('rounded-3xl border border-border bg-surface/70 shadow-mint-card', compact ? 'p-5' : 'p-6')}>
+      <Input type="email" name="username" autoComplete="username" defaultValue={email} readOnly tabIndex={-1} aria-hidden="true" className="sr-only" />
+      <div className={cn('flex flex-col', compact ? 'gap-4' : 'gap-6')}><div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-3"><Label htmlFor="mobile-login-password">{t('密码', 'Password')}</Label><Button variant="link" size="compact" disabled={busy} className="h-auto px-0 text-sm text-muted underline">{t('忘记密码？', 'Forgot password?')}</Button></div>
+        <div className="relative"><Input id="mobile-login-password" name="password" type={shown ? 'text' : 'password'} autoComplete="current-password" autoCapitalize="none" spellCheck={false} enterKeyHint="go" defaultValue={password} disabled={busy} aria-invalid={wrong || undefined} aria-describedby="mobile-login-password-feedback" className={cn('h-14 rounded-2xl bg-surface pr-14 pl-4 text-base shadow-sm', wrong && 'border-destructive', focused && !wrong && 'border-ring ring-2 ring-ring')} /><Button type="button" variant="ghost" size="icon" disabled={busy} aria-pressed={shown} aria-label={t('显示密码', 'Show password')} className="absolute top-1/2 right-1.5 size-11 -translate-y-1/2 rounded-xl text-muted">{shown ? <EyeOff className="size-5" /> : <Eye className="size-5" />}</Button></div>
+        <div id="mobile-login-password-feedback" className={cn(!compact && 'min-h-6')}>{notice && <p role="alert" className="text-xs leading-6 text-destructive-ink">{notice}</p>}</div>
+      </div><div aria-busy={busy}><Primary disabled={busy || !password || Boolean(wait)}>{busy ? t('登录中…', 'Signing in…') : wait ? t(`${wait} 秒后可重试`, `Try again in ${wait}s`) : t('登录', 'Sign in')}</Primary></div></div>
+    </form>
+    <div className="mt-6 flex flex-col items-center">{codeFixes ? <Button variant="outline" size="lg" disabled={busy} className="w-full gap-2 whitespace-normal rounded-full"><Mail className="size-4 shrink-0" />{useCode}</Button> : <Button variant="link" size="compact" disabled={busy} className={cn(alternative, 'gap-2')}><Mail className="size-4" />{useCode}</Button>}</div>
+    <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">{t('还没有密码？用邮箱验证码登录后，可以在 avibe.bot 的「账号安全」里设置。', 'No password yet? Sign in with an email code, then set one in Account security on avibe.bot.')}</p>
+  </CloudScreen>;
+}
+
+/**
+ * Forgot password. Email sign-in always works, so the code comes first; a new
+ * password is set on avibe.bot's Account security page, opened in Safari.
+ */
+export function ForgotPasswordPage({ email }: { email: string }) {
+  const t = useCopy();
+  return <CloudScreen><Brand back /><div className="flex flex-col items-center pt-8 pb-6"><PageMark /><h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">{t('忘记密码了？', 'Forgot your password?')}</h1><p className="mt-3 text-center text-sm leading-6 text-muted">{t('邮件登录始终可用。', 'Email sign-in always works.')}</p></div>
+    <div className="pb-7 text-center"><p className="text-sm leading-7 text-muted">{t('账号', 'Account')}</p><p className="break-all text-sm font-medium leading-6">{email}</p></div>
+    <section className={cn(raised, 'flex flex-col gap-4')}><div><h2 className="text-base font-semibold">{t('现在登录', 'Sign in now')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('验证码会发到这个邮箱，在这里输入就能登录。', 'We’ll email a code to this address. Enter it here to sign in.')}</p></div><Primary>{t('发送验证码', 'Send verification code')}</Primary></section>
+    <section className={cn(raised, 'mt-4 flex flex-col gap-4')}><div><h2 className="text-base font-semibold">{t('设置新密码', 'Set a new password')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('在 Safari 中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。', 'Open Account security on avibe.bot in Safari. Sign in with your email, then choose Set or change password.')}</p></div><Button variant="outline" size="lg" className="w-full gap-2 whitespace-normal rounded-full"><ExternalLink className="size-4 shrink-0" />{t('在 Safari 中打开', 'Open in Safari')}</Button></section>
+  </CloudScreen>;
+}
+
+/**
+ * Signed in, but avibe.bot reports the password as weak (it appeared in a data
+ * breach). A one-time notice before the instance picker; Continue never blocks.
+ */
+export function WeakPasswordNotice({ email }: { email: string }) {
+  const t = useCopy();
+  return <CloudScreen><Brand /><div className="flex flex-1 flex-col items-center justify-center py-10 text-center"><PageMark warn /><h1 className="text-3xl font-semibold leading-tight tracking-tight">{t('建议更换密码。', 'Time for a new password.')}</h1><p className="mt-4 text-sm leading-7 text-muted">{t('已登录', 'Signed in as')}</p><p className="break-all text-sm font-medium leading-6">{email}</p>
+    <div className={cn(raised, 'mt-7 w-full text-left text-sm leading-7 text-muted')}>{t('这个密码出现在已知的数据泄露中，别人可能猜到它。请在 avibe.bot 的「账号安全」里换一个新密码。', 'This password has appeared in a data breach, so others may guess it. Choose a new one in Account security on avibe.bot.')}</div>
+    <div className="mt-8 flex w-full flex-col gap-3"><Primary>{t('继续', 'Continue')}</Primary><Button variant="outline" size="lg" className="w-full gap-2 whitespace-normal rounded-full"><ExternalLink className="size-4 shrink-0" />{t('在 Safari 中更换密码', 'Change it in Safari')}</Button></div></div>
   </CloudScreen>;
 }
