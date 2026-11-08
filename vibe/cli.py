@@ -6232,6 +6232,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             help_command=help_command,
         )
     if fork_session or fork_self:
+        if project:
+            raise TaskCliError(
+                "--project cannot be combined with a fork",
+                code="project_with_fork",
+                hint="Fork the source Session without --project, or start a new Session with --project to place it in that directory.",
+                help_command=help_command,
+            )
         return "fork"
     if project and (getattr(args, "cwd", None) or "").strip():
         raise TaskCliError(

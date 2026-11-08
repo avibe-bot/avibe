@@ -804,7 +804,7 @@ def resolve_project_target(
     project semantics. Exact IDs win; duplicate exact names use the oldest
     ``scope_settings.created_at`` / scope-id order.
     """
-    needle = " ".join(str(name or "").split())
+    needle = str(name or "").strip()
     if not needle:
         raise LookupError("Project name is required")
     rows = conn.execute(

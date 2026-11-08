@@ -50,7 +50,17 @@ def test_project_description_round_trips_and_resolves_by_name_or_id(engine, tmp_
         assert projects_service.resolve_project_target(conn, second["id"])["id"] == second["id"]
 
 
-def test_project_resolver_rejects_disabled_projects_clearly(engine, tmp_path):
+def test_project_resolver_preserves_internal_name_whitespace(engine, tmp_path):
+    folder = tmp_path / "spaced"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, str(folder), display_name="Demo  App")
+    with engine.connect() as conn:
+        assert projects_service.resolve_project_target(conn, "  Demo  App  ")["id"] == project["id"]
+        with pytest.raises(LookupError, match="Project not found: Demo App"):
+            projects_service.resolve_project_target(conn, "Demo App")
+
+
     folder = tmp_path / "disabled"
     folder.mkdir()
     with engine.begin() as conn:
@@ -76,6 +86,25 @@ def test_agent_run_project_resolves_scope_and_workdir_and_reports_unknown(engine
     unknown = build_parser().parse_args(["agent", "run", "--agent", "default", "--project", "Missing", "--message", "Ship it"])
     with pytest.raises(cli.TaskCliError, match="Project not found: Missing"):
         cli._resolve_agent_run_scope_key(unknown, caller_context=None, source_session_id=None)
+
+
+def test_agent_run_project_rejects_fork_placement():
+    args = build_parser().parse_args(
+        [
+            "agent",
+            "run",
+            "--agent",
+            "default",
+            "--fork-session",
+            "ses-source",
+            "--project",
+            "Demo",
+            "--message",
+            "Ship it",
+        ]
+    )
+    with pytest.raises(cli.TaskCliError, match="--project cannot be combined with a fork"):
+        cli._validate_run_session_policy(args, help_command="vibe agent run --help")
 
 
 def test_project_show_includes_background_sessions(engine, tmp_path):
