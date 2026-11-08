@@ -5955,6 +5955,7 @@
       "toolsHiddenLive": "工具调用已隐藏 · 进行中",
       "params": "参数",
       "viewJson": "JSON",
+      "loading": "正在加载执行过程…",
       "jsonLoading": "加载中…",
       "copy": "复制",
       "copied": "已复制",

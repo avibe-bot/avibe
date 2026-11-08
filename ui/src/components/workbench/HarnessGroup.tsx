@@ -25,17 +25,14 @@ export function HarnessGroup({
   members,
   expanded,
   closing = false,
-  closed = false,
   onToggle,
 }: {
   /** Stable across growth; the Transcript finds the head by it after a collapse. */
   groupKey: string;
   members: WorkbenchMessage[];
   expanded: boolean;
-  /** Closed, while its members leave in place: still drawn as open, so nothing moves until they are gone. */
+  /** Closed, while its members fold back: still drawn as open, so nothing moves until they are gone. */
   closing?: boolean;
-  /** Its members have just left: the folded card comes in where they were (`motion-summary-in`). */
-  closed?: boolean;
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
@@ -44,12 +41,41 @@ export function HarnessGroup({
   const link = chatTriggerLink(latest, t('chat.source.agentFallback'));
   const latestSource = link?.kind === 'source' ? link.label : t(harnessChipLabelKey(latest));
 
-  const head = (
-    <span className="flex min-w-0 items-center gap-2 px-0.5 text-left">
+  const headLine = (hidden = false) => (
+    <span className={clsx('flex min-w-0 items-center gap-2 px-0.5 text-left', hidden && 'invisible')}>
       <RoleAvatar tone="cyan">
         <Layers />
       </RoleAvatar>
       <span className="shrink-0 text-[11px] font-semibold text-cyan-ink">{countLabel}</span>
+    </span>
+  );
+  const head = headLine();
+  // The folded card: what the group is closed, under its head line. `copy`: the inert copy the members fold
+  // back into, whose words come in only once its card covers them (lib/transcriptMotion).
+  const folded = (copy = false) => (
+    <span className="relative block w-[min(100%,460px)] pb-3">
+      {/* Two offset sheets behind the latest message: more is folded in. */}
+      <span aria-hidden className="absolute inset-x-5 bottom-0 top-5 rounded-xl border border-cyan/25 bg-background opacity-60" />
+      <span aria-hidden className="absolute inset-x-2.5 bottom-1.5 top-2.5 rounded-xl border border-cyan/30 bg-background" />
+      <span className="relative block rounded-xl rounded-tl-md bg-background">
+        <span
+          {...(copy ? { 'data-transcript-summary-late': '' } : {})}
+          className={clsx(
+            'flex items-center gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 transition-colors',
+            'group-hover/harness:bg-cyan/[0.10]',
+          )}
+        >
+          <span className="shrink-0 rounded bg-cyan/[0.10] px-1 text-[10px] font-bold text-cyan-ink">
+            {t('chat.harnessGroup.latest')}
+          </span>
+          <span className="max-w-[40%] shrink-0 truncate text-[11px] font-medium text-cyan-ink">{latestSource}</span>
+          <span className="min-w-0 flex-1 truncate text-[12px] text-muted">{latest.text?.trim()}</span>
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-[11px] font-semibold text-cyan-ink">
+            {t('chat.harnessGroup.expand')}
+            <ChevronDown className="size-3.5" />
+          </span>
+        </span>
+      </span>
     </span>
   );
 
@@ -64,7 +90,7 @@ export function HarnessGroup({
 
   if (expanded || closing) {
     return (
-      <div {...rowAttributes} className="flex w-full justify-start">
+      <div {...rowAttributes} className="relative flex w-full justify-start">
         <button
           type="button"
           onClick={onToggle}
@@ -77,13 +103,25 @@ export function HarnessGroup({
           <span
             className={clsx(
               'inline-flex shrink-0 items-center gap-0.5 rounded-md bg-cyan/[0.08] px-1.5 py-0.5 text-[11px] font-semibold text-cyan-ink group-hover/harness:bg-cyan/[0.14]',
-              closing && 'motion-disclose-out-fade',
+              closing && 'motion-disclose-chrome-out',
             )}
           >
             {t('chat.collapse')}
             <ChevronDown className="size-3.5 rotate-180" />
           </span>
         </button>
+        {/* The group as it will be closed, inert and unseen, where it will be, so closing cross-fades into its
+            folded card and opening out of it (lib/transcriptMotion). Its head line is the real one's, so it is
+            not drawn. */}
+        <span
+          aria-hidden="true"
+          inert
+          data-transcript-summary=""
+          className="pointer-events-none absolute left-0 top-0 z-[1] flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left opacity-0"
+        >
+          {headLine(true)}
+          {folded(true)}
+        </span>
       </div>
     );
   }
@@ -98,30 +136,7 @@ export function HarnessGroup({
         className="group/harness flex max-w-[min(92%,860px)] flex-col items-start gap-1.5 text-left"
       >
         {head}
-        {/* The folded card comes in where the members left; the head above it stays as it was. */}
-        <span className={clsx('relative block w-[min(100%,460px)] pb-3', closed && 'motion-summary-in')}>
-          {/* Two offset sheets behind the latest message: more is folded in. */}
-          <span aria-hidden className="absolute inset-x-5 bottom-0 top-5 rounded-xl border border-cyan/25 bg-background opacity-60" />
-          <span aria-hidden className="absolute inset-x-2.5 bottom-1.5 top-2.5 rounded-xl border border-cyan/30 bg-background" />
-          <span className="relative block rounded-xl rounded-tl-md bg-background">
-            <span
-              className={clsx(
-                'flex items-center gap-2 rounded-xl rounded-tl-md border border-dashed border-cyan/40 bg-cyan/[0.05] px-3 py-1.5 transition-colors',
-                'group-hover/harness:bg-cyan/[0.10]',
-              )}
-            >
-              <span className="shrink-0 rounded bg-cyan/[0.10] px-1 text-[10px] font-bold text-cyan-ink">
-                {t('chat.harnessGroup.latest')}
-              </span>
-              <span className="max-w-[40%] shrink-0 truncate text-[11px] font-medium text-cyan-ink">{latestSource}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-muted">{latest.text?.trim()}</span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-[11px] font-semibold text-cyan-ink">
-                {t('chat.harnessGroup.expand')}
-                <ChevronDown className="size-3.5" />
-              </span>
-            </span>
-          </span>
-        </span>
+        {folded()}
       </button>
     </div>
   );
@@ -136,7 +151,7 @@ export function HarnessGroupCollapse({ groupKey, count, onCollapse, closing = fa
       data-transcript-row=""
       {...{ [ITEM_KEY_ATTRIBUTE]: `harness-collapse:${groupKey}`, [REVEAL_ATTRIBUTE]: '' }}
       aria-hidden={closing || undefined}
-      className={clsx(HARNESS_GROUP_RAIL, closing && 'motion-disclose-out-children')}
+      className={clsx(HARNESS_GROUP_RAIL, closing && 'motion-disclose-leaving')}
     >
       <button
         type="button"

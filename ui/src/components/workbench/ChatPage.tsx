@@ -6079,8 +6079,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
 
 /**
  * A Harness group in the transcript: its head, and while it is open its members on the rail and the bar
- * that closes it, each a transcript item of its own. Closed, the members leave in place while the head
- * still draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
+ * that closes it, each a transcript item of its own. Closed, the members fold back while the head still
+ * draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
  */
 function HarnessGroupItem({
   groupKey,
@@ -6095,7 +6095,7 @@ function HarnessGroupItem({
   onToggle: () => void;
   renderRow: (message: WorkbenchMessage, index: number) => React.ReactNode;
 }) {
-  const { present, closing, closed } = useDisclosure(open);
+  const { present, closing } = useDisclosure(open);
   return (
     <>
       <HarnessGroup
@@ -6103,7 +6103,6 @@ function HarnessGroupItem({
         members={members.map(({ message }) => message)}
         expanded={open}
         closing={closing}
-        closed={closed}
         onToggle={onToggle}
       />
       {present && members.map(({ message, index }) => (
@@ -6112,7 +6111,7 @@ function HarnessGroupItem({
           data-transcript-row=""
           {...{ [ITEM_KEY_ATTRIBUTE]: `harness-member:${message.id}`, [REVEAL_ATTRIBUTE]: '' }}
           aria-hidden={closing || undefined}
-          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-out-children')}
+          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-leaving')}
         >
           {renderRow(message, index)}
         </div>
@@ -6617,7 +6616,7 @@ export const MessageRow = memo(function MessageRow({
             <div
               {...{ [REVEAL_ATTRIBUTE]: '' }}
               aria-hidden={harnessBody.closing || undefined}
-              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-out')}
+              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-leaving')}
             >
               {bodyNode}
               {attachmentsNode}
