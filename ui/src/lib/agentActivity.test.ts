@@ -20,6 +20,9 @@ import {
   toolRecipe,
   toolSummary,
   type ActivityRow,
+  type ActivityStepStatus,
+  type LiveActivityState,
+  type TurnActivityGroupWire,
 } from './agentActivity';
 
 // ``format_toolcall`` stores one string: "🔧 `ToolName` `{json params}`".
@@ -650,5 +653,133 @@ describe('durable Activity order contract', () => {
       expect(state.rows).toEqual(wireRows);
       expect(liveActivityReducer(state, { type: 'row', row: rows[3], now: 200 })).toBe(state);
     }
+  });
+});
+
+describe('projected tool steps: explicit order and same-id state changes', () => {
+  // Vibey's canonical projection (core/tool_activity.py): a step is
+  // ``tool:<response>:<call>``; a native hosted call sorts just before its
+  // response, ordinary calls just after it in block order.
+  const CLOCK = 1_788_566_400_000_000;
+  const CREATED = '2026-09-05T00:00:00Z';
+  const clockId = (prefix: string, micros: number) => `${prefix}_${micros.toString(16).padStart(15, '0')}12345678`;
+  const R1 = clockId('msg', CLOCK);
+  const R2 = clockId('msg', CLOCK + 1_000);
+  const LEGACY = clockId('evt', CLOCK + 500); // an unmarked call keeps its real trace
+  type Step = { id: string; text: string; order_micros: number; order_index: number };
+  const native: Step = { id: `tool:${R1}:hosted`, text: 'search', order_micros: CLOCK - 1, order_index: 0 };
+  // Call ids sort opposite to their block order.
+  const first: Step = { id: `tool:${R1}:z`, text: BASH, order_micros: CLOCK + 1, order_index: 1 };
+  const second: Step = { id: `tool:${R1}:a`, text: READ, order_micros: CLOCK + 1, order_index: 2 };
+  type Timing = { started_at?: string | null; ended_at?: string | null; duration_ms?: number | null };
+
+  // Live ``message.new`` envelopes as message_mirror publishes them.
+  const narration = (id: string, text: string) =>
+    ({ id, type: 'assistant', text, created_at: CREATED }) as WorkbenchMessage;
+  const legacyTrace = (id: string, text = '🔧 `Grep`') =>
+    ({ id, type: 'tool_call', text, created_at: CREATED, content: { kind: 'toolcall' } }) as unknown as WorkbenchMessage;
+  const stepMessage = (step: Step, status: ActivityStepStatus, timing: Timing = {}) => ({
+    id: step.id, type: 'tool_call', text: step.text, created_at: CREATED,
+    content: {
+      kind: 'toolcall',
+      activity: {
+        order_micros: step.order_micros, order_index: step.order_index, status,
+        started_at: null, ended_at: null, duration_ms: null, ...timing,
+      },
+    },
+  }) as unknown as WorkbenchMessage;
+  const durableStep = (step: Step, status: ActivityStepStatus, timing: Timing = {}) => ({
+    id: step.id, kind: 'tool_call' as const, text: step.text, created_at: CREATED,
+    order_micros: step.order_micros, order_index: step.order_index, status,
+    started_at: null, ended_at: null, duration_ms: null, ...timing,
+  });
+  const durableRows = (rows: NonNullable<TurnActivityGroupWire['rows']>) => groupFromWire({
+    id: rows[0].id, anchor_message_id: null, anchor_position: 'after', open: true,
+    status: 'running', steps: rows.length, duration_ms: null, rows,
+  }).rows!;
+
+  const play = (messages: WorkbenchMessage[], from?: LiveActivityState) => messages.reduce(
+    (state, msg, now) => liveActivityReducer(state, { type: 'row', row: activityRowFromMessage(msg), now }),
+    from ?? liveActivityReducer(initialLiveActivity(), { type: 'turn_start' }),
+  );
+  const shown = (rows: ActivityRow[]) => rows.map((row) => [row.id, row.text, row.status ?? null]);
+
+  const firstDone: Timing = { started_at: '2026-09-05T00:00:01Z', ended_at: '2026-09-05T00:00:02Z', duration_ms: 1000 };
+  const liveTurn = [
+    narration(R1, 'Looking'),
+    stepMessage(native, 'completed'),
+    stepMessage(first, 'pending'),
+    stepMessage(second, 'pending'),
+    stepMessage(first, 'running', { started_at: firstDone.started_at }),
+    stepMessage(first, 'completed', firstDone),
+    stepMessage(second, 'running'),
+    legacyTrace(LEGACY),
+    stepMessage(second, 'failed'),
+    narration(R2, 'Found it'),
+  ];
+  const reloaded = durableRows([
+    durableStep(native, 'completed'),
+    { id: R1, kind: 'assistant', text: 'Looking', created_at: CREATED, order_micros: CLOCK },
+    durableStep(first, 'completed', firstDone),
+    durableStep(second, 'failed'),
+    { id: LEGACY, kind: 'tool_call', text: '🔧 `Grep`', created_at: CREATED, order_micros: CLOCK + 500 },
+    { id: R2, kind: 'assistant', text: 'Found it', created_at: CREATED, order_micros: CLOCK + 1_000 },
+  ]);
+
+  it('shows the live sequence exactly as a reload shows the stored turn', () => {
+    const live = play(liveTurn);
+    expect(shown(live.rows)).toEqual(shown(reloaded));
+    expect(live.rows.find((row) => row.id === first.id)).toMatchObject(firstDone);
+    // Rehydrating the stored turn into that live buffer changes nothing shown.
+    const merged = liveActivityReducer(live, { type: 'rehydrate_for_gen', gen: live.gen, rows: reloaded, startedAt: 0 });
+    expect(shown(merged.rows)).toEqual(shown(reloaded));
+  });
+
+  it('places steps in storage order whatever order they first arrive in', () => {
+    const arrivals = [narration(R1, 'Looking'), stepMessage(native, 'completed'), stepMessage(first, 'pending'), stepMessage(second, 'pending')];
+    const permutations = (items: WorkbenchMessage[]): WorkbenchMessage[][] => (items.length <= 1 ? [items] : items.flatMap(
+      (item, index) => permutations([...items.slice(0, index), ...items.slice(index + 1)]).map((rest) => [item, ...rest]),
+    ));
+    for (const order of permutations(arrivals)) {
+      expect(play(order).rows.map((row) => row.id)).toEqual([native.id, R1, first.id, second.id]);
+    }
+  });
+
+  it('updates a step in place, also after settle, and never moves it back', () => {
+    let state = play([narration(R1, 'Looking'), stepMessage(first, 'pending'), stepMessage(second, 'pending')]);
+    state = play([stepMessage(first, 'running')], state);
+    expect(shown(state.rows)).toEqual([[R1, 'Looking', null], [first.id, BASH, 'running'], [second.id, READ, 'pending']]);
+
+    state = liveActivityReducer(state, { type: 'settle' });
+    const settledGen = state.gen;
+    state = play([stepMessage(second, 'interrupted')], state);
+    expect(state).toMatchObject({ gen: settledGen, settled: true });
+    expect(shown(state.rows)[2]).toEqual([second.id, READ, 'interrupted']);
+
+    // A snapshot older than the state already shown is stale, whichever way it arrives.
+    expect(play([stepMessage(second, 'running')], state)).toBe(state);
+    const live = play([stepMessage(first, 'completed', firstDone)]);
+    const staleRead = liveActivityReducer(live, {
+      type: 'rehydrate_for_gen', gen: live.gen, rows: durableRows([durableStep(first, 'running')]), startedAt: 0,
+    });
+    expect(staleRead.rows).toEqual(live.rows);
+    const newerRead = liveActivityReducer(live, {
+      type: 'rehydrate_for_gen', gen: live.gen, rows: durableRows([durableStep(first, 'failed')]), startedAt: 0,
+    });
+    expect(shown(newerRead.rows)).toEqual([[first.id, BASH, 'failed']]);
+  });
+
+  it("keeps an older server's rows exactly as before", () => {
+    const older = [
+      { ...legacyTrace(clockId('evt', CLOCK + 2), 'later clock'), content: { kind: 'toolcall', activity: { order_micros: '1', order_index: 1.5, status: 'done' } } },
+      legacyTrace(clockId('evt', CLOCK + 1), 'earlier clock'),
+    ] as unknown as WorkbenchMessage[];
+    expect(activityRowFromMessage(older[0])).toEqual({
+      id: older[0].id, kind: 'tool_call', text: 'later clock', created_at: CREATED,
+    });
+    // Arrival order, not clock order, and a repeated id never changes the row.
+    const state = play(older);
+    expect(state.rows.map((row) => row.text)).toEqual(['later clock', 'earlier clock']);
+    expect(play([legacyTrace(older[1].id, 'changed')], state)).toBe(state);
   });
 });
