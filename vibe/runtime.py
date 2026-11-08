@@ -2980,16 +2980,36 @@ def stop_ui(
     if stop_remote_access:
         remote_access_started_at = time.monotonic()
         remote_access_stopped = stop_remote_access_connector()
+        remote_access_seconds = time.monotonic() - remote_access_started_at
+        logger.info(
+            "Shutdown phase=stop_remote_access duration_ms=%d stopped=%s",
+            round(remote_access_seconds * 1000),
+            remote_access_stopped,
+        )
         if timings is not None:
-            timings["stop_remote_access_seconds"] = _rounded_seconds(time.monotonic() - remote_access_started_at)
-    elif timings is not None:
-        timings["stop_remote_access_seconds"] = 0.0
-        timings["stop_remote_access_skipped"] = True
+            timings["stop_remote_access_seconds"] = _rounded_seconds(remote_access_seconds)
+    else:
+        logger.info("Shutdown phase=stop_remote_access duration_ms=0 stopped=true skipped=true")
+        if timings is not None:
+            timings["stop_remote_access_seconds"] = 0.0
+            timings["stop_remote_access_skipped"] = True
     ui_started_at = time.monotonic()
     ui_stopped = stop_process(ui_pid_path, runtime_ids=runtime_ids, part="ui")
+    ui_seconds = time.monotonic() - ui_started_at
+    logger.info(
+        "Shutdown phase=stop_ui_process duration_ms=%d stopped=%s",
+        round(ui_seconds * 1000),
+        ui_stopped,
+    )
     if timings is not None:
-        timings["stop_ui_process_seconds"] = _rounded_seconds(time.monotonic() - ui_started_at)
+        timings["stop_ui_process_seconds"] = _rounded_seconds(ui_seconds)
         timings["stop_ui_seconds"] = _rounded_seconds(time.monotonic() - started_at)
+    logger.info(
+        "Shutdown phase=stop_ui duration_ms=%d stopped=%s remote_access_stopped=%s",
+        round((time.monotonic() - started_at) * 1000),
+        ui_stopped,
+        remote_access_stopped,
+    )
     return bool(ui_stopped and remote_access_stopped)
 
 

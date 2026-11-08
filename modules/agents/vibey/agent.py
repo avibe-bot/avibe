@@ -41,7 +41,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 import httpx
-from sqlalchemy import and_, select, text as sql_text
+from sqlalchemy import and_, literal_column, or_, select, text as sql_text, union
 from sqlalchemy.engine import Engine
 
 from config import paths
@@ -128,6 +128,7 @@ from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import (
     INPUT_TYPES,
+    MESSAGE_TURN_ID_SQL,
     RESPONSE_TYPES,
     SQLiteTranscriptStore,
     call_instance_result,
@@ -137,7 +138,7 @@ from storage.agent_transcript import (
     text_parts,
 )
 from storage.db import get_cached_sqlite_engine
-from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.models import agent_events, agent_runs, agent_sessions, message_deliveries, messages, session_turns
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 from vibe.i18n import t as i18n_t
 
@@ -151,6 +152,14 @@ _COMPLETED = ("completed", "ended_by_hook")
 # transcript-only continuation before the ordinary empty-response failure is delivered.
 _MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
+_OPEN_RECOVERY_DELIVERY_STATES = ("claimed", "steering", "interrupt_waiting", "reconciling_steer")
+_INTERRUPTED_TURN_SETTLEMENTS = (
+    "no_terminal_result",
+    "restarted",
+    "interrupted",
+    "backend_refresh",
+    "backend_disabled",
+)
 
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
@@ -687,7 +696,13 @@ class VibeyAgent(BaseAgent):
         if self._media_sweep is None:
             self._media_sweep = asyncio.create_task(self._sweep_media(), name="vibey-agent-media-sweep")
         explicit = session_id is not None
+        candidates_started_at = time.monotonic()
         candidates = [session_id] if session_id else await asyncio.to_thread(self._recovery_candidates)
+        logger.info(
+            "Startup phase=vibey_recovery_candidates duration_ms=%d candidates=%d",
+            round((time.monotonic() - candidates_started_at) * 1000),
+            len(candidates),
+        )
         unsettled: list[str] = []
         for candidate in candidates:
             async with self._held(candidate, wait=False) as runtime:
@@ -698,12 +713,81 @@ class VibeyAgent(BaseAgent):
                 except Exception:
                     logger.exception("Vibey could not settle Session %s outside a Turn", candidate)
                     unsettled.append(candidate)
+        prune_started_at = time.monotonic()
         if not unsettled:
             await self._prune_settled_jobs()
+        logger.info(
+            "Startup phase=vibey_recovery_prune duration_ms=%d unsettled=%d",
+            round((time.monotonic() - prune_started_at) * 1000),
+            len(unsettled),
+        )
         return unsettled
 
     def _recovery_candidates(self) -> list[str]:
         return sorted({*self._sessions_with_open_tail(), *self._sessions_with_unconsumed_inputs()})
+
+    def _durable_recovery_query(self):
+        unfinished_run_statuses = ("pending", "queued", "processing", "running")
+        interrupted_turn = and_(
+            session_turns.c.state == "terminal",
+            session_turns.c.terminal_outcome == "failed",
+            session_turns.c.settled_by.in_(_INTERRUPTED_TURN_SETTLEMENTS),
+        )
+        turn_owner = or_(session_turns.c.state != "terminal", interrupted_turn)
+        return union(
+            select(session_turns.c.session_id).where(
+                session_turns.c.backend == BACKEND,
+                turn_owner,
+            ),
+            select(message_deliveries.c.session_id)
+            .select_from(
+                message_deliveries.join(
+                    session_turns,
+                    message_deliveries.c.turn_id == session_turns.c.id,
+                )
+            )
+            .where(
+                session_turns.c.backend == BACKEND,
+                message_deliveries.c.state.in_(_OPEN_RECOVERY_DELIVERY_STATES),
+            ),
+            select(agent_runs.c.session_id).where(
+                agent_runs.c.run_type == "agent_run",
+                or_(agent_runs.c.agent_backend == BACKEND, agent_runs.c.agent_name == BACKEND),
+                agent_runs.c.session_id.is_not(None),
+                agent_runs.c.status.in_(unfinished_run_statuses),
+            ),
+        )
+
+    def _durable_recovery_sessions(self) -> set[str]:
+        """Return Sessions whose durable work can own a restart-open Vibey tail.
+
+        The transcript check below is exact, but it must not begin by walking all
+        historical responses. A live/non-terminal Vibey Turn is the durable owner
+        for a crash, Stop, backend switch, or fork boundary; an unfinished Vibey
+        Agent Run is the legacy/Workbench owner for work that had not settled.
+        """
+        with self._engine.connect() as conn:
+            candidates = set(conn.execute(self._durable_recovery_query()).scalars())
+        return {str(session_id) for session_id in candidates if session_id is not None}
+
+    def _durable_recovery_turns(self) -> dict[str, set[str]]:
+        interrupted_turn = and_(
+            session_turns.c.state == "terminal",
+            session_turns.c.terminal_outcome == "failed",
+            session_turns.c.settled_by.in_(_INTERRUPTED_TURN_SETTLEMENTS),
+        )
+        turn_owner = or_(session_turns.c.state != "terminal", interrupted_turn)
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(session_turns.c.session_id, session_turns.c.id).where(
+                    session_turns.c.backend == BACKEND,
+                    turn_owner,
+                )
+            )
+        turns: dict[str, set[str]] = {}
+        for session_id, turn_id in rows:
+            turns.setdefault(str(session_id), set()).add(str(turn_id))
+        return turns
 
     def _schedule_recovery(self) -> None:
         """Hand what this Turn could not settle to the process's recovery owner."""
@@ -2293,43 +2377,86 @@ class VibeyAgent(BaseAgent):
         return seq is not None
 
     def _sessions_with_open_tail(self) -> list[str]:
-        """Sessions whose context can hold an open tool call: startup T2's candidates.
+        """Sessions whose durable Vibey work can hold an open tool call: startup T2's candidates.
 
         Every run settles earlier open calls before its next model call, so only a
         Session's last response can have one: it has tool calls and fewer results after
-        it. Candidates come from Avibe context rows (only this backend writes
-        ``context_seq``), whatever Agent the Session is routed to now: a Session switched
-        away mid-run still owns its jobs.
+        it. The candidate set comes from durable Turn/Run ownership rather than all
+        historical responses, while remaining independent of the Session's current
+        routing so a Session switched away mid-run still owns its jobs.
         """
         from sqlalchemy import func
 
-        with self._engine.connect() as conn:
-            last_response = (
-                select(messages.c.session_id, func.max(messages.c.context_seq).label("seq"))
-                .where(
-                    messages.c.session_id.is_not(None),
-                    messages.c.context_seq.is_not(None),
-                    messages.c.type.in_(RESPONSE_TYPES),
+        durable_turns = self._durable_recovery_turns()
+        candidate_sessions = self._durable_recovery_sessions()
+        turn_ids = {turn_id for ids in durable_turns.values() for turn_id in ids}
+        responses = []
+        if turn_ids:
+            # Keep this expression byte-identical to ix_messages_turn_id; SQLite
+            # will otherwise fall back to the all-history transcript index.
+            turn_id_expr = literal_column(f"({MESSAGE_TURN_ID_SQL})")
+            with self._engine.connect() as conn:
+                last_response = (
+                    select(turn_id_expr.label("turn_id"), func.max(messages.c.context_seq).label("seq"))
+                    .where(
+                        turn_id_expr.in_(turn_ids),
+                        messages.c.context_seq.is_not(None),
+                        messages.c.type.in_(RESPONSE_TYPES),
+                    )
+                    .group_by(turn_id_expr)
+                    .subquery()
                 )
-                .group_by(messages.c.session_id)
-                .subquery()
-            )
-            responses = conn.execute(
-                select(messages.c.session_id, messages.c.context_seq, messages.c.content_json).join(
-                    last_response,
-                    and_(
-                        messages.c.session_id == last_response.c.session_id,
-                        messages.c.context_seq == last_response.c.seq,
-                    ),
+                responses.extend(
+                    conn.execute(
+                        select(messages.c.session_id, messages.c.context_seq, messages.c.content_json).join(
+                            last_response,
+                            and_(
+                                turn_id_expr == last_response.c.turn_id,
+                                messages.c.context_seq == last_response.c.seq,
+                            ),
+                        )
+                    ).all()
                 )
-            ).all()
-            candidates = []
-            for session_id, seq, raw in responses:
-                message = (_json_object(raw).get("model") or {}).get("message") or {}
-                calls = [block for block in message.get("content") or () if isinstance(block, dict)
-                         and block.get("type") == "tool_call"]
-                if not calls:
-                    continue
+
+        # Legacy rows predating the per-response Turn metadata still need the
+        # session-based check. Restrict that fallback to durable Sessions for
+        # which the indexed Turn lookup found no response at all.
+        seen_sessions = {str(session_id) for session_id, _seq, _raw in responses}
+        legacy_sessions = candidate_sessions - seen_sessions
+        if legacy_sessions:
+            with self._engine.connect() as conn:
+                last_response = (
+                    select(messages.c.session_id, func.max(messages.c.context_seq).label("seq"))
+                    .where(
+                        messages.c.session_id.in_(legacy_sessions),
+                        messages.c.context_seq.is_not(None),
+                        messages.c.type.in_(RESPONSE_TYPES),
+                    )
+                    .group_by(messages.c.session_id)
+                    .subquery()
+                )
+                responses.extend(
+                    conn.execute(
+                        select(messages.c.session_id, messages.c.context_seq, messages.c.content_json).join(
+                            last_response,
+                            and_(
+                                messages.c.session_id == last_response.c.session_id,
+                                messages.c.context_seq == last_response.c.seq,
+                            ),
+                        )
+                    ).all()
+                )
+
+        candidates = []
+        for session_id, seq, raw in responses:
+            message = (_json_object(raw).get("model") or {}).get("message") or {}
+            calls = [
+                block for block in message.get("content") or ()
+                if isinstance(block, dict) and block.get("type") == "tool_call"
+            ]
+            if not calls:
+                continue
+            with self._engine.connect() as conn:
                 settled = conn.execute(
                     select(func.count()).select_from(agent_events).where(
                         agent_events.c.session_id == session_id,
@@ -2337,8 +2464,8 @@ class VibeyAgent(BaseAgent):
                         agent_events.c.context_seq > seq,
                     )
                 ).scalar()
-                if settled < len(calls):
-                    candidates.append(session_id)
+            if settled < len(calls):
+                candidates.append(session_id)
         return sorted(candidates)
 
     def _sessions_with_unconsumed_inputs(self) -> list[str]:

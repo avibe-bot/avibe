@@ -77,10 +77,10 @@ from modules.agents.vibey.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch
 from modules.im import MessageContext
-from storage import message_deliveries
-from storage.agent_transcript import resolve_fork_point
+from storage import message_deliveries, messages_service
+from storage.agent_transcript import SQLiteTranscriptStore, resolve_fork_point
 from storage.db import create_sqlite_engine
-from storage.models import agent_events, agent_sessions, messages, session_turns
+from storage.models import agent_events, agent_runs, agent_sessions, messages, session_turns
 from storage.settings_service import upsert_scope
 from tests.agent_core.fakes import ORIGIN, FakeJobHost, FakeTool, ScriptedProvider, assistant
 from vibe.i18n import t as i18n_t
@@ -319,7 +319,12 @@ def _owner_settled(engine, *requests) -> None:
         conn.execute(
             update(session_turns)
             .where(session_turns.c.id.in_([_turn(request.context) for request in requests]))
-            .values(state="terminal", terminal_outcome="failed", terminal_at=NOW)
+            .values(
+                state="terminal",
+                terminal_outcome="failed",
+                settled_by="no_terminal_result",
+                terminal_at=NOW,
+            )
         )
 
 
@@ -516,6 +521,190 @@ def _tool_turn() -> list:
 def _shape(entries) -> list[tuple]:
     """Context rows without their row ids, which differ per Session."""
     return [(entry.context_seq, entry.kind, entry.message) for entry in entries]
+
+
+def _open_recovery_tail(
+    engine,
+    session_id: str,
+    turn_id: str,
+    *,
+    control_mode: str | None = None,
+) -> None:
+    delivery_id = f"recovery_delivery_{turn_id}"
+    with engine.begin() as conn:
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=_SCOPES["avibe"],
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text=f"request {turn_id}",
+            ),
+            dispatch_text=f"request {turn_id}",
+            now=NOW,
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="vibey",
+            deliveries=[delivery],
+            dispatch_text=f"request {turn_id}",
+        )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key="runtime",
+            runtime_turn_id=turn_id,
+            native_turn_id=f"native:{turn_id}",
+        )
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "recovery-test"},
+        )
+        if control_mode is not None:
+            conn.execute(
+                update(session_turns)
+                .where(session_turns.c.id == turn_id)
+                .values(control_mode=control_mode, control_state="pending")
+            )
+    call = ToolCallBlock(id=f"call:{turn_id}", name="echo", arguments={"path": "src"})
+    asyncio.run(
+        SQLiteTranscriptStore(engine).append_response(
+            session_id,
+            assistant("Listing.", calls=(call,)),
+            final=False,
+            turn_id=turn_id,
+        )
+    )
+
+
+class _RecoveryProbe(SimpleNamespace):
+    def _durable_recovery_query(self):
+        return VibeyAgent._durable_recovery_query(self)
+
+    def _durable_recovery_sessions(self):
+        return VibeyAgent._durable_recovery_sessions(self)
+
+    def _durable_recovery_turns(self):
+        return VibeyAgent._durable_recovery_turns(self)
+
+
+def _recovery_probe(engine):
+    return _RecoveryProbe(_engine=engine)
+
+
+def test_vibey_open_tail_candidates_cover_every_durable_restart_owner(engine, session):
+    cases = {
+        "crash": ("tail-crash", "turn-crash", None),
+        "stop": ("tail-stop", "turn-stop", "stop_only"),
+        "backend-switch": ("tail-switch", "turn-switch", None),
+        "fork-source": ("tail-fork", "turn-fork", None),
+    }
+    for session_id, _turn_id, _control_mode in cases.values():
+        with engine.begin() as conn:
+            _insert_session(conn, session_id, _SCOPES["avibe"])
+    for session_id, turn_id, control_mode in cases.values():
+        _open_recovery_tail(engine, session_id, turn_id, control_mode=control_mode)
+
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "tail-switch")
+            .values(agent_backend="claude", agent_variant="claude")
+        )
+        _insert_session(
+            conn,
+            "tail-fork-child",
+            _SCOPES["avibe"],
+            {"fork_source_session_id": "tail-fork", "fork_source_context_seq": 1},
+        )
+
+    found = set(VibeyAgent._sessions_with_open_tail(_recovery_probe(engine)))
+
+    assert found == {session_id for session_id, _turn_id, _control_mode in cases.values()}
+
+
+def test_vibey_recovery_candidate_query_plan_stays_on_durable_work_tables(engine, session):
+    probe = _recovery_probe(engine)
+    statement = probe._durable_recovery_query()
+    compiled = statement.compile(engine, compile_kwargs={"literal_binds": True})
+    with engine.connect() as conn:
+        details = [
+            str(row[3])
+            for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {compiled}")
+        ]
+
+    assert any("session_turns" in detail for detail in details)
+    assert any("message_deliveries" in detail for detail in details)
+    assert any("agent_runs" in detail for detail in details)
+    assert not any("SCAN messages" in detail for detail in details)
+
+
+def test_vibey_open_tail_candidates_include_unfinished_agent_run_and_skip_history_only_tail(engine, session):
+    run_session = "tail-run"
+    history_only = "tail-history-only"
+    with engine.begin() as conn:
+        _insert_session(conn, run_session, _SCOPES["avibe"])
+        _insert_session(conn, history_only, _SCOPES["avibe"])
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-open-tail",
+                run_type="agent_run",
+                status="running",
+                agent_name="vibey",
+                agent_backend=None,
+                session_id=run_session,
+                created_at=NOW,
+                updated_at=NOW,
+                metadata_json="{}",
+            )
+        )
+    with engine.begin() as conn:
+        for seed_session, seed_text in ((run_session, "running"), (history_only, "old")):
+            row = messages_service.append(
+                conn,
+                scope_id=_SCOPES["avibe"],
+                session_id=seed_session,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text=seed_text,
+            )
+            conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=1))
+
+    call = ToolCallBlock(id="call:run", name="echo", arguments={})
+    asyncio.run(
+        SQLiteTranscriptStore(engine).append_response(
+            run_session,
+            assistant("Running.", calls=(call,)),
+            final=False,
+        )
+    )
+    call = ToolCallBlock(id="call:history", name="echo", arguments={})
+    asyncio.run(
+        SQLiteTranscriptStore(engine).append_response(
+            history_only,
+            assistant("Old.", calls=(call,)),
+            final=False,
+        )
+    )
+
+    found = set(VibeyAgent._sessions_with_open_tail(_recovery_probe(engine)))
+
+    assert run_session in found
+    assert history_only not in found
 
 
 @pytest.mark.parametrize("platform", ["avibe", "telegram"])
@@ -5554,8 +5743,12 @@ async def test_recovery_retries_a_session_it_could_not_settle(
         # SESSION's Turn owner settled its Turn without continuing it: the job is recovery's.
         conn.execute(
             update(session_turns)
-            .where(session_turns.c.session_id == SESSION)
-            .values(state="terminal", terminal_outcome="failed", terminal_at=NOW)
+            .values(
+                state="terminal",
+                terminal_outcome="failed",
+                settled_by="no_terminal_result",
+                terminal_at=NOW,
+            )
         )
     recovery = _controller_with(harness.new_agent()).vibey_recovery
     try:
