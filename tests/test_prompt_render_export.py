@@ -150,7 +150,7 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
         # Only a Vibey Turn runs as a Bot; the main Bot also renders its own section.
         options["bot"] = {
             "handle": "main", "display_name": "", "role": "The user's main Bot.", "session_id": "ses_main",
-            "workdir": "/fixture/bots/main", "builtin": True,
+            "builtin": True,
         }
     return {"backend": backend, "agent_instructions": "Custom {unchanged} instructions", "options": options}
 

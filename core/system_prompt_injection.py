@@ -58,14 +58,14 @@ class BotPromptInfo:
     """The Bot a Vibey Turn runs as, for its own sections (``docs/plans/bots.md`` "Prompt drafts").
 
     Every field is a fact of the Bot, never of the Session or Turn, so a Bot's sections are byte-stable across its
-    Turns and identical in its forks, which keep its directory (D7).
+    Turns and identical in its forks, which keep its directory (D7). The directory itself is not one of them: it is
+    the environment block's ``cwd``.
     """
 
     handle: str
     display_name: str
     role: str
     session_id: str
-    workdir: str
     builtin: bool = False
 
 
@@ -251,7 +251,7 @@ def _bot_blocks(bot: BotPromptInfo) -> list[RenderedPromptBlock]:
             role_sentence=_role_sentence(bot.role),
             session_id=bot.session_id,
         ),
-        render_prompt_block("bot-memory-prompt", workdir=bot.workdir, session_id=bot.session_id),
+        render_prompt_block("bot-memory-prompt"),
     ]
     if bot.builtin:
         blocks.append(render_prompt_block("bot-main-prompt"))
@@ -279,7 +279,6 @@ def bot_for_turn(store: Any, *, agent_id: Optional[str], cwd: str) -> Optional[B
         display_name=bot.display_name,
         role=bot.role,
         session_id=bot.session_id,
-        workdir=str(bot.directory),
         builtin=bot.builtin,
     )
 

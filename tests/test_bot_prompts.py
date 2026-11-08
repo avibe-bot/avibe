@@ -34,11 +34,10 @@ _ROSTER = [
 
 _MAIN = BotPromptInfo(
     handle="main", display_name="", role="The user's main Bot and first point of contact.",
-    session_id="ses_main", workdir="/home/u/.avibe/bots/main", builtin=True,
+    session_id="ses_main", builtin=True,
 )
 _CSO = BotPromptInfo(
-    handle="cso", display_name="首席安全官", role="Reviews security risks",
-    session_id="ses_cso", workdir="/home/u/.avibe/bots/cso",
+    handle="cso", display_name="首席安全官", role="Reviews security risks", session_id="ses_cso",
 )
 
 
@@ -67,7 +66,8 @@ def test_bot_sections_appear_only_for_a_bot_and_the_main_section_only_for_the_ma
         main["bot-identity-prompt"]
     )
     assert "Session `ses_main`" in main["bot-identity-prompt"]
-    assert "`/home/u/.avibe/bots/main`" in main["bot-memory-prompt"]
+    # The permanent Session is named once; the directory is the environment block's cwd, not a prompt value.
+    assert "".join(text for module, text in main.items() if module.startswith("bot-")).count("ses_main") == 1
     assert "## You are the user's main Bot" in main["bot-main-prompt"]
     # A Bot's Session is titled by its display name.
     assert "session-title-prompt" not in main
@@ -148,8 +148,7 @@ def test_a_turn_runs_as_a_bot_only_in_the_bots_directory(bots, tmp_path):
     vibey = bots.store.get_builtin_default_agent_for_backend("vibey")
     info = bot_for_turn(bots.store, agent_id=main.agent.id, cwd=str(tmp_path / "bots" / "main"))
     assert info == BotPromptInfo(
-        handle="main", display_name="", role=main.role, session_id="ses_main",
-        workdir=str(tmp_path / "bots" / "main"), builtin=True,
+        handle="main", display_name="", role=main.role, session_id="ses_main", builtin=True,
     )
     # A fresh --agent Session of the Bot's Agent elsewhere, or another Agent in the directory, is a worker.
     assert bot_for_turn(bots.store, agent_id=main.agent.id, cwd=str(tmp_path)) is None
