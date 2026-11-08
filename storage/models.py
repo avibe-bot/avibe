@@ -382,7 +382,6 @@ agent_runs = Table(
     # Every ownership arm must be indexed or a Session's OR filter scans history.
     Index("ix_agent_runs_callback_session", "callback_session_id"),
     Index("ix_agent_runs_source_actor", "source_kind", "source_actor"),
-    Index("ix_agent_runs_dispatch_probe", "source_kind", "source_actor", "session_id"),
     Index(
         "uq_agent_runs_delivery",
         "delivery_id",
