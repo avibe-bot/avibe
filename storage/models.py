@@ -841,10 +841,6 @@ session_turns = Table(
     Column("terminal_evidence_json", Text, nullable=False, server_default="{}"),
     # One coalesced control slot owns empty/content P0 against this exact Turn.
     Column("control_state", String, nullable=True),
-    # A terminal Vibey Turn owns an interrupted transcript tail until T2 commits
-    # every missing tool result. This marker is the bounded recovery admission
-    # index; terminal outcome alone is historical state, not pending work.
-    Column("recovery_required", Integer, nullable=False, server_default="0"),
     Column("control_mode", String, nullable=True),
     Column("control_attempt_id", String, nullable=True),
     Column("control_expected_native_turn_id", Text, nullable=True),
@@ -923,10 +919,6 @@ session_turns = Table(
         name="ck_session_turns_control_state",
     ),
     CheckConstraint(
-        "recovery_required in (0, 1)",
-        name="ck_session_turns_recovery_required",
-    ),
-    CheckConstraint(
         "control_mode is null or control_mode in ('stop_only', 'replace')",
         name="ck_session_turns_control_mode",
     ),
@@ -949,13 +941,6 @@ session_turns = Table(
         "ix_session_turns_recovery_owner",
         "backend",
         "state",
-        "session_id",
-        "id",
-    ),
-    Index(
-        "ix_session_turns_recovery_pending",
-        "backend",
-        "recovery_required",
         "session_id",
         "id",
     ),

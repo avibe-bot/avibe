@@ -180,7 +180,6 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
         "control_state",
         "terminal_outcome",
         "settled_by",
-        "recovery_required",
         "version",
     },
 }
@@ -502,7 +501,6 @@ def _compatible_schema_problem(conn: sqlite3.Connection) -> str | None:
         ("agent_events", "ix_agent_events_turn_sequence_id"),
         ("message_deliveries", "ix_message_deliveries_turn"),
         ("message_deliveries", "ix_message_deliveries_recovery_owner"),
-        ("session_turns", "ix_session_turns_recovery_pending"),
     ):
         if not conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ?", (table, index)

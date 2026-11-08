@@ -41,7 +41,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 import httpx
-from sqlalchemy import and_, literal_column, or_, select, text as sql_text, union, update
+from sqlalchemy import and_, literal_column, or_, select, text as sql_text, union
 from sqlalchemy.engine import Engine
 
 from config import paths
@@ -708,8 +708,6 @@ class VibeyAgent(BaseAgent):
                 except Exception:
                     logger.exception("Vibey could not settle Session %s outside a Turn", candidate)
                     unsettled.append(candidate)
-                else:
-                    await asyncio.to_thread(self._clear_recovery_markers, {candidate})
         prune_started_at = time.monotonic()
         if not unsettled:
             await self._prune_settled_jobs()
@@ -764,10 +762,6 @@ class VibeyAgent(BaseAgent):
             self._durable_recovery_turn_query(),
             delivery_by_turn,
             delivery_by_target,
-            select(session_turns.c.session_id).where(
-                session_turns.c.backend == BACKEND,
-                session_turns.c.recovery_required == 1,
-            ),
             select(agent_runs.c.session_id).where(
                 agent_runs.c.run_type == "agent_run",
                 or_(agent_runs.c.agent_backend == BACKEND, agent_runs.c.agent_name == BACKEND),
@@ -777,12 +771,11 @@ class VibeyAgent(BaseAgent):
         )
 
     def _unsettled_interrupted_sessions_query(self):
-        """Find the latest transcript tail for durable interrupted-tail owners.
+        """Find only the latest transcript tail of an interrupted Vibey Session.
 
-        A terminal outcome is not ownership evidence. The marker is written when
-        T2 could not settle a tail before the Turn ended and is cleared after the
-        exact latest-tail check or a successful recovery pass. This query must
-        never rediscover historical failed/canceled Turns on its own.
+        Terminal outcome is ownership evidence, not recovery evidence. The latest
+        response must still contain more tool calls than durable results after it;
+        normal stopped/canceled history therefore contributes no candidate.
         """
         return sql_text(
             f"""
@@ -790,7 +783,8 @@ class VibeyAgent(BaseAgent):
                 SELECT DISTINCT session_id
                 FROM session_turns
                 WHERE backend = 'vibey'
-                  AND recovery_required = 1
+                  AND state = 'terminal'
+                  AND terminal_outcome IN ('failed', 'canceled')
             ), latest AS (
                 SELECT interrupted_sessions.session_id AS session_id,
                        (
@@ -825,50 +819,15 @@ class VibeyAgent(BaseAgent):
             """
         )
 
-    def _recovery_marker_sessions(self) -> set[str]:
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(session_turns.c.session_id)
-                .where(
-                    session_turns.c.backend == BACKEND,
-                    session_turns.c.recovery_required == 1,
-                )
-                .distinct()
-            ).scalars()
-        return {str(session_id) for session_id in rows if session_id is not None}
-
-    def _mark_recovery_required(self, session_id: str, turn_id: str | None) -> None:
-        if not session_id:
-            return
-        with self._engine.begin() as conn:
-            statement = update(session_turns).where(
-                session_turns.c.backend == BACKEND,
-                session_turns.c.session_id == session_id,
-            )
-            if turn_id:
-                statement = statement.where(session_turns.c.id == turn_id)
-            conn.execute(statement.values(recovery_required=1))
-
-    def _clear_recovery_markers(self, session_ids: set[str]) -> None:
-        if not session_ids:
-            return
-        with self._engine.begin() as conn:
-            conn.execute(
-                update(session_turns)
-                .where(
-                    session_turns.c.backend == BACKEND,
-                    session_turns.c.session_id.in_(tuple(session_ids)),
-                    session_turns.c.recovery_required == 1,
-                )
-                .values(recovery_required=0)
-            )
-
     def _durable_recovery_sessions(self) -> set[str]:
         """Return Sessions whose durable work can own a restart-open Vibey tail.
 
-        The transcript check is exact, but every input to it is current durable
-        ownership: nonterminal Turns, unsettled Deliveries, unfinished Agent
-        Runs, or an explicit interrupted-tail marker.
+        The transcript check is exact, but it must not begin by walking all
+        historical responses. A live/non-terminal Vibey Turn is the durable owner
+        for a crash, Stop, backend switch, or fork boundary; an unfinished Vibey
+        Agent Run is the legacy/Workbench owner for work that had not settled.
+        Terminal interrupted Turns are considered only through the latest Session
+        tail and only while that tail still has an unmatched tool call.
         """
         with self._engine.connect() as conn:
             candidates = set(conn.execute(self._durable_recovery_query()).scalars())
@@ -1562,19 +1521,8 @@ class VibeyAgent(BaseAgent):
             await self._settle_open_calls(runtime)
         except Exception:
             # The calls stay open, and the recovery owner settles them once this Turn releases the Session.
-            run = runtime.run
-            try:
-                await asyncio.to_thread(
-                    self._mark_recovery_required,
-                    runtime.session_id,
-                    run.turn_id if run is not None else None,
-                )
-            except Exception:
-                logger.exception("Vibey could not persist recovery ownership for Session %s", runtime.session_id)
             logger.exception("Vibey could not settle the calls a run left open in Session %s", runtime.session_id)
             self._schedule_recovery()
-        else:
-            await asyncio.to_thread(self._clear_recovery_markers, {runtime.session_id})
 
     async def _settle_open_calls(
         self,
@@ -2485,13 +2433,12 @@ class VibeyAgent(BaseAgent):
         """Find Sessions whose current transcript tail still owns an open call.
 
         The exact transcript check is intentionally downstream of durable-owner
-        discovery. Terminal history is never an admission source; only explicit
-        recovery markers, current Turns, unsettled Deliveries, or unfinished
-        Agent Runs may put a Session into this bounded candidate set.
+        discovery. A nonterminal Turn, unsettled Delivery, unfinished Agent Run,
+        or terminal interrupted Session tail may put a Session into the candidate
+        set; the terminal tail still needs an unmatched tool call.
         """
         from sqlalchemy import func
 
-        marker_sessions = self._recovery_marker_sessions()
         durable_turns = self._durable_recovery_turns()
         candidate_sessions = self._durable_recovery_sessions()
         turn_ids = {turn_id for ids in durable_turns.values() for turn_id in ids}
@@ -2572,9 +2519,7 @@ class VibeyAgent(BaseAgent):
             if settled < len(calls):
                 candidates.append(str(session_id))
 
-        found = set(candidates)
-        self._clear_recovery_markers(marker_sessions - found)
-        return sorted(found)
+        return sorted(candidates)
 
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
         """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
