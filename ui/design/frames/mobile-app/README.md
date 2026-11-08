@@ -197,9 +197,10 @@ verification opens avibe.bot and returns to "I've turned it on · Continue".
 The system passkey sheet is native and is not drawn; `passkey-waiting` is the
 page behind it.
 
-## Password sign-in — proposed
+## Password sign-in — approved
 
-Status: **proposed** on 2026-11-08 for the owner's approval. Plan:
+Status: **approved** by the owner on 2026-11-08 at 12:46 Asia/Shanghai, with
+the four decisions below. Plan:
 `docs/plans/2026-11-08-mobile-password-sign-in.md`. An account that set a
 password on avibe.bot (Account security → Set or change password) can sign in
 with it instead of the email code. The email code stays the primary path and
@@ -215,9 +216,9 @@ the `password` fixture flag, so the approved `welcome/*` frames are unchanged.
 | --- | --- |
 | `password` | `email` (both ways offered), `email-invalid`, `default`, `filled`, `shown`, `signing-in`, `invalid`, `unconfirmed`, `rate-limited`, `network`, `forgot`, `weak`, `small` (375 × 667, long email + error), `keyboard` (375 × 407) |
 
-**28 proposed frames / 56 theme captures** (14 states × zh/en × light/dark).
-On approval, `password/email` and `password/email-invalid` supersede the email
-entry of `welcome/default` and `welcome/email-invalid`.
+**28 approved frames / 56 theme captures** (14 states × zh/en × light/dark).
+`password/email` and `password/email-invalid` supersede the email entry of
+`welcome/default` and `welcome/email-invalid`.
 
 ### Why a link under the primary action
 
@@ -276,7 +277,7 @@ copy no longer names the code.
 - Motion: navigation between these steps follows the approved M5 rule above.
   These frames add no new moment.
 
-### Proposed owner decisions
+### Owner decisions (approved)
 
 1. Entry: a "Sign in with password" link under Send verification code, rather
    than a segmented control or a second button.

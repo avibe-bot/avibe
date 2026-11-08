@@ -23,7 +23,7 @@ export interface MobileLoginFixture {
   cooldown?: 60 | 15;
   resent?: boolean;
   compact?: boolean;
-  /** Proposed (`password/*`): the email step also offers password sign-in. */
+  /** `password/*`: the email step also offers password sign-in. */
   password?: boolean;
 }
 /** The second step after the email code, for an account with two-step verification. */

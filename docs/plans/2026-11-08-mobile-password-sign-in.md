@@ -1,7 +1,7 @@
 # Mobile password sign-in
 
-Status: proposed on 2026-11-08, awaiting the owner's approval of the design
-frames `mobile-app/password/*` and the four decisions below.
+Status: approved by the owner on 2026-11-08 at 12:46 Asia/Shanghai, with the
+four decisions below. The design frames are `mobile-app/password/*`.
 
 ## Background
 
@@ -119,10 +119,10 @@ Nothing is required:
 - The `apple-app-site-association` `webcredentials` entry already associates
   `avibe.bot` passwords with the app.
 
-A dedicated reset-by-email page would be new backend work. It is not proposed
-(decision 3).
+A dedicated reset-by-email page would be new backend work. It is not part of
+this plan (decision 3).
 
-## Owner decisions (proposed)
+## Owner decisions (approved)
 
 1. Entry: a "Sign in with password" link under Send verification code, rather
    than a segmented control or a second button.

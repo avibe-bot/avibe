@@ -38,6 +38,6 @@ const states: { name: string; title: string; render: () => ReactNode; size?: [nu
 ];
 
 const designFrames = frames(states.flatMap(({ name, title, render, size }) =>
-  bilingual(name, title, render, size, 'proposed')));
+  bilingual(name, title, render, size)));
 
 export default designFrames;
