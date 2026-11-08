@@ -255,6 +255,7 @@ def _bot_blocks(bot: BotPromptInfo) -> list[RenderedPromptBlock]:
     ]
     if bot.builtin:
         blocks.append(render_prompt_block("bot-main-prompt"))
+    blocks.append(render_prompt_block("bot-harness-prompt"))
     return blocks
 
 

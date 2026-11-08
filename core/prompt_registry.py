@@ -82,6 +82,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("bot-identity-prompt", "You Are a Bot", "bot-identity.md", trailing_newlines=2, placeholders=("display_name", "handle", "role_sentence", "session_id")),
     PromptModule("bot-memory-prompt", "Bot Memory", "bot-memory.md", trailing_newlines=2),
     PromptModule("bot-main-prompt", "The Main Bot", "bot-main.md", trailing_newlines=2),
+    PromptModule("bot-harness-prompt", "Bot Handing Out Work", "bot-harness.md", trailing_newlines=2),
     PromptModule("session-start-prompt", "Session Start Prompt", "session-start.md", trailing_newlines=2, placeholders=("default_session_id",)),
     PromptModule("forked-session-prompt", "Forked Session Prompt", "forked-session.md", trailing_newlines=2, placeholders=("source_session_id", "default_session_id")),
     PromptModule("base-capabilities-body", "Base Capabilities Body", "base-capabilities.md", trailing_newlines=1),

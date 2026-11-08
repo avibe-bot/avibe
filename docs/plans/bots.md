@@ -167,6 +167,13 @@ own. A Session has none of these; a Bot has all three.
   Without automatic callbacks, a message between Bots is always one a Bot chose
   to send.
 - CLI examples in the prompts get parser-backed contract tests.
+- **Handing out work is resident; the Harness Skill is not** (owner decision,
+  2026-11-08). Every Bot dispatches on most Turns, so a short Bot-only section
+  ("Handing out work" below) says whom to hand work to, what a brief must
+  say, how to choose the model, how to bring a Session to the front, and how
+  to follow up. The `use-avibe-harness` Skill (about 4k tokens) stays out of
+  the Bot prompt, and a Bot loads it only to set a Task or Watch. The section
+  says a dispatched Session reports back and never asks for `--callback`.
 
 ### D5. Web surfaces
 
@@ -417,8 +424,16 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
   concrete actions: Avibe users are personal-agent users, not only
   programmers.
 - The strictness is the main Bot's, in its own section. Whether custom Bots
-  should be as strict is not settled; they get the identity and memory
-  sections, and their definition decides how they work.
+  should be as strict is not settled; they get the identity, memory, and
+  handing-out sections, and their definition decides how they work.
+- Lead Sessions (owner decision, 2026-11-08): each lasting Project gets a
+  lead Session that coordinates its work, named in the main Bot's note on the
+  Project, and handed over to a fresh one when its context grows long. A
+  Project's lead is usually a Project Session, not a Bot: Bots are scarce
+  (D12). When an area needs a standing relationship with the user (they talk
+  to it often, it outlives single pieces of work or spans Projects, it needs a
+  memory of its own), the main Bot suggests a Bot for it, and the user
+  decides.
 - Its memory holds what the user entrusts to it: what they ask it to
   remember, the matters it follows, and the Sessions handling them. Live state
   is queried, not copied.
@@ -625,7 +640,23 @@ You are the user's first point of contact, and you can see everything on this ma
 
 Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Follow each matter through to the end.
 
+Give each lasting Project a lead Session that coordinates its work, and name it in your note on the Project; when its context grows long, have it hand over to a fresh one. When an area needs a standing relationship with the user (they talk to it often, it outlives single pieces of work or spans Projects, it needs a memory of its own), suggest a Bot for it; the user decides.
+
 Your memory holds what the user entrusts to you: what they ask you to remember, the matters you are following, and the Sessions handling them.
+```
+
+### Handing out work (every Bot, after the main Bot's section)
+
+Put a fresh Session in a Project with `--cwd` until `vibe agent run --project`
+exists; then this example switches. The reporting sentence becomes the
+safety-net wording once Avibe notifies a dispatcher whose Session went idle
+without answering.
+
+```markdown
+## Handing out work
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --cwd <dir>`, in the directory where the work lives). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+
+A Session you dispatch is told how to report to you, and a run that does not complete always reports here. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch.
 ```
 
 ### The memory Bot

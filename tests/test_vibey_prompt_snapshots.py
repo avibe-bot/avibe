@@ -40,6 +40,7 @@ def choose(previous, candidate, **overrides):
     (Component("bot-identity-prompt", "new"), 1),
     (Component("bot-memory-prompt", "new"), 1),
     (Component("bot-main-prompt", "new"), 1),
+    (Component("bot-harness-prompt", "new"), 1),
 ])
 def test_each_component_class_replaces_only_at_its_tier(component, expected):
     old = replace(component, content="old")
