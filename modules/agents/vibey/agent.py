@@ -155,6 +155,7 @@ _JOB_PRUNE_INTERVAL_S = 3600.0
 _OPEN_RECOVERY_DELIVERY_STATES = ("claimed", "steering", "interrupt_waiting", "reconciling_steer")
 _INTERRUPTED_TURN_SETTLEMENTS = (
     "no_terminal_result",
+    "stopped",
     "restarted",
     "interrupted",
     "backend_refresh",
@@ -730,7 +731,7 @@ class VibeyAgent(BaseAgent):
         unfinished_run_statuses = ("pending", "queued", "processing", "running")
         interrupted_turn = and_(
             session_turns.c.state == "terminal",
-            session_turns.c.terminal_outcome == "failed",
+            session_turns.c.terminal_outcome.in_(("failed", "canceled")),
             session_turns.c.settled_by.in_(_INTERRUPTED_TURN_SETTLEMENTS),
         )
         turn_owner = or_(session_turns.c.state != "terminal", interrupted_turn)
@@ -773,7 +774,7 @@ class VibeyAgent(BaseAgent):
     def _durable_recovery_turns(self) -> dict[str, set[str]]:
         interrupted_turn = and_(
             session_turns.c.state == "terminal",
-            session_turns.c.terminal_outcome == "failed",
+            session_turns.c.terminal_outcome.in_(("failed", "canceled")),
             session_turns.c.settled_by.in_(_INTERRUPTED_TURN_SETTLEMENTS),
         )
         turn_owner = or_(session_turns.c.state != "terminal", interrupted_turn)

@@ -616,6 +616,17 @@ def test_vibey_open_tail_candidates_cover_every_durable_restart_owner(engine, se
             _insert_session(conn, session_id, _SCOPES["avibe"])
     for session_id, turn_id, control_mode in cases.values():
         _open_recovery_tail(engine, session_id, turn_id, control_mode=control_mode)
+    with engine.begin() as conn:
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id == "turn-stop")
+            .values(
+                state="terminal",
+                terminal_outcome="canceled",
+                settled_by="stopped",
+                terminal_at=NOW,
+            )
+        )
 
     with engine.begin() as conn:
         conn.execute(
