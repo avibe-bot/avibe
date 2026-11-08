@@ -302,7 +302,7 @@ redirect; other control-plane origins, such as a Debug override, still receive
 the link-and-code email. A sign-in link in the email opened Safari, which
 consumed the one-time code the app was waiting for.
 
-Readiness navigation has a native 10-second deadline. Fixed account scripts
+Readiness navigation has a native 30-second deadline. Fixed account scripts
 share one `AbortController` deadline mechanism: OTP/session operations use 15
 seconds and best-effort current-device DELETE uses 5 seconds. Both navigation
 actions and responses must remain on the configured control-plane origin.
@@ -374,7 +374,10 @@ no real account in automation.
 
 The hermetic WebKit transport tests run serially, wait for fixture events with
 budgets separate from the app's deadlines, and use numeric loopback origins for
-cross-origin redirect checks. When `ios-shell` XCTest fails, CI uploads
+cross-origin redirect checks. The hanging-readiness case uses a 3-second
+readiness deadline, which a cold WebContent or GPU process launch on a loaded
+simulator can exceed before the request is sent; it retries such an attempt
+within the fixture budget instead of counting it. When `ios-shell` XCTest fails, CI uploads
 `AvibeTests.xcresult` as `ios-shell-xcresult`.
 
 ### Two-step verification
