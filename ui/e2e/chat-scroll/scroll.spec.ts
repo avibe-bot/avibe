@@ -229,7 +229,11 @@ test('an image that lands above the reader while they scroll is compensated, not
 
 test('the reader\'s own scroll is not written back when a row lands before its scroll event', async ({ page }) => {
   // No images: a late one above the reader is a real shift, compensated by design.
-  await open(page, 'delay=0&images=0');
+  // No older history either (the bootstrap holds all 50 rows): 4000 px from the top
+  // is inside the older-page prefetch band, and a page prepended above the reader is
+  // compensated by design too. Whether it went in before, during or after the
+  // recording depended on the runner's timing.
+  await open(page, 'delay=0&images=0&count=50');
   await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
     const block = (event: Event) => event.stopImmediatePropagation();
@@ -261,6 +265,7 @@ test('the reader\'s own scroll is not written back when a row lands before its s
     delete lab.releaseScrollEvent;
   });
   const { writes } = await stop(page);
+  expect(await loads(page)).toBe(0);
   expect(restoreWrites(writes)).toEqual([]);
 });
 
