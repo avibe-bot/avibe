@@ -1107,7 +1107,7 @@ export type WorkbenchProject = {
   id: string;
   scope_id: string;
   display_name: string;
-  description: string;
+  description?: string;
   folder_path: string;
   created_at: string;
   last_active_at: string | null;
