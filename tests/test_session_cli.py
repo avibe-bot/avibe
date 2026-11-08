@@ -10,7 +10,7 @@ from storage import message_deliveries
 from storage.background import attach_agent_run_delivery_in_connection
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages
+from storage.models import agent_runs, agent_sessions, messages, scopes, session_digests
 from storage.settings_service import upsert_scope
 from vibe import cli
 from tests.cli_control_support import lent
@@ -40,6 +40,33 @@ def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend=
             )
         )
     return scope_id
+
+
+def _agent_run(
+    engine,
+    run_id: str,
+    *,
+    session_id: str | None = None,
+    source_kind: str | None = None,
+    source_actor: str | None = None,
+    callback_session_id: str | None = None,
+) -> None:
+    now = "2026-06-09T09:00:00Z"
+    with engine.begin() as conn:
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                run_type="agent_run",
+                status="succeeded",
+                source_kind=source_kind,
+                source_actor=source_actor,
+                session_id=session_id,
+                callback_session_id=callback_session_id,
+                created_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
 
 
 def _run(cmd, argv, capsys):
@@ -147,6 +174,139 @@ def test_list_invalid_type_errors(monkeypatch, tmp_path, capsys):
     assert code == 1
     assert payload["ok"] is False
     assert payload["code"] == "invalid_session_type"
+
+
+
+
+def test_list_row_has_status_from_digest_or_latest_reply(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesdigest", title="Digest", last_active="2026-06-09T12:00:00Z")
+    _seed(engine, "sesreply", title="Reply", native="proj_b", last_active="2026-06-09T11:00:00Z")
+    long_reply = "reply " + ("x" * 260)
+    with engine.begin() as conn:
+        conn.execute(
+            session_digests.insert().values(
+                session_id="sesdigest",
+                compaction_id="evt-1",
+                updated_at="2026-06-09T12:00:00Z",
+                mind=None,
+                memo=None,
+                now="# 6. Now\n- Verify the filter\n- Report the result",
+            )
+        )
+        conn.execute(
+            messages.insert().values(
+                id="msg-reply",
+                scope_id=None,
+                session_id="sesreply",
+                platform="avibe",
+                author="assistant",
+                type="result",
+                content_text=long_reply,
+                content_json="{}",
+                metadata_json="{}",
+                created_at="2026-06-09T11:00:00Z",
+                updated_at="2026-06-09T11:00:00Z",
+            )
+        )
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
+    rows = {row["id"]: row for row in payload["sessions"]}
+    assert rows["sesdigest"]["status"] == "- Verify the filter - Report the result"
+    assert rows["sesreply"]["status"].startswith("reply ")
+    assert len(rows["sesreply"]["status"]) == 200
+    assert rows["sesreply"]["status"].endswith("…")
+
+
+def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
+    monkeypatch, tmp_path, capsys
+):
+    engine = _setup(monkeypatch, tmp_path)
+    for session_id, native in (
+        ("sescaller", "proj_caller"),
+        ("sestarget", "proj_target"),
+        ("sesincoming", "proj_incoming"),
+        ("sescallback", "proj_callback"),
+        ("sesharness", "proj_harness"),
+        ("sesunrelated", "proj_unrelated"),
+    ):
+        _seed(engine, session_id, native=native)
+    _agent_run(
+        engine,
+        "run-dispatched",
+        session_id="sestarget",
+        source_kind="agent",
+        source_actor="sescaller",
+    )
+    _agent_run(
+        engine,
+        "run-incoming",
+        session_id="sescaller",
+        source_kind="agent",
+        source_actor="sesincoming",
+    )
+    _agent_run(
+        engine,
+        "run-callback",
+        session_id="sescallback",
+        source_kind="agent",
+        source_actor="sesother",
+        callback_session_id="sescaller",
+    )
+    _agent_run(
+        engine,
+        "run-harness-child",
+        session_id="sesharness",
+        source_kind="callback",
+        source_actor="run-parent",
+        callback_session_id="sescaller",
+    )
+    _agent_run(
+        engine,
+        "run-unrelated",
+        session_id="sesunrelated",
+        source_kind="agent",
+        source_actor="sesother",
+    )
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sescaller")
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
+
+    assert {row["id"] for row in payload["sessions"]} == {
+        "sestarget",
+        "sesincoming",
+        "sescallback",
+    }
+
+
+def test_list_mine_requires_the_injected_caller_session(monkeypatch, tmp_path, capsys):
+    _setup(monkeypatch, tmp_path)
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+    code, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
+
+    assert code == 1
+    assert payload["code"] == "missing_caller_session"
+
+
+def test_list_project_resolves_a_project_name(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    alpha = _seed(engine, "sesalpha", native="proj_alpha")
+    _seed(engine, "sesbeta", native="proj_beta")
+    with engine.begin() as conn:
+        conn.execute(scopes.update().where(scopes.c.id == alpha).values(display_name="Alpha"))
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--project", "alpha"], capsys)
+    assert [row["id"] for row in payload["sessions"]] == ["sesalpha"]
+
+    _, payload = _run(cli.cmd_session_list, ["session", "list", "--project", "proj_alpha"], capsys)
+    assert [row["id"] for row in payload["sessions"]] == ["sesalpha"]
+
+
+def test_list_project_and_mine_are_mutually_exclusive():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["session", "list", "--mine", "--project", "alpha"])
 
 
 # ---------------------------------------------------------------------------- get

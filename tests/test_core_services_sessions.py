@@ -9,10 +9,12 @@ shape or the public function set must update this file in lock-step.
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -20,7 +22,8 @@ from core.services import sessions as sessions_service
 from storage import workbench_sessions_service as storage_sessions
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, scope_settings, session_turns
+from storage.models import agent_runs, agent_sessions, scope_settings, session_turns
+from vibe.authorization import AuthorizationContext
 from storage.settings_service import upsert_scope
 
 
@@ -60,7 +63,123 @@ def _seed_avibe_scope(conn, workdir: str | None = None) -> str:
     return scope_id
 
 
-# --- Public surface ---------------------------------------------------
+
+
+def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
+    """Pin the owner-sized query shape: indexed filters, no growing sort, two page reads."""
+
+    engine = create_sqlite_engine()
+    scope_id = None
+    now = "2026-06-09T09:00:00Z"
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        session_rows = [
+            {
+                "id": f"ses{i:04d}",
+                "scope_id": scope_id,
+                "agent_id": f"agent_ses{i:04d}",
+                "agent_name": "claude",
+                "agent_backend": "claude",
+                "agent_variant": "default",
+                "session_anchor": f"anchor_ses{i:04d}",
+                "native_session_id": f"native_ses{i:04d}",
+                "title": f"Session {i}",
+                "status": "active",
+                "visibility": "foreground",
+                "agent_status": "idle",
+                "metadata_json": "{}",
+                "created_at": now,
+                "updated_at": now,
+                "last_active_at": f"2026-06-09T09:{i // 60:02d}:{i % 60:02d}Z",
+            }
+            for i in range(64)
+        ]
+        conn.execute(agent_sessions.insert(), session_rows)
+        run_rows = []
+        for i in range(512):
+            run_rows.append(
+                {
+                    "id": f"run{i:04d}",
+                    "run_type": "agent_run",
+                    "status": "succeeded",
+                    "source_kind": "agent",
+                    "source_actor": "ses0000" if i % 3 == 0 else f"ses{i % 64:04d}",
+                    "session_id": f"ses{(i + 1) % 64:04d}",
+                    "callback_session_id": "ses0000" if i % 5 == 0 else None,
+                    "created_at": now,
+                    "updated_at": now,
+                    "metadata_json": "{}",
+                }
+            )
+        conn.execute(agent_runs.insert(), run_rows)
+
+    captured: list[tuple[str, tuple]] = []
+
+    def capture_select(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith("select"):
+            captured.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture_select)
+    started = time.perf_counter()
+    with engine.connect() as conn:
+        owner = AuthorizationContext(instance_role="owner")
+        default_page = storage_sessions.list_sessions_page(conn, limit=10, authorization_context=owner)
+        project_page = storage_sessions.list_sessions_page(
+            conn, project_id="proj_contract", limit=10, authorization_context=owner
+        )
+        mine_page = storage_sessions.list_sessions_page(
+            conn, mine_session_id="ses0000", limit=10, authorization_context=owner
+        )
+    elapsed = time.perf_counter() - started
+    event.remove(engine, "before_cursor_execute", capture_select)
+
+    assert len(default_page.items) == len(project_page.items) == len(mine_page.items) == 10
+    assert elapsed < 2.0, f"indexed Session list reads took {elapsed:.3f}s"
+
+    main_queries = [
+        (statement, parameters)
+        for statement, parameters in captured
+        if "ORDER BY agent_sessions.last_active_at" in statement
+    ]
+    assert len(main_queries) == 3
+    plans = []
+    with engine.connect() as conn:
+        for statement, parameters in main_queries:
+            plans.append(
+                [
+                    row[3]
+                    for row in conn.exec_driver_sql(
+                        "EXPLAIN QUERY PLAN " + statement, parameters
+                    ).fetchall()
+                ]
+            )
+    default_plan, project_plan, mine_plan = plans
+    assert any("ix_agent_sessions_status_visibility_activity" in detail for detail in default_plan)
+    assert any("ix_agent_sessions_scope_status_visibility_activity" in detail for detail in project_plan)
+    assert any("ix_agent_sessions_status_visibility_activity" in detail for detail in mine_plan)
+    assert all("USE TEMP B-TREE FOR ORDER BY" not in detail for plan in plans for detail in plan)
+    mine_details = " ".join(mine_plan)
+    assert "ix_agent_runs_source_actor" in mine_details
+    assert "ix_agent_runs_source_session" in mine_details
+    assert "ix_agent_runs_callback_session" in mine_details
+    assert all("LIMIT ? OFFSET ?" in statement for statement, _ in main_queries)
+
+    status_queries = [
+        (statement, parameters)
+        for statement, parameters in captured
+        if "session_digests.now" in statement
+    ]
+    assert len(status_queries) == 3
+    with engine.connect() as conn:
+        status_plan = [
+            row[3]
+            for statement, parameters in status_queries
+            for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters).fetchall()
+        ]
+    assert any("sqlite_autoindex_session_digests_1" in detail for detail in status_plan)
+    assert any("ix_messages_session_type_created_id" in detail for detail in status_plan)
+
+
 
 
 def test_public_surface_is_stable():

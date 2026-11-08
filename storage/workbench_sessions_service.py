@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import Integer, and_, case, cast, func, or_, select, update
+from sqlalchemy import Integer, and_, case, cast, func, or_, select, union, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
@@ -67,6 +67,7 @@ from storage.models import (
     run_definitions,
     scope_settings,
     scopes,
+    session_digests,
     session_turns,
     show_pages,
     state_meta,
@@ -440,10 +441,100 @@ def require_session_turn_authority(
     return payload
 
 
+def _mine_session_ids(session_id: str):
+    """Return the other Sessions in this Session's Agent-run conversations.
+
+    ``source_actor`` is the dispatching Session for a real Agent run. The
+    execution Session is the recipient, and ``callback_session_id`` is the
+    Session receiving a requested result. Callback child Runs are Harness
+    plumbing and are excluded by the ``source_kind = 'agent'`` predicate.
+    Each arm is indexed on the owner-sized ``agent_runs`` table.
+    """
+
+    agent_run = agent_runs.c.run_type == "agent_run"
+    agent_source = agent_runs.c.source_kind == "agent"
+    dispatched = (
+        select(agent_runs.c.session_id.label("session_id"))
+        .where(agent_run, agent_source, agent_runs.c.source_actor == session_id)
+    )
+    received = (
+        select(agent_runs.c.source_actor.label("session_id"))
+        .where(agent_run, agent_source, agent_runs.c.session_id == session_id)
+    )
+    callback = (
+        select(agent_runs.c.session_id.label("session_id"))
+        .where(agent_run, agent_source, agent_runs.c.callback_session_id == session_id)
+    )
+    return union(dispatched, received, callback).subquery("mine_session_ids")
+
+
+_SESSION_STATUS_MAX_CHARS = 200
+
+
+def _one_line_session_status(value: Any) -> str | None:
+    """Render a digest ``now`` block or reply as one bounded list-row value."""
+
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    if lines:
+        heading = lines[0].lstrip("#").strip().lower()
+        if heading == "now" or heading.endswith(". now"):
+            lines.pop(0)
+    text = " ".join(lines)
+    if not text:
+        return None
+    if len(text) <= _SESSION_STATUS_MAX_CHARS:
+        return text
+    return text[: _SESSION_STATUS_MAX_CHARS - 1].rstrip() + "…"
+
+
+def _session_statuses(conn: Connection, session_ids: list[str]) -> dict[str, str]:
+    """Read the current-page status in two indexed lookups per Session at most."""
+
+    if not session_ids:
+        return {}
+    latest_reply = (
+        select(messages.c.content_text)
+        .where(
+            messages.c.session_id == agent_sessions.c.id,
+            messages.c.type == "result",
+            messages.c.content_text.is_not(None),
+            messages.c.content_text != "",
+        )
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(1)
+        .correlate(agent_sessions)
+        .scalar_subquery()
+    )
+    statement = (
+        select(
+            agent_sessions.c.id,
+            session_digests.c.now,
+            latest_reply.label("latest_reply"),
+        )
+        .select_from(
+            agent_sessions.outerjoin(
+                session_digests,
+                session_digests.c.session_id == agent_sessions.c.id,
+            )
+        )
+        .where(agent_sessions.c.id.in_(session_ids))
+    )
+    statuses: dict[str, str] = {}
+    for row in conn.execute(statement).mappings():
+        status = _one_line_session_status(row["now"])
+        if status is None:
+            status = _one_line_session_status(row["latest_reply"])
+        if status:
+            statuses[str(row["id"])] = status
+    return statuses
+
+
 def list_sessions_page(
     conn: Connection,
     *,
     platform: Optional[str] = None,
+    project_id: Optional[str] = None,
+    mine_session_id: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
@@ -458,6 +549,10 @@ def list_sessions_page(
 
     ``visibility == 'foreground'`` is positive for the reason ``list_sessions`` spells
     out: runtime-owned ``system`` sessions are excluded without naming them.
+
+    ``project_id`` narrows to one Avibe Project scope. ``mine_session_id`` narrows
+    to the other Sessions that this Session dispatched to or exchanged an Agent
+    Run with; Harness-only callback children never become matches.
 
     Project access narrows the QUERY, exactly as it does in ``list_sessions``.
     Filtering the rows afterwards would be a different answer: the page is built
@@ -490,6 +585,14 @@ def list_sessions_page(
             # filter even though their payload correctly has no platform.
             platform_filter = or_(agent_sessions.c.scope_id.is_(None), platform_filter)
         query = query.where(platform_filter)
+    if project_id:
+        query = query.where(agent_sessions.c.scope_id == f"avibe::project::{project_id}")
+    if mine_session_id:
+        mine = _mine_session_ids(str(mine_session_id).strip())
+        query = query.where(
+            agent_sessions.c.id != str(mine_session_id),
+            agent_sessions.c.id.in_(select(mine.c.session_id)),
+        )
     query = (
         query.order_by(
             agent_sessions.c.last_active_at.desc(),
@@ -504,6 +607,10 @@ def list_sessions_page(
         _row_to_payload(row, include_local_details=_include_local_details(context))
         for row in rows
     ]
+    statuses = _session_statuses(conn, [str(row["id"]) for row in rows])
+    for payload in payloads:
+        status = statuses.get(str(payload["id"]))
+        payload["status"] = status
     return page_result_from_limit_plus_one(payloads, request)
 
 

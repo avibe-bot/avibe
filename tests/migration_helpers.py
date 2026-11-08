@@ -35,11 +35,11 @@ def downgrade_legacy_schema(config: Config, revision: str) -> None:
     is deliberately test-only: the product refuses cross-epoch downgrades.
     """
     path = make_url(config.get_main_option("sqlalchemy.url")).database
-    # First undo same-epoch additive extensions; the bridge itself deliberately
-    # has no downgrade. Reconstruct that frozen legacy fixture only below.
     with closing(sqlite3.connect(path)) as conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-    if stamp == [("20261108_0079",)]:
+    if stamp != [("20261108_0076",)]:
+        # New additive migrations may sit above the non-downgradable bridge.
+        # Remove only those successors first; never ask Alembic to cross 0076.
         command.downgrade(config, "20261108_0076")
     with closing(sqlite3.connect(path)) as conn, conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()

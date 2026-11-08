@@ -655,6 +655,8 @@ soft-deleted and never surfaced.
 ```bash
 vibe session list                       # active sessions, 20 per page by default, newest activity first
 vibe session list --type slack          # filter by platform (avibe = Web/Workbench)
+vibe session list --mine                # inside an Agent shell, Sessions exchanged with the caller
+vibe session list --project "Release"  # active Sessions in a Project by display name or id
 vibe session list --page 2 --limit 50   # request page 2 with 50 rows (at most 100)
 vibe session get                        # inside an Avibe Agent shell, the caller Session
 vibe session get --session-id sesk8m4q2p7x                   # full detail for another Session
@@ -667,9 +669,18 @@ vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x
 vibe session send-now --session-id sesk8m4q2p7x              # promote the exact queue head
 ```
 
+Session list rows are lean and include `id`, title/project/agent fields when
+present, recent activity, and a one-line `status` when the Session has a
+current digest `now` block or latest result reply. Status is collapsed to one
+line and capped at 200 characters. `--mine` requires the injected caller
+Session and includes Sessions connected by real Agent runs in either direction
+(including result callbacks), while excluding Harness-only callback plumbing.
+`--mine` and `--project` are mutually exclusive; either may be combined with
+`--type`. Project names are resolved case-insensitively, and an ambiguous name
+must be replaced with its Project id.
+
 Every command except `list` acts on one Session: `--session-id`, or the caller
 Session inside an Avibe Agent shell (see [Grammar](#grammar)). With `--if-untitled`,
-`update --title` writes only when no user or Agent has titled the Session; an
 automatic title still counts as untitled. The check and the write are one
 transaction, so a concurrent rename is never overwritten, and `updated: false`
 reports that the existing title was kept. `--type` accepts
