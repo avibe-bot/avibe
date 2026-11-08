@@ -20,7 +20,9 @@ from core.runtime_work import RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
 from storage import message_deliveries as deliveries
 from storage.models import agent_runs, agent_sessions, messages, run_definitions, session_delegations
-from storage.session_delegations import candidate_query, latest_reply_query, pending_return_queries, pending_wake_queries
+from storage.session_delegations import (
+    candidate_query, has_dispatch_pair, latest_reply_query, pending_return_queries, pending_wake_queries,
+)
 
 NOW = "2026-11-08T00:00:00+00:00"
 
@@ -566,6 +568,27 @@ async def test_supervisor_startup_recovers_idle_pair_without_turn_end_event(harn
         await supervisor.stop()
 
 
+def test_dispatch_pair_probe_keeps_accepted_direction_after_answer(harness):
+    """Report-hint callers need dispatch history, not queued sends or reverse answers."""
+    h = harness
+    run = _send(h)
+    with h.engine.connect() as conn:
+        assert not has_dispatch_pair(conn, "sesA", "sesB")
+    _accept(h, run)
+    for state in ("open", "notified", "answered", "unavailable"):
+        with h.engine.begin() as conn:
+            conn.execute(update(session_delegations).values(state=state))
+            assert has_dispatch_pair(conn, "sesA", "sesB")
+            assert not has_dispatch_pair(conn, "sesB", "sesA")
+    # Restore the real pending state, then answer through actual acceptance.
+    with h.engine.begin() as conn:
+        conn.execute(update(session_delegations).values(state="open"))
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    with h.engine.connect() as conn:
+        assert has_dispatch_pair(conn, "sesA", "sesB")
+        assert not has_dispatch_pair(conn, "sesB", "sesA")
+
+
 def test_hot_queries_are_index_keyed_without_history_sort(harness):
     h = harness
     queries = [candidate_query(limit=32, cursor="old"), *pending_wake_queries("sesB"),
@@ -626,6 +649,7 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
             try:
                 for query in queries:
                     conn.execute(query).all()
+                assert not has_dispatch_pair(conn, "sesB", "missing-recipient")
             finally:
                 raw.set_progress_handler(None, 0)
             return steps

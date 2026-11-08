@@ -89,6 +89,18 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
         ))
 
 
+def has_dispatch_pair(conn: Connection, sender_session_id: str, recipient_session_id: str) -> bool:
+    """Whether this accepted dispatch direction has existed, including closed pairs.
+
+    For an incoming B→A message, probe (A, B) to recognize A's own delegate.
+    Queued/unaccepted sends and ordinary reverse answers do not create a pair.
+    """
+    return _has_rows(conn, select(session_delegations.c.sender_session_id).where(
+        session_delegations.c.sender_session_id == sender_session_id,
+        session_delegations.c.recipient_session_id == recipient_session_id,
+    ))
+
+
 def candidate_query(*, limit: int, cursor: str | None = None, occupied: frozenset[str] = frozenset()):
     """Page only pending pairs, never the Run/Message history."""
     query = select(session_delegations).where(session_delegations.c.state == "open")
