@@ -2831,11 +2831,14 @@ final class FormAccessoryBarTests: XCTestCase {
     }
 }
 
-// DIAGNOSTIC ONLY (draft PR, closed after reading): how the scene's status bar
-// style follows candidate mechanisms under UIKit and SwiftUI hosting roots.
+// DIAGNOSTIC ONLY (draft PR, closed after reading), round 2: which
+// representable child SwiftUI's hosting controller forwards the status bar
+// style to, and whether a live change follows.
 private final class DiagStyleController: UIViewController {
     var style: UIStatusBarStyle
-    init(style: UIStatusBarStyle) {
+    let label: String
+    init(_ label: String, style: UIStatusBarStyle) {
+        self.label = label
         self.style = style
         super.init(nibName: nil, bundle: nil)
     }
@@ -2854,43 +2857,68 @@ private struct DiagChildRepresentable: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
 }
 
-private final class DiagSchemeModel: ObservableObject {
-    @Published var scheme: ColorScheme?
+private final class DiagModel: ObservableObject {
+    @Published var showB = false
 }
 
-private struct DiagPreferredSchemeRoot: View {
-    @ObservedObject var model: DiagSchemeModel
-    let child: UIViewController
+private struct DiagAThenB: View {
+    @ObservedObject var model: DiagModel
+    let a: UIViewController
+    let b: UIViewController
     var body: some View {
-        DiagChildRepresentable(controller: child)
-            .ignoresSafeArea()
-            .preferredColorScheme(model.scheme)
+        ZStack {
+            DiagChildRepresentable(controller: a).ignoresSafeArea()
+            if model.showB {
+                DiagChildRepresentable(controller: b).ignoresSafeArea()
+            }
+        }
     }
 }
 
-private final class DiagWebController: UIViewController {
-    let webView = WKWebView(frame: .zero)
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        webView.frame = view.bounds
-        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.addSubview(webView)
-        webView.loadHTMLString(
-            "<html><head><meta name='color-scheme' content='light dark'></head><body>diag</body></html>",
-            baseURL: nil
-        )
+private struct DiagBThenA: View {
+    @ObservedObject var model: DiagModel
+    let a: UIViewController
+    let b: UIViewController
+    var body: some View {
+        ZStack {
+            if model.showB {
+                DiagChildRepresentable(controller: b).ignoresSafeArea()
+            }
+            DiagChildRepresentable(controller: a).ignoresSafeArea()
+        }
+    }
+}
+
+private struct DiagNested: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let a: UIViewController
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                DiagChildRepresentable(controller: a)
+                    .ignoresSafeArea(.container, edges: [.top, .bottom])
+                ProgressView("loading")
+            }
+        }
+        .background(colorScheme == .dark ? Color.black : Color.white)
+        .id(1)
     }
 }
 
 final class StatusBarDiagnosticTests: XCTestCase {
     @MainActor
-    func testDiagnoseStatusBarMechanisms() async throws {
+    func testDiagnoseStatusBarForwarding() async throws {
         let scene = try XCTUnwrap(
             UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         )
         func style() -> Int { scene.statusBarManager?.statusBarStyle.rawValue ?? -1 }
         func log(_ text: String) { print("AVIBE_DIAG " + text) }
-        func settle(_ label: String, ms: Int = 1500) async {
+        func name(_ object: AnyObject?) -> String {
+            guard let object else { return "nil" }
+            if let diag = object as? DiagStyleController { return diag.label }
+            return String(describing: type(of: object))
+        }
+        func settle(_ label: String, _ hosting: UIViewController, ms: Int = 1200) async {
             let clock = ContinuousClock()
             let start = clock.now
             var states: [String] = []
@@ -2903,161 +2931,136 @@ final class StatusBarDiagnosticTests: XCTestCase {
                 }
                 try? await Task.sleep(for: .milliseconds(20))
             }
-            log("\(label): " + states.joined(separator: " | "))
-        }
-        func name(_ object: AnyObject?) -> String {
-            object.map { String(describing: type(of: $0)) } ?? "nil"
-        }
-
-        log("scene ui=\(scene.traitCollection.userInterfaceStyle.rawValue) status=\(style())")
-        for existing in scene.windows {
-            let root = existing.rootViewController
-            log(
-                "existing \(name(existing)) root=\(name(root)) key=\(existing.isKeyWindow) hidden=\(existing.isHidden) " +
-                "level=\(existing.windowLevel.rawValue) winOverride=\(existing.overrideUserInterfaceStyle.rawValue) " +
-                "rootOverride=\(root?.overrideUserInterfaceStyle.rawValue ?? -1) rootPref=\(root?.preferredStatusBarStyle.rawValue ?? -1) " +
-                "childForStyle=\(name(root?.childForStatusBarStyle)) children=\(root?.children.map { name($0) } ?? [])"
-            )
+            log("\(label): " + states.joined(separator: " | ") + " childForStyle=\(name(hosting.childForStatusBarStyle)) children=\(hosting.children.map { name($0) })")
         }
 
         let window = UIWindow(windowScene: scene)
         window.frame = scene.screen.bounds
-
-        // 1. Calibration with a plain UIKit root.
-        let calibration = DiagStyleController(style: .lightContent)
-        window.rootViewController = calibration
         window.makeKeyAndVisible()
-        await settle("1a uikit lightContent")
-        calibration.style = .darkContent
-        calibration.setNeedsStatusBarAppearanceUpdate()
-        await settle("1b uikit darkContent")
-        calibration.style = .default
-        calibration.setNeedsStatusBarAppearanceUpdate()
-        await settle("1c uikit default")
-        calibration.overrideUserInterfaceStyle = .dark
-        calibration.setNeedsStatusBarAppearanceUpdate()
-        await settle("1d uikit default + vc override dark")
-        calibration.overrideUserInterfaceStyle = .unspecified
-        window.overrideUserInterfaceStyle = .dark
-        calibration.setNeedsStatusBarAppearanceUpdate()
-        await settle("1e uikit default + window override dark")
-        window.overrideUserInterfaceStyle = .unspecified
-        scene.traitOverrides.userInterfaceStyle = .dark
-        calibration.setNeedsStatusBarAppearanceUpdate()
-        await settle("1f uikit default + scene override dark")
-        log("1f scene ui=\(scene.traitCollection.userInterfaceStyle.rawValue) window ui=\(window.traitCollection.userInterfaceStyle.rawValue)")
-        scene.traitOverrides.remove(UITraitUserInterfaceStyle.self)
-        await settle("1g scene override removed")
-        log("1g scene ui=\(scene.traitCollection.userInterfaceStyle.rawValue)")
 
-        // 2. SwiftUI hosting root with a representable child that prefers lightContent.
-        let child = DiagStyleController(style: .lightContent)
-        let childHosting = UIHostingController(
-            rootView: DiagChildRepresentable(controller: child).ignoresSafeArea()
-        )
-        window.rootViewController = childHosting
-        await settle("2a hosting + child lightContent")
-        log(
-            "2a hostingPref=\(childHosting.preferredStatusBarStyle.rawValue) " +
-            "childForStyle=\(name(childHosting.childForStatusBarStyle)) children=\(childHosting.children.map { name($0) })"
-        )
-        childHosting.overrideUserInterfaceStyle = .dark
-        childHosting.setNeedsStatusBarAppearanceUpdate()
-        await settle("2b hosting override dark (uikit)")
-        childHosting.overrideUserInterfaceStyle = .unspecified
-        childHosting.setNeedsStatusBarAppearanceUpdate()
-        await settle("2c hosting override cleared")
+        // M1: A first, B inserted later and drawn above.
+        do {
+            let model = DiagModel()
+            let a = DiagStyleController("A", style: .lightContent)
+            let b = DiagStyleController("B", style: .darkContent)
+            let hosting = UIHostingController(rootView: DiagAThenB(model: model, a: a, b: b))
+            window.rootViewController = hosting
+            await settle("M1a A only", hosting)
+            model.showB = true
+            await settle("M1b A then B shown", hosting)
+            b.setNeedsStatusBarAppearanceUpdate()
+            await settle("M1c after B setNeeds", hosting)
+            model.showB = false
+            await settle("M1d B removed", hosting)
+            a.style = .darkContent
+            a.setNeedsStatusBarAppearanceUpdate()
+            await settle("M1e A live darkContent", hosting)
+            a.style = .lightContent
+            a.setNeedsStatusBarAppearanceUpdate()
+            await settle("M1f A live lightContent", hosting)
+            a.style = .default
+            a.setNeedsStatusBarAppearanceUpdate()
+            await settle("M1g A live default", hosting)
+        }
 
-        // 3. SwiftUI preferredColorScheme with a WebView controller below it.
-        let model = DiagSchemeModel()
-        let web = DiagWebController()
-        let schemeHosting = UIHostingController(
-            rootView: DiagPreferredSchemeRoot(model: model, child: web)
-        )
-        window.rootViewController = schemeHosting
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(10))
-        while clock.now < deadline {
-            if (try? await web.webView.evaluateJavaScript("document.readyState")) as? String == "complete" {
-                break
+        // M2: B declared first but inserted later, drawn below A.
+        do {
+            let model = DiagModel()
+            let a = DiagStyleController("A", style: .lightContent)
+            let b = DiagStyleController("B", style: .darkContent)
+            let hosting = UIHostingController(rootView: DiagBThenA(model: model, a: a, b: b))
+            window.rootViewController = hosting
+            await settle("M2a A only", hosting)
+            model.showB = true
+            await settle("M2b B shown below A", hosting)
+            model.showB = false
+            await settle("M2c B removed", hosting)
+        }
+
+        // M3: nested like BrowserScreen.
+        do {
+            let a = DiagStyleController("A", style: .lightContent)
+            let hosting = UIHostingController(rootView: DiagNested(a: a))
+            window.rootViewController = hosting
+            await settle("M3a nested", hosting)
+            a.style = .darkContent
+            a.setNeedsStatusBarAppearanceUpdate()
+            await settle("M3b nested live darkContent", hosting)
+        }
+
+        window.rootViewController = nil
+        window.isHidden = true
+    }
+
+    /// The real RootView: which controller owns the status bar over a runtime,
+    /// with Account covering it, and back.
+    @MainActor
+    func testDiagnoseRootViewStatusBarOwner() async throws {
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                return .json(
+                    """
+                    {
+                      "account": {"id": "account", "email": "max@example.com"},
+                      "instances": [{
+                        "id": "instance", "name": "Unreachable", "host": "status-bar.invalid",
+                        "url": "https://status-bar.invalid", "relationship": "owner",
+                        "owner_email": "max@example.com", "available": true
+                      }]
+                    }
+                    """
+                )
+            default:
+                return .status(404)
             }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock { server.stop() }
+        let suiteName = "StatusBarDiagnosticTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        let appModel = AppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(testBaseURL: baseURL)
+        )
+        let clock = ContinuousClock()
+        var deadline = clock.now.advanced(by: .seconds(20))
+        while clock.now < deadline,
+              (try? appModel.mobileSessionCoordinator.selectInstance(id: "instance")) == nil {
             try await Task.sleep(for: .milliseconds(50))
         }
-        func describe(_ label: String) async {
-            let dark = (try? await web.webView.evaluateJavaScript(
-                "matchMedia('(prefers-color-scheme: dark)').matches"
-            )) as? Bool
-            log(
-                "\(label) winOverride=\(window.overrideUserInterfaceStyle.rawValue) " +
-                "hostOverride=\(schemeHosting.overrideUserInterfaceStyle.rawValue) " +
-                "hostTraitsOverride=\(schemeHosting.traitOverrides.contains(UITraitUserInterfaceStyle.self)) " +
-                "winTraitsOverride=\(window.traitOverrides.contains(UITraitUserInterfaceStyle.self)) " +
-                "hostUI=\(schemeHosting.traitCollection.userInterfaceStyle.rawValue) " +
-                "hostPref=\(schemeHosting.preferredStatusBarStyle.rawValue) " +
-                "childForStyle=\(name(schemeHosting.childForStatusBarStyle)) " +
-                "webVCOverride=\(web.overrideUserInterfaceStyle.rawValue) webVCUI=\(web.traitCollection.userInterfaceStyle.rawValue) " +
-                "webViewUI=\(web.webView.traitCollection.userInterfaceStyle.rawValue) mqDark=\(dark.map { "\($0)" } ?? "nil") " +
-                "sceneUI=\(scene.traitCollection.userInterfaceStyle.rawValue)"
+        let hosting = UIHostingController(rootView: RootView().environmentObject(appModel))
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.screen.bounds
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+        func log(_ text: String) {
+            print(
+                "AVIBE_DIAG root \(text): route=\(appModel.route) childForStyle=\(hosting.childForStatusBarStyle.map { String(describing: type(of: $0)) } ?? "nil") " +
+                "children=\(hosting.children.map { String(describing: type(of: $0)) }) status=\(scene.statusBarManager?.statusBarStyle.rawValue ?? -1)"
             )
         }
-        await settle("3a scheme nil")
-        await describe("3a")
-        model.scheme = .dark
-        await settle("3b scheme dark")
-        await describe("3b")
-        web.overrideUserInterfaceStyle = scene.traitCollection.userInterfaceStyle
-        await settle("3c scheme dark + web pinned to scene")
-        await describe("3c")
-        let presented = UIViewController()
-        presented.view.backgroundColor = .systemBackground
-        web.present(presented, animated: false)
+        deadline = clock.now.advanced(by: .seconds(10))
+        while clock.now < deadline, !hosting.children.contains(where: { $0 is WebViewController }) {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         try await Task.sleep(for: .milliseconds(500))
-        log("3d presented(pageSheet) UI=\(presented.traitCollection.userInterfaceStyle.rawValue) presentingIsWeb=\(presented.presentingViewController === web) presenter=\(name(presented.presentingViewController))")
-        await settle("3d with presented sheet")
-        presented.dismiss(animated: false)
-        let full = UIViewController()
-        full.modalPresentationStyle = .fullScreen
-        web.present(full, animated: false)
-        try await Task.sleep(for: .milliseconds(500))
-        log("3e presented(fullScreen) UI=\(full.traitCollection.userInterfaceStyle.rawValue) presenter=\(name(full.presentingViewController))")
-        await settle("3e with fullScreen presented")
-        full.dismiss(animated: false)
-        try await Task.sleep(for: .milliseconds(300))
-        model.scheme = .light
-        await settle("3f scheme light")
-        await describe("3f")
-        model.scheme = .dark
-        await settle("3g scheme dark again")
-        model.scheme = nil
-        await settle("3h scheme nil after dark")
-        await describe("3h")
-        // Simulated system dark at the scene, page explicit light.
-        web.overrideUserInterfaceStyle = .unspecified
-        scene.traitOverrides.userInterfaceStyle = .dark
-        await settle("3i scene dark, scheme nil")
-        await describe("3i")
-        model.scheme = .light
-        await settle("3j scene dark, scheme light")
-        await describe("3j")
-        web.overrideUserInterfaceStyle = scene.traitCollection.userInterfaceStyle
-        await settle("3k scene dark, scheme light, web pinned to scene")
-        await describe("3k")
-        scene.traitOverrides.remove(UITraitUserInterfaceStyle.self)
-        await settle("3l scene override removed (web still pinned dark)")
-        await describe("3l")
-        model.scheme = nil
-        web.overrideUserInterfaceStyle = .unspecified
-
-        // 4. SwiftUI root that sets the window override first, then a
-        // preferredColorScheme(.light) is applied and removed.
-        window.overrideUserInterfaceStyle = .dark
-        model.scheme = .light
-        await settle("4a window override dark, scheme light")
-        await describe("4a")
-        model.scheme = nil
-        await settle("4b window override dark, scheme nil")
-        await describe("4b")
-
+        log("browser")
+        appModel.showAccount()
+        try await Task.sleep(for: .milliseconds(1500))
+        log("account over browser")
+        _ = appModel.returnToRuntime()
+        try await Task.sleep(for: .milliseconds(1500))
+        log("returned")
+        if let runtime = hosting.children.first(where: { $0 is WebViewController }) as? WebViewController {
+            appModel.recordRuntimeReleaseBarrier(runtime.invalidateForAccountTransition())
+        }
         window.rootViewController = nil
         window.isHidden = true
     }
