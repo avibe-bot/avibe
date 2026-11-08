@@ -108,11 +108,15 @@ class SSEBroker:
         return subscription.dropped if subscription is not None else 0
 
     def close_all(self) -> None:
-        """Wake every subscriber and reject late subscribers during shutdown."""
+        """Wake every subscriber and reject late subscribers during shutdown.
 
-        with self._lock:
-            self._closed = True
-            loop = self._loop
+        This is called from Uvicorn's signal handler. Do not acquire ``_lock``
+        here: a signal can interrupt an event-loop operation while it holds the
+        lock, so closure must be recorded and scheduled without waiting.
+        """
+
+        self._closed = True
+        loop = self._loop
         if loop is None:
             return
         try:

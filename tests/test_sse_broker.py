@@ -88,7 +88,24 @@ def test_late_subscribers_close_immediately_after_shutdown():
     assert subscribers == 0
 
 
-def test_dropped_count_records_what_a_full_queue_discarded():
+def test_close_all_does_not_wait_for_subscriber_lock():
+    broker = SSEBroker()
+    broker._lock.acquire()
+    finished = threading.Event()
+
+    def close():
+        broker.close_all()
+        finished.set()
+
+    thread = threading.Thread(target=close)
+    thread.start()
+    try:
+        assert finished.wait(timeout=1)
+    finally:
+        broker._lock.release()
+        thread.join(timeout=1)
+
+
     """A subscriber that cannot keep up is a subscriber losing events.
 
     The queue is bounded, so ``put_nowait`` raises somewhere it cannot report
