@@ -8391,7 +8391,11 @@ _SESSION_GET_OMIT = ("status", "session_anchor", "agent_id")
 
 def _session_row(payload: dict, *, brief: bool) -> dict:
     if brief:
-        return _present_fields({key: payload.get(key) for key in _SESSION_LIST_FIELDS})
+        # Storage's lifecycle status stays "active". The lean CLI row instead
+        # exposes the digest/reply projection, when there is one.
+        row = {key: payload.get(key) for key in _SESSION_LIST_FIELDS}
+        row["status"] = payload.get("status_line")
+        return _present_fields(row)
     return {key: value for key, value in payload.items() if key not in _SESSION_GET_OMIT}
 
 

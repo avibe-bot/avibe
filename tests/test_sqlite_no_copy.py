@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 import pytest
+from alembic.script import ScriptDirectory
 
 from storage import backups, importer, migrations
 from storage.compatibility import BRIDGE_REVISION, PRE_BRIDGE_REVISION
@@ -51,7 +52,7 @@ def ready_db(tmp_path, monkeypatch):
 def _graph(tmp_path, monkeypatch, *, second=False, opaque=False):
     graph = tmp_path / "alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
-    previous = CURRENT
+    previous = ScriptDirectory.from_config(migrations.alembic_config()).get_current_head()
     for number, revision in enumerate((FIRST, SECOND) if second else (FIRST,), 1):
         body = f"op.create_index('ix_no_copy_{number}', 'agents', ['description'], unique=False)"
         if opaque and (not second or number == 2):
@@ -79,6 +80,8 @@ def _rollback_artifacts(path):
 
 
 def test_no_copy_executes_pending_ddl_without_backup_validation_or_import(ready_db, tmp_path, monkeypatch):
+    with closing(sqlite3.connect(ready_db)) as conn:
+        previous = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
     _graph(tmp_path, monkeypatch, second=True)
     before = _rollback_artifacts(ready_db)
     for name in ("create_sqlite_migration_backup", "begin_sqlite_backup_migration", "complete_sqlite_backup_migration"):
@@ -88,7 +91,7 @@ def test_no_copy_executes_pending_ddl_without_backup_validation_or_import(ready_
     monkeypatch.setattr(backups, "_validate_migrated_database", _forbid)
     decision = migrations.preflight_database(ready_db)
     assert decision.skip_snapshot
-    assert decision.backup_revisions == ({CURRENT}, {SECOND})
+    assert decision.backup_revisions == ({previous}, {SECOND})
     report = importer.repair_sqlite_state(db_path=ready_db, state_dir=ready_db.parent)
     assert report.backup_attempt_id is None
     with closing(sqlite3.connect(ready_db)) as conn:

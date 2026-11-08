@@ -484,7 +484,7 @@ def _one_line_session_status(value: Any) -> str | None:
         heading = lines[0].lstrip("#").strip().lower()
         if heading == "now" or heading.endswith(". now"):
             lines.pop(0)
-    text = " ".join(lines)
+    text = " ".join(" ".join(lines).split())
     if not text:
         return None
     if len(text) <= _SESSION_STATUS_MAX_CHARS:
@@ -552,8 +552,8 @@ def list_sessions_page(
     Fetches ``limit + 1`` rows so the caller learns whether a next page exists
     without a second COUNT query.
 
-    ``visibility == 'foreground'`` is positive for the reason ``list_sessions`` spells
-    out: runtime-owned ``system`` sessions are excluded without naming them.
+    Ordinary browsing is foreground-only. ``mine_session_id`` also includes
+    background workers, but never runtime-owned ``system`` Sessions.
 
     ``project_id`` narrows to one Avibe Project scope. ``mine_session_id`` narrows
     to the other Sessions that this Session dispatched to or exchanged an Agent
@@ -566,9 +566,16 @@ def list_sessions_page(
     """
     context = require_instance_role(authorization_context, "viewer")
     request = PageRequest(page=max(int(page), 1), limit=max(int(limit), 1))
+    # Ordinary browsing stays foreground-only. Explicit relationship discovery
+    # must include background workers: that is the default dispatch visibility.
+    visibility_filter = (
+        agent_sessions.c.visibility.in_(("foreground", "background"))
+        if mine_session_id
+        else agent_sessions.c.visibility == "foreground"
+    )
     query = select(agent_sessions).where(
         agent_sessions.c.status == "active",
-        agent_sessions.c.visibility == "foreground",
+        visibility_filter,
     )
     # A Bot's Session is the Owner's, and a removed Bot's stays hidden until the Bot is set again (bots.md D1).
     hidden = hidden_bot_session_ids(conn, owner=context.is_instance_owner)
@@ -593,10 +600,10 @@ def list_sessions_page(
     if project_id:
         query = query.where(agent_sessions.c.scope_id == f"avibe::project::{project_id}")
     if mine_session_id:
-        mine = _mine_session_ids(str(mine_session_id).strip())
-        query = query.where(
-            agent_sessions.c.id != str(mine_session_id),
-            agent_sessions.c.id.in_(select(mine.c.session_id)),
+        mine_session_id = str(mine_session_id).strip()
+        mine = _mine_session_ids(mine_session_id)
+        query = query.join(mine, agent_sessions.c.id == mine.c.session_id).where(
+            agent_sessions.c.id != mine_session_id,
         )
     query = (
         query.order_by(
@@ -615,7 +622,7 @@ def list_sessions_page(
     statuses = _session_statuses(conn, [str(row["id"]) for row in rows])
     for payload in payloads:
         status = statuses.get(str(payload["id"]))
-        payload["status"] = status
+        payload["status_line"] = status
     return page_result_from_limit_plus_one(payloads, request)
 
 

@@ -674,13 +674,15 @@ present, recent activity, and a one-line `status` when the Session has a
 current digest `now` block or latest result reply. Status is collapsed to one
 line and capped at 200 characters. `--mine` requires the injected caller
 Session and includes Sessions connected by real Agent runs in either direction
-(including result callbacks), while excluding Harness-only callback plumbing.
+(including result callbacks and background workers), while excluding archived
+Sessions, runtime-owned system Sessions, and Harness-only callback plumbing.
 `--mine` and `--project` are mutually exclusive; either may be combined with
 `--type`. Project names are resolved case-insensitively, and an ambiguous name
 must be replaced with its Project id.
 
 Every command except `list` acts on one Session: `--session-id`, or the caller
 Session inside an Avibe Agent shell (see [Grammar](#grammar)). With `--if-untitled`,
+`update --title` writes only when no user or Agent has titled the Session; an
 automatic title still counts as untitled. The check and the write are one
 transaction, so a concurrent rename is never overwritten, and `updated: false`
 reports that the existing title was kept. `--type` accepts

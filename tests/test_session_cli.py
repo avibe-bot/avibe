@@ -25,7 +25,7 @@ def _setup(monkeypatch, tmp_path):
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
-def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend="claude", status="active", title_source=None, last_active="2026-06-09T10:00:00Z"):
+def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend="claude", status="active", visibility="foreground", title_source=None, last_active="2026-06-09T10:00:00Z"):
     now = "2026-06-09T09:00:00Z"
     scope_type = "project" if platform == "avibe" else "channel"
     metadata = {"title_source": title_source} if title_source else {}
@@ -35,7 +35,7 @@ def _seed(engine, sid, *, platform="avibe", native="proj_a", title="T", backend=
             agent_sessions.insert().values(
                 id=sid, scope_id=scope_id, agent_id="agent_internal_" + sid, agent_name=backend,
                 agent_backend=backend, agent_variant="default", session_anchor="anc_" + sid,
-                native_session_id="nat_" + sid, title=title, status=status, agent_status="idle",
+                native_session_id="nat_" + sid, title=title, status=status, visibility=visibility, agent_status="idle",
                 metadata_json=json.dumps(metadata), created_at=now, updated_at=now, last_active_at=last_active,
             )
         )
@@ -50,13 +50,14 @@ def _agent_run(
     source_kind: str | None = None,
     source_actor: str | None = None,
     callback_session_id: str | None = None,
+    run_type: str = "agent_run",
 ) -> None:
     now = "2026-06-09T09:00:00Z"
     with engine.begin() as conn:
         conn.execute(
             agent_runs.insert().values(
                 id=run_id,
-                run_type="agent_run",
+                run_type=run_type,
                 status="succeeded",
                 source_kind=source_kind,
                 source_actor=source_actor,
@@ -176,8 +177,6 @@ def test_list_invalid_type_errors(monkeypatch, tmp_path, capsys):
     assert payload["code"] == "invalid_session_type"
 
 
-
-
 def test_list_row_has_status_from_digest_or_latest_reply(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesdigest", title="Digest", last_active="2026-06-09T12:00:00Z")
@@ -216,6 +215,27 @@ def test_list_row_has_status_from_digest_or_latest_reply(monkeypatch, tmp_path, 
     assert rows["sesreply"]["status"].startswith("reply ")
     assert len(rows["sesreply"]["status"]) == 200
     assert rows["sesreply"]["status"].endswith("…")
+
+    with engine.begin() as conn:
+        # Even a newer reply never overrides nonempty checkpoint progress.
+        conn.execute(messages.insert().values(
+            id="msg-new", session_id="sesdigest", platform="avibe", author="agent", type="result",
+            content_text="new reply", content_json="{}", metadata_json="{}",
+            created_at="2026-06-09T13:00:00Z", updated_at="2026-06-09T13:00:00Z",
+        ))
+        conn.execute(session_digests.insert().values(
+            session_id="sesreply", compaction_id="evt-2", updated_at="2026-06-09T14:00:00Z", now="# 6. Now\n \t",
+        ))
+        for mid, kind, text in (("a", "result", "older tie"), ("b", "result", "Latest\treply\n  done"), ("c", "progress", "not a final reply")):
+            conn.execute(messages.insert().values(
+                id=mid, session_id="sesreply", platform="avibe", author="agent", type=kind,
+                content_text=text, content_json="{}", metadata_json="{}",
+                created_at="2026-06-09T14:00:00Z", updated_at="2026-06-09T14:00:00Z",
+            ))
+    _, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
+    rows = {row["id"]: row for row in payload["sessions"]}
+    assert rows["sesdigest"]["status"] == "- Verify the filter - Report the result"
+    assert rows["sesreply"]["status"] == "Latest reply done"
 
 
 def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
@@ -292,6 +312,42 @@ def test_list_mine_finds_agent_runs_in_both_directions_but_not_harness_children(
     monkeypatch.setenv("AVIBE_SESSION_ID", "sesexecution")
     _, payload = _run(cli.cmd_session_list, ["session", "list", "--mine"], capsys)
     assert {row["id"] for row in payload["sessions"]} == {"sescaller", "sesrecipient"}
+
+
+def test_list_mine_includes_background_workers_but_not_system_or_archived(
+    monkeypatch, tmp_path, capsys
+):
+    engine = _setup(monkeypatch, tmp_path)
+    for sid, visibility, status in (
+        ("caller", "foreground", "active"),
+        ("worker", "background", "active"),
+        ("retired", "background", "archived"),
+        ("system", "system", "active"),
+        ("ordinary", "foreground", "active"),
+    ):
+        _seed(engine, sid, visibility=visibility, status=status)
+        _agent_run(engine, "run-" + sid, source_kind="agent", source_actor="caller", session_id=sid)
+    # Duplicate dispatch and Watch/Task plumbing must not add rows or cause gaps.
+    _agent_run(engine, "again", source_kind="agent", source_actor="caller", session_id="worker")
+    _seed(engine, "watch-only", visibility="background")
+    _agent_run(engine, "watch-callback", source_kind="callback", source_actor="caller", session_id="watch-only")
+    _agent_run(engine, "watch-process", run_type="watch", source_kind="agent", source_actor="caller", session_id="watch-only")
+    _agent_run(engine, "task-process", run_type="scheduled", source_kind="agent", source_actor="caller", session_id="watch-only")
+    monkeypatch.setenv("AVIBE_SESSION_ID", "caller")
+
+    _, page1 = _run(cli.cmd_session_list, ["session", "list", "--mine", "--type", "avibe", "--limit", "1"], capsys)
+    assert [row["id"] for row in page1["sessions"]] == ["worker"]
+    assert page1["pagination"]["next_command"] == "vibe session list --type avibe --mine --page 2 --limit 1"
+    _, page2 = _run(cli.cmd_session_list, ["session", "list", "--mine", "--type", "avibe", "--limit", "1", "--page", "2"], capsys)
+    assert [row["id"] for row in page2["sessions"]] == ["ordinary"]
+    assert not page2["pagination"]["has_more"]
+
+
+def test_brief_session_row_never_confuses_lifecycle_with_digest_status():
+    assert cli._session_row({"id": "s", "status": "active"}, brief=True) == {"id": "s"}
+    assert cli._session_row({"id": "s", "status": "active", "status_line": "Reviewing tests"}, brief=True) == {
+        "id": "s", "status": "Reviewing tests"
+    }
 
 
 def test_list_mine_requires_the_injected_caller_session(monkeypatch, tmp_path, capsys):

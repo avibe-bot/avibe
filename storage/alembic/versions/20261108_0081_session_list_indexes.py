@@ -13,13 +13,14 @@ down_revision = "20261108_0076"
 branch_labels = None
 depends_on = None
 MIGRATION_SAFETY = "additive"
+MIGRATION_COMPATIBILITY = "additive"
 
 
 def upgrade() -> None:
-    # The CLI always filters active foreground Sessions before applying an
-    # optional Project or Agent-run relationship filter, then keeps this
-    # recent-activity order. These indexes keep that page bounded without a
-    # growing temporary sort over the owner-sized Sessions table.
+    # Ordinary browsing filters active foreground Sessions and optionally a
+    # Project before keeping the recent-activity order. These indexes avoid a
+    # growing temporary sort for those pages; the Run index bounds --mine's
+    # reverse relationship lookup (which also includes background workers).
     op.create_index(
         "ix_agent_runs_source_session",
         "agent_runs",

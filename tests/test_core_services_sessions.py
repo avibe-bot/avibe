@@ -9,7 +9,6 @@ shape or the public function set must update this file in lock-step.
 from __future__ import annotations
 
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -63,13 +62,10 @@ def _seed_avibe_scope(conn, workdir: str | None = None) -> str:
     return scope_id
 
 
-
-
 def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
-    """Pin the owner-sized query shape: indexed filters, no growing sort, two page reads."""
+    """Pin scoped Run seeks and page-only digest/reply reads, not elapsed time."""
 
     engine = create_sqlite_engine()
-    scope_id = None
     now = "2026-06-09T09:00:00Z"
     with engine.begin() as conn:
         scope_id = _seed_avibe_scope(conn)
@@ -120,7 +116,6 @@ def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
             captured.append((statement, parameters))
 
     event.listen(engine, "before_cursor_execute", capture_select)
-    started = time.perf_counter()
     with engine.connect() as conn:
         owner = AuthorizationContext(instance_role="owner")
         default_page = storage_sessions.list_sessions_page(conn, limit=10, authorization_context=owner)
@@ -130,11 +125,10 @@ def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
         mine_page = storage_sessions.list_sessions_page(
             conn, mine_session_id="ses0000", limit=10, authorization_context=owner
         )
-    elapsed = time.perf_counter() - started
     event.remove(engine, "before_cursor_execute", capture_select)
 
     assert len(default_page.items) == len(project_page.items) == len(mine_page.items) == 10
-    assert elapsed < 2.0, f"indexed Session list reads took {elapsed:.3f}s"
+    assert all(row["status"] == "active" for row in default_page.items)
 
     main_queries = [
         (statement, parameters)
@@ -156,12 +150,15 @@ def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
     default_plan, project_plan, mine_plan = plans
     assert any("ix_agent_sessions_status_visibility_activity" in detail for detail in default_plan)
     assert any("ix_agent_sessions_scope_status_visibility_activity" in detail for detail in project_plan)
-    assert any("ix_agent_sessions_status_visibility_activity" in detail for detail in mine_plan)
-    assert all("USE TEMP B-TREE FOR ORDER BY" not in detail for plan in plans for detail in plan)
-    mine_details = " ".join(mine_plan)
-    assert "ix_agent_runs_source_actor" in mine_details
-    assert "ix_agent_runs_source_session" in mine_details
-    assert "ix_agent_runs_callback_session" in mine_details
+    assert all("USE TEMP B-TREE FOR ORDER BY" not in detail for plan in plans[:2] for detail in plan)
+    # --mine sorts only the distinct related Sessions, including background
+    # workers. All four Run arms must seek the caller, never scan Run history.
+    assert any("SEARCH agent_sessions" in detail for detail in mine_plan)
+    run_seeks = [detail for detail in mine_plan if "SEARCH agent_runs" in detail]
+    assert len(run_seeks) == 4
+    for key in ("source_kind=? AND source_actor=?", "source_kind=? AND session_id=?", "callback_session_id=?"):
+        assert any(key in detail for detail in run_seeks), mine_plan
+    assert not any("SCAN agent_runs" in detail for detail in mine_plan)
     assert all("LIMIT ? OFFSET ?" in statement for statement, _ in main_queries)
 
     status_queries = [
@@ -170,6 +167,8 @@ def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
         if "session_digests.now" in statement
     ]
     assert len(status_queries) == 3
+    # Four reply-subquery parameters + at most limit+1 Session ids.
+    assert all(len(parameters) == 4 + 11 for _, parameters in status_queries)
     with engine.connect() as conn:
         status_plan = [
             row[3]
@@ -180,6 +179,7 @@ def test_session_list_plan_is_indexed_and_page_bounded(isolated_state):
     assert any("ix_messages_session_type_created_id" in detail for detail in status_plan)
 
 
+# --- Public surface ---------------------------------------------------
 
 
 def test_public_surface_is_stable():

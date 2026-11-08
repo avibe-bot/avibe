@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 from alembic import command
+from alembic.script import ScriptDirectory
 import pytest
 
 from storage import importer, migrations
@@ -176,15 +177,20 @@ os._exit(72)
     if crash == "before-commit":
         assert (epoch, stamp, table) == (None, ("20261107_0075",), None)
     else:
-        assert (epoch, stamp, table) == (("1",), ("20261108_0079",), ("crash_probe",))
+        current_head = ScriptDirectory.from_config(migrations.alembic_config(path)).get_current_head()
+        assert (epoch, stamp, table) == (("1",), (current_head,), ("crash_probe",))
 
 
 def _next_graph(tmp_path, monkeypatch, body, *, epoch=None):
     graph = tmp_path / "next-alembic"
     shutil.copytree(migrations.alembic_dir(), graph, ignore=shutil.ignore_patterns("__pycache__"))
+    config = migrations.alembic_config(tmp_path / "next.sqlite")
+    config.set_main_option("script_location", str(graph))
+    down_revision = ScriptDirectory.from_config(config).get_current_head()
     (graph / "versions" / "20261109_0077_next.py").write_text(
         "from alembic import op\nimport sqlalchemy as sa\n"
-        "revision = '20261109_0077'\ndown_revision = '20261108_0079'\n"
+        "revision = '20261109_0077'\n"
+        f"down_revision = {down_revision!r}\n"
         "branch_labels = None\ndepends_on = None\nMIGRATION_COMPATIBILITY = 'breaking'\n"
         + (f"COMPATIBILITY_EPOCH = {epoch}\n" if epoch is not None else "")
         + "def upgrade():\n" + body + "\ndef downgrade():\n    pass\n"
