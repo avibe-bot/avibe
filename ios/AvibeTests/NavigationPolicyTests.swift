@@ -838,6 +838,94 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(bottom(of: child, in: window), safeAreaBottom, accuracy: 0.5)
     }
 
+    // DIAGNOSTIC ONLY (draft PR): records the fixed-position layout viewport
+    // after WebKit switches a laid-out document to viewport-fit=cover.
+    @MainActor
+    func testZZDiagnoseFixedViewportAfterCoverSwitch() async throws {
+        let server = try LocalHTTPServer { _ in
+            LocalHTTPResponse.html(FullBleedFixture.diagnosticDocument)
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        for iteration in 1...25 {
+            let controller = makeRuntimeController(instanceOrigin: origin)
+            let window = try await makeHomeIndicatorWindow(rootViewController: controller)
+            let webView = try XCTUnwrap(
+                controller.view.subviews.compactMap { $0 as? WKWebView }.first
+            )
+            let inset = window.safeAreaInsets.bottom
+            let clock = ContinuousClock()
+            try await waitForTitle("Workbench", in: webView)
+            let loaded = clock.now
+            try await waitUntil {
+                let padding = await self.paddingBottom(of: "#tab-bar", in: webView)
+                return abs((padding ?? -1) - inset) < 0.5
+                    && webView.scrollView.adjustedContentInset.bottom == 0
+            }
+            let switched = clock.now
+            var lines: [String] = []
+            lines.append("switchAfterLoad=\(switched - loaded)")
+            lines.append("s0=\(await diagnosticSnapshot(webView))")
+            var firstFull: Duration?
+            var lastSnapshot = ""
+            while clock.now - switched < .seconds(3) {
+                let snapshot = await diagnosticSnapshot(webView)
+                lastSnapshot = snapshot
+                if snapshot.contains("\"tab\":\(Int(webView.bounds.height))") {
+                    firstFull = clock.now - switched
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            lines.append("firstFull=\(firstFull.map { "\($0)" } ?? "never")")
+            if firstFull == nil {
+                lines.append("at3s=\(lastSnapshot)")
+                webView.setNeedsLayout()
+                webView.layoutIfNeeded()
+                try await Task.sleep(for: .milliseconds(500))
+                lines.append("afterLayoutIfNeeded=\(await diagnosticSnapshot(webView))")
+                webView.scrollView.setContentOffset(CGPoint(x: 0, y: 1), animated: false)
+                webView.scrollView.setContentOffset(.zero, animated: false)
+                try await Task.sleep(for: .milliseconds(500))
+                lines.append("afterOffsetNudge=\(await diagnosticSnapshot(webView))")
+                if let constraint = controller.view.constraints.first(where: {
+                    $0.firstItem === webView && $0.firstAttribute == .bottom
+                }) {
+                    constraint.constant -= 1
+                    controller.view.layoutIfNeeded()
+                    constraint.constant += 1
+                    controller.view.layoutIfNeeded()
+                    try await Task.sleep(for: .milliseconds(500))
+                    lines.append("afterFrameNudge=\(await diagnosticSnapshot(webView))")
+                }
+            }
+            print("AVIBE_DIAG iter=\(iteration) " + lines.joined(separator: " | "))
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+    }
+
+    @MainActor
+    private func diagnosticSnapshot(_ webView: WKWebView) async -> String {
+        let page = (try? await webView.evaluateJavaScript(
+            """
+            JSON.stringify({
+              tab: document.querySelector("#tab-bar").getBoundingClientRect().bottom,
+              pad: parseFloat(getComputedStyle(document.querySelector("#tab-bar")).paddingBottom),
+              inner: window.innerHeight,
+              client: document.documentElement.clientHeight,
+              vv: window.visualViewport.height,
+              dvh: document.querySelector("#dvh").getBoundingClientRect().height,
+              svh: document.querySelector("#svh").getBoundingClientRect().height,
+              lvh: document.querySelector("#lvh").getBoundingClientRect().height
+            })
+            """
+        ) as? String) ?? "js-failed"
+        let scrollView = webView.scrollView
+        return page + " native{bounds:\(webView.bounds.height),adj:\(scrollView.adjustedContentInset.bottom),beh:\(scrollView.contentInsetAdjustmentBehavior.rawValue),content:\(scrollView.contentSize.height),safe:\(webView.safeAreaInsets.bottom)}"
+    }
+
     @MainActor
     func testWorkbenchPadsTheHomeIndicatorOnceAndOrdinaryDocumentsKeepTheAutomaticInset() async throws {
         let instanceServer = try LocalHTTPServer { request in
@@ -2411,6 +2499,38 @@ private enum FullBleedFixture {
             </style>
           </head>
           <body>
+            <nav id="tab-bar"></nav>
+            <script>
+              window.avibeNative.call("viewport.setOuterScrollLocked", {locked: true});
+            </script>
+          </body>
+        </html>
+        """
+
+    static let diagnosticDocument = """
+        <!doctype html>
+        <html>
+          <head>
+            <meta name="viewport" content="\(workbenchViewport)">
+            <title>Workbench</title>
+            <style>
+              html, body { margin: 0; height: 100%; overflow: hidden; }
+              #tab-bar {
+                position: fixed;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                height: 56px;
+                padding-bottom: env(safe-area-inset-bottom);
+                background: #0891b2;
+              }
+              .probe { position: absolute; top: 0; width: 1px; }
+            </style>
+          </head>
+          <body>
+            <div id="dvh" class="probe" style="left: 0; height: 100dvh"></div>
+            <div id="svh" class="probe" style="left: 2px; height: 100svh"></div>
+            <div id="lvh" class="probe" style="left: 4px; height: 100lvh"></div>
             <nav id="tab-bar"></nav>
             <script>
               window.avibeNative.call("viewport.setOuterScrollLocked", {locked: true});
