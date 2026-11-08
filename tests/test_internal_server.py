@@ -5167,10 +5167,47 @@ def test_canceling_held_agent_run_retires_queue_before_send_now(
     assert stored["cancel_requested"] is True
 
 
+def test_live_run_cancel_suppresses_callback_before_owner_stop(monkeypatch, tmp_path):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import apply_live_agent_run_cancellation_in_connection
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="worker",
+        source_kind="agent",
+        source_actor="caller-session",
+        callback_session_id="caller-session",
+    )
+    assert request_store.claim(request.id) is not None
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            assert apply_live_agent_run_cancellation_in_connection(
+                conn,
+                request.id,
+                session_id="target-session",
+                detach=False,
+                suppress_callback=True,
+            ) == "cancel_requested"
+        stored = request_store.get_run(request.id)
+        assert stored is not None
+        assert stored["status"] == "running"
+        assert stored["cancel_requested"] is True
+        assert stored["callback_status"] == "skipped"
+    finally:
+        engine.dispose()
+
+
 def test_idle_send_now_releases_hold_and_starts_the_exact_head(
     monkeypatch,
     tmp_path,
-):
+) -> None:
     """Empty P1 releases a hold and claims only the observed FIFO head."""
 
     from core.services import sessions as sessions_service
@@ -8097,7 +8134,7 @@ def test_flush_suppressed_segment_claims_each_delivery_id_in_one_turn(tmp_path, 
             "agent_run", {"source_kind": "agent", "source_actor": "sescaller01"},
             "[Harness: agent run run-1 from #sescaller01; agent run run-2 from #sescaller01]",
             # Where the result goes, once per distinct target (docs/plans/bots.md D4).
-            ["[No callback. When the work is done, you can report to #sescaller01 with "
+            ["[No callback. When the work is done or you need a decision, you can report to #sescaller01 with "
              "`vibe agent run --session-id sescaller01 --message ...`.]"],
             id="agent-runs-from-one-caller",
         ),

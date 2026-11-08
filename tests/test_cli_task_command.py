@@ -2304,17 +2304,21 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_una
     assert payload["run"]["status"] == "running"
 
 
-def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuses_stop(
+def test_runs_cancel_running_agent_run_restores_own_callback_when_backend_refuses_stop(
     monkeypatch,
     tmp_path: Path,
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_stop_failed")
     request_store = scheduled_tasks.TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id="ses_stop_failed",
         message="keep working",
         agent_name="worker",
+        source_kind="agent",
+        source_actor="ses_stop_failed",
+        callback_session_id="ses_stop_failed",
     )
     assert request_store.claim(request.id) is not None
     owner_cancel = AsyncMock(return_value={"ok": False, "code": "stop_failed", "reason": "interrupt_failed"})
@@ -2326,11 +2330,14 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuse
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    owner_cancel.assert_awaited_once_with("ses_stop_failed", agent_run_id=request.id)
+    owner_cancel.assert_awaited_once_with(
+        "ses_stop_failed", agent_run_id=request.id, suppress_callback=True
+    )
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
     assert saved["cancel_requested"] is True
+    assert saved["callback_status"] == "pending"
     payload = json.loads(capsys.readouterr().out)
     assert payload["cancel_code"] == "cancel_request_recorded_only"
     assert payload["cancel_result"]["reason_code"] == "stop_failed"

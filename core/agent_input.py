@@ -81,6 +81,7 @@ HARNESS_SOURCE_FIELDS = (
     "parent_run_id",
     "callback_session_id",
     "callback_mode",
+    "suppress_report_hint",
 )
 #: ``callback_mode`` of a run that asked for no callback: only a failure is reported (``core.scheduled_tasks``).
 _CALLBACK_FAILURE_ONLY = "failure"
@@ -178,8 +179,10 @@ def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:
     sender = _token(spec.get("source_actor")) if source_kind == "agent" else ""
     if not sender or sender == receiver:
         return ""
+    if spec.get("suppress_report_hint") is True:
+        return ""
     name, command = _address(sender)
-    return f"No callback. When the work is done, you can report to {name} with `{command}`."
+    return f"No callback. When the work is done or you need a decision, you can report to {name} with `{command}`."
 
 
 def harness_hints(spec: Mapping[str, Any]) -> tuple[str, ...]:

@@ -2992,6 +2992,7 @@ def apply_live_agent_run_cancellation_in_connection(
     *,
     session_id: str,
     detach: bool,
+    suppress_callback: bool = False,
     updated_at: Optional[str] = None,
 ) -> str:
     """Record one live Run cancellation inside the Turn owner's transaction.
@@ -3041,14 +3042,14 @@ def apply_live_agent_run_cancellation_in_connection(
             ):
                 _defer_queue_updated_from_connection(conn, normalized_session_id)
         values.update(status="canceled", completed_at=now)
-        callback_session_id = str(row["callback_session_id"] or "").strip()
-        callback_status = str(row["callback_status"] or "").strip()
-        if callback_session_id and callback_status not in {"sent", "skipped"}:
-            values.update(
-                callback_status="skipped",
-                callback_error=None,
-                callback_completed_at=now,
-            )
+    callback_session_id = str(row["callback_session_id"] or "").strip()
+    callback_status = str(row["callback_status"] or "").strip()
+    if (detach or suppress_callback) and callback_session_id and callback_status not in {"sent", "skipped"}:
+        values.update(
+            callback_status="skipped",
+            callback_error=None,
+            callback_completed_at=now,
+        )
     result = conn.execute(
         update(agent_runs)
         .where(agent_runs.c.id == normalized_run_id)
@@ -5332,7 +5333,13 @@ class SQLiteBackgroundTaskStore:
             rows = list(conn.execute(stmt).mappings())
             return [self._run_from_row(row) for row in rows]
 
-    def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
+    def cancel_run(
+        self,
+        run_id: str,
+        *,
+        requested_at: Optional[str] = None,
+        suppress_callback: bool = False,
+    ) -> bool:
         now = requested_at or _utc_now_iso()
         row_to_publish = None
         rows_to_publish: list[dict[str, Any]] = []
@@ -5371,6 +5378,14 @@ class SQLiteBackgroundTaskStore:
             if retired_delivery or (status == "queued" and not delivery_id):
                 values["status"] = "canceled"
                 values["completed_at"] = now
+            if suppress_callback and status not in TERMINAL_RUN_STATUSES and str(
+                row["callback_session_id"] or ""
+            ).strip() and str(row["callback_status"] or "").strip() not in {"sent", "skipped"}:
+                values.update(
+                    callback_status="skipped",
+                    callback_error=None,
+                    callback_completed_at=now,
+                )
             result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)

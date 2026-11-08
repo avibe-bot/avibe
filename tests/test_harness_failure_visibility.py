@@ -7743,6 +7743,32 @@ def test_hfr_448_cancel_requested_callback_does_not_block_turn_fallback(
     assert sqlite.owed_failure_notice(immediate.id)["state"] == "sent"
 
 
+def test_self_cancel_preserves_a_callback_for_an_already_settled_run(tmp_path: Path) -> None:
+    """A sender cancel cannot erase a result that completed before its request."""
+
+    sqlite, requests = _store(tmp_path)
+    run = requests.enqueue_agent_run(
+        message="finish the report",
+        session_id="ses-worker",
+        source_kind="agent",
+        source_actor="ses-sender",
+        callback_session_id="ses-sender",
+    )
+    assert run is not None
+    assert requests.claim(run.id) is not None
+    sqlite.record_run_output(
+        run.id,
+        output_id="out-success-before-cancel",
+        text="completed report",
+        terminal_status="succeeded",
+    )
+
+    assert sqlite.cancel_run(run.id, suppress_callback=True)
+    stored = sqlite.get_run(run.id)
+    assert stored["status"] == "succeeded"
+    assert stored["callback_status"] == "pending"
+
+
 def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
     tmp_path: Path,
 ) -> None:

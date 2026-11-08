@@ -7753,6 +7753,20 @@ def _run_session_id(run: dict | None) -> str:
     return str(run.get("session_id") or "").strip()
 
 
+def _sender_is_canceling_own_run(run: dict | None, caller_context) -> bool:
+    """A sender already knows when it explicitly cancels its own delegated Run."""
+
+    if not isinstance(run, dict) or caller_context is None:
+        return False
+    caller_session_id = str(getattr(caller_context, "session_id", None) or "").strip()
+    return bool(
+        caller_session_id
+        and str(run.get("source_kind") or "").strip() == "agent"
+        and str(run.get("source_actor") or "").strip() == caller_session_id
+        and str(run.get("callback_session_id") or "").strip() == caller_session_id
+    )
+
+
 def _should_attempt_live_run_cancel(run: dict | None) -> bool:
     from storage.background import normalize_run_status
 
@@ -7783,9 +7797,13 @@ def _record_live_cancel_fallback(
     run_id: str,
     *,
     reason_code: str,
+    suppress_callback: bool = False,
+    restore_callback: bool = False,
     detail: object | None = None,
 ) -> dict:
-    store.cancel_run(run_id)
+    store.cancel_run(run_id, suppress_callback=suppress_callback)
+    if restore_callback:
+        store.mark_callback_pending(run_id)
     return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
 
 
@@ -7865,16 +7883,30 @@ async def _call_session_owner(turns, call: Callable[[Any], Any], status_code: Ca
     return {"status_code": status_code(body), "body": body}
 
 
-async def _cancel_live_agent_run(store: TaskExecutionStore, run: dict, turns) -> dict:
+async def _cancel_live_agent_run(
+    store: TaskExecutionStore,
+    run: dict,
+    turns,
+    *,
+    suppress_callback: bool = False,
+) -> dict:
     from core.internal_server import cancel_status_code
 
     session_id = _run_session_id(run)
     run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
+    restore_callback = suppress_callback and str(run.get("callback_status") or "").strip() == "pending"
+
+    async def _cancel_owner(owner):
+        kwargs = {"agent_run_id": run_id}
+        if suppress_callback:
+            kwargs["suppress_callback"] = True
+        return await owner.cancel(session_id, **kwargs)
+
     try:
         controller_result = await _call_session_owner(
-            turns, lambda owner: owner.cancel(session_id, agent_run_id=run_id), cancel_status_code
+            turns, _cancel_owner, cancel_status_code
         )
     except internal_client.InternalServerUnavailable as exc:
         return await asyncio.to_thread(
@@ -7882,6 +7914,7 @@ async def _cancel_live_agent_run(store: TaskExecutionStore, run: dict, turns) ->
             store,
             run_id,
             reason_code="internal_unavailable",
+            suppress_callback=suppress_callback,
             detail=str(exc),
         )
     except Exception as exc:  # noqa: BLE001
@@ -7890,12 +7923,27 @@ async def _cancel_live_agent_run(store: TaskExecutionStore, run: dict, turns) ->
             store,
             run_id,
             reason_code="live_cancel_failed",
+            suppress_callback=suppress_callback,
             detail=str(exc),
         )
-    return await asyncio.to_thread(_settle_live_cancel, store, run_id, controller_result)
+    return await asyncio.to_thread(
+        _settle_live_cancel,
+        store,
+        run_id,
+        controller_result,
+        suppress_callback=suppress_callback,
+        restore_callback=restore_callback,
+    )
 
 
-def _settle_live_cancel(store: TaskExecutionStore, run_id: str, controller_result: dict) -> dict:
+def _settle_live_cancel(
+    store: TaskExecutionStore,
+    run_id: str,
+    controller_result: dict,
+    *,
+    suppress_callback: bool = False,
+    restore_callback: bool = False,
+) -> dict:
     """Classify the owner's answer and record the durable half, as the Stop it answered."""
     from storage.background import normalize_run_status
 
@@ -7929,6 +7977,8 @@ def _settle_live_cancel(store: TaskExecutionStore, run_id: str, controller_resul
         and isinstance(body, dict)
         and str(body.get("status") or "").strip() == "run_settled"
     ):
+        if restore_callback:
+            store.mark_callback_pending(run_id)
         return {
             "code": "run_already_settled",
             "live_cancel_attempted": False,
@@ -7943,13 +7993,15 @@ def _settle_live_cancel(store: TaskExecutionStore, run_id: str, controller_resul
             store,
             run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
+            suppress_callback=suppress_callback,
+            restore_callback=restore_callback,
             detail={
                 "controller_status_code": normalized_status_code,
                 "controller_response": body,
             },
         )
 
-    run_terminalized = store.mark_run_canceled(run_id)
+    run_terminalized = store.mark_run_canceled(run_id, suppress_callback=suppress_callback)
     return {
         "code": "live_cancel_confirmed",
         "live_cancel_attempted": True,
@@ -7982,6 +8034,8 @@ def _runs_cancel(args, invocation: _ServiceInvocation):
     existing = store.get_run(run_id)
     if existing is None:
         raise TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id})
+    caller_context = caller_context_from_env(invocation.caller_env)
+    suppress_callback = _sender_is_canceling_own_run(existing, caller_context)
     if _should_attempt_live_run_cancel(existing):
         turns = invocation.stores.session_turns
 
@@ -7989,7 +8043,12 @@ def _runs_cancel(args, invocation: _ServiceInvocation):
             from core.runtime_work import answer_caught_cancellation, land_step
 
             async def stop_and_settle() -> dict:
-                cancel_result = await _cancel_live_agent_run(store, existing, turns)
+                cancel_result = await _cancel_live_agent_run(
+                    store,
+                    existing,
+                    turns,
+                    suppress_callback=suppress_callback,
+                )
                 return await asyncio.to_thread(payload, cancel_result)
 
             # Once the owner is asked, this command still owns the durable half --
@@ -8001,7 +8060,7 @@ def _runs_cancel(args, invocation: _ServiceInvocation):
             return landed.result()
 
         return cancel_live
-    if not store.cancel_run(run_id):
+    if not store.cancel_run(run_id, suppress_callback=suppress_callback):
         raise TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id})
     return payload(_initial_cancel_result(existing))
 
