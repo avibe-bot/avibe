@@ -153,14 +153,6 @@ _COMPLETED = ("completed", "ended_by_hook")
 _MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 _OPEN_RECOVERY_DELIVERY_STATES = ("claimed", "steering", "interrupt_waiting", "reconciling_steer")
-_INTERRUPTED_TURN_SETTLEMENTS = (
-    "no_terminal_result",
-    "stopped",
-    "restarted",
-    "interrupted",
-    "backend_refresh",
-    "backend_disabled",
-)
 
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
@@ -768,7 +760,6 @@ class VibeyAgent(BaseAgent):
                 WHERE backend = 'vibey'
                   AND state = 'terminal'
                   AND terminal_outcome IN ('failed', 'canceled')
-                  AND settled_by IN ({','.join(repr(value) for value in _INTERRUPTED_TURN_SETTLEMENTS)})
             ), latest AS (
                 SELECT interrupted_sessions.session_id AS session_id,
                        (

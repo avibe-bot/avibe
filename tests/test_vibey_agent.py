@@ -618,6 +618,7 @@ def test_vibey_open_tail_candidates_cover_every_durable_restart_owner(engine, se
     cases = {
         "crash": ("tail-crash", "turn-crash", None),
         "stop": ("tail-stop", "turn-stop", "stop_only"),
+        "ordinary-failure": ("tail-failure", "turn-failure", None),
         "backend-switch": ("tail-switch", "turn-switch", None),
         "fork-source": ("tail-fork", "turn-fork", None),
     }
@@ -634,6 +635,18 @@ def test_vibey_open_tail_candidates_cover_every_durable_restart_owner(engine, se
                 state="terminal",
                 terminal_outcome="canceled",
                 settled_by="stopped",
+                terminal_at=NOW,
+            )
+        )
+
+    with engine.begin() as conn:
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id == "turn-failure")
+            .values(
+                state="terminal",
+                terminal_outcome="failed",
+                settled_by="terminal_result",
                 terminal_at=NOW,
             )
         )
