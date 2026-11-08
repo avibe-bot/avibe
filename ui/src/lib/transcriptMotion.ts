@@ -286,6 +286,13 @@ export const SHARED_ATTRIBUTE = 'data-transcript-shared';
  *  its first member): they come in only once the summary's card, which hides what is under it, is whole,
  *  and go first. */
 export const SUMMARY_LATE_ATTRIBUTE = 'data-transcript-summary-late';
+/** The parts of a summary copy that are its frame (a pill's fill, border and chevron): they cross-fade with what
+ *  it replaces, while what it shares with that (its icon and label) hands over in one frame. Without any, the
+ *  copy cross-fades whole. */
+export const SUMMARY_FRAME_ATTRIBUTE = 'data-transcript-summary-frame';
+/** What the summary takes the place of in the content (a chip panel's head bar): under reduced motion the two
+ *  trade places in one frame, while the rest of the content fades. */
+export const SUMMARY_HEAD_ATTRIBUTE = 'data-transcript-summary-head';
 
 /** The cross-fade, as fractions of a fold (closing) and an unfold (opening). Closing: the shared parts
  *  move onto the summary's while the edge rises; the summary comes in on top, and only once it is nearly
@@ -359,10 +366,12 @@ function backdropOf(column: HTMLElement): string {
   return 'var(--background)';
 }
 
-/** Where each shared part of what closes would have to be drawn to lie on the summary's: a translate and a
- *  scale (by font size, from its top-left corner). */
-function sharedMoves(summary: Element, nodes: HTMLElement[]): { el: HTMLElement; translate: string; scale: string }[] {
-  const moves: { el: HTMLElement; translate: string; scale: string }[] = [];
+/** A part what closes shares with the summary (`el`, and `twin`, the summary copy's own), and where `el` would
+ *  have to be drawn to lie on `twin`: a translate and a scale (by font size, from its top-left corner). */
+type Shared = { el: HTMLElement; twin: HTMLElement; translate: string; scale: string };
+/** Where each shared part of what closes would have to be drawn to lie on the summary's. */
+function sharedMoves(summary: Element, nodes: HTMLElement[]): Shared[] {
+  const moves: Shared[] = [];
   for (const target of Array.from(summary.querySelectorAll<HTMLElement | SVGElement>(`[${SHARED_ATTRIBUTE}]`))) {
     const key = target.getAttribute(SHARED_ATTRIBUTE);
     const el = nodes.map((node) => node.querySelector<HTMLElement>(`[${SHARED_ATTRIBUTE}="${key}"]`)).find(Boolean);
@@ -375,7 +384,7 @@ function sharedMoves(summary: Element, nodes: HTMLElement[]): { el: HTMLElement;
     const tx = b.left - a.left;
     const ty = b.top + b.height / 2 - (a.top + (a.height * scale) / 2);
     if (Math.abs(tx) < 0.25 && Math.abs(ty) < 0.25 && Math.abs(scale - 1) < 0.005) continue;
-    moves.push({ el, translate: `${tx}px ${ty}px`, scale: String(scale) });
+    moves.push({ el, twin: target as HTMLElement, translate: `${tx}px ${ty}px`, scale: String(scale) });
   }
   return moves;
 }
@@ -433,7 +442,7 @@ type Disclosing = {
   open: number;
   copy: HTMLElement | null;
   late: HTMLElement[];
-  shared: { el: HTMLElement; translate: string; scale: string }[];
+  shared: Shared[];
   curtain: HTMLElement | null;
   /** Where its curtain's edge is going, as shares of its own (its slide, and what grew as it loaded): read
    *  from these rather than from the curtain's style, which an engine may give at another time than the
@@ -456,7 +465,16 @@ const active = (entry: Disclosing | undefined): entry is Disclosing =>
   )) || [...entry.moves.values()].some((share) => !shareOver(share, clockNow())));
 
 /** Where a disclosure is drawn: its edge, the rows below, what fades, and the shared parts. */
-type State = { edge: number; rows: number[]; content: number; copy: number; late: number; shared: { translate: string; scale: string }[] };
+type State = { edge: number; rows: number[]; content: number; copy: number; late: number; head: number; shared: { translate: string; scale: string; shown: number; twin: number }[] };
+
+/** What of a summary copy cross-fades: its frame, or the whole copy where it has none. */
+const summaryParts = (copy: HTMLElement): HTMLElement[] => {
+  const frame = Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_FRAME_ATTRIBUTE}]`));
+  return frame.length > 0 ? frame : [copy];
+};
+
+/** What the summary takes the place of in the content, if anything is marked so. */
+const headOf = (entry: Disclosing) => entry.nodes.map((node) => node.querySelector<HTMLElement>(`[${SUMMARY_HEAD_ATTRIBUTE}]`)).find(Boolean) ?? null;
 
 function drawnState(entry: Disclosing): State {
   const style = (el: Element) => getComputedStyle(el);
@@ -467,9 +485,15 @@ function drawnState(entry: Disclosing): State {
       return share ? shareAt(share, clockNow()) : 0;
     }),
     content: parseFloat(style(entry.nodes[0]).opacity),
-    copy: entry.copy ? parseFloat(style(entry.copy).opacity) : 0,
+    copy: entry.copy ? parseFloat(style(summaryParts(entry.copy)[0]).opacity) : 0,
     late: entry.late[0] ? parseFloat(style(entry.late[0]).opacity) : 1,
-    shared: entry.shared.map(({ el }) => ({ translate: style(el).translate === 'none' ? '0px 0px' : style(el).translate, scale: style(el).scale === 'none' ? '1' : style(el).scale })),
+    head: headOf(entry) ? parseFloat(style(headOf(entry)!).opacity) : 1,
+    shared: entry.shared.map(({ el, twin }) => ({
+      translate: style(el).translate === 'none' ? '0px 0px' : style(el).translate,
+      scale: style(el).scale === 'none' ? '1' : style(el).scale,
+      shown: parseFloat(style(el).opacity),
+      twin: parseFloat(style(twin).opacity),
+    })),
   };
 }
 
@@ -574,19 +598,26 @@ function play(entry: Disclosing, from: State, closing: boolean, duration: number
   const host = entry.curtain?.parentElement?.parentElement ?? null;
   const fading = entry.nodes.filter((node) => node !== host);
   if (entry.copy) {
-    // Closing, the summary and its words fade in and the content out; opening, the other way round.
+    // Closing, the summary's frame and its words fade in and the content out; opening, the other way round. What
+    // the two share (a chip's icon and label) is never drawn twice: the content's moves onto the summary's, and
+    // the two hand over in the frame they lie on each other (closing, as the move ends; opening, as it starts).
+    // Under reduced motion nothing moves, and the summary trades places with what it stands in for (a panel's
+    // head bar) in one frame, while the rest of the content fades.
     const [fadeIn, fadeOut] = [tokens.enterEase, tokens.exitEase];
-    add(entry.copy.animate(segment('opacity', String(from.copy), closing ? '1' : '0', way.summary, closing ? fadeIn : fadeOut), timing));
+    const handover = reduced ? (closing ? way.summary[0] : way.summary[1]) : (closing ? way.glide[1] : way.glide[0]);
+    const at = [handover, handover] as const;
+    const head = headOf(entry);
+    for (const part of summaryParts(entry.copy)) {
+      add(part.animate(segment('opacity', String(from.copy), closing ? '1' : '0', reduced && head ? at : way.summary, closing ? fadeIn : fadeOut), timing));
+    }
+    if (reduced && head) add(head.animate(segment('opacity', String(from.head), closing ? '0' : '1', at, 'linear'), timing));
     for (const node of fading) add(node.animate(segment('opacity', String(from.content), closing ? '0' : '1', way.content, closing ? fadeOut : fadeIn), timing));
     if (way.late) for (const part of entry.late) add(part.animate(segment('opacity', String(from.late), closing ? '1' : '0', way.late, closing ? fadeIn : fadeOut), timing));
-    entry.shared.forEach(({ el, translate, scale }, index) => {
-      const now = from.shared[index] ?? { translate: '0px 0px', scale: '1' };
-      if (reduced) {
-        // Not moved: hidden while the summary's own shows, so the two are never drawn apart.
-        const at = closing ? [way.summary[0] - 0.1, way.summary[0]] as const : [way.summary[1], way.summary[1] + 0.1] as const;
-        add(el.animate(segment('opacity', closing ? '1' : '0', closing ? '0' : '1', at, closing ? fadeOut : fadeIn), timing));
-        return;
-      }
+    entry.shared.forEach(({ el, twin, translate, scale }, index) => {
+      const now = from.shared[index] ?? { translate: '0px 0px', scale: '1', shown: closing ? 1 : 0, twin: closing ? 0 : 1 };
+      add(el.animate(segment('opacity', String(now.shown), closing ? '0' : '1', at, 'linear'), timing));
+      add(twin.animate(segment('opacity', String(now.twin), closing ? '1' : '0', at, 'linear'), timing));
+      if (reduced) return;
       el.style.transformOrigin = 'top left';
       const to = closing ? { translate, scale } : { translate: '0px 0px', scale: '1' };
       add(el.animate([
@@ -647,7 +678,8 @@ function unfold(column: HTMLElement, item: Element, nodes: HTMLElement[], growth
     content: copy ? 0 : 0.4,
     copy: 1,
     late: 1,
-    shared: entry.shared.map(({ translate, scale }) => ({ translate, scale })),
+    head: 0,
+    shared: entry.shared.map(({ translate, scale }) => ({ translate, scale, shown: 0, twin: 1 })),
   };
   play(entry, from, false, tokens.discloseOpen.duration, tokens, reduced);
   disclosing.set(nodes[0], entry);
@@ -661,6 +693,38 @@ const summaries = new WeakMap<Element, { keep: number; room: number | null }>();
 
 /** Where the layout puts an element's top on screen, without the offset a disclosure draws it at. */
 const layoutTop = (el: Element) => el.getBoundingClientRect().top - offsetOf(el);
+
+/** How a disclosure about to fold measures: the content's height, where the edge stops (`keep`, px below its
+ *  top), and how far the rows below rise (`rise`). From its opening's measure when there is one; else from its
+ *  summary copy, which lies where what stands for it closed will be (a group a link opened); else from the
+ *  content itself (a Harness row's body). */
+function measureFold(column: HTMLElement, nodes: HTMLElement[], stays: Element | null, next: HTMLElement | null) {
+  const [first] = nodes;
+  const rects = nodes.map((node) => node.getBoundingClientRect());
+  const top = Math.min(...rects.map((rect) => rect.top));
+  const height = Math.max(...rects.map((rect) => rect.bottom)) - top;
+  const measured = stays ? summaries.get(stays) : undefined;
+  const copy = stays?.querySelector<HTMLElement>(`[${SUMMARY_ATTRIBUTE}]`) ?? null;
+  let keep: number;
+  let rise: number;
+  if (measured) {
+    keep = Math.max(0, Math.min(height, measured.keep));
+    rise = measured.room != null && next && stays ? Math.max(0, layoutTop(next) - layoutTop(stays) - measured.room) : height - keep;
+  } else if (copy && stays) {
+    const summaryBox = copy.getBoundingClientRect();
+    keep = Math.max(0, Math.min(height, summaryBox.bottom - top));
+    const room = summaryBox.bottom - stays.getBoundingClientRect().top + (parseFloat(getComputedStyle(column).rowGap) || 0);
+    rise = next ? Math.max(0, layoutTop(next) - layoutTop(stays) - room) : height - keep;
+  } else {
+    // A panel whose head carries the control that closes it keeps its head; the layout gives back the rest, and
+    // the gap its container leaves before it.
+    const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
+    keep = Math.max(0, Math.min(height, head ? head.getBoundingClientRect().bottom - top : 0));
+    const container = nodes.length === 1 && first.previousElementSibling && first.parentElement ? getComputedStyle(first.parentElement) : null;
+    rise = height - keep + (container && /flex|grid/.test(container.display) ? parseFloat(container.rowGap) || 0 : 0);
+  }
+  return { height, keep, rise, copy };
+}
 
 /** What closes folds back up: the edge rises to where what stands for it closed will end (the pill's
  *  height, the folded card's, none for a Harness row's body) while it still holds its layout, and the rows
@@ -684,33 +748,20 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     entry = prior;
     entry.watch?.disconnect();
     from = drawnState(entry);
+    // What it holds may have grown or shrunk since it started (a member's body opened inside a group that is
+    // still opening): its room, and how far the rows below rise, are measured again; everything starts from
+    // where it is drawn.
+    const measure = measureFold(column, nodes, stays, next);
+    const rows = [...trail, ...(next ? [next, ...itemsBelow(next, viewportBottom(), measure.rise)] : [])];
+    const now = clockNow();
+    from.rows = rows.map((row) => {
+      const share = entry.moves.get(row);
+      return share ? shareAt(share, now) : 0;
+    });
+    for (const row of entry.rows) if (!rows.includes(row)) setShare(entry.moves, row, null);
+    Object.assign(entry, { rows, trail, rise: measure.rise, keep: measure.keep, open: measure.height + EDGE_PAD });
   } else {
-    const rects = nodes.map((node) => node.getBoundingClientRect());
-    const top = Math.min(...rects.map((rect) => rect.top));
-    const height = Math.max(...rects.map((rect) => rect.bottom)) - top;
-    const measured = stays ? summaries.get(stays) : undefined;
-    const copy = stays?.querySelector<HTMLElement>(`[${SUMMARY_ATTRIBUTE}]`) ?? null;
-    let keep: number;
-    let rise: number;
-    if (measured) {
-      keep = Math.max(0, Math.min(height, measured.keep));
-      rise = measured.room != null && next && stays ? Math.max(0, layoutTop(next) - layoutTop(stays) - measured.room) : height - keep;
-    } else if (copy && stays) {
-      // Opened without a tap the transcript saw (a jump to a message opens its group): what stands for it closed
-      // is measured where its copy already lies. The edge stops at its bottom, and the rows below rise to where
-      // the item that stays, closed to it, leaves them.
-      const summaryBox = copy.getBoundingClientRect();
-      keep = Math.max(0, Math.min(height, summaryBox.bottom - top));
-      const room = summaryBox.bottom - stays.getBoundingClientRect().top + (parseFloat(getComputedStyle(column).rowGap) || 0);
-      rise = next ? Math.max(0, layoutTop(next) - layoutTop(stays) - room) : height - keep;
-    } else {
-      // Nothing stands in for it closed (a Harness row's body): a panel whose head carries the control that closes
-      // it keeps its head; the layout gives back the rest, and the gap its container leaves before it.
-      const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
-      keep = Math.max(0, Math.min(height, head ? head.getBoundingClientRect().bottom - top : 0));
-      const container = nodes.length === 1 && first.previousElementSibling && first.parentElement ? getComputedStyle(first.parentElement) : null;
-      rise = height - keep + (container && /flex|grid/.test(container.display) ? parseFloat(container.rowGap) || 0 : 0);
-    }
+    const { height, keep, rise, copy } = measureFold(column, nodes, stays, next);
     entry = {
       column, nodes, rows: [...trail, ...(next ? [next, ...itemsBelow(next, viewportBottom(), rise)] : [])], trail, rise, keep, open: height + EDGE_PAD, copy,
       late: copy ? Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_LATE_ATTRIBUTE}]`)) : [],
@@ -721,7 +772,7 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
       moves: new Map(),
       settles: [],
     };
-    from = { edge: entry.open, rows: entry.rows.map(() => 0), content: 1, copy: 0, late: 0, shared: entry.shared.map(() => ({ translate: '0px 0px', scale: '1' })) };
+    from = { edge: entry.open, rows: entry.rows.map(() => 0), content: 1, copy: 0, late: 0, head: 1, shared: entry.shared.map(() => ({ translate: '0px 0px', scale: '1', shown: 1, twin: 0 })) };
     disclosing.set(first, entry);
   }
   play(entry, from, true, tokens.discloseClose.duration * shareLeft(entry, from, true, reduced), tokens, reduced);

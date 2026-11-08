@@ -374,9 +374,12 @@ reduced-motion form.
     in beneath it, then fades out. Where the two overlap at least 98% is drawn:
     no empty frame, no dimming.
   - **Shared text morphs.** The chip's status icon and title move between
-    their pill place and the panel head's during the cross-fade, so the title
-    is never drawn twice. A group's folded card covers its members before its
-    own words fade in, and on opening they go first.
+    their pill place and the panel head's, and hand over to the pill's own in
+    the one frame where they lie on each other: only the pill's frame (its
+    fill, border and chevron) cross-fades, so the title is drawn once at every
+    frame, never twice (two copies on each other read bolder). A group's
+    folded card covers its members before its own words fade in, and on
+    opening they go first.
   - **Turning back.** Closed while still opening (or opened while closing), it
     turns from wherever it is drawn, on the new direction's curve, over the
     share of the way left.
@@ -394,9 +397,9 @@ reduced-motion form.
     last second opens anything this way, inside the tapped item or among the
     items its own Harness group lays out; a tap that closes opens nothing, and
     what a read adds to an opened group lands still.
-- **Reduced**: fades only. Nothing moves; the cross-fade keeps its timing, and
-  the chip's title in the panel head is hidden before the pill's shows, so it is
-  never drawn twice.
+- **Reduced**: fades only. Nothing moves; the content cross-fades on the same
+  timing, and the chip's pill and its panel's head bar trade places in one
+  frame, so neither is drawn over the other and the title is drawn once.
 - **Frames**: `motion/arrival/phone`, `phone-reduced`, `phone-card`,
   `phone-turn-end`, `phone-show-page`; `motion/disclosure/*`.
 

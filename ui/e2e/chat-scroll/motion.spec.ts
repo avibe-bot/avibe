@@ -709,8 +709,13 @@ type Disclosed = {
   /** How opaque the summary's own words show, and how much of what they replace shows through under them. */
   late: number | null;
   through: number | null;
-  /** Where each shared label that shows is (left, middle). */
-  labels: [number, number][];
+  /** How many copies of each part a chip and its panel share (its icon, its label) are drawn, at the most and
+   *  at the least: one, always, never two over each other. */
+  copies: [number, number];
+  /** Where the one copy of the shared label that shows is (left, middle), and how opaque what the summary stands
+   *  in for in the content (a chip panel's head bar) shows. */
+  title: [number, number] | null;
+  head: number | null;
   /** Something in the transcript animates a transform, a translate, a scale, or a clip, besides opacity. */
   moves: boolean;
   /** Something in the transcript animates a layout property. */
@@ -780,8 +785,10 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         if (el.hasAttribute('data-transcript-reveal')) opened.push(el as HTMLElement);
         else { next = el; break; }
       }
-      // Its own curtain: in the tapped item, or in the last item it laid out.
-      const curtain = [item, ...opened].map((el) => el.querySelector('[data-transcript-curtain]')).find(Boolean) ?? null;
+      // Its own curtain, laid in the item that holds the last of what it opened (not one a disclosure inside that
+      // laid): the last item it laid out (a group's collapse bar), else the tapped item.
+      const host = opened.length > 0 && opened.at(-1)!.parentElement === column ? opened.at(-1)! : item;
+      const curtain = host.querySelector(':scope > [data-transcript-curtain-clip] > [data-transcript-curtain]');
       const curtainTop = curtain ? curtain.getBoundingClientRect().top : Infinity;
       const contentTop = opened.length > 0 ? Math.min(...opened.map((node) => node.getBoundingClientRect().top)) : null;
       // What it opened that shows, as one span from its top to its bottom (a group's items, with the gaps between
@@ -792,7 +799,9 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
       const visible = spanTop === null || curtainTop <= spanTop ? [] : [{ bottom: Math.min(spanBottom!, curtainTop) }];
       const copy = item.querySelector('[data-transcript-summary]');
       const real = summarySelector ? item.querySelector(summarySelector) : null;
-      const summaryOpacity = copy ? shownOpacity(copy) : real ? shownOpacity(real) : null;
+      // A summary copy with a frame shows as much as its frame does (what it shares with the content hands over).
+      const copyShown = copy ? (copy.querySelector('[data-transcript-summary-frame]') ?? copy) : null;
+      const summaryOpacity = copyShown ? shownOpacity(copyShown) : real ? shownOpacity(real) : null;
       const late = copy?.querySelector('[data-transcript-summary-late]');
       // How opaque what it opened shows, but for what its curtain lies in and covers (a group's collapse bar).
       const uncovered = opened.filter((node) => !(curtain && node.contains(curtain)));
@@ -814,9 +823,20 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         summary: summaryOpacity,
         late: late ? shownOpacity(late) : null,
         through: late && contentOpacity !== null && summaryOpacity !== null ? contentOpacity * (1 - summaryOpacity) : null,
-        labels: [...item.querySelectorAll('[data-transcript-shared="label"]')]
-          .filter((label) => shownOpacity(label) > 0.03)
-          .map((label) => { const box = label.getBoundingClientRect(); return [box.left, box.top + box.height / 2] as [number, number]; }),
+        title: (() => {
+          const shown = [...item.querySelectorAll('[data-transcript-shared="label"]')].filter((label) => shownOpacity(label) > 0.05);
+          if (shown.length !== 1) return null;
+          const box = shown[0].getBoundingClientRect();
+          return [box.left, box.top + box.height / 2] as [number, number];
+        })(),
+        head: (() => {
+          const bar = item.querySelector('[data-transcript-summary-head]');
+          return bar ? shownOpacity(bar) : null;
+        })(),
+        copies: (() => {
+          const counts = ['icon', 'label'].map((key) => [...item.querySelectorAll(`[data-transcript-shared="${key}"]`)].filter((part) => shownOpacity(part) > 0.05).length);
+          return [Math.max(...counts), Math.min(...counts)] as [number, number];
+        })(),
         moves: animated.some((key) => /^(transform|translate|scale|clipPath)$/.test(key)),
         layout: animated.some((key) => /^(height|maxHeight|minHeight|margin|padding|top|bottom|left|right|width)/.test(key)),
         busy: opened.some((node) => !!node.querySelector('[aria-busy="true"]')),
@@ -885,11 +905,19 @@ function expectCovered(frames: Disclosed[]) {
   expect(cover.length).toBeGreaterThan(0);
   expect(Math.min(...cover)).toBeGreaterThanOrEqual(0.95);
 }
-/** A shared label is never drawn twice apart: whenever two show, they lie on each other. */
-function expectNoDoubledLabel(frames: Disclosed[]) {
-  const apart = frames.filter(({ labels }) => labels.length >= 2)
-    .map(({ labels }) => Math.max(...labels.flatMap(([x1, y1]) => labels.map(([x2, y2]) => Math.abs(x1 - x2) + Math.abs(y1 - y2)))));
-  expect(Math.max(0, ...apart)).toBeLessThanOrEqual(1);
+/** What a chip and its panel share (its icon and its label) is drawn once at every read, never twice. */
+function expectNoDoubledLabel(frames: Disclosed[], { moves = true }: { moves?: boolean } = {}) {
+  // Two copies lying on each other draw their text twice (it reads bolder for those frames), even where they are
+  // exactly in place: what a chip and its panel share hands over in one frame, and is never missing either.
+  expect(Math.max(...frames.map(({ copies }) => copies[0]))).toBe(1);
+  expect(Math.min(...frames.map(({ copies }) => copies[1]))).toBe(1);
+  if (!moves) return;
+  // The one that shows moves between the panel head's place and the pill's: it passes places in between, where
+  // one that jumped there would pass none.
+  const places = drawn(frames).map(({ title }) => title).filter((place): place is [number, number] => place !== null);
+  const apart = (a: [number, number], b: [number, number]) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+  const [start, end] = [places[0], places.at(-1)!];
+  if (apart(start, end) > 2) expect(places.filter((place) => apart(place, start) > 1 && apart(place, end) > 1).length).toBeGreaterThanOrEqual(1);
 }
 /** Closing lifts the rows below by exactly what the layout gives back: once what closed is gone, nothing moves on. */
 function expectLandsAsItGoes(frames: Disclosed[]) {
@@ -1001,6 +1029,30 @@ test('closing a Harness group with a member opened inside folds the group once, 
   expect(rowPath(closing).turns).toBe(0);
   expectLandsAsItGoes(closing);
   expect(closing.at(-1)!.summary).toBe(1);
+});
+
+test('a Harness group closed while it still opens, after a member opened in it, folds what it holds now in one movement', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  const head = transcript(page).locator('[data-harness-group]').last();
+  await head.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  // The group opens; two frames later a member's body opens in it; two frames after that, while the group is
+  // still opening, it is closed.
+  await page.evaluate(async () => {
+    [...document.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+    for (let frame = 0; frame < 2; frame += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
+  });
+  const closing = await discloseAndWatch(page, '[data-harness-group] button[aria-expanded="true"]', {
+    summary: GROUP_CARD,
+    before: { control: '[data-transcript-key^="harness-member:"] button[aria-expanded="false"]', index: 0, frames: 2 },
+  });
+  expect(closing[0].curtainAt).not.toBeNull();
+  // It folds what it holds now, the body that opened in it too: the rows below rise once, and land where the
+  // layout puts them, with nothing left to glide after.
+  expectInPlace(closing);
+  expectCovered(closing);
+  expect(rowPath(closing).turns).toBe(0);
+  expectLandsAsItGoes(closing);
 });
 
 test('a Harness group a link opened folds back into its card when closed, rising once to where the layout puts the rows', async ({ page }) => {
@@ -1129,7 +1181,10 @@ test('under reduced motion a disclosure only fades, nothing moves, and no title 
   for (const frames of [opening, closing]) {
     expect(frames.some(({ moves }) => moves)).toBe(false);
     expectCovered(frames);
-    expectNoDoubledLabel(frames);
+    expectNoDoubledLabel(frames, { moves: false });
+    // The pill and the panel's head bar trade places in one frame: never both drawn (judged where both are read
+    // at the frame's time, as with where things are).
+    expect(drawn(frames).filter(({ summary, head }) => (summary ?? 0) > 0.05 && (head ?? 0) > 0.05)).toEqual([]);
   }
   expect(closing.at(-1)!.summary).toBe(1);
 });

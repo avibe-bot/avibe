@@ -32,7 +32,7 @@ import { Dialog, DialogContent } from '../ui/dialog';
 import { Skeleton, SkeletonShimmer } from '../ui/skeleton';
 import { copyTextToClipboard } from '../../lib/utils';
 import { bindCitations } from '../../lib/citations';
-import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, SUMMARY_FRAME_ATTRIBUTE, SUMMARY_HEAD_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { canAnimate, motionTiming, useDisclosure } from '../../lib/motion';
 import {
   filterActivityRows,
@@ -685,23 +685,32 @@ export const ActivityChip: React.FC<{
   );
 
   // The pill: the chip closed. While the panel is open (and while it leaves) an inert copy of it waits,
-  // unseen, where the pill will be, so closing cross-fades into it and opening out of it; its icon and
-  // label are the panel head's, which move onto them before the two cross (lib/transcriptMotion).
+  // unseen, where the pill will be, so closing cross-fades into it and opening out of it. Only its frame (its
+  // fill, border and chevron) cross-fades; its icon and label are the panel head's, which move onto them and
+  // then hand over in one frame, so the two are never drawn over each other (lib/transcriptMotion).
+  const pillShape = 'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]';
+  const pillTone = group.status === 'failed'
+    ? 'border-destructive/30 bg-destructive/[0.06]'
+    : group.status === 'interrupted'
+      ? 'border-gold/30 bg-gold/[0.07]'
+      : 'border-mint/25 bg-mint/[0.07]';
   const pillClassName = clsx(
-    'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
-    group.status === 'failed'
-      ? 'border-destructive/30 bg-destructive/[0.06] hover:bg-destructive/[0.1]'
-      : group.status === 'interrupted'
-        ? 'border-gold/30 bg-gold/[0.07] hover:bg-gold/[0.12]'
-        : 'border-mint/25 bg-mint/[0.07] hover:bg-mint/[0.12]',
+    pillShape,
+    pillTone,
+    'transition-colors',
+    group.status === 'failed' ? 'hover:bg-destructive/[0.1]' : group.status === 'interrupted' ? 'hover:bg-gold/[0.12]' : 'hover:bg-mint/[0.12]',
   );
-  const pillContent = (
-    <>
-      <StatusIcon data-transcript-shared="icon" className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
-      <span data-transcript-shared="label" className="min-w-0 truncate font-medium text-foreground/90">{label}</span>
-      <ChevronDown className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
-    </>
-  );
+  const pillContent = (copy = false) => {
+    const frame = copy ? { [SUMMARY_FRAME_ATTRIBUTE]: '' } : {};
+    return (
+      <>
+        {copy && <span {...frame} className={clsx('absolute -inset-px rounded-full border opacity-0', pillTone)} />}
+        <StatusIcon data-transcript-shared="icon" className={clsx('relative size-3.5 shrink-0', STATUS_TINT[group.status], copy && 'opacity-0')} aria-hidden="true" />
+        <span data-transcript-shared="label" className={clsx('relative min-w-0 truncate font-medium text-foreground/90', copy && 'opacity-0')}>{label}</span>
+        <ChevronDown {...frame} className={clsx('relative size-3.5 shrink-0 text-muted', copy && 'opacity-0')} aria-hidden="true" />
+      </>
+    );
+  };
 
   return (
     <div {...itemAttributes} className="flex w-full justify-start">
@@ -714,7 +723,7 @@ export const ActivityChip: React.FC<{
             title={t('chat.agentActivity.expand')}
             className={pillClassName}
           >
-            {pillContent}
+            {pillContent()}
           </button>
         ) : (
           // Expanded: a full panel card. Header bar carries the status/label (toggles
@@ -726,7 +735,7 @@ export const ActivityChip: React.FC<{
             aria-hidden={panel.closing || undefined}
             className={clsx('w-full overflow-hidden rounded-xl rounded-tl-md border border-border bg-foreground/[0.02]', panel.closing && 'motion-disclose-leaving')}
           >
-            <div className={clsx('flex items-center gap-2 border-b px-3 py-2', statusChipClasses(group.status))}>
+            <div {...{ [SUMMARY_HEAD_ATTRIBUTE]: '' }} className={clsx('flex items-center gap-2 border-b px-3 py-2', statusChipClasses(group.status))}>
               <button
                 type="button"
                 onClick={onToggle}
@@ -749,8 +758,8 @@ export const ActivityChip: React.FC<{
           </div>
         )}
         {panel.present && (
-          <span aria-hidden="true" inert data-transcript-summary="" className={clsx(pillClassName, 'pointer-events-none absolute left-0 top-0 z-[1] opacity-0')}>
-            {pillContent}
+          <span aria-hidden="true" inert data-transcript-summary="" className={clsx(pillShape, 'pointer-events-none absolute left-0 top-0 z-[1] border-transparent')}>
+            {pillContent(true)}
           </span>
         )}
       </div>
