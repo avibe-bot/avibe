@@ -89,7 +89,10 @@ def capture_request() -> dict[str, Any]:
     original_entropy = http_ece.os.urandom
     original_clock = pywebpush.time.time
     original_post = pywebpush.requests.post
-    original_from_pem_bound = py_vapid.Vapid.from_pem
+    vapid_class = py_vapid.Vapid
+    original_from_pem_bound = vapid_class.from_pem
+    had_own_from_pem = "from_pem" in vapid_class.__dict__
+    original_from_pem_entry = vapid_class.__dict__.get("from_pem")
     fixed_ecdh_private_key = ec.derive_private_key(
         int.from_bytes(FIXED_ECDH_PRIVATE_SCALAR, "big"),
         ec.SECP256R1(),
@@ -135,7 +138,7 @@ def capture_request() -> dict[str, Any]:
     http_ece.os.urandom = lambda size: FIXED_SALT if size == 16 else original_entropy(size)
     pywebpush.time.time = lambda: TEST_CLOCK
     pywebpush.requests.post = capture_post
-    py_vapid.Vapid.from_pem = classmethod(deterministic_from_pem)
+    vapid_class.from_pem = classmethod(deterministic_from_pem)
     try:
         payload = {
             "title": "任务完成",
@@ -172,7 +175,10 @@ def capture_request() -> dict[str, Any]:
         http_ece.os.urandom = original_entropy
         pywebpush.time.time = original_clock
         pywebpush.requests.post = original_post
-        del py_vapid.Vapid.from_pem
+        if had_own_from_pem:
+            setattr(vapid_class, "from_pem", original_from_pem_entry)
+        else:
+            delattr(vapid_class, "from_pem")
 
 
 def serialize_request(request: dict[str, Any]) -> bytes:
