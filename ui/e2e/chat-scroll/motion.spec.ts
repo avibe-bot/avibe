@@ -718,15 +718,32 @@ type Disclosed = {
    *  over the curtain while one is down. */
   trail: number | null;
   trailOver: boolean | null;
+  /** While a curtain is down: how far from the top of what it covers the box it slides in lies. It belongs on
+   *  that top, whatever else moves. */
+  curtainAt: number | null;
+  /** How far the conversation is still drawn from where the layout puts it by a glide (px). */
+  glide: number;
 };
 
 /** Taps `control` (the last match) and reads the frames that follow; `then`: after `after` ms, taps the last
  *  match of `control` again (the same disclosure, now pointing the other way). `summary` finds what stands
- *  for it closed inside the tapped item once its copy is gone. */
-async function discloseAndWatch(page: Page, control: string, { summary = null, then = null, frames = 54 }: { summary?: string | null; then?: { control: string; after: number } | null; frames?: number } = {}) {
-  return page.evaluate(async ({ controlSelector, summarySelector, second, count }) => {
+ *  for it closed inside the tapped item once its copy is gone. `before`: first taps the match of its control at
+ *  `index` (from the end when negative), another disclosure, and `ms` later the one watched. */
+async function discloseAndWatch(page: Page, control: string, { summary = null, then = null, before = null, frames = 54 }: { summary?: string | null; then?: { control: string; after: number } | null; before?: { control: string; index: number; ms: number } | null; frames?: number } = {}) {
+  return page.evaluate(async ({ controlSelector, summarySelector, second, first, count }) => {
     const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
     const column = transcript.firstElementChild!.firstElementChild! as HTMLElement;
+    if (first) {
+      [...transcript.querySelectorAll<HTMLElement>(first.control)].at(first.index)!.click();
+      const tappedAt = performance.now();
+      while (performance.now() - tappedAt < first.ms) await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    // How far an element is drawn down by its own translate and transform.
+    const ownOffset = (el: Element) => {
+      const style = getComputedStyle(el);
+      const translate = style.translate && style.translate !== 'none' ? parseFloat(style.translate.split(/\s+/)[1] ?? '0') || 0 : 0;
+      return translate + (style.transform && style.transform !== 'none' ? new DOMMatrixReadOnly(style.transform).m42 : 0);
+    };
     const button = [...transcript.querySelectorAll<HTMLElement>(controlSelector)].at(-1)!;
     const item = [...column.children].find((child) => child.contains(button))! as HTMLElement;
     const shownOpacity = (el: Element) => {
@@ -757,8 +774,10 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         if (el.hasAttribute('data-transcript-reveal')) opened.push(el as HTMLElement);
         else { next = el; break; }
       }
-      const curtain = column.querySelector('[data-transcript-curtain]');
+      // Its own curtain: in the tapped item, or in the last item it laid out.
+      const curtain = [item, ...opened].map((el) => el.querySelector('[data-transcript-curtain]')).find(Boolean) ?? null;
       const curtainTop = curtain ? curtain.getBoundingClientRect().top : Infinity;
+      const contentTop = opened.length > 0 ? Math.min(...opened.map((node) => node.getBoundingClientRect().top)) : null;
       const visible = opened.map((node) => {
         const box = node.getBoundingClientRect();
         return { bottom: curtainTop <= box.top ? null : Math.min(box.bottom, curtainTop), opacity: shownOpacity(node) };
@@ -794,6 +813,8 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
           return trailEl?.isConnected ? trailEl.getBoundingClientRect().top : null;
         })(),
         trailOver: trailEl?.isConnected && curtain ? getComputedStyle(trailEl).zIndex === '1' : null,
+        curtainAt: curtain?.parentElement && contentTop !== null ? curtain.parentElement.getBoundingClientRect().top - contentTop : null,
+        glide: ownOffset(column),
         body: (() => {
           const box = opened[0]?.lastElementChild;
           if (!box) return null;
@@ -820,16 +841,29 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
     }
     changes.disconnect();
     return out;
-  }, { controlSelector: control, summarySelector: summary, second: then, count: frames });
+  }, { controlSelector: control, summarySelector: summary, second: then, first: before, count: frames });
 }
 
 /** What the frames hold to, wherever a disclosure is opened or closed: the tapped item stays where it was;
  *  the rows below are never drawn over what it shows; nothing animates layout. */
 function expectInPlace(frames: Disclosed[]) {
   expect(Math.max(...frames.map(({ tapped }) => Math.abs(tapped - frames[0].tapped)))).toBeLessThanOrEqual(1);
-  const over = frames.filter(({ next, shown }) => next !== null && shown !== null).map(({ next, shown }) => shown! - next!);
-  expect(Math.max(-Infinity, ...over)).toBeLessThanOrEqual(0.5);
-  expect(frames.some(({ layout }) => layout)).toBe(false);
+  expectRowsWithEdge(frames);
+}
+/** The rows below go with the edge, whatever else moves: never drawn over what it shows, and never left
+ *  further behind it than the layout leaves them when it is open (a few px of play where the edge crosses the
+ *  gap between two items it opened); its curtain rests on what it covers; nothing animates layout. */
+function expectRowsWithEdge(all: Disclosed[]) {
+  // Where things are drawn is read at frames: between them an engine may give an element its compositor's
+  // place at that moment, and another one the timeline's.
+  const frames = all.filter(({ frame }) => frame !== null);
+  const gaps = frames.filter(({ next, shown }) => next !== null && shown !== null).map(({ next, shown }) => next! - shown!);
+  expect(Math.min(Infinity, ...gaps)).toBeGreaterThanOrEqual(-0.5);
+  const resting = frames.filter(({ next, shown, curtainAt }) => next !== null && shown !== null && curtainAt === null).map(({ next, shown }) => next! - shown!);
+  if (resting.length > 0) expect(Math.max(...gaps)).toBeLessThanOrEqual(Math.max(...resting) + 8);
+  const off = frames.filter(({ curtainAt }) => curtainAt !== null).map(({ curtainAt }) => Math.abs(curtainAt!));
+  expect(Math.max(0, ...off)).toBeLessThanOrEqual(1);
+  expect(all.some(({ layout }) => layout)).toBe(false);
 }
 /** No frame is empty or dim where the summary and what it stands for meet: at least 95% is drawn there. */
 function expectCovered(frames: Disclosed[]) {
@@ -851,9 +885,9 @@ function expectLandsAsItGoes(frames: Disclosed[]) {
   expect(Math.max(...after) - Math.min(...after)).toBeLessThanOrEqual(0.5);
 }
 /** How far the row below moves in all, how fast at its fastest (px/ms, on the animations' clock), and how
- *  often it turns back. */
+ *  often it turns back, as drawn (at frames). */
 function rowPath(frames: Disclosed[]) {
-  const tops = frames.map(({ next }) => next).filter((top): top is number => top !== null);
+  const tops = frames.filter(({ frame }) => frame !== null).map(({ next }) => next).filter((top): top is number => top !== null);
   const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
   const turns = steps.slice(1).filter((step, index) => Math.sign(step) !== Math.sign(steps[index])).length;
   // Over at least two frames' time, so a frame drawn a little early or late does not read as a burst of speed.
@@ -862,7 +896,9 @@ function rowPath(frames: Disclosed[]) {
     const later = timed.slice(index + 1).find((other) => other.frame! - frame! >= 30);
     return later ? [Math.abs(later.next! - next!) / (later.frame! - frame!)] : [];
   });
-  return { travel: tops.at(-1)! - tops[0], fastest: Math.max(0, ...speeds), turns };
+  // In all, from before the tap (nothing moving) to the end.
+  const all = frames.map(({ next }) => next).filter((top): top is number => top !== null);
+  return { travel: all.at(-1)! - all[0], fastest: Math.max(0, ...speeds), turns };
 }
 
 const CHIP = '[data-transcript-key^="activity:"]';
@@ -976,6 +1012,55 @@ test('closing a chip while it still opens turns back from where it is, as smooth
   expectInPlace(turned);
   expectCovered(turned.filter(({ summary }) => summary !== null));
   expectNoDoubledLabel(turned);
+});
+
+test('a chip opened while the conversation still glides up reveals from its own top, and the rows go with its edge', async ({ page }) => {
+  await open(page, 'delay=0&activity=1&records=1&count=392');
+  // A reply comes in while the reader follows the tail: the conversation glides up to make room for it, and
+  // the reader opens the last chip while it still does.
+  await page.evaluate(async () => {
+    window.__scrollLab.push('A reply, so the conversation glides.', 'agent');
+    for (let frame = 0; frame < 2; frame += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
+  });
+  const frames = await discloseAndWatch(page, `${CHIP} button[aria-expanded="false"]`);
+  expect(Math.max(...frames.filter(({ curtainAt }) => curtainAt !== null).map(({ glide }) => Math.abs(glide)))).toBeGreaterThan(4);
+  expectRowsWithEdge(frames);
+  // In the conversation (less the glide, which moves everything together), the row under it only goes down.
+  expect(rowPath(frames.map((frame) => ({ ...frame, next: frame.next === null ? null : frame.next - frame.glide }))).turns).toBe(0);
+});
+
+test('two disclosures opened a moment apart move the rows they share by both, and each reveals from its own top', async ({ page }) => {
+  await open(page, 'delay=0&activity=1&records=1&count=392');
+  // A chip with a Harness row of its own a little under it, the chip near the top of the screen.
+  const pair = await transcript(page).evaluate((scroller) => {
+    const column = scroller.firstElementChild!.firstElementChild!;
+    const items = [...column.children] as HTMLElement[];
+    const harness = new Set(window.__scrollLab.history.filter((message) => message.type === 'harness').map((message) => message.id));
+    for (const [index, chip] of items.entries()) {
+      if (!chip.dataset.transcriptKey?.startsWith('activity:')) continue;
+      const row = items.slice(index + 1).find((el) => harness.has(el.dataset.messageId ?? '') && el.querySelector('button[aria-expanded="false"]'));
+      if (row && row.getBoundingClientRect().top - chip.getBoundingClientRect().top < 300) {
+        scroller.scrollTop += chip.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 40;
+        return { chip: chip.dataset.transcriptKey, row: row.dataset.messageId! };
+      }
+    }
+    return null;
+  });
+  expect(pair).not.toBeNull();
+  await page.waitForTimeout(400);
+  // The chip first; 120 ms later, while it still moves the Harness row and everything under it, the row.
+  const frames = await discloseAndWatch(page, `[data-message-id="${pair!.row}"] button[aria-expanded="false"]`, {
+    before: { control: `[data-transcript-key="${pair!.chip}"] button[aria-expanded="false"]`, index: 0, ms: 120 },
+    frames: 70,
+  });
+  expect(frames.some(({ curtainAt }) => curtainAt !== null)).toBe(true);
+  // The row goes down with the chip's edge, and its own body unfolds from its own top while it does; the rows
+  // under it go with its edge, down only, and come to rest.
+  expect(frames[0].tapped).toBeLessThan(frames.at(-1)!.tapped - 20);
+  expectRowsWithEdge(frames);
+  expect(rowPath(frames).turns).toBe(0);
+  const tail = frames.slice(-10).map(({ next }) => next!);
+  expect(Math.max(...tail) - Math.min(...tail)).toBeLessThanOrEqual(0.5);
 });
 
 test('under reduced motion a disclosure only fades, nothing moves, and no title is drawn twice', async ({ page }) => {

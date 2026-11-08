@@ -83,6 +83,31 @@ export function timeToProgress(timing: MotionTiming, progress: number): number {
 }
 
 /**
+ * The eased progress `easing` gives `x` of the way through (both 0–1): exact for a `cubic-bezier()` curve;
+ * any other easing counts as linear. For motion drawn from several curves at once (keyframes sampled from
+ * their sum), so each part keeps its own curve.
+ */
+export function curveOf(easing: string): (x: number) => number {
+  const curve = /^cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)$/.exec(easing.trim());
+  if (!curve) return (x) => Math.min(1, Math.max(0, x));
+  const [x1, y1, x2, y2] = curve.slice(1).map(Number);
+  const at = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3;
+  return (x) => {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    // The curve's own parameter where its time reaches `x`, then its progress there.
+    let lo = 0;
+    let hi = 1;
+    for (let step = 0; step < 32; step += 1) {
+      const mid = (lo + hi) / 2;
+      if (at(mid, x1, x2) < x) lo = mid;
+      else hi = mid;
+    }
+    return at((lo + hi) / 2, y1, y2);
+  };
+}
+
+/**
  * The springs for framer-motion, in its own form (§4): the same three the CSS samples into
  * `--motion-spring-*`, so a framer animation and a CSS one of the same name settle alike. `snappy`
  * for controls (press release, Send and Stop, badges), `smooth` for content (a message rising, rows

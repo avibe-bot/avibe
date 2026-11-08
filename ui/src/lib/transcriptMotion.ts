@@ -34,7 +34,7 @@
 // fades what enters and what leaves, in place, and nothing glides.
 import { Component, useCallback, useRef } from 'react';
 
-import { canAnimate, motionTiming, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming, timeToProgress, type MotionTiming } from './motion';
+import { canAnimate, curveOf, motionTiming, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming, timeToProgress, type MotionTiming } from './motion';
 
 /** How a departing element leaves. */
 export type DepartureKind = 'withdrawn' | 'working';
@@ -181,9 +181,12 @@ function laidOutBy(head: HTMLElement, item: HTMLElement): boolean {
 //
 // What opens is revealed top to bottom, and the rows below make room on the same curve; closing is the
 // same the other way. The edge is a curtain: a band of the transcript's own background laid over what is
-// not revealed yet, from the edge down, that the rows below are drawn over. The curtain and the rows move
-// by transform, what cross-fades by opacity, so the compositor runs all of it on one clock and nothing is
-// repainted on the way; no layout changes and nothing writes a scroll position.
+// not revealed yet, from the edge down, that the rows below are drawn over. It lives in the item that holds
+// what it covers, inside a box that clips it to that content, so it moves with that item whatever moves it.
+// The curtain and the rows move by transform, what cross-fades by opacity, so the compositor runs all of it
+// and nothing is repainted on the way; no layout changes and nothing writes a scroll position. Disclosures
+// can overlap in time (a reader opening two a moment apart, or one while the conversation glides): each
+// has its own share in how far a row below it is drawn, and a row is drawn at their sum.
 
 /** How far past the content's bottom the edge travels, so its last row's shadow is never cut. */
 const EDGE_PAD = 8;
@@ -199,6 +202,78 @@ const tagged = (animation: Animation) => {
   animation.id = DISCLOSE;
   return animation;
 };
+
+/** One disclosure's share in how far a row below it is drawn from where the layout puts it (px, down), as a
+ *  function of the document's time: `from` at `start`, then `to` on `curve` over `duration`. `hold`: it keeps
+ *  `to` until it is taken away (a fold's, until what closed is gone). */
+type Share = { start: number; duration: number; from: number; to: number; curve: (x: number) => number; hold: boolean };
+const shareAt = (share: Share, time: number) => {
+  const x = share.duration > 0 ? (time - share.start) / share.duration : 1;
+  return x <= 0 ? share.from : x >= 1 ? share.to : share.from + (share.to - share.from) * share.curve(x);
+};
+const shareOver = (share: Share, time: number) => !share.hold && time >= share.start + share.duration;
+/** Now on the clock every Web Animation is drawn by: the document timeline's time (a frame's, between frames),
+ *  but never further behind the time origin's own clock than a few frames, where a page that drew nothing
+ *  for a while may leave it. Everything a disclosure starts is started at one such time, given explicitly, and every row's
+ *  sum is sampled from it, so the curtain, the fades and each share run on one clock with what is already
+ *  drawn. */
+/** How far behind its own clock the timeline is taken to have been left by a page that drew nothing. */
+const STALE_TIMELINE_MS = 100;
+const clockNow = () => {
+  const timeline = Number(document.timeline.currentTime ?? Number.NaN);
+  const now = performance.now();
+  return Number.isFinite(timeline) ? Math.max(timeline, now - STALE_TIMELINE_MS) : now;
+};
+/** Every share a row has, and the animation drawing their sum. */
+const sharesOf = new WeakMap<HTMLElement, Set<Share>>();
+const drawing = new WeakMap<HTMLElement, Animation>();
+/** Keyframes a row's sum is sampled at: two to a frame, so it is drawn as smoothly as one curve. */
+const SAMPLE_MS = 1000 / 120;
+
+/** Draws `row` at the sum of its shares from now on: one animation of its `translate`, sampled from the sum and
+ *  started at the document's current time, so it goes on exactly where the last one was, on the compositor.
+ *  Shares that are over at no offset are let go, and so is the animation once the sum has settled at none. */
+function redraw(row: HTMLElement) {
+  const shares = sharesOf.get(row) ?? new Set<Share>();
+  const now = clockNow();
+  for (const share of shares) if (shareOver(share, now) && Math.abs(share.to) < 0.01) shares.delete(share);
+  const previous = drawing.get(row);
+  if (shares.size === 0 || !row.isConnected) {
+    previous?.cancel();
+    drawing.delete(row);
+    sharesOf.delete(row);
+    return;
+  }
+  const list = [...shares];
+  const end = Math.max(now, ...list.map((share) => share.start + share.duration));
+  const steps = Math.max(1, Math.ceil((end - now) / SAMPLE_MS));
+  const sum = (time: number) => list.reduce((total, share) => total + shareAt(share, time), 0);
+  const keyframes = Array.from({ length: steps + 1 }, (_, step) => ({ offset: step / steps, translate: `0 ${sum(now + ((end - now) * step) / steps)}px` }));
+  const hold = list.some((share) => share.hold);
+  const animation = tagged(row.animate(keyframes, { duration: Math.max(1, end - now), easing: 'linear', fill: 'both', endDelay: hold ? FOLD_HOLD_MS : 0 }));
+  animation.startTime = now;
+  previous?.cancel();
+  drawing.set(row, animation);
+  if (!hold && list.every((share) => Math.abs(share.to) < 0.01)) {
+    void animation.finished.then(() => { if (drawing.get(row) === animation) redraw(row); }, () => {});
+  }
+}
+
+/** Gives the disclosure whose shares `owner` holds the share `share` in `row` instead of the one it had there
+ *  (`null`: none), and redraws the row. */
+function setShare(owner: Map<HTMLElement, Share>, row: HTMLElement, share: Share | null) {
+  const shares = sharesOf.get(row) ?? new Set<Share>();
+  const old = owner.get(row);
+  if (old) shares.delete(old);
+  if (share) {
+    shares.add(share);
+    owner.set(row, share);
+  } else {
+    owner.delete(row);
+  }
+  sharesOf.set(row, shares);
+  redraw(row);
+}
 
 /** What stands for a disclosure closed (a chip's pill, a group's folded card), drawn while it is open by an
  *  inert copy that waits unseen where it will be, inside the item that stays. Closing cross-fades into it,
@@ -360,18 +435,25 @@ type Disclosing = {
   late: HTMLElement[];
   shared: { el: HTMLElement; translate: string; scale: string }[];
   curtain: HTMLElement | null;
+  /** Where its curtain's edge is going, as shares of its own (its slide, and what grew as it loaded): read
+   *  from these rather than from the curtain's style, which an engine may give at another time than the
+   *  timeline's. */
+  edge: Share[];
   animations: Animation[];
+  /** Its share in each row it moves; and the shares it added where what it loaded landed. */
+  moves: Map<HTMLElement, Share>;
+  settles: Map<HTMLElement, Share>[];
   watch?: MutationObserver;
 };
 /** By its first node. */
 const disclosing = new WeakMap<Element, Disclosing>();
 /** Whether any of its motion is still drawn (running, or held at its end on something still there). */
 const active = (entry: Disclosing | undefined): entry is Disclosing =>
-  !!entry && entry.animations.some((animation) => animation.playState === 'running' || (
+  !!entry && (entry.animations.some((animation) => animation.playState === 'running' || (
     animation.playState === 'finished'
     && animation.effect?.getComputedTiming().fill === 'forwards'
     && ((animation.effect as KeyframeEffect).target?.isConnected ?? false)
-  ));
+  )) || [...entry.moves.values()].some((share) => !shareOver(share, clockNow())));
 
 /** Where a disclosure is drawn: its edge, the rows below, what fades, and the shared parts. */
 type State = { edge: number; rows: number[]; content: number; copy: number; late: number; shared: { translate: string; scale: string }[] };
@@ -379,8 +461,11 @@ type State = { edge: number; rows: number[]; content: number; copy: number; late
 function drawnState(entry: Disclosing): State {
   const style = (el: Element) => getComputedStyle(el);
   return {
-    edge: entry.curtain?.isConnected ? offsetOf(entry.curtain) : entry.open,
-    rows: entry.rows.map(translateOf),
+    edge: entry.curtain?.isConnected ? entry.edge.reduce((sum, share) => sum + shareAt(share, clockNow()), 0) : entry.open,
+    rows: entry.rows.map((row) => {
+      const share = entry.moves.get(row);
+      return share ? shareAt(share, clockNow()) : 0;
+    }),
     content: parseFloat(style(entry.nodes[0]).opacity),
     copy: entry.copy ? parseFloat(style(entry.copy).opacity) : 0,
     late: entry.late[0] ? parseFloat(style(entry.late[0]).opacity) : 1,
@@ -388,27 +473,55 @@ function drawnState(entry: Disclosing): State {
   };
 }
 
-/** The curtain over what `nodes` do not show yet: a band of the transcript's background from their top
- *  down, as wide as the column and its padding, laid right after them so the rows below are drawn over it. */
+/** The inline `position` an item had before a curtain was laid in it (it needs one to hold the curtain). */
+const positioned = new WeakMap<HTMLElement, string>();
+
+/** The curtain over what `nodes` do not show yet: a band of the transcript's background, as wide as the column
+ *  and its padding, in a box that clips it to the content (and the pad under it). Both are laid at the end of
+ *  the item that holds the last of the nodes, so they move with it, whatever moves it: a disclosure above, a
+ *  glide, a layout change above. The rows below are drawn over it. */
 function curtainFor(entry: Disclosing): HTMLElement {
   const { column, nodes } = entry;
+  const host = itemOf(column, nodes[nodes.length - 1]) as HTMLElement;
+  if (!positioned.has(host) && getComputedStyle(host).position === 'static') {
+    positioned.set(host, host.style.position);
+    host.style.position = 'relative';
+  }
+  // Both boxes are drawn with whatever moves the host, so the offset between them is the layout's.
+  const hostBox = host.getBoundingClientRect();
   const columnBox = column.getBoundingClientRect();
-  const top = Math.min(...nodes.map((node) => node.getBoundingClientRect().top)) - columnBox.top - offsetOf(column);
-  const curtain = document.createElement('div');
-  curtain.setAttribute('aria-hidden', 'true');
-  curtain.dataset.transcriptCurtain = '';
-  Object.assign(curtain.style, {
+  const top = Math.min(...nodes.map((node) => node.getBoundingClientRect().top)) - hostBox.top - host.clientTop;
+  const clip = document.createElement('div');
+  clip.setAttribute('aria-hidden', 'true');
+  clip.dataset.transcriptCurtainClip = '';
+  Object.assign(clip.style, {
     position: 'absolute',
     top: `${top}px`,
-    left: `${-CURTAIN_REACH}px`,
-    right: `${-CURTAIN_REACH}px`,
-    height: `${entry.open + EDGE_PAD}px`,
-    background: backdropOf(column),
+    left: `${columnBox.left - hostBox.left - host.clientLeft - CURTAIN_REACH}px`,
+    width: `${columnBox.width + 2 * CURTAIN_REACH}px`,
+    height: `${entry.open}px`,
+    overflow: 'hidden',
     pointerEvents: 'none',
   });
-  const last = itemOf(column, nodes[nodes.length - 1]);
-  column.insertBefore(curtain, last?.nextSibling ?? null);
+  const curtain = document.createElement('div');
+  curtain.dataset.transcriptCurtain = '';
+  Object.assign(curtain.style, { height: `${entry.open}px`, background: backdropOf(column) });
+  clip.append(curtain);
+  host.append(clip);
   return curtain;
+}
+
+/** Takes a disclosure's curtain away, and gives its item back the position it had. */
+function removeCurtain(entry: Disclosing) {
+  const clip = entry.curtain?.parentElement;
+  const host = clip?.parentElement;
+  clip?.remove();
+  entry.curtain = null;
+  entry.edge = [];
+  if (host && positioned.has(host) && !host.querySelector(':scope > [data-transcript-curtain-clip]')) {
+    host.style.position = positioned.get(host)!;
+    positioned.delete(host);
+  }
 }
 
 /** Takes the curtain away once nothing moves it any more (it is only needed while what it covers unfolds). */
@@ -419,8 +532,7 @@ function dropWhenStill(entry: Disclosing, curtain: HTMLElement) {
     return;
   }
   if (entry.curtain === curtain) {
-    curtain.remove();
-    entry.curtain = null;
+    removeCurtain(entry);
     unlift(entry.trail);
   }
 }
@@ -429,12 +541,17 @@ function dropWhenStill(entry: Disclosing, curtain: HTMLElement) {
  *  edge, the cross-fade, and the shared parts. Reduced motion: only the fades, and nothing moves. */
 function play(entry: Disclosing, from: State, closing: boolean, duration: number, tokens: Tokens, reduced: boolean) {
   entry.animations.forEach((animation) => animation.cancel());
-  entry.curtain?.remove();
-  entry.curtain = null;
+  removeCurtain(entry);
   const animations: Animation[] = [];
-  const add = (animation: Animation) => { animations.push(tagged(animation)); return animation; };
+  const start = clockNow();
+  const add = (animation: Animation) => {
+    animation.startTime = start;
+    animations.push(tagged(animation));
+    return animation;
+  };
   const curve = closing ? tokens.discloseClose.easing : tokens.discloseOpen.easing;
-  const fill: FillMode = closing ? 'forwards' : 'backwards';
+  // Started at `start`, which may be ahead of the frame the timeline is in: each holds its first frame until then.
+  const fill: FillMode = closing ? 'both' : 'backwards';
   const timing = { duration, easing: 'linear', fill };
   const way = (entry.late.length > 0 ? CROSS_LATE : CROSS)[closing ? 'close' : 'open'];
   const edge = closing ? entry.keep : entry.open;
@@ -442,12 +559,14 @@ function play(entry: Disclosing, from: State, closing: boolean, duration: number
     if (Math.abs(from.edge - edge) >= 0.5 || from.edge < entry.open) {
       const curtain = curtainFor(entry);
       entry.curtain = curtain;
-      const slide = add(curtain.animate([{ transform: `translateY(${from.edge}px)` }, { transform: `translateY(${edge}px)` }], { duration, easing: curve, fill: 'forwards' }));
+      const slide = add(curtain.animate([{ transform: `translateY(${from.edge}px)` }, { transform: `translateY(${edge}px)` }], { duration, easing: curve, fill: 'both' }));
+      entry.edge = [{ start, duration, from: from.edge, to: edge, curve: curveOf(curve), hold: false }];
       // Opened all the way, it is not needed any more; closed, it stays until what it covers is gone.
       if (!closing) void slide.finished.then(() => dropWhenStill(entry, curtain), () => {});
     }
+    // Its share in each row below, from where it has them now; what other disclosures add goes on as it was.
     entry.rows.forEach((row, index) => {
-      add(row.animate([{ translate: `0 ${from.rows[index] ?? 0}px` }, { translate: `0 ${closing ? -entry.rise : 0}px` }], { duration, easing: curve, fill, endDelay: closing ? FOLD_HOLD_MS : 0 }));
+      setShare(entry.moves, row, { start, duration, from: from.rows[index] ?? 0, to: closing ? -entry.rise : 0, curve: curveOf(curve), hold: closing });
     });
   }
   if (entry.copy) {
@@ -480,7 +599,7 @@ function play(entry: Disclosing, from: State, closing: boolean, duration: number
       add(node.animate([{ opacity: from.content, offset: 0, easing: tokens.exitEase }, { opacity: Math.min(from.content, 0.08), offset: 0.7 }, { opacity: 0, offset: 1 }], timing));
     }
   } else {
-    for (const node of entry.nodes) add(node.animate([{ opacity: from.content }, { opacity: 1 }], { duration, easing: tokens.enterEase, fill: 'backwards' }));
+    for (const node of entry.nodes) add(node.animate([{ opacity: from.content }, { opacity: 1 }], { duration, easing: tokens.enterEase, fill }));
   }
   entry.animations = animations;
 }
@@ -512,7 +631,10 @@ function unfold(column: HTMLElement, item: Element, nodes: HTMLElement[], growth
     late: copy ? Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_LATE_ATTRIBUTE}]`)) : [],
     shared: copy ? sharedMoves(copy, nodes) : [],
     curtain: null,
+    edge: [],
     animations: [],
+    moves: new Map(),
+    settles: [],
   };
   // Where opening starts: what was there before, and nothing of what opens.
   const from: State = {
@@ -574,7 +696,10 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
       late: copy ? Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_LATE_ATTRIBUTE}]`)) : [],
       shared: copy ? sharedMoves(copy, nodes) : [],
       curtain: null,
+      edge: [],
       animations: [],
+      moves: new Map(),
+      settles: [],
     };
     from = { edge: entry.open, rows: entry.rows.map(() => 0), content: 1, copy: 0, late: 0, shared: entry.shared.map(() => ({ translate: '0px 0px', scale: '1' })) };
     disclosing.set(first, entry);
@@ -592,19 +717,18 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
   const settle = new MutationObserver(() => {
     if (nodes.some((node) => node.isConnected)) return;
     settle.disconnect();
-    settled.curtain?.remove();
-    settled.curtain = null;
+    removeCurtain(settled);
     unlift(settled.trail);
-    if (!probe || !anchor || rows.length === 0) return;
-    // Where each row is drawn now, then where the layout puts it: the rest of the way glides.
-    const drawn = rows.map(translateOf);
-    settled.animations.forEach((animation) => { if (rows.includes((animation.effect as KeyframeEffect | null)?.target as HTMLElement)) animation.cancel(); });
-    if (!probe.isConnected || !anchor.isConnected) return;
-    const shrink = before - gap();
-    rows.forEach((row, index) => {
-      const left = drawn[index] + shrink;
-      if (Math.abs(left) < 0.5 || !row.isConnected) return;
-      tagged(row.animate([{ translate: `0 ${left}px` }, { translate: '0 0' }], { ...tokens.discloseOpen, fill: 'backwards' }));
+    // The layout let go of what closed: its share in each row becomes what is left of the way to where the
+    // layout puts the row now, and that glides out; what other disclosures add goes on as it was.
+    const known = probe?.isConnected && anchor?.isConnected;
+    const shrink = known ? before - gap() : 0;
+    const now = clockNow();
+    rows.forEach((row) => {
+      const own = settled.moves.get(row);
+      const left = (own ? shareAt(own, now) : 0) + shrink;
+      const glides = known && row.isConnected && Math.abs(left) >= 0.5;
+      setShare(settled.moves, row, glides ? { start: now, duration: tokens.discloseOpen.duration, from: left, to: 0, curve: curveOf(tokens.discloseOpen.easing), hold: false } : null);
     });
   });
   settle.observe(column, { childList: true, subtree: true });
@@ -622,31 +746,41 @@ function refold(nodes: HTMLElement[], tokens: Tokens, reduced: boolean) {
 }
 
 /** What an open disclosure was loading has landed (its skeleton replaced by the rows): it grew or shrank by
- *  `delta`, all at once in the layout. Nothing it is playing restarts: the rows below take an offset of their
- *  own (a transform, besides the translate an unfold or a fold moves them by) that starts where the layout
- *  moved them from and settles on the move curve, and the edge goes on by `delta` the same way (a translate on
- *  the curtain, besides its transform), so what grew is revealed and nothing jumps or grows twice. */
+ *  `delta`, all at once in the layout. Nothing it is playing restarts: the rows below take a share of their
+ *  own that starts where the layout moved them from and settles on the move curve, and the edge goes on by
+ *  `delta` the same way (a translate on the curtain, besides its transform), so what grew is revealed and
+ *  nothing jumps or grows twice. */
 function resettle(entry: Disclosing, delta: number, viewportBottom: number, tokens: Tokens, reduced: boolean) {
   if (reduced || Math.abs(delta) < 0.5) return;
   const { column, nodes } = entry;
   const after = itemOf(column, nodes[nodes.length - 1]);
   const next = after ? nextItem(after) : null;
   const rows = next ? [next, ...itemsBelow(next, viewportBottom, Math.abs(delta))] : [];
-  const timing = { ...tokens.discloseOpen, fill: 'backwards' as FillMode };
-  for (const row of rows) entry.animations.push(tagged(row.animate([{ transform: `translateY(${-delta}px)` }, { transform: 'none' }], timing)));
+  const now = clockNow();
+  const settles = new Map<HTMLElement, Share>();
+  entry.settles.push(settles);
+  for (const row of rows) setShare(settles, row, { start: now, duration: tokens.discloseOpen.duration, from: -delta, to: 0, curve: curveOf(tokens.discloseOpen.easing), hold: false });
   const opened = entry.open;
   entry.open += delta;
   entry.rise += delta;
   if (entry.curtain?.isConnected) {
-    // Still unfolding: the curtain covers what grew too, and its edge goes on that much further.
-    entry.curtain.style.height = `${Math.max(opened, entry.open) + EDGE_PAD}px`;
-    entry.animations.push(tagged(entry.curtain.animate([{ translate: '0 0' }, { translate: `0 ${delta}px` }], { ...tokens.discloseOpen, fill: 'forwards' })));
+    // Still unfolding: the curtain (and the box clipping it) covers what grew too, and its edge goes on that
+    // much further.
+    const height = `${Math.max(opened, entry.open)}px`;
+    entry.curtain.style.height = height;
+    if (entry.curtain.parentElement) entry.curtain.parentElement.style.height = height;
+    const grows = tagged(entry.curtain.animate([{ translate: '0 0' }, { translate: `0 ${delta}px` }], { ...tokens.discloseOpen, fill: 'both' }));
+    grows.startTime = now;
+    entry.animations.push(grows);
+    entry.edge.push({ start: now, duration: tokens.discloseOpen.duration, from: 0, to: delta, curve: curveOf(tokens.discloseOpen.easing), hold: false });
   } else if (delta > 0) {
     // Opened all the way already: what grew is revealed from where the content ended.
     const curtain = curtainFor(entry);
     entry.curtain = curtain;
-    const slide = tagged(curtain.animate([{ transform: `translateY(${opened}px)` }, { transform: `translateY(${entry.open}px)` }], { ...tokens.discloseOpen, fill: 'forwards' }));
+    const slide = tagged(curtain.animate([{ transform: `translateY(${opened}px)` }, { transform: `translateY(${entry.open}px)` }], { ...tokens.discloseOpen, fill: 'both' }));
+    slide.startTime = now;
     entry.animations.push(slide);
+    entry.edge = [{ start: now, duration: tokens.discloseOpen.duration, from: opened, to: entry.open, curve: curveOf(tokens.discloseOpen.easing), hold: false }];
     void slide.finished.then(() => dropWhenStill(entry, curtain), () => {});
   }
 }

@@ -356,7 +356,13 @@ reduced-motion form.
     it, and the layout lets go of the content in one commit as they land.
     Only `transform`, `translate` and `opacity` animate, all on the compositor;
     no clip-path, no layout property, and the boxes the scroller measures
-    never move.
+    never move. The band lives in the item that holds what it covers, inside
+    a box clipped to that content, so it moves with that item whatever else
+    moves it (a glide, a disclosure above, a layout change above).
+  - **Overlapping disclosures.** Two opened a moment apart, or one opened
+    while the conversation glides, add up: each has its own share in how far
+    a row below it is drawn, a row is drawn at their sum, and each turns or
+    lands without disturbing the other's.
   - **Timing.** Opening takes `--motion-disclose-open-duration` (440 ms),
     closing `--motion-disclose-close-duration` (350 ms) including the
     cross-fade. The edge and the rows ride the move curve; what fades in
