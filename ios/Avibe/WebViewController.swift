@@ -83,6 +83,186 @@ final class OuterScrollLockController {
 }
 
 @MainActor
+final class KeyboardViewportLayoutController: NSObject {
+    private struct Animation {
+        let duration: TimeInterval
+        let options: UIView.AnimationOptions
+    }
+
+    private weak var containerView: UIView?
+    let bottomConstraint: NSLayoutConstraint
+    private var keyboardFrameInScreenCoordinates: CGRect?
+    private var keyboardFrameWindowBounds: CGRect?
+
+    init(
+        contentView: UIView,
+        containerView: UIView
+    ) {
+        self.containerView = containerView
+        bottomConstraint = contentView.bottomAnchor.constraint(
+            equalTo: containerView.safeAreaLayoutGuide.bottomAnchor
+        )
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardFrameWillChange(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(keyboardFrameWillChange(_:)),
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    func refreshForContainerGeometryChange() {
+        guard let containerView else {
+            return
+        }
+        let currentWindowBounds = containerView.window?.bounds
+        if keyboardFrameInScreenCoordinates != nil,
+           keyboardFrameWindowBounds != currentWindowBounds {
+            clearKeyboardFrame()
+        }
+        applyKeyboardFrame(animation: nil)
+    }
+
+    @objc
+    private func keyboardFrameWillChange(_ notification: Notification) {
+        guard let containerView else {
+            return
+        }
+        keyboardFrameInScreenCoordinates = (
+            notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? NSValue
+        )?.cgRectValue
+        keyboardFrameWindowBounds = containerView.window?.bounds
+        applyKeyboardFrame(animation: animation(from: notification))
+    }
+
+    @objc
+    private func applicationDidEnterBackground() {
+        refreshForContainerGeometryChange()
+    }
+
+    @objc
+    private func applicationWillEnterForeground() {
+        refreshForContainerGeometryChange()
+    }
+
+    private func clearKeyboardFrame() {
+        keyboardFrameInScreenCoordinates = nil
+        keyboardFrameWindowBounds = nil
+    }
+
+    private func applyKeyboardFrame(animation: Animation?) {
+        guard let containerView else {
+            return
+        }
+        let convertedFrame = keyboardFrameInScreenCoordinates.flatMap { frame in
+            containerView.window?.screen.coordinateSpace.convert(
+                frame,
+                to: containerView
+            )
+        }
+        let overlap = Self.dockedOverlap(
+            keyboardFrame: convertedFrame,
+            bounds: containerView.bounds,
+            safeAreaInsets: containerView.safeAreaInsets
+        )
+        let constant = -overlap
+        guard abs(bottomConstraint.constant - constant) > 0.5 else {
+            return
+        }
+        let changes = { [bottomConstraint] in
+            bottomConstraint.constant = constant
+        }
+        if let animation {
+            containerView.layoutIfNeeded()
+            guard animation.duration > 0 else {
+                changes()
+                containerView.layoutIfNeeded()
+                return
+            }
+            UIView.animate(
+                withDuration: animation.duration,
+                delay: 0,
+                options: animation.options,
+                animations: {
+                    changes()
+                    containerView.layoutIfNeeded()
+                }
+            )
+        } else {
+            changes()
+            containerView.layoutIfNeeded()
+        }
+    }
+
+    private func animation(from notification: Notification) -> Animation {
+        let duration = (
+            notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey]
+                as? NSNumber
+        )?.doubleValue ?? 0
+        let curve = (
+            notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey]
+                as? NSNumber
+        )?.uintValue ?? UInt(UIView.AnimationCurve.easeInOut.rawValue)
+        let curveOptions = UIView.AnimationOptions(rawValue: curve << 16)
+        return Animation(
+            duration: duration,
+            options: curveOptions.union([
+                .allowUserInteraction,
+                .beginFromCurrentState,
+            ])
+        )
+    }
+
+    private static func dockedOverlap(
+        keyboardFrame: CGRect?,
+        bounds: CGRect,
+        safeAreaInsets: UIEdgeInsets
+    ) -> CGFloat {
+        guard let keyboardFrame, !keyboardFrame.isNull else {
+            return 0
+        }
+        let safeAreaMinX = bounds.minX + safeAreaInsets.left
+        let safeAreaMaxX = bounds.maxX - safeAreaInsets.right
+        let safeAreaMinY = bounds.minY + safeAreaInsets.top
+        let safeAreaBottom = bounds.maxY - safeAreaInsets.bottom
+        let overlapsHorizontally = keyboardFrame.maxX > safeAreaMinX
+            && keyboardFrame.minX < safeAreaMaxX
+        let coversSafeAreaBottom = keyboardFrame.minY < safeAreaBottom
+            && keyboardFrame.maxY >= safeAreaBottom
+        guard overlapsHorizontally, coversSafeAreaBottom else {
+            return 0
+        }
+        return min(
+            max(safeAreaBottom - keyboardFrame.minY, 0),
+            max(safeAreaBottom - safeAreaMinY, 0)
+        )
+    }
+}
+
+@MainActor
 final class WebViewFactory {
     private let instanceOrigin: WebOrigin
     private let websiteDataStore: WKWebsiteDataStore
@@ -91,6 +271,9 @@ final class WebViewFactory {
     private let showAccount: () -> Void
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
+    ] = [:]
+    private var keyboardViewportLayoutControllers: [
+        ObjectIdentifier: KeyboardViewportLayoutController
     ] = [:]
     private lazy var nativeConfiguration = NativeBridgeConfiguration.make(
         instanceOrigin: instanceOrigin,
@@ -140,6 +323,13 @@ final class WebViewFactory {
     func install(_ webView: WKWebView, in containerView: UIView) -> [NSLayoutConstraint] {
         precondition(isManaging(webView))
         containerView.addSubview(webView)
+        let keyboardViewportLayoutController =
+            KeyboardViewportLayoutController(
+                contentView: webView,
+                containerView: containerView
+            )
+        keyboardViewportLayoutControllers[ObjectIdentifier(webView)] =
+            keyboardViewportLayoutController
         let constraints = [
             webView.topAnchor.constraint(
                 equalTo: containerView.safeAreaLayoutGuide.topAnchor
@@ -150,11 +340,10 @@ final class WebViewFactory {
             webView.trailingAnchor.constraint(
                 equalTo: containerView.safeAreaLayoutGuide.trailingAnchor
             ),
-            webView.bottomAnchor.constraint(
-                equalTo: containerView.keyboardLayoutGuide.topAnchor
-            ),
+            keyboardViewportLayoutController.bottomConstraint,
         ]
         NSLayoutConstraint.activate(constraints)
+        keyboardViewportLayoutController.refreshForContainerGeometryChange()
         return constraints
     }
 
@@ -176,8 +365,23 @@ final class WebViewFactory {
         }
     }
 
+    func refreshKeyboardViewportLayouts() {
+        for controller in keyboardViewportLayoutControllers.values {
+            controller.refreshForContainerGeometryChange()
+        }
+    }
+
+    func refreshKeyboardViewportLayout(for webView: WKWebView) {
+        keyboardViewportLayoutControllers[
+            ObjectIdentifier(webView)
+        ]?.refreshForContainerGeometryChange()
+    }
+
     func unregister(_ webView: WKWebView) {
         outerScrollLockControllers.removeValue(forKey: ObjectIdentifier(webView))
+        keyboardViewportLayoutControllers.removeValue(
+            forKey: ObjectIdentifier(webView)
+        )
     }
 
     func isManaging(_ webView: WKWebView) -> Bool {
@@ -358,6 +562,16 @@ final class WebViewController: UIViewController {
         )
 
         loadConfiguredInstance()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        retainedWebViewFactory?.refreshKeyboardViewportLayouts()
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        retainedWebViewFactory?.refreshKeyboardViewportLayouts()
     }
 
     override func willMove(toParent parent: UIViewController?) {
@@ -1755,6 +1969,22 @@ private final class PopupWebViewController: UIViewController {
         urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak self] webView, _ in
             self?.updateNavigationItem(for: webView.url)
         }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard let webView else {
+            return
+        }
+        webViewFactory?.refreshKeyboardViewportLayout(for: webView)
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        guard let webView else {
+            return
+        }
+        webViewFactory?.refreshKeyboardViewportLayout(for: webView)
     }
 
     @objc

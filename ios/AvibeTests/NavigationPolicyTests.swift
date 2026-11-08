@@ -498,12 +498,12 @@ final class NavigationPolicyTests: XCTestCase {
 
         XCTAssertTrue(factory.isManaging(primary))
         XCTAssertTrue(factory.isManaging(child))
-        assertKeyboardBottomConstraint(
+        assertSafeAreaBottomConstraint(
             primaryConstraints,
             webView: primary,
             containerView: primaryContainer
         )
-        assertKeyboardBottomConstraint(
+        assertSafeAreaBottomConstraint(
             childConstraints,
             webView: child,
             containerView: childContainer
@@ -519,6 +519,172 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertFalse(primary.isInspectable)
         XCTAssertFalse(child.isInspectable)
         #endif
+    }
+
+    @MainActor
+    func testKeyboardViewportUsesDockedFramesAndWillHideRestoresTheBaseline() {
+        let fixture = KeyboardViewportFixture()
+        let safeAreaBottom = fixture.safeAreaBottom
+        let keyboardTop = safeAreaBottom - 278
+        let shortcutBarTop = safeAreaBottom - 48
+        let rows: [
+            (
+                name: String,
+                notification: Notification.Name,
+                frame: CGRect,
+                expectedBottom: CGFloat
+            )
+        ] = [
+            (
+                "software keyboard",
+                UIResponder.keyboardWillChangeFrameNotification,
+                fixture.dockedKeyboardFrame(top: keyboardTop),
+                keyboardTop
+            ),
+            (
+                "external keyboard shortcut bar",
+                UIResponder.keyboardWillChangeFrameNotification,
+                fixture.dockedKeyboardFrame(top: shortcutBarTop),
+                shortcutBarTop
+            ),
+            (
+                "floating frame above the bottom",
+                UIResponder.keyboardWillChangeFrameNotification,
+                CGRect(
+                    x: 80,
+                    y: keyboardTop,
+                    width: 220,
+                    height: 200
+                ),
+                safeAreaBottom
+            ),
+            (
+                "frame outside the horizontal safe area",
+                UIResponder.keyboardWillChangeFrameNotification,
+                CGRect(
+                    x: fixture.containerView.bounds.maxX + 10,
+                    y: keyboardTop,
+                    width: 200,
+                    height: fixture.containerView.bounds.maxY - keyboardTop
+                ),
+                safeAreaBottom
+            ),
+            (
+                "keyboard completely offscreen",
+                UIResponder.keyboardWillChangeFrameNotification,
+                fixture.offscreenKeyboardFrame(),
+                safeAreaBottom
+            ),
+            (
+                "willHide without didHide",
+                UIResponder.keyboardWillHideNotification,
+                fixture.offscreenKeyboardFrame(),
+                safeAreaBottom
+            ),
+        ]
+
+        for row in rows {
+            fixture.postKeyboardFrame(
+                row.frame,
+                notification: row.notification
+            )
+            XCTAssertEqual(
+                fixture.contentBottom,
+                row.expectedBottom,
+                accuracy: 0.5,
+                row.name
+            )
+        }
+    }
+
+    @MainActor
+    func testKeyboardViewportUsesTheUIKitAnimationPath() {
+        let fixture = KeyboardViewportFixture()
+        let keyboardTop = fixture.safeAreaBottom - 278
+
+        let animationsWereEnabled = UIView.areAnimationsEnabled
+        UIView.setAnimationsEnabled(false)
+        defer {
+            UIView.setAnimationsEnabled(animationsWereEnabled)
+        }
+        fixture.postKeyboardFrame(
+            fixture.dockedKeyboardFrame(top: keyboardTop),
+            duration: 0.31,
+            curve: .easeOut
+        )
+
+        XCTAssertEqual(fixture.contentBottom, keyboardTop, accuracy: 0.5)
+    }
+
+    @MainActor
+    func testKeyboardViewportRecalculatesAfterRotationAndBackgrounding() {
+        let fixture = KeyboardViewportFixture()
+        let portraitKeyboardTop = fixture.safeAreaBottom - 278
+        fixture.postKeyboardFrame(
+            fixture.dockedKeyboardFrame(top: portraitKeyboardTop)
+        )
+        XCTAssertEqual(
+            fixture.contentBottom,
+            portraitKeyboardTop,
+            accuracy: 0.5
+        )
+
+        fixture.window.bounds = CGRect(
+            x: 0,
+            y: 0,
+            width: fixture.window.bounds.height,
+            height: fixture.window.bounds.width
+        )
+        fixture.containerView.frame = fixture.window.bounds.insetBy(
+            dx: 8,
+            dy: 20
+        )
+        fixture.layoutController.refreshForContainerGeometryChange()
+        XCTAssertEqual(
+            fixture.contentBottom,
+            fixture.safeAreaBottom,
+            accuracy: 0.5
+        )
+
+        let landscapeKeyboardTop = fixture.safeAreaBottom - 119
+        fixture.postKeyboardFrame(
+            fixture.dockedKeyboardFrame(top: landscapeKeyboardTop)
+        )
+        XCTAssertEqual(
+            fixture.contentBottom,
+            landscapeKeyboardTop,
+            accuracy: 0.5
+        )
+
+        NotificationCenter.default.post(
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        XCTAssertEqual(
+            fixture.contentBottom,
+            landscapeKeyboardTop,
+            accuracy: 0.5
+        )
+
+        fixture.postKeyboardFrame(
+            fixture.offscreenKeyboardFrame(),
+            notification: UIResponder.keyboardWillHideNotification
+        )
+        XCTAssertEqual(
+            fixture.contentBottom,
+            fixture.safeAreaBottom,
+            accuracy: 0.5
+        )
+
+        NotificationCenter.default.post(
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+        XCTAssertEqual(
+            fixture.contentBottom,
+            fixture.safeAreaBottom,
+            accuracy: 0.5
+        )
     }
 
     @MainActor
@@ -1700,14 +1866,14 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
-    private func assertKeyboardBottomConstraint(
+    private func assertSafeAreaBottomConstraint(
         _ constraints: [NSLayoutConstraint],
         webView: WKWebView,
         containerView: UIView,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let hasKeyboardBottomConstraint = constraints.contains { constraint in
+        let hasSafeAreaBottomConstraint = constraints.contains { constraint in
             guard
                 let firstItem = constraint.firstItem as? WKWebView,
                 let secondItem = constraint.secondItem as? UILayoutGuide
@@ -1716,10 +1882,115 @@ final class NavigationPolicyTests: XCTestCase {
             }
             return firstItem === webView
                 && constraint.firstAttribute == .bottom
-                && secondItem === containerView.keyboardLayoutGuide
-                && constraint.secondAttribute == .top
+                && secondItem === containerView.safeAreaLayoutGuide
+                && constraint.secondAttribute == .bottom
         }
-        XCTAssertTrue(hasKeyboardBottomConstraint, file: file, line: line)
+        XCTAssertTrue(hasSafeAreaBottomConstraint, file: file, line: line)
+    }
+}
+
+@MainActor
+private final class KeyboardViewportFixture {
+    let window: UIWindow
+    let containerView: UIView
+    let contentView = UIView()
+    let layoutController: KeyboardViewportLayoutController
+
+    var safeAreaBottom: CGFloat {
+        containerView.layoutIfNeeded()
+        return containerView.safeAreaLayoutGuide.layoutFrame.maxY
+    }
+
+    var contentBottom: CGFloat {
+        containerView.layoutIfNeeded()
+        return contentView.frame.maxY
+    }
+
+    init() {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first
+        else {
+            preconditionFailure("Keyboard viewport tests require a window scene.")
+        }
+        let screenBounds = windowScene.screen.bounds
+        window = UIWindow(windowScene: windowScene)
+        window.frame = screenBounds
+        containerView = UIView(
+            frame: screenBounds.insetBy(dx: 8, dy: 20)
+        )
+        let rootViewController = UIViewController()
+        rootViewController.view = UIView(frame: screenBounds)
+        window.rootViewController = rootViewController
+        window.isHidden = false
+        rootViewController.view.addSubview(containerView)
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        containerView.addSubview(contentView)
+        layoutController = KeyboardViewportLayoutController(
+            contentView: contentView,
+            containerView: containerView
+        )
+        NSLayoutConstraint.activate([
+            contentView.topAnchor.constraint(equalTo: containerView.topAnchor),
+            contentView.leadingAnchor.constraint(
+                equalTo: containerView.leadingAnchor
+            ),
+            contentView.trailingAnchor.constraint(
+                equalTo: containerView.trailingAnchor
+            ),
+            layoutController.bottomConstraint,
+        ])
+        containerView.layoutIfNeeded()
+    }
+
+    deinit {
+        window.isHidden = true
+    }
+
+    func dockedKeyboardFrame(top: CGFloat) -> CGRect {
+        CGRect(
+            x: containerView.bounds.minX,
+            y: top,
+            width: containerView.bounds.width,
+            height: containerView.bounds.maxY - top
+        )
+    }
+
+    func offscreenKeyboardFrame() -> CGRect {
+        CGRect(
+            x: containerView.bounds.minX,
+            y: containerView.bounds.maxY,
+            width: containerView.bounds.width,
+            height: max(containerView.bounds.height / 3, 1)
+        )
+    }
+
+    func postKeyboardFrame(
+        _ frame: CGRect,
+        notification: Notification.Name =
+            UIResponder.keyboardWillChangeFrameNotification,
+        duration: TimeInterval = 0,
+        curve: UIView.AnimationCurve = .easeInOut
+    ) {
+        guard let screen = containerView.window?.screen else {
+            XCTFail("Keyboard viewport fixture is not attached to a window.")
+            return
+        }
+        let frameInScreenCoordinates = containerView.convert(
+            frame,
+            to: screen.coordinateSpace
+        )
+        NotificationCenter.default.post(
+            name: notification,
+            object: nil,
+            userInfo: [
+                UIResponder.keyboardFrameEndUserInfoKey: NSValue(
+                    cgRect: frameInScreenCoordinates
+                ),
+                UIResponder.keyboardAnimationDurationUserInfoKey: duration,
+                UIResponder.keyboardAnimationCurveUserInfoKey: curve.rawValue,
+            ]
+        )
     }
 }
 
