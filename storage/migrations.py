@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import logging
+import re
 import sys
 import threading
+from dataclasses import dataclass
+from functools import lru_cache
 from contextlib import closing
 from importlib import import_module
 from pathlib import Path
@@ -22,6 +25,9 @@ from storage.backups import (
     complete_sqlite_backup_migration,
     create_sqlite_migration_backup,
     prune_state_backups,
+)
+from storage.compatibility import (
+    BRIDGE_REVISION, CompatibilityEpochError, read_compatibility_epoch, require_supported_compatibility_epoch,
 )
 from storage.db import create_sqlite_engine, sqlite_url
 from storage.lock import MigrationFileLock, migration_lock_path_for
@@ -61,7 +67,16 @@ class UnsafeDefaultStateMigrationError(RuntimeError):
 
 
 class IncompatibleDatabaseRevisionError(RuntimeError):
-    """The stored revisions cannot move forward in this executable's graph."""
+    """The stored revisions or reader/writer epoch are incompatible."""
+
+
+@dataclass(frozen=True)
+class MigrationPreflight:
+    """One decision shared by migration, bootstrap, explicit stores and readiness."""
+
+    compatible_open: bool = False
+    compatibility_epoch: int | None = None
+    backup_revisions: tuple[set[str], set[str]] | None = None
 
 
 HEAD_TABLES = INITIAL_TABLES | {
@@ -262,13 +277,37 @@ def alembic_config(db_path: Path | None = None) -> Config:
     return cfg
 
 
+@lru_cache(maxsize=4)
+def _installed_script_directory(location: str, versions_mtime: int) -> ScriptDirectory:
+    # An installed binary's graph is immutable. The directory mtime also keeps
+    # isolated source/check-out tests honest when a new revision file is added.
+    cfg = Config()
+    set_literal_main_option(cfg, "script_location", location)
+    return ScriptDirectory.from_config(cfg)
+
+
+def _script_directory(cfg: Config) -> ScriptDirectory:
+    location = cfg.get_main_option("script_location")
+    if not cfg.get_main_option("version_locations") and location and Path(location).is_dir():
+        return _installed_script_directory(location, (Path(location) / "versions").stat().st_mtime_ns)
+    return ScriptDirectory.from_config(cfg)
+
+
+def declared_compatibility_epoch(script: ScriptDirectory, revisions: set[str]) -> int:
+    """Epoch at an exact bridge-or-later revision set, using the Alembic graph."""
+    return max(
+        getattr(item.module, "COMPATIBILITY_EPOCH", 1)
+        for item in script.iterate_revisions(tuple(revisions), BRIDGE_REVISION, inclusive=True)
+    )
+
+
 def run_migrations(
     db_path: Path | None = None,
     *,
     revision: str = "head",
     prune_backups_after_upgrade: bool = True,
-) -> None:
-    """Bring one SQLite state database to `revision`, one migrator at a time.
+) -> MigrationPreflight:
+    """Bring one SQLite state database to `revision`, or open a compatible future schema.
 
     Exclusion belongs here rather than at the call sites, because "at most one
     migrator per database" is a property of the database, and a call site can
@@ -300,7 +339,7 @@ def run_migrations(
     guard_source_checkout_default_state_migration(target_db)
     with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
         with _MIGRATION_LOCK:
-            _run_migrations_locked(
+            return _run_migrations_locked(
                 target_db,
                 revision=revision,
                 prune_backups_after_upgrade=prune_backups_after_upgrade,
@@ -312,18 +351,22 @@ def _run_migrations_locked(
     *,
     revision: str,
     prune_backups_after_upgrade: bool,
-) -> None:
+) -> MigrationPreflight:
     cfg = alembic_config(target_db)
-    backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
+    decision = preflight_database(target_db, cfg=cfg, revision=revision)
+    if decision.compatible_open or (decision.compatibility_epoch is not None and decision.backup_revisions is None):
+        return decision
+    backup_revisions = decision.backup_revisions
     backup_attempt: str | None = None
     if backup_revisions is not None:
         _current_revisions, target_revisions = backup_revisions
         backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
         backup_attempt = begin_sqlite_backup_migration(target_db, backup_path)
         logger.info("Pre-migration SQLite rollback point at %s", backup_path)
-    _reset_unreleased_initial_schema_drift(target_db)
-    _repair_unreleased_head_schema_drift(target_db)
-    _stamp_existing_initial_schema(target_db, cfg)
+    if decision.compatibility_epoch is None:
+        _reset_unreleased_initial_schema_drift(target_db)
+        _repair_unreleased_head_schema_drift(target_db)
+        _stamp_existing_initial_schema(target_db, cfg)
     command.upgrade(cfg, revision)
     if backup_attempt is not None:
         try:
@@ -332,39 +375,80 @@ def _run_migrations_locked(
             logger.warning("SQLite migration completed without expiry evidence; retaining backups", exc_info=True)
     if prune_backups_after_upgrade:
         prune_state_backups(target_db.parent / "backups", json_retention=None)
+    return decision
 
 
-def _migration_backup_revisions(db_path: Path, cfg: Config, revision: str) -> tuple[set[str], set[str]] | None:
+def preflight_database(
+    db_path: Path, *, cfg: Config | None = None, revision: str = "head", read_only: bool = False
+) -> MigrationPreflight:
+    """Refuse incompatible state before backup, repair, import or index rebuild.
+
+    The caller holds the existing migration lock when it will mutate state.
+    Compatible-open is deliberately read-only *initialization*, not a read-only
+    database: supported application readers/writers may operate afterwards.
+    """
     if not db_path.exists() or db_path.stat().st_size == 0:
-        return None
-
-    # This is the preflight for BOTH backup and repair. Even a version-only
-    # database must be checked first. Use SQLite's ordinary reader so native
-    # hot-journal recovery still precedes our inspection of committed revisions.
-    with closing(sqlite3.connect(db_path)) as conn:
-        tables = _table_names(conn)
-        current_revisions = (
-            {str(row[0]) for row in conn.execute("select version_num from alembic_version")}
-            if "alembic_version" in tables
-            else set()
-        )
-
-    script = ScriptDirectory.from_config(cfg)
+        return MigrationPreflight()
+    cfg = cfg or alembic_config(db_path)
+    script = _script_directory(cfg)
     installed_heads = set(script.get_heads())
     target_revisions: set[str] = set()
+    current_revisions: set[str] = set()
     try:
         target_revisions = {item.revision for item in script.get_revisions(revision)}
-        # An empty stamp retains the existing unversioned-schema repair path.
-        if current_revisions and current_revisions != {""}:
+        # An ordinary connection preserves SQLite's hot-journal recovery. BEGIN
+        # makes marker, stamp and schema observations one committed snapshot.
+        database = f"{db_path.resolve().as_uri()}?mode=ro" if read_only else db_path
+        with closing(sqlite3.connect(database, uri=read_only)) as conn:
+            conn.execute("BEGIN")
+            tables = _table_names(conn)
+            current_revisions = (
+                {str(row[0]) for row in conn.execute("select version_num from alembic_version")}
+                if "alembic_version" in tables else set()
+            )
+            epoch = read_compatibility_epoch(conn)
             installed_revisions = {item.revision for item in script.walk_revisions()}
-            if not current_revisions.issubset(installed_revisions):
-                # Alembic resolves aliases/partial identifiers, but a persisted
-                # stamp must name an exact revision, not e.g. "head" or a prefix.
-                raise RevisionError("Stored revisions are not in the installed migration graph")
-            # Unlike command.upgrade (implicit_base=True), this rejects a
-            # requested ancestor or sibling instead of silently doing no work.
-            tuple(script.iterate_revisions(tuple(target_revisions), tuple(current_revisions)))
-    except (CommandError, RevisionError) as exc:
+            unknown = current_revisions - installed_revisions
+            if unknown and current_revisions != {""}:
+                # Full repository revision IDs only. Never treat a symbolic or
+                # partial Alembic identifier, or mixed known/unknown heads, as a
+                # future revision. No ordering is inferred from these digits.
+                if (
+                    epoch is None or revision != "head" or len(current_revisions) != 1
+                    or not re.fullmatch(r"\d{8}_\d{4}", next(iter(unknown)))
+                ):
+                    raise RevisionError("Stored revisions are not in the installed migration graph")
+                require_supported_compatibility_epoch(epoch)
+                problem = _compatible_schema_problem(conn)
+                if problem:
+                    raise CompatibilityEpochError(problem)
+                return MigrationPreflight(compatible_open=True, compatibility_epoch=epoch)
+            if current_revisions and current_revisions != {""}:
+                tuple(script.iterate_revisions(tuple(target_revisions), tuple(current_revisions)))
+            if epoch is not None:
+                if BRIDGE_REVISION not in installed_revisions or not current_revisions:
+                    raise CompatibilityEpochError("compatibility_epoch has no bridge revision")
+                bridge_descendants = {item.revision for item in script.walk_revisions(base=BRIDGE_REVISION)}
+                if not current_revisions.issubset(bridge_descendants):
+                    raise CompatibilityEpochError("compatibility_epoch precedes its bridge schema")
+                expected_epoch = declared_compatibility_epoch(script, current_revisions)
+                if epoch != expected_epoch:
+                    raise CompatibilityEpochError(
+                        f"compatibility_epoch {epoch} does not match stored revision's epoch {expected_epoch}"
+                    )
+                # A known forward upgrade may legitimately lack this binary's
+                # new columns until its pending migrations run. Check the
+                # required application schema only when opening current head.
+                if current_revisions == installed_heads:
+                    require_supported_compatibility_epoch(epoch)
+                    problem = _compatible_schema_problem(conn)
+                    if problem:
+                        raise CompatibilityEpochError(problem)
+            elif BRIDGE_REVISION in installed_revisions:
+                bridge_descendants = {item.revision for item in script.walk_revisions(base=BRIDGE_REVISION)}
+                if current_revisions & bridge_descendants:
+                    raise CompatibilityEpochError("bridge schema is missing compatibility_epoch")
+    except (CommandError, RevisionError, CompatibilityEpochError) as exc:
         from vibe import __version__
 
         raise IncompatibleDatabaseRevisionError(
@@ -375,17 +459,54 @@ def _migration_backup_revisions(db_path: Path, cfg: Config, revision: str) -> tu
             f"installed heads: {sorted(installed_heads)}; "
             f"requested target: {revision!r} ({sorted(target_revisions)}).\n"
             "Hint: a newer Avibe may have migrated this database; this executable may be older, "
-            "or the requested target is incompatible. Use the matching/newer Avibe executable "
-            "and its head revision; do not restamp or restore the database to force this open."
+            "or the requested target is incompatible. Use a matching/newer Avibe executable. "
+            "Do not restamp or lower compatibility_epoch. Across epochs or to a pre-bridge binary, "
+            "stop all writers and explicitly restore a verified backup; restoring discards writes "
+            "made since that snapshot. Prefer forward repair."
         ) from exc
-    if not tables - {"alembic_version"} or current_revisions == target_revisions:
-        return None
-    return current_revisions, target_revisions
+    backup = (
+        (current_revisions, target_revisions)
+        if tables - {"alembic_version"} and current_revisions != target_revisions else None
+    )
+    return MigrationPreflight(compatibility_epoch=epoch, backup_revisions=backup)
+
+
+def _compatible_schema_problem(conn: sqlite3.Connection) -> str | None:
+    """Bounded schema inspection, never a repair or a full-database scan."""
+    from storage.models import metadata
+
+    tables = _table_names(conn)
+    for table in metadata.tables.values():
+        if table.name not in tables:
+            return f"compatible schema is missing table {table.name}"
+        columns = {row[1]: row for row in conn.execute(f'PRAGMA table_info("{table.name}")')}
+        missing = set(table.columns.keys()) - columns.keys()
+        if missing:
+            return f"compatible schema is missing {table.name} columns: {sorted(missing)}"
+        for name in columns.keys() - set(table.columns.keys()):
+            column = columns[name]
+            if column[3] and (column[4] is None or str(column[4]).strip("() ").upper() == "NULL"):
+                return f"compatible schema requires old writers to supply new column {table.name}.{name}"
+    # INDEXED BY is a correctness dependency, not an optional performance hint.
+    for table, index in (
+        ("messages", "ix_messages_turn_id"),
+        ("agent_events", "ix_agent_events_turn_sequence_id"),
+        ("message_deliveries", "ix_message_deliveries_turn"),
+    ):
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ?", (table, index)
+        ).fetchone():
+            return f"compatible schema is missing required index {index}"
+    return None
 
 
 def background_tables_ready(db_path: Path | None = None) -> bool:
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     if not target_db.exists():
+        return False
+    try:
+        preflight_database(target_db)
+    except IncompatibleDatabaseRevisionError:
         return False
     with sqlite3.connect(target_db) as conn:
         tables = _table_names(conn)
@@ -410,10 +531,20 @@ def ensure_background_indexes(db_path: Path | None = None) -> None:
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     if not target_db.exists():
         return
+    if preflight_database(target_db).compatibility_epoch is not None:
+        # Epoch schemas are migration-owned, never repaired by old helpers.
+        return
     with sqlite3.connect(target_db) as conn:
         tables = _table_names(conn)
-        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_managed_indexes_ready(conn):
-            _ensure_agent_runs_managed_indexes(conn)
+        if not {"run_definitions", "agent_runs"}.issubset(tables) or _agent_runs_managed_indexes_ready(conn):
+            return
+    with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
+        if preflight_database(target_db).compatibility_epoch is not None:
+            return
+        with sqlite3.connect(target_db) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not _agent_runs_managed_indexes_ready(conn):
+                _ensure_agent_runs_managed_indexes(conn)
             conn.commit()
 
 

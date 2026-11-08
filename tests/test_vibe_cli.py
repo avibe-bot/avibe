@@ -336,6 +336,25 @@ def test_local_cli_installation_items_fails_for_unknown_sqlite_revision(monkeypa
     )
 
 
+@pytest.mark.parametrize("epoch, expected", [("1", "pass"), ("2", "fail")])
+def test_doctor_uses_epoch_preflight_for_a_future_revision(monkeypatch, tmp_path, sqlite_db_factory, epoch, expected):
+    # Filename inventory used to report every newer revision as a failed
+    # installation, even when the shared opener safely admitted its epoch.
+    _make_fake_uv_tool(tmp_path, revisions=["20261108_0076"])
+    db_path = sqlite_db_factory(tmp_path / "state" / "vibe.sqlite")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = '20990101_9999'")
+        conn.execute("UPDATE state_meta SET value_json = ? WHERE key = 'compatibility_epoch'", (epoch,))
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(cli.os, "get_exec_path", lambda: [str(tmp_path / ".local" / "bin")])
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+    items = cli._local_cli_installation_items()
+    item = next(item for item in items if "SQLite schema revision" in item["message"])
+    assert item["status"] == expected
+    if expected == "pass":
+        assert "compatible with this CLI" in item["message"]
+
+
 def _managed_generation(name: str, version: str, export: str = "vibe") -> Path:
     """Build one uv-shaped install generation that reports ``version``."""
 

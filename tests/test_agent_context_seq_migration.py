@@ -9,7 +9,7 @@ table.
 import sqlite3
 
 import pytest
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 
 from storage import migrations
 
@@ -56,7 +56,7 @@ def test_context_seq_upgrade_and_downgrade_keep_released_rows(tmp_path):
 
     migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261107_0075",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261108_0076",)
         assert_released_rows_unchanged(conn)
         assert _index_sql(conn, "ix_agent_events_turn_sequence_id") is not None
         for table, (first, same_session, other_session) in _IDS.items():
@@ -67,7 +67,7 @@ def test_context_seq_upgrade_and_downgrade_keep_released_rows(tmp_path):
                 conn.execute(f"UPDATE {table} SET context_seq = 1 WHERE id = ?", (same_session,))
         conn.commit()
 
-    command.downgrade(migrations.alembic_config(path), "20260923_0062")
+    downgrade_legacy_schema(migrations.alembic_config(path), "20260923_0062")
     with sqlite3.connect(path) as conn:
         assert_released_rows_unchanged(conn)
         assert [_index_sql(conn, index) for index in _INDEXES.values()] == [None, None]

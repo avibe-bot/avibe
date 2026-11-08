@@ -52,6 +52,11 @@ additive upgrades rather than optimizing its copying again.
 
 ### State, classification and bridge
 
+Bridge implementation and the proposed (not approved) release tags are tracked
+in [the bridge delivery contract](../maintenance/sqlite-compatibility.md).
+The bridge remains conservative; its presence alone does not enable no-copy
+upgrades or C-alt trace suppression.
+
 Store **one integer `compatibility_epoch` in core `state_meta`**. Each binary
 knows which epochs it supports. Keep Alembic's stamp/graph for migration order;
 no applied-ancestry ledger, schema-use lease or new runtime coordination system.

@@ -1448,6 +1448,7 @@
       "alembicFound": "找到打包的 Alembic 脚本：{path}",
       "alembicRevisionsMissing": "{path} 下没有 Alembic revision 文件",
       "sqliteRevisionAbsent": "SQLite schema revision 尚未初始化",
+      "sqliteRevisionCompatible": "SQLite schema revision 与此 CLI 兼容：{revision}（兼容纪元 {epoch}）",
       "sqliteRevisionKnown": "此 CLI 已识别 SQLite schema revision：{revision}",
       "sqliteRevisionUnknown": "SQLite schema revision 比此 CLI 更新或未知：{revision}"
     },

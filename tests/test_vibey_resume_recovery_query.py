@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pytest
-from alembic import command
+from tests.migration_helpers import downgrade_legacy_schema
 from sqlalchemy import event
 
 from modules.agents.vibey import VibeyAgent
@@ -192,7 +192,7 @@ def test_migration_round_trip_owns_the_recovery_index(tmp_path: Path) -> None:
         ]
         assert [item[2] for item in conn.execute(f"pragma index_info({_MIGRATION._DELIVERY_INDEX})")] == ["message_id"]
 
-    command.downgrade(alembic_config(db_path), _MIGRATION.down_revision)
+    downgrade_legacy_schema(alembic_config(db_path), _MIGRATION.down_revision)
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
             "select name from sqlite_master where type = 'index' and name = ?",

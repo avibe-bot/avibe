@@ -33,6 +33,9 @@ from storage.backups import (
     next_backup_sequence,
     prune_state_backups,
 )
+from storage.compatibility import (
+    COMPATIBILITY_EPOCH_KEY, parse_compatibility_epoch, require_supported_compatibility_epoch,
+)
 from storage.db import create_sqlite_engine
 from storage.lock import MigrationFileLock, migration_lock_path_for
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
@@ -101,6 +104,15 @@ def _installed_schema_revision() -> str | None:
     return ScriptDirectory.from_config(alembic_config()).get_current_head()
 
 
+@lru_cache(maxsize=1)
+def _installed_schema_epoch() -> int:
+    from alembic.script import ScriptDirectory
+    from storage.migrations import alembic_config, declared_compatibility_epoch
+
+    script = ScriptDirectory.from_config(alembic_config())
+    return declared_compatibility_epoch(script, set(script.get_heads()))
+
+
 def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
     """Check existing completion receipts without a lock, engine, or repair.
 
@@ -118,12 +130,18 @@ def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
                 "SELECT version_num, "
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?), "
+                "(SELECT value_json FROM state_meta WHERE key = ?), "
                 "(SELECT value_json FROM state_meta WHERE key = ?) "
                 "FROM alembic_version LIMIT 2",
-                (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY),
+                (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+                 COMPATIBILITY_EPOCH_KEY),
             ).fetchall()
         expected_revision = _installed_schema_revision()
         if expected_revision is None or len(rows) != 1 or rows[0][0] != expected_revision:
+            return False
+        epoch = parse_compatibility_epoch(rows[0][4])
+        require_supported_compatibility_epoch(epoch)
+        if epoch != _installed_schema_epoch():
             return False
         for value in rows[0][1:3]:
             timestamp = json.loads(value)
@@ -195,7 +213,14 @@ def repair_sqlite_state(
     # establishing this database, and a second process must not start migrating
     # it in between.
     with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
-        run_migrations(target_db, prune_backups_after_upgrade=False)
+        decision = run_migrations(target_db, prune_backups_after_upgrade=False)
+        if decision.compatible_open:
+            # The newer runtime owns all migration/import/backup receipts. An
+            # older compatible binary must not replay, adopt or complete them.
+            report = MigrationImportReport(db_path=target_db, imported=False)
+            with _ensured_lock:
+                _ensured_targets[ensured_key] = report
+            return report
         try:
             backup_attempt = begin_sqlite_backup_validation(target_db)
         except OSError:
