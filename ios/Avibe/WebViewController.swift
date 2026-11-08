@@ -316,6 +316,7 @@ final class WebViewFactory {
         #endif
         outerScrollLockControllers[ObjectIdentifier(webView)] =
             OuterScrollLockController(webView: webView)
+        FormAccessoryBar.hide(in: webView)
         return webView
     }
 

@@ -274,10 +274,15 @@ shell to measure what remains (section 15).
   changes. The Web UI's own scroll containers remain enabled. Neither half
   ships independently, so the keyboard has one layout owner without changing
   ordinary document scrolling.
-- **Accessory bar remains WebKit-owned in Phase 0a.** No public API removes it.
-  The common private-content-view override carries App Review risk under the
-  license agreement's private-API rule (section 13), so it is not part of the
-  shell. The native composer makes it unnecessary for chat.
+- **Instance WebViews hide the accessory bar.** No public API removes it.
+  The shell gives WebKit's content view a runtime subclass whose
+  `inputAccessoryView` is nil (`FormAccessoryBar`, the technique Capacitor's
+  Keyboard plugin uses). It carries App Review risk under the license
+  agreement's private-API rule (section 13); the owner accepted that risk on
+  2026-11-08 after using the TestFlight build, since internal testing is not
+  reviewed and the change is a few lines to remove. The bundled sign-in page
+  keeps WebKit's default accessory. The native composer would make it
+  unnecessary for chat.
 
 ### Native composer (Phase 0b)
 
@@ -1039,9 +1044,9 @@ every item with the native composer.
   without a private API, removing Lexical's page nudge, and native
   hold-to-talk. Phase 0a's checklist results should confirm it before 0b
   starts.
-- **The accessory-bar technique uses a private class** (DPLA 3.3.1(A)). It
-  stays behind a flag, and the native composer removes the need for it in
-  chat.
+- **The accessory-bar technique uses a private class** (DPLA 3.3.1(A)). The
+  shell uses it in instance WebViews (owner decision, 2026-11-08); before an
+  App Store submission, decide whether to keep it or ship the native composer.
 - **Protected Vault passkeys inside the shell** (section 7).
 - **Agent-authored Show Pages share the bridge and the silent microphone
   grant** (sections 7 and 13). A separate Show Page origin is the structural
