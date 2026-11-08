@@ -12,6 +12,7 @@ import io
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -38,14 +39,23 @@ def retry_clock(monkeypatch):
 
 @pytest.fixture
 def asset_server():
-    state = SimpleNamespace(responses=[], requests=[])
+    state = SimpleNamespace(responses=[], requests=[], headers=[], routes={})
+    real_urlopen = urllib.request.urlopen
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             state.requests.append(self.path)
-            status, body = state.responses.pop(0)
+            state.headers.append(dict(self.headers))
+            if state.routes:
+                replies = state.routes[self.path]
+                reply = replies.pop(0) if len(replies) > 1 else replies[0]
+            else:
+                reply = state.responses.pop(0)
+            status, body, *headers = reply
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
+            for name, value in (headers[0] if headers else {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -55,7 +65,18 @@ def asset_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
     thread.start()
-    state.url = f"http://127.0.0.1:{server.server_port}/asset"
+    state.origin = f"http://127.0.0.1:{server.server_port}"
+    state.url = state.origin + "/asset"
+
+    def opener(request, *, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        prefix = "/api" if parsed.hostname == "api.github.com" else "/browser"
+        local = urllib.request.Request(state.origin + prefix + parsed.path, headers=request.headers)
+        for name, value in request.unredirected_hdrs.items():
+            local.add_unredirected_header(name, value)
+        return real_urlopen(local, timeout=timeout)
+
+    state.opener = opener
     try:
         yield state
     finally:
@@ -206,3 +227,138 @@ def test_manifest_consumer_retries_transport_but_never_integrity(asset_server, t
         assert len(asset_server.requests) == 3
     if case != "transient":
         assert target.read_bytes() == b"previous verified manifest"
+
+
+_OWN_URL = f"https://github.com/avibe-bot/avibe/releases/download/{RELEASE_TAG}/show-runtime-manifest.json"
+_API_LOOKUP = f"/api/repos/avibe-bot/avibe/releases/tags/{RELEASE_TAG}"
+_API_ASSET = "/api/repos/avibe-bot/avibe/releases/assets/42"
+_BROWSER = f"/browser/avibe-bot/avibe/releases/download/{RELEASE_TAG}/show-runtime-manifest.json"
+
+
+def _api_routes(server, content=b"verified bytes"):
+    asset = {"id": 42, "name": "show-runtime-manifest.json", "browser_download_url": _OWN_URL,
+             "digest": f"sha256:{hashlib.sha256(content).hexdigest()}"}
+    release = json.dumps({"tag_name": RELEASE_TAG, "assets": [asset]}).encode()
+    server.routes = {
+        _API_LOOKUP: [(200, release)],
+        _API_ASSET: [(200, content)],
+        _BROWSER: [(504, b"browser route persistently unavailable")],
+    }
+    return asset
+
+
+@pytest.mark.parametrize("to_file", [False, True])
+@pytest.mark.parametrize("reuse_metadata", [False, True])
+def test_owned_release_resolves_api_asset_without_touching_broken_browser(
+    asset_server, retry_clock, tmp_path, monkeypatch, to_file, reuse_metadata,
+):
+    asset = _api_routes(asset_server)
+    metadata = asset if reuse_metadata else None
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    if to_file:
+        monkeypatch.setattr(downloads.urllib.request, "urlopen", asset_server.opener)
+        target = tmp_path / "asset"
+        downloads.download_to_path(_OWN_URL, target, release_asset=metadata)
+        result = target.read_bytes()
+    else:
+        result = downloads.read_bytes(_OWN_URL, opener=asset_server.opener, release_asset=metadata)
+    assert result == b"verified bytes"
+    assert asset_server.requests == ([_API_ASSET] if reuse_metadata else [_API_LOOKUP, _API_ASSET])
+    expected_accepts = ["application/octet-stream"] if reuse_metadata else [
+        "application/vnd.github+json", "application/octet-stream",
+    ]
+    assert [headers["Accept"] for headers in asset_server.headers] == expected_accepts
+    assert all(headers["Authorization"] == "Bearer test-github-token" for headers in asset_server.headers)
+    assert retry_clock.sleeps == []
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_manifest_reuses_release_api_metadata_and_still_checks_digest(asset_server, tmp_path, mismatch):
+    content = (json.dumps(_manifest()) + "\n").encode()
+    asset = _api_routes(asset_server, content)
+    if mismatch:
+        asset["digest"] = f"sha256:{'0' * 64}"
+        asset_server.routes[_API_LOOKUP] = [(200, json.dumps({"tag_name": RELEASE_TAG, "assets": [asset]}).encode())]
+    target = tmp_path / "manifest.json"
+    target.write_bytes(b"previous verified manifest")
+    if mismatch:
+        with pytest.raises(RuntimeError, match="digest mismatch"):
+            manifests.prepare_manifest(target, release_tag=RELEASE_TAG, opener=asset_server.opener)
+        assert target.read_bytes() == b"previous verified manifest"
+    else:
+        assert manifests.prepare_manifest(target, release_tag=RELEASE_TAG, opener=asset_server.opener) == _manifest()
+        assert target.read_bytes() == content
+    # No duplicate metadata lookup and no browser fallback after valid API bytes,
+    # even if the caller rejects those bytes on integrity grounds.
+    assert asset_server.requests == [_API_LOOKUP, _API_ASSET]
+
+
+@pytest.mark.parametrize("failure_path", [_API_LOOKUP, _API_ASSET])
+@pytest.mark.parametrize("status", [403, 404, 429, 504])
+def test_api_unavailable_falls_back_to_browser(asset_server, retry_clock, failure_path, status):
+    _api_routes(asset_server)
+    asset_server.routes[failure_path] = [(status, b"API unavailable")]
+    asset_server.routes[_BROWSER] = [(200, b"verified bytes")]
+    assert downloads.read_bytes(_OWN_URL, opener=asset_server.opener) == b"verified bytes"
+    expected = [_API_LOOKUP] if failure_path == _API_LOOKUP else [_API_LOOKUP, _API_ASSET]
+    assert asset_server.requests == expected + [_BROWSER]
+    assert retry_clock.sleeps == []
+
+
+@pytest.mark.parametrize("api_status", [404, 504])
+def test_fallback_retries_do_not_repeat_permanent_api_errors(asset_server, retry_clock, api_status):
+    _api_routes(asset_server)
+    asset_server.routes[_API_ASSET] = [(api_status, b"API unavailable"), (200, b"verified bytes")]
+    asset_server.routes[_BROWSER] = [(504, b"browser unavailable"), (200, b"verified bytes")]
+    assert downloads.read_bytes(_OWN_URL, opener=asset_server.opener) == b"verified bytes"
+    expected_last = _BROWSER if api_status == 404 else _API_ASSET
+    assert asset_server.requests == [_API_LOOKUP, _API_ASSET, _BROWSER, expected_last]
+    assert retry_clock.sleeps == [1.5]
+
+
+def test_api_and_browser_fallback_share_the_retry_time_budget(retry_clock):
+    calls = []
+
+    def opener(request, *, timeout):
+        calls.append(request.full_url)
+        retry_clock.now += timeout
+        raise TimeoutError("network stalled")
+
+    with pytest.raises(TimeoutError):
+        downloads.read_bytes(_OWN_URL, opener=opener)
+    assert any("api.github.com" in url for url in calls)
+    assert _OWN_URL in calls
+    assert retry_clock.now <= 45
+
+
+def test_api_size_failure_does_not_fall_back(asset_server, retry_clock, monkeypatch, tmp_path):
+    _api_routes(asset_server)
+    monkeypatch.setattr(downloads.urllib.request, "urlopen", asset_server.opener)
+    target = tmp_path / "asset"
+    with pytest.raises(ValueError, match="size limit"):
+        downloads.download_to_path(_OWN_URL, target, max_bytes=3)
+    assert asset_server.requests == [_API_LOOKUP, _API_ASSET]
+    assert not target.exists()
+    assert retry_clock.sleeps == []
+
+
+def test_api_credentials_are_not_forwarded_to_asset_storage(asset_server, monkeypatch):
+    _api_routes(asset_server)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    asset_server.routes[_API_ASSET] = [(302, b"", {"Location": asset_server.origin + "/storage"})]
+    asset_server.routes["/storage"] = [(200, b"verified bytes")]
+    assert downloads.read_bytes(_OWN_URL, opener=asset_server.opener) == b"verified bytes"
+    assert asset_server.requests == [_API_LOOKUP, _API_ASSET, "/storage"]
+    assert asset_server.headers[1]["Authorization"] == "Bearer test-github-token"
+    assert "Authorization" not in asset_server.headers[2]
+
+
+def test_third_party_release_keeps_plain_retry_without_api_credentials(asset_server, retry_clock, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token")
+    url = "https://github.com/other/repo/releases/download/v1/tool.zip"
+    path = "/browser/other/repo/releases/download/v1/tool.zip"
+    asset_server.routes[path] = [(504, b"unavailable"), (200, b"verified bytes")]
+    assert downloads.read_bytes(url, opener=asset_server.opener) == b"verified bytes"
+    assert asset_server.requests == [path, path]
+    assert all("Authorization" not in headers for headers in asset_server.headers)
+    assert retry_clock.sleeps == [1.5]

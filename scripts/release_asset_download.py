@@ -1,21 +1,26 @@
-"""Stdlib-only release downloads for build/CI scripts (not runtime mirror policy)."""
+"""Stdlib-only, API-first release downloads for build/CI scripts."""
 
 from __future__ import annotations
 
 import errno
 import http.client
+import json
 import logging
+import os
 import random
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Mapping, TypeVar
 
 _T = TypeVar("_T")
 _MAX_ATTEMPTS = 4
 _REQUEST_TIMEOUT = 10.0
 _RETRY_WINDOW = 45.0
+_RELEASE_ROOT = "https://github.com/avibe-bot/avibe/releases/download/"
+_API_ROOT = "https://api.github.com/repos/avibe-bot/avibe/releases"
 
 
 def _retryable(exc: Exception) -> bool:
@@ -28,16 +33,13 @@ def _retryable(exc: Exception) -> bool:
     )
 
 
-def _with_retry(operation: Callable[[float], _T]) -> _T:
-    # Four stalled attempts plus 1/2/4s backoff and <=0.5s jitter each fit in
-    # roughly a minute. The window bounds retries, not healthy large transfers;
-    # urllib's timeout is a socket inactivity limit, not a transfer deadline.
-    deadline = time.monotonic() + _RETRY_WINDOW
+def _with_retry(operation: Callable[[], _T], *, deadline: float) -> _T:
+    # The window bounds retries, not healthy large transfers; urllib's timeout
+    # is a socket inactivity limit, not a transfer deadline.
     for attempt in range(_MAX_ATTEMPTS):
         try:
-            return operation(min(_REQUEST_TIMEOUT, max(0.001, deadline - time.monotonic())))
+            return operation()
         except Exception as exc:
-            # HTTPError owns a response stream even when urlopen never returns.
             if isinstance(exc, urllib.error.HTTPError):
                 exc.close()
             if not _retryable(exc) or attempt == _MAX_ATTEMPTS - 1:
@@ -54,19 +56,114 @@ def _with_retry(operation: Callable[[float], _T]) -> _T:
     raise AssertionError("unreachable")
 
 
+def _request(url: str, *, accept: str = "application/octet-stream") -> urllib.request.Request:
+    request = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "avibe-release-downloader/1"})
+    _authorize_api(request)
+    return request
+
+
+def _authorize_api(request: urllib.request.Request) -> None:
+    token = os.environ.get("GITHUB_TOKEN")
+    parsed = urllib.parse.urlparse(request.full_url)
+    if token and parsed.scheme == "https" and parsed.netloc == "api.github.com":
+        # GitHub redirects asset API downloads to a signed storage URL. Never
+        # forward the API credential to that host (or any other redirect).
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+
+
+def _asset_api_request(
+    url: str,
+    asset: Mapping[str, Any] | None,
+    open_response: Callable[..., Any],
+) -> urllib.request.Request | None:
+    if not url.startswith(_RELEASE_ROOT):
+        return None
+    parts = url[len(_RELEASE_ROOT):].split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    tag, name = (urllib.parse.unquote(part) for part in parts)
+    if asset is None:
+        lookup = _request(f"{_API_ROOT}/tags/{urllib.parse.quote(tag, safe='')}", accept="application/vnd.github+json")
+        with open_response(lookup) as response:
+            try:
+                release = json.loads(response.read())
+            except (ValueError, UnicodeDecodeError):
+                return None
+        if not isinstance(release, dict) or release.get("tag_name") != tag:
+            return None
+        assets = release.get("assets")
+        if not isinstance(assets, list):
+            return None
+        matches = [item for item in assets if isinstance(item, dict) and item.get("name") == name]
+        if len(matches) != 1:
+            return None
+        asset = matches[0]
+    asset_id = asset.get("id")
+    if (asset.get("name") != name or asset.get("browser_download_url") != url
+            or not isinstance(asset_id, int) or isinstance(asset_id, bool) or asset_id <= 0):
+        return None
+    # Construct the API URL from a validated id, never trust a metadata-supplied
+    # URL with a bearer token. All digest/size validation remains with callers.
+    return _request(f"{_API_ROOT}/assets/{asset_id}")
+
+
+def _with_response(
+    request: str | urllib.request.Request,
+    consume: Callable[[Any], _T],
+    *,
+    opener: Callable[..., Any] | None = None,
+    release_asset: Mapping[str, Any] | None = None,
+) -> _T:
+    request = _request(request) if isinstance(request, str) else request
+    _authorize_api(request)
+    resolved_opener = opener or urllib.request.urlopen
+    deadline = time.monotonic() + _RETRY_WINDOW
+    api_allowed = request.full_url.startswith(_RELEASE_ROOT)
+    api_request = None
+
+    def open_response(candidate: urllib.request.Request):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("release download retry window exhausted")
+        return resolved_opener(candidate, timeout=min(_REQUEST_TIMEOUT, remaining))
+
+    def transfer() -> _T:
+        nonlocal api_allowed, api_request
+        if api_allowed:
+            try:
+                if api_request is None:
+                    api_request = _asset_api_request(request.full_url, release_asset, open_response)
+                    api_allowed = api_request is not None
+                if api_request is not None:
+                    with open_response(api_request) as response:
+                        return consume(response)
+            except Exception as exc:
+                # A transport failure makes the alternate browser route useful;
+                # a size/digest/local-write failure does not. Permanent API 4xx
+                # is never requested again during retries of the browser route.
+                if not (_retryable(exc) or isinstance(exc, urllib.error.URLError)):
+                    raise
+                if isinstance(exc, urllib.error.HTTPError):
+                    exc.close()
+                if not _retryable(exc):
+                    api_allowed = False
+                logging.getLogger(__name__).warning("Release asset API unavailable; trying browser download URL")
+        with open_response(request) as response:
+            return consume(response)
+
+    # API discovery, asset transfer and fallback share one elapsed retry window,
+    # not nested independent retry loops. A healthy API never hits browser URLs.
+    return _with_retry(transfer, deadline=deadline)
+
+
 def read_bytes(
     request: str | urllib.request.Request,
     *,
     opener: Callable[..., Any] | None = None,
+    release_asset: Mapping[str, Any] | None = None,
 ) -> bytes:
-    """Read fresh bytes on each transient retry; validation belongs to callers."""
-    resolved_opener = opener or urllib.request.urlopen
-
-    def read(timeout: float) -> bytes:
-        with resolved_opener(request, timeout=timeout) as response:
-            return response.read()
-
-    return _with_retry(read)
+    """Read fresh bytes; reuse release metadata when the caller already has it."""
+    return _with_response(request, lambda response: response.read(), opener=opener, release_asset=release_asset)
 
 
 def download_to_path(
@@ -74,12 +171,13 @@ def download_to_path(
     destination: Path,
     *,
     max_bytes: int | None = None,
+    release_asset: Mapping[str, Any] | None = None,
 ) -> None:
     """Stream each attempt from byte zero, never retaining an incomplete file."""
-    def download(timeout: float) -> None:
+    def download(response: Any) -> None:
         started = False
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response, destination.open("wb") as output:
+            with destination.open("wb") as output:
                 started = True
                 downloaded = 0
                 while chunk := response.read(1024 * 1024):
@@ -92,4 +190,4 @@ def download_to_path(
                 destination.unlink(missing_ok=True)
             raise
 
-    _with_retry(download)
+    _with_response(request, download, release_asset=release_asset)

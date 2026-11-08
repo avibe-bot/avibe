@@ -58,6 +58,8 @@ jobs:
       # The packaged engine manifest, with this runner's asset downloaded and
       # verified, so every scenario installs the pinned engine offline.
       - name: Prepare the pinned engine offline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python - <<'EOF'
           import hashlib, json, os, pathlib

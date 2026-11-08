@@ -94,6 +94,7 @@ jobs:
       - name: Publish or verify the pinned release
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -173,6 +174,8 @@ jobs:
       - name: Fetch and verify published assets
         id: probe
         continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/model_hub_engine_release_guard.py fetch \
             --output-dir "$RUNNER_TEMP/model-hub-engine-release"
@@ -278,6 +281,8 @@ jobs:
 
       - name: Verify recovered release
         if: steps.probe.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/model_hub_engine_release_guard.py fetch \
             --output-dir "$RUNNER_TEMP/model-hub-engine-release"

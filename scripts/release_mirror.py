@@ -97,6 +97,7 @@ class Asset:
     sha256: str
     url: str
     content_type: str
+    api_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,7 @@ def parse_releases(
                     sha256=digest,
                     url=expected,
                     content_type=raw.get("content_type") or "application/octet-stream",
+                    api_id=raw.get("id"),
                 )
             )
         releases.append(
@@ -355,8 +357,11 @@ def plan(
 def download(asset: Asset, destination: Path) -> None:
     """Download ``asset`` and prove its size and sha256 match GitHub's digest."""
     request = urllib.request.Request(asset.url, headers={"User-Agent": "avibe-release-mirror/1"})
+    metadata = None if asset.api_id is None else {
+        "id": asset.api_id, "name": asset.name, "browser_download_url": asset.url,
+    }
     try:
-        download_to_path(request, destination, max_bytes=asset.size)
+        download_to_path(request, destination, max_bytes=asset.size, release_asset=metadata)
     except ValueError as exc:
         raise MirrorError(f"downloaded bytes do not match GitHub's digest: {asset.url}") from exc
     except urllib.error.HTTPError as exc:
