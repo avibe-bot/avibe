@@ -29,6 +29,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+SSE_BROKER_CLOSED_EVENT = "__avibe_sse_broker_closed__"
+
 
 class _Subscription:
     """One subscriber's queue, plus what this broker failed to hand it.
@@ -40,11 +42,12 @@ class _Subscription:
     that subscriber's stream tell it that its view has a hole in it.
     """
 
-    __slots__ = ("queue", "dropped")
+    __slots__ = ("queue", "dropped", "closed")
 
     def __init__(self, queue: asyncio.Queue) -> None:
         self.queue = queue
         self.dropped = 0
+        self.closed = False
 
 
 class SSEBroker:
@@ -52,6 +55,7 @@ class SSEBroker:
         self._subscribers: dict[int, _Subscription] = {}
         self._next_id = 0
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._closed = False
         # ``subscribe`` / ``unsubscribe`` run on the event loop thread while
         # ``publish`` runs from any thread (sync REST routes, IM threads).
         # Plain ``list(dict.values())`` mid-mutation can raise
@@ -67,8 +71,14 @@ class SSEBroker:
         with self._lock:
             sub_id = self._next_id
             self._next_id += 1
-            self._subscribers[sub_id] = _Subscription(queue)
-            total = len(self._subscribers)
+            if self._closed:
+                subscription = _Subscription(queue)
+                subscription.closed = True
+                queue.put_nowait((SSE_BROKER_CLOSED_EVENT, ""))
+                total = len(self._subscribers)
+            else:
+                self._subscribers[sub_id] = _Subscription(queue)
+                total = len(self._subscribers)
         logger.debug("SSE subscriber %s connected (total=%s)", sub_id, total)
         return sub_id, queue
 
@@ -97,6 +107,41 @@ class SSEBroker:
             subscription = self._subscribers.get(sub_id)
         return subscription.dropped if subscription is not None else 0
 
+    def close_all(self) -> None:
+        """Wake every subscriber and reject late subscribers during shutdown.
+
+        This is called from Uvicorn's signal handler. Do not acquire ``_lock``
+        here: a signal can interrupt an event-loop operation while it holds the
+        lock, so closure must be recorded and scheduled without waiting.
+        """
+
+        self._closed = True
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._close_all_now)
+        except RuntimeError:
+            return
+
+    def _close_all_now(self) -> None:
+        with self._lock:
+            subscriptions = list(self._subscribers.values())
+        for subscription in subscriptions:
+            if subscription.closed:
+                continue
+            subscription.closed = True
+            while subscription.queue.full():
+                try:
+                    subscription.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                subscription.queue.put_nowait((SSE_BROKER_CLOSED_EVENT, ""))
+            except asyncio.QueueFull:
+                subscription.dropped += 1
+                logger.debug("SSE subscriber close signal could not be queued")
+
     def publish(self, event_type: str, data: Any) -> None:
         """Fan a JSON event out to every subscriber.
 
@@ -111,7 +156,7 @@ class SSEBroker:
         # the event loop thread cannot mutate the dict mid-iteration.
         payload = json.dumps({"type": event_type, "data": data}, sort_keys=True, separators=(",", ":"))
         with self._lock:
-            if not self._subscribers:
+            if self._closed or not self._subscribers:
                 return
             subscriptions = list(self._subscribers.values())
         for subscription in subscriptions:
@@ -133,6 +178,8 @@ class SSEBroker:
         that reads the count, so the counter needs no lock of its own.
         """
 
+        if subscription.closed:
+            return
         try:
             subscription.queue.put_nowait((event_type, payload))
         except asyncio.QueueFull:

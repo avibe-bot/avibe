@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import threading
+import time
 import uuid
 from typing import TYPE_CHECKING, Optional, Dict, Any
 from config import paths
@@ -210,6 +211,7 @@ class Controller:
     def __init__(self, config):
         """Initialize controller with configuration"""
         self.config = config
+        self._startup_started_at = time.monotonic()
         self._config_mtime: Optional[float] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._im_thread: Optional[threading.Thread] = None
@@ -1173,6 +1175,15 @@ class Controller:
         """
         await self.vibey_recovery.start()
 
+    def _log_startup_phase(self, phase: str, started_at: float) -> None:
+        startup_started_at = getattr(self, "_startup_started_at", started_at)
+        logger.info(
+            "Startup phase=%s duration_ms=%d elapsed_ms=%d",
+            phase,
+            round((time.monotonic() - started_at) * 1000),
+            round((time.monotonic() - startup_started_at) * 1000),
+        )
+
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
@@ -1230,12 +1241,16 @@ class Controller:
         workbench_platforms = {"avibe"}
         if self.primary_platform == "avibe":
             workbench_platforms.add("")
+        restore_started_at = time.monotonic()
         await self._restore_active_polls(workbench_platforms)
+        self._log_startup_phase("restore_active_polls", restore_started_at)
+        recovery_started_at = time.monotonic()
         try:
             await self._recover_runtime_owners()
         except Exception:
             self.request_shutdown("runtime owner recovery failed")
             raise
+        self._log_startup_phase("runtime_owner_recovery", recovery_started_at)
 
         agent_service = getattr(self, "agent_service", None)
         codex_agent = getattr(agent_service, "agents", {}).get("codex")
@@ -1249,7 +1264,12 @@ class Controller:
         # --- everything above must have succeeded for the service to be up ---
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
+        readiness_started_at = time.monotonic()
         self._publish_readiness_unless_im_runtime_failed()
+        try:
+            self._log_startup_phase("ready", readiness_started_at)
+        except Exception:
+            logger.exception("Failed to log startup readiness phase")
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -1365,6 +1385,7 @@ class Controller:
             None,
         )
         if callable(recover_model_hub):
+            model_hub_started_at = time.monotonic()
             try:
                 await recover_model_hub()
             except Exception:
@@ -1375,6 +1396,7 @@ class Controller:
                 coordinator = getattr(self, "backend_restart_coordinator", None)
                 if coordinator is not None:
                     coordinator.restore_migration_blocks()
+                self._log_startup_phase("recover_model_hub", model_hub_started_at)
 
         # recovery.md: T2 before T4. Vibey settles what a restart left open first; a
         # command still running for a Turn not yet settled is left to the Turn owner
@@ -1382,9 +1404,12 @@ class Controller:
         # command handed to a Watch before its notice names it. Best effort: its single
         # owner retries what it could not settle.
         try:
+            vibey_started_at = time.monotonic()
             await self._recover_vibey_agent_runtime_state()
         except Exception:
             logger.exception("Failed to recover Vibey's runtime state")
+        finally:
+            self._log_startup_phase("recover_vibey_runtime", vibey_started_at)
 
         recover_deliveries = getattr(
             self.session_turns,
@@ -1392,6 +1417,7 @@ class Controller:
             None,
         )
         if callable(recover_deliveries):
+            deliveries_started_at = time.monotonic()
             try:
                 recovered = await recover_deliveries(service_restart=True)
                 if recovered:
@@ -1402,6 +1428,8 @@ class Controller:
             except Exception:
                 logger.exception("Failed to recover durable Session delivery owners")
                 raise
+            finally:
+                self._log_startup_phase("recover_durable_delivery", deliveries_started_at)
 
         recover_queue = getattr(
             self.session_turns,
@@ -1409,6 +1437,7 @@ class Controller:
             None,
         )
         if callable(recover_queue):
+            queue_started_at = time.monotonic()
             try:
                 recovered = await recover_queue()
                 if recovered:
@@ -1419,15 +1448,22 @@ class Controller:
             except Exception:
                 logger.exception("Failed to recover persisted Workbench Agent Run queues")
                 raise
+            finally:
+                self._log_startup_phase("recover_agent_run_queue", queue_started_at)
 
+        fallback_started_at = time.monotonic()
         try:
             self.scheduled_task_service.recover_processing_requests()
         except Exception:
             logger.exception("Failed to recover fallback request owners")
             raise
+        finally:
+            self._log_startup_phase("recover_fallback_requests", fallback_started_at)
 
+        supervisor_started_at = time.monotonic()
         await self.runtime_work_supervisor.activate()
         self._delivery_recovery_complete.set()
+        self._log_startup_phase("activate_runtime_work", supervisor_started_at)
 
     # Utility methods used by handlers
 
@@ -2539,7 +2575,8 @@ class Controller:
 
     def cleanup_sync(self):
         """Best-effort synchronous cleanup without cross-loop awaits"""
-        logger.info("Cleaning up controller resources (sync, best-effort)...")
+        cleanup_started_at = time.monotonic()
+        logger.info("Shutdown phase=controller_cleanup_sync start")
 
         def _stop_loop_coroutine(coro, label: str, *, timeout: float | None = 5) -> None:
             try:
@@ -2786,6 +2823,10 @@ class Controller:
             logger.warning("OpenCode server cleanup failed: %s", e)
 
         loop_writers.log_summary(final=True)
+        logger.info(
+            "Shutdown phase=controller_cleanup_sync duration_ms=%d",
+            round((time.monotonic() - cleanup_started_at) * 1000),
+        )
         logger.info("Controller cleanup (sync) complete")
 
     def _model_hub_snapshot_refresh_completed(self) -> None:

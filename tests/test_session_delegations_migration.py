@@ -14,7 +14,7 @@ from storage.migration_policy import classify_migration
 
 pytestmark = pytest.mark.no_sqlite_template
 PREVIOUS = "20261108_0076"
-HEAD_REVISION = "20261108_0081"
+HEAD = "20261108_0082"
 
 
 def test_delegation_projection_upgrade_and_fixture_downgrade_preserve_released_data(tmp_path):
@@ -46,4 +46,4 @@ def test_delegation_projection_upgrade_and_fixture_downgrade_preserve_released_d
     migrations.run_migrations(path)
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT * FROM session_delegations").fetchall() == []
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (HEAD_REVISION,)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (HEAD,)

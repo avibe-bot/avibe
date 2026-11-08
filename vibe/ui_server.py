@@ -4033,8 +4033,12 @@ async def _wait_for_project_session_access_loss(
     session_id: str,
     minimum_role: str,
 ) -> None:
+    from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT
+
     while True:
         event_type, _payload = await queue.get()
+        if event_type == SSE_BROKER_CLOSED_EVENT:
+            return
         if event_type != "authorization.changed":
             continue
         if not _project_session_access_allowed(context, session_id, minimum_role):
@@ -4048,8 +4052,12 @@ async def _wait_for_show_page_access_loss(
 ) -> None:
     """Close a Show Page socket when its independent ACL is revoked."""
 
+    from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT
+
     while True:
         event_type, _payload = await queue.get()
+        if event_type == SSE_BROKER_CLOSED_EVENT:
+            return
         if event_type != "authorization.changed":
             continue
         if not _show_page_mutation_allowed(context):
@@ -14189,7 +14197,7 @@ async def workbench_events():
     from core.inbox_events import WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT
     from vibe.authorization import can_receive_workbench_event
     from vibe.inbox_bridge import is_bridge_connected
-    from vibe.sse_broker import broker
+    from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT, broker
 
     authorization_context = getattr(g, "authorization_context", None)
     remote_session_identity = getattr(g, "remote_session_identity", None)
@@ -14288,6 +14296,8 @@ async def workbench_events():
                         queue.get(),
                         timeout=max(0.25, WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S - since_heartbeat),
                     )
+                    if event_type == SSE_BROKER_CLOSED_EVENT:
+                        return
                     state = await authorization_state()
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
@@ -16502,7 +16512,7 @@ async def _show_events_stream(
 
     from fastapi.responses import StreamingResponse
 
-    from vibe.sse_broker import broker
+    from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT, broker
 
     def _event_visible(event_payload: dict[str, Any]) -> bool:
         return event_payload.get("session_id") == session_id
@@ -16574,6 +16584,8 @@ async def _show_events_stream(
                     return
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    if event_type == SSE_BROKER_CLOSED_EVENT:
+                        return
                     state = await _authorization_state()
                     if state != "current":
                         yield _remote_authorization_sse_frame(state)
@@ -18773,6 +18785,9 @@ def _create_ui_server(config):
 
     class _UIServer(uvicorn.Server):
         def handle_exit(self, sig, frame) -> None:
+            from vibe.sse_broker import broker
+
+            broker.close_all()
             super().handle_exit(sig, frame)
             drain_desktop_backend_installs_on_shutdown()
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vibe.sse_broker import SSEBroker
+from vibe.sse_broker import SSE_BROKER_CLOSED_EVENT, SSEBroker
 
 
 def test_publish_preserves_repeated_payloads_and_omits_ts():
@@ -54,7 +54,58 @@ def test_publish_preserves_repeated_payloads_and_omits_ts():
     assert third_payload == {"type": "queue.updated", "data": {"session_id": "ses2"}}
 
 
-def test_dropped_count_records_what_a_full_queue_discarded():
+def test_close_all_wakes_subscribers_for_prompt_shutdown():
+    broker = SSEBroker()
+
+    async def scenario():
+        sub_id, queue = broker.subscribe()
+        broker.close_all()
+        event_type, payload = await asyncio.wait_for(queue.get(), timeout=1)
+        return sub_id, event_type, payload, broker.subscriber_count()
+
+    sub_id, event_type, payload, subscribers = asyncio.run(scenario())
+
+    assert sub_id == 0
+    assert event_type == SSE_BROKER_CLOSED_EVENT
+    assert payload == ""
+    assert subscribers == 1
+
+
+def test_late_subscribers_close_immediately_after_shutdown():
+    broker = SSEBroker()
+    broker.close_all()
+
+    async def scenario():
+        sub_id, queue = broker.subscribe()
+        event_type, payload = await asyncio.wait_for(queue.get(), timeout=1)
+        return sub_id, event_type, payload, broker.subscriber_count()
+
+    sub_id, event_type, payload, subscribers = asyncio.run(scenario())
+
+    assert sub_id == 0
+    assert event_type == SSE_BROKER_CLOSED_EVENT
+    assert payload == ""
+    assert subscribers == 0
+
+
+def test_close_all_does_not_wait_for_subscriber_lock():
+    broker = SSEBroker()
+    broker._lock.acquire()
+    finished = threading.Event()
+
+    def close():
+        broker.close_all()
+        finished.set()
+
+    thread = threading.Thread(target=close)
+    thread.start()
+    try:
+        assert finished.wait(timeout=1)
+    finally:
+        broker._lock.release()
+        thread.join(timeout=1)
+
+
     """A subscriber that cannot keep up is a subscriber losing events.
 
     The queue is bounded, so ``put_nowait`` raises somewhere it cannot report

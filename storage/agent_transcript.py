@@ -974,6 +974,7 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     unconsumed = conn.execute(
         text(
             "select messages.id from message_deliveries "
+            "indexed by ix_message_deliveries_turn "
             "cross join messages on messages.id = message_deliveries.message_id "
             "where message_deliveries.turn_id = :turn_id and message_deliveries.state = 'accepted' "
             f"and {VIBEY_RECOVERY_INPUT_PREDICATE} limit 1"

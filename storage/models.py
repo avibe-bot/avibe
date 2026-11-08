@@ -974,6 +974,13 @@ session_turns = Table(
     ),
     Index("ix_session_turns_session_created", "session_id", "created_at", "id"),
     Index(
+        "ix_session_turns_recovery_owner",
+        "backend",
+        "state",
+        "session_id",
+        "id",
+    ),
+    Index(
         "uq_session_turns_live_session",
         "session_id",
         unique=True,
@@ -1177,6 +1184,14 @@ message_deliveries = Table(
         "ix_message_deliveries_message",
         "message_id",
         sqlite_where=text("message_id is not null"),
+    ),
+    Index(
+        "ix_message_deliveries_recovery_owner",
+        "state",
+        "session_id",
+        "turn_id",
+        "current_target_turn_id",
+        "id",
     ),
     Index("ix_message_deliveries_turn", "turn_id", "turn_position"),
     Index(

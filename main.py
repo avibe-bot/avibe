@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import logging
+import time
 from typing import Any
 
 from config.paths import ensure_data_dirs, get_logs_dir
@@ -175,6 +176,7 @@ def _request_controller_loop_stop(controller: Any) -> bool:
 
 def main():
     """Main entry point"""
+    process_started_at = time.monotonic()
     lock_acquired = False
     macos_session_diagnostics = None
     controller = None
@@ -219,6 +221,7 @@ def main():
             from core.process_diagnostics import log_process_snapshot
 
             log_process_snapshot(logger, "service-start")
+        sqlite_started_at = time.monotonic()
         report = prepare_sqlite_state(config)
         logger.info(
             "SQLite state ready: imported=%s db_path=%s backup_path=%s",
@@ -226,12 +229,24 @@ def main():
             report.db_path,
             report.backup_path,
         )
-        
+        logger.info(
+            "Startup phase=sqlite_state duration_ms=%d elapsed_ms=%d",
+            round((time.monotonic() - sqlite_started_at) * 1000),
+            round((time.monotonic() - process_started_at) * 1000),
+        )
+
         # Create and run controller
         from core.controller import Controller
         from config.v2_compat import to_app_config
 
+        controller_started_at = time.monotonic()
         controller = Controller(to_app_config(config))
+        controller._startup_started_at = process_started_at
+        logger.info(
+            "Startup phase=controller_init duration_ms=%d elapsed_ms=%d",
+            round((time.monotonic() - controller_started_at) * 1000),
+            round((time.monotonic() - process_started_at) * 1000),
+        )
 
         shutdown_initiated = False
 

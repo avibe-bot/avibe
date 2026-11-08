@@ -25,6 +25,7 @@ from sqlalchemy import (
     literal_column,
     or_,
     select,
+    text,
     tuple_,
     update,
 )
@@ -5959,17 +5960,16 @@ class SQLiteBackgroundTaskStore:
                     if (participant_id := str(value or "").strip())
                 )
             )
-            durable_participant_ids = (
-                select(agent_runs.c.id)
-                .select_from(
-                    agent_runs.join(
-                        message_deliveries,
-                        message_deliveries.c.id == agent_runs.c.delivery_id,
-                    )
+            durable_participant_ids = select(literal_column("agent_runs.id")).select_from(
+                text(
+                    "agent_runs JOIN message_deliveries INDEXED BY "
+                    "ix_message_deliveries_turn ON message_deliveries.id = agent_runs.delivery_id"
                 )
-                .where(message_deliveries.c.turn_id == normalized_turn_id)
-                .where(message_deliveries.c.state == "accepted")
-            )
+            ).where(
+                text("message_deliveries.turn_id = :turn_id")
+            ).where(
+                text("message_deliveries.state = 'accepted'")
+            ).params(turn_id=normalized_turn_id)
             membership = [parent.c.id.in_(durable_participant_ids)]
             if normalized_participant_ids:
                 membership.append(parent.c.id.in_(normalized_participant_ids))
