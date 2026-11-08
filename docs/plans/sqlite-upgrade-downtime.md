@@ -89,16 +89,20 @@ still require review and a breaking declaration rather than a false CI proof.
 Bridge: **R0 is the first release of any kind, RC or stable, implementing epoch
 protocol v1**. A prerelease establishes the bridge for each DB it opens; the
 per-DB marker, not a semver tag, is the authority. **R1 is a later release with
-no-copy activation**, allowed only when the DB already has valid bridge evidence
-from a different, earlier binary generation, so its rollback binary understands
-the epoch. A marker first written during the current upgrade does not qualify.
+no-copy activation**. As clarified by the owner on 2026-11-08, it requires all
+four: a valid marker already present at upgrade start, the immediately previous
+published binary's verified protocol and reader/writer contract, an exact known
+Alembic forward path, and an entirely proven-additive pending batch. A marker
+first written during this upgrade does not qualify. This is capability evidence
+for the released predecessor, not forensic identity of the last writer; do not
+add a generation field or per-database lineage record.
 Neither `3.2.4` nor `3.2.5rc18` understands the protocol. R0 uses the current
 conservative upgrade/backup path and writes epoch 1 after reaching its required
-schema. R1 skips a snapshot only with that prior-generation bridge evidence and
-an entirely proven-additive batch. Direct upgrades from pre-marker versions
-remain conservative. Do not relabel or edit released migrations to opt them in;
-fresh empty databases need no backup. Rolling back to a pre-protocol binary
-still requires the bridge-time backup.
+schema. Direct upgrades from pre-marker versions remain conservative, as do
+upgrades without verified predecessor evidence. Do not relabel or edit released
+migrations to opt them in; fresh empty databases need no backup. Rolling back to
+a pre-protocol binary requires the bridge-time backup; once it expires, rollback
+to a pre-bridge binary is unsupported.
 
 ### Open and upgrade rules
 
