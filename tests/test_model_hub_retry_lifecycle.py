@@ -1170,11 +1170,18 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
             output = _large_output(protocol) * BACKPRESSURE_FRAMES
         calls: list[dict] = []
         stalled_for: list[float] = []
+        # When the gateway asked the engine client for each engine request.
+        invoked_at: list[float] = []
 
         async def respond(request: web.Request) -> web.StreamResponse:
             calls.append(await request.json())
             stalls = len(calls) == 1 and stall not in {"heartbeat", "backpressure"}
-            started = time.monotonic()
+            # Before the first response byte the bound runs from the request's start, its
+            # connection and upload included (``EngineClient.invoke``), and this handler runs
+            # only once the request has arrived and the loop has come round to it: on a
+            # loaded runner, a tenth of the bound later. Silence is timed from the start.
+            # Later bounds start at a byte this side writes, before the client reads it.
+            started = invoked_at[-1] if stall == "before_headers" else time.monotonic()
             try:
                 if stalls and stall == "before_headers":
                     await asyncio.Event().wait()
@@ -1201,7 +1208,14 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
                 stalled_for.append(time.monotonic() - started)
                 raise
 
-        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+        async with loopback_engine(tmp_path, service, respond) as (adapter, engine_client):
+            invoke = engine_client.invoke
+
+            async def timed_invoke(*args, **kwargs):
+                invoked_at.append(time.monotonic())
+                return await invoke(*args, **kwargs)
+
+            monkeypatch.setattr(engine_client, "invoke", timed_invoke)
             async with gateway_client(service, backend, models[backend]) as (_gateway, client, url, headers):
 
                 async def exchange() -> tuple[int, bytes]:
