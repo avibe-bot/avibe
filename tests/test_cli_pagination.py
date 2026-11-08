@@ -116,7 +116,7 @@ def test_injected_and_builtin_skill_commands_only_use_parser_supported_flags() -
     prompt = build_system_prompt_injection(context=context)
     guidance = [prompt] + [
         (ROOT / "skills" / name / "SKILL.md").read_text()
-        for name in ("use-avibe", "use-avibe-harness", "use-avibe-vault", "use-show-pages")
+        for name in ("use-avibe", "use-avibe-harness", "use-avibe-vault", "use-show-pages", "choose-model")
     ]
     commands = re.findall(r"`(vibe [^`\n]+)`", "\n".join(guidance))
     checked_commands = 0
