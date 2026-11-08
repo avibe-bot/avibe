@@ -1143,9 +1143,10 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     /// The owner's report: an explicit Web theme that differs from the
-    /// system. The status bar text follows the page, live, while the WebView
-    /// keeps the system appearance, so `prefers-color-scheme` stays the
-    /// system's and a page that follows the system can still follow it.
+    /// system. The status bar text follows what the page draws under it,
+    /// live, while the WebView keeps the system appearance, so
+    /// `prefers-color-scheme` stays the system's and a page that follows the
+    /// system can still follow it.
     @MainActor
     func testPageSchemeDrivesTheStatusBarWhileTheWebViewKeepsTheSystemAppearance() async throws {
         let server = try LocalHTTPServer { _ in
@@ -1260,6 +1261,28 @@ final class NavigationPolicyTests: XCTestCase {
         scene.traitOverrides.userInterfaceStyle = .dark
         try await expectStatusBar(page: .dark, style: .lightContent, systemDark: true)
         scene.traitOverrides.userInterfaceStyle = .light
+        try await expectStatusBar(page: .light, style: .darkContent, systemDark: false)
+
+        // A layer that is dark in every theme, such as the image viewer,
+        // declares its scheme; while it covers the top the text turns light,
+        // and it returns to the theme's when the layer leaves.
+        try await setTheme("light")
+        _ = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const layer = document.createElement("div");
+              layer.id = "dark-layer";
+              layer.style.cssText =
+                "position: fixed; inset: 0; color-scheme: dark; background: rgb(0 0 0 / 0.8)";
+              document.body.append(layer);
+              return true;
+            })()
+            """
+        )
+        try await expectStatusBar(page: .dark, style: .lightContent, systemDark: false)
+        _ = try await webView.evaluateJavaScript(
+            "document.querySelector('#dark-layer').remove(); true"
+        )
         try await expectStatusBar(page: .light, style: .darkContent, systemDark: false)
     }
 

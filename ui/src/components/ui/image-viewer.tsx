@@ -129,14 +129,16 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
         {children}
         {src && (
           <DialogPortal forceMount>
-            {routeSurfaceActive && <DialogOverlay className="bg-black/80 backdrop-blur-sm" />}
+            {/* The viewer is dark in every theme and says so, so the iOS status bar
+                above it turns light. */}
+            {routeSurfaceActive && <DialogOverlay className="bg-black/80 backdrop-blur-sm scheme-dark" />}
             <DialogPrimitive.Content
               forceMount
               aria-describedby={undefined}
               aria-hidden={!routeSurfaceActive || undefined}
               inert={!routeSurfaceActive || undefined}
               className={cn(
-                'fixed inset-0 z-50 flex items-center justify-center p-6 focus:outline-none',
+                'fixed inset-0 z-50 flex items-center justify-center p-6 scheme-dark focus:outline-none',
                 !routeSurfaceActive && 'pointer-events-none invisible',
               )}
               onEscapeKeyDown={(event) => {

@@ -659,6 +659,49 @@ test.describe('phone surfaces under the status bar', () => {
       expect(unexpectedModelReads).toEqual([]);
     });
   }
+
+  // The iOS shell sets the status bar text from the color-scheme of the element at the top of the
+  // viewport. Ordinary surfaces inherit the theme's; the layers that are dark in every theme say so.
+  test('declares the dark layers that cover the status bar in the light theme', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: false } }));
+    await page.route(`**/api/sessions/${CHAT}/bootstrap`, (route) => route.fulfill({ json: {
+      session, capabilities: { can_chat: true }, agents: [], default_agent_name: 'vibey', config: { ui: {} },
+      messages: [imageMessage], queued: [], next_after_id: null, next_before_id: null,
+      draft: { text: '', updated_at: null }, turn_state: turnState,
+    } }));
+    await page.route(`**/api/sessions/${CHAT}`, (route) => route.fulfill({ json: session }));
+    await page.route(`**/api/sessions/${CHAT}/turn-state`, (route) => route.fulfill({ json: turnState }));
+    await page.route(`**/api/sessions/${CHAT}/activity**`, (route) => route.fulfill({ json: { groups: [] } }));
+    await page.route('**/api/media/med_top', (route) => route.fulfill({ status: 200, contentType: 'image/svg+xml', body: image }));
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 62, bottom: 34, left: 0, right: 0 } });
+    await page.setViewportSize(NARROW);
+    const underStatusBar = () => page.evaluate(() => getComputedStyle(
+      document.elementFromPoint(window.innerWidth / 2, 0) ?? document.documentElement,
+    ).colorScheme);
+
+    await open(page, `/chat/${CHAT}`, { theme: 'light' });
+    const inlineImage = page.locator('span img[src="/api/media/med_top"]');
+    await expect(inlineImage).toHaveJSProperty('naturalWidth', 64);
+    await expect.poll(underStatusBar, 'the chat header wears the light theme').toBe('light');
+
+    await inlineImage.click({ position: { x: 8, y: 8 } });
+    const viewer = page.locator('[role="dialog"]:has(img[src^="/api/media/"])');
+    await expect(viewer).toBeVisible();
+    await expect.poll(underStatusBar, 'the image viewer is dark').toBe('dark');
+    await viewer.getByRole('button', { name: 'Close' }).click();
+    await expect(viewer).toHaveCount(0);
+    await expect.poll(underStatusBar, 'closing the viewer gives the header back').toBe('light');
+
+    await page.keyboard.press('Control+k');
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await expect.poll(underStatusBar, 'the search palette scrim is dark').toBe('dark');
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect.poll(underStatusBar).toBe('light');
+    expect(denied).toEqual([]);
+  });
 });
 
 test.describe('settings overlay geometry', () => {

@@ -119,11 +119,14 @@ and Web resizing cannot both run.
   `.lightContent` for a dark page, and `.default` while the page's scheme is
   unknown or the load-failure view covers it. When Account covers the runtime,
   the bundled page's controller is newer and keeps `.default`, matching that
-  page's system theme. The shell's bridge script reads the primary document's
-  scheme from the root element's computed `color-scheme`, which the Web
-  stylesheet sets per theme, and reports it through the internal
-  `appearance.colorSchemeChanged` signal described below. Deployed instances
-  need no Web change. Only native presentation follows the page: the status
+  page's system theme. The shell's bridge script reads the computed
+  `color-scheme` of the element the primary document draws at the top of the
+  viewport. That inherits the root's, which the Web stylesheet sets per
+  theme, unless a layer that is dark in every theme, such as the image viewer
+  or the search palette, declares `color-scheme: dark` itself. The script
+  reports the result through the internal `appearance.colorSchemeChanged`
+  signal described below. Deployed instances need no Web change for the
+  theme; the dark-layer declarations arrive with the Web UI. Only native presentation follows the page: the status
   bar, the strip behind it, and the old-Web fallback toolbar. No WebView's
   appearance is overridden, so `prefers-color-scheme` stays the system's and a
   page that follows the system keeps following it. Before the first report,
@@ -202,10 +205,13 @@ history data. The trusted primary-main-frame handler uses it only to reread
 WebKit's current and immediate back items; the controller rejects child
 WebViews, and those native origin checks remain the gesture authority.
 The same script reports the internal `appearance.colorSchemeChanged`
-signal with `{scheme: "light" | "dark" | null}` when the root element's
-computed `color-scheme` changes: on root attribute mutations, stylesheet
-loads, `prefers-color-scheme` changes, document load, and a page-cache
-restore. It is not an advertised capability either. Only the primary
+signal with `{scheme: "light" | "dark" | null}` when the computed
+`color-scheme` at the top of the viewport changes. It rereads it, at most
+once per frame, on root attribute mutations, body child insertions and
+removals (the layers dialogs, viewers, and palettes portal in), stylesheet
+loads, and `prefers-color-scheme` changes, and directly on document load and
+a page-cache restore. A layer that declares its own scheme is therefore a
+body-level layer. It is not an advertised capability either. Only the primary
 WebView's report drives the status bar; a child receives `forbidden`.
 
 The PR 2 method surface is fixed:
