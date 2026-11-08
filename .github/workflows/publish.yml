@@ -284,6 +284,16 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
 
+      - name: Verify the published predecessor before enabling SQLite no-copy
+        # Historical tags without this contract keep their original behavior.
+        if: hashFiles('scripts/sqlite_predecessor_contract.py') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+        run: |
+          python scripts/sqlite_predecessor_contract.py \
+            --repo "$GITHUB_REPOSITORY" --release-tag "$RELEASE_TAG" --activate
+
       - name: Build Python distributions
         run: |
           python -m build

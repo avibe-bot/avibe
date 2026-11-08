@@ -113,6 +113,36 @@ def _installed_schema_epoch() -> int:
     return declared_compatibility_epoch(script, set(script.get_heads()))
 
 
+def _valid_import_receipts(values: tuple) -> bool:
+    try:
+        for value in values[:2]:
+            timestamp = json.loads(value)
+            if not isinstance(timestamp, str) or datetime.fromisoformat(timestamp).tzinfo is None:
+                return False
+        marker = json.loads(values[2])
+        return (
+            isinstance(marker, dict)
+            and type(marker.get("schema_version")) is int
+            and (marker.get("state"), marker["schema_version"])
+            in {("completed", 3), ("sealed_unattributed", 2)}
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def completed_sqlite_imports(conn: sqlite3.Connection) -> bool:
+    """Existing importer receipts, read on the migration preflight's snapshot."""
+    from storage.resource_access_service import LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+
+    row = conn.execute(
+        "SELECT (SELECT value_json FROM state_meta WHERE key = ?), "
+        "(SELECT value_json FROM state_meta WHERE key = ?), "
+        "(SELECT value_json FROM state_meta WHERE key = ?)",
+        (JSON_IMPORT_MARKER, BACKGROUND_IMPORT_MARKER, LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY),
+    ).fetchone()
+    return _valid_import_receipts(row)
+
+
 def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
     """Check existing completion receipts without a lock, engine, or repair.
 
@@ -143,17 +173,7 @@ def probe_current_sqlite_state(db_path: Path | None = None) -> bool:
         require_supported_compatibility_epoch(epoch)
         if epoch != _installed_schema_epoch():
             return False
-        for value in rows[0][1:3]:
-            timestamp = json.loads(value)
-            if not isinstance(timestamp, str) or datetime.fromisoformat(timestamp).tzinfo is None:
-                return False
-        marker = json.loads(rows[0][3])
-        return (
-            isinstance(marker, dict)
-            and type(marker.get("schema_version")) is int
-            and (marker.get("state"), marker["schema_version"])
-            in {("completed", 3), ("sealed_unattributed", 2)}
-        )
+        return _valid_import_receipts(rows[0][1:4])
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return False
 
@@ -214,9 +234,10 @@ def repair_sqlite_state(
     # it in between.
     with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
         decision = run_migrations(target_db, prune_backups_after_upgrade=False)
-        if decision.compatible_open:
-            # The newer runtime owns all migration/import/backup receipts. An
-            # older compatible binary must not replay, adopt or complete them.
+        if decision.compatible_open or decision.skip_snapshot:
+            # Compatible-open belongs to the newer runtime. A no-copy batch has
+            # already proved its importer receipts complete. Neither path may
+            # adopt an old backup attempt, replay imports or run a full-file check.
             report = MigrationImportReport(db_path=target_db, imported=False)
             with _ensured_lock:
                 _ensured_targets[ensured_key] = report

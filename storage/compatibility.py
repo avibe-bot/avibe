@@ -18,6 +18,10 @@ VIBEY_TOOL_PROJECTION_EPOCH = 2
 SUPPORTED_COMPATIBILITY_EPOCHS = frozenset({1, VIBEY_TOOL_PROJECTION_EPOCH})
 BRIDGE_REVISION = "20261108_0076"
 PRE_BRIDGE_REVISION = "20261107_0075"
+# The publisher fills this literal only after exercising the immediately previous
+# published wheel against this build. Source/unverified builds stay conservative;
+# this is binary capability, not another persisted DB marker or a version gate.
+VERIFIED_PREDECESSOR_EPOCH: int | None = None
 
 
 class CompatibilityEpochError(ValueError):

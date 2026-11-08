@@ -867,6 +867,11 @@ def begin_sqlite_backup_validation(db_path: Path) -> str | None:
         record = _lifecycle_record(target)
         if record is None or record.get("phase") not in {"migrated", "validating", "validated"}:
             return None
+        # A later no-copy upgrade owns no backup attempt. This also prevents a
+        # subsequent startup from adopting that upgrade's older receipt.
+        with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as connection:
+            if _stamped_revisions(connection) != _normalized_position(record["to_revisions"]):
+                return None
         _advance_backup_lifecycle(target, record, phase="validating")
         return record["attempt_id"]
 
@@ -943,8 +948,20 @@ def expire_sqlite_migration_backups(
             if record is None or record.get("phase") != "ready":
                 return {"status": "unconfirmed", "removed": []}
             with sqlite3.connect(f"{target.as_uri()}?mode=ro", uri=True) as connection:
-                if _stamped_revisions(connection) != _normalized_position(record["to_revisions"]):
-                    return {"status": "unconfirmed", "removed": []}
+                connection.execute("BEGIN")
+                current = _stamped_revisions(connection)
+                if current != _normalized_position(record["to_revisions"]):
+                    from storage.compatibility import CompatibilityEpochError, read_compatibility_epoch
+                    from storage.migrations import is_proven_additive_successor
+
+                    try:
+                        additive = is_proven_additive_successor(
+                            set(record["to_revisions"]), set(current), read_compatibility_epoch(connection)
+                        )
+                    except CompatibilityEpochError:
+                        additive = False
+                    if not additive:
+                        return {"status": "unconfirmed", "removed": []}
             for candidate in _managed_candidates(root):
                 if cancel_event is not None and cancel_event.is_set():
                     return {"status": "cancelled", "removed": removed}

@@ -1,15 +1,17 @@
 # SQLite compatibility epoch
 
 Implementation of section A in [the downtime plan](../plans/sqlite-upgrade-downtime.md).
-The bridge and mechanical migration classification are implemented. Snapshot-free
-upgrade activation and the released-predecessor reader contract remain separate
-follow-up work; all upgrade snapshots are still conservative.
+The bridge, mechanical migration classification, and gated no-copy path share the
+same preflight. No-copy is enabled only in a build whose immediately previous
+published binary passes the real protocol/reader/writer contract. Source builds
+and builds with a pre-protocol predecessor keep conservative upgrade snapshots.
 
 ## Change contract
 
 - Revision `20261108_0076` establishes integer `state_meta.compatibility_epoch = 1`.
-  Its schema is otherwise unchanged. Existing non-empty databases still get a
-  fresh verified snapshot on upgrade; fresh databases need no snapshot.
+  Its schema is otherwise unchanged. Entering the bridge from a non-empty
+  pre-protocol database always gets a fresh verified snapshot; a marker created
+  by this upgrade cannot opt that same upgrade out. Fresh databases need no snapshot.
 - `storage.migrations.preflight_database` is the common decision owner.
   `MigrationPreflight.compatible_open` means the installed binary may use the
   newer schema as-is, not run Alembic against it. A full unknown exact revision
@@ -25,6 +27,13 @@ follow-up work; all upgrade snapshots are still conservative.
   successful admission per process/path/inode, matching the existing importer
   process-lifetime contract. File replacement is rechecked. Breaking upgrades
   require **all** controller/Web/CLI writers stopped; this is not a lease.
+- `MigrationPreflight.skip_snapshot` omits the copy, **not** the migration. The
+  exact pending revision pair remains present and every migration still runs.
+  It requires the four release conditions below and already-complete importer
+  receipts; missing receipts mean unclassified repair/import work and keep the
+  conservative path. A no-copy bootstrap returns without backup validation,
+  receipt adoption, import replay, report-only row scans or an added full-file
+  integrity scan. Existing transaction and final-schema checks remain.
 - A known forward upgrade may lack the new binary's columns until its migrations
   run. An epoch marker on a known graph must match the epoch declared by that
   revision's ancestry. A supported unknown revision is the only intentional
@@ -82,6 +91,47 @@ Rolling back to a pre-protocol binary requires the bridge-time backup with all
 writers stopped; restoring it discards later writes. **Once that backup expires,
 rollback to a pre-bridge binary is unsupported.**
 
+### One predecessor, one build literal
+
+`scripts/sqlite_predecessor_contract.py` selects the immediately previous
+**published** GitHub release by publication time, including RCs and releases
+with an unchanged migration graph. It verifies that release's wheel digest,
+installs the actual wheel in an isolated environment, and checks the imported
+version/package path. It never substitutes current source for that binary.
+Every probe process gets a test-owned HOME/Avibe/XDG tree and no caller routing
+or credentials. No service is started.
+
+The probe uses real settings, Sessions, Harness records, Message and trace
+readers/writers. It upgrades populated predecessor state, writes candidate rows,
+then exercises the older binary against same-epoch future state with independent
+tables and nullable/defaulted columns. Existing new values must survive whole-row
+upserts and load/save; omitted columns must take server defaults. It checks
+stored type/JSON interpretation and unknown extensions in extensible metadata,
+then reopens with the candidate. A simulated `INSERT OR REPLACE` loss and JSON
+loss are negative harness regressions. This does **not** make arbitrary new
+closed-schema settings meanings additive: semantic changes still need review
+and a breaking boundary.
+
+The existing migration-guard CI job runs this contract. The existing publisher
+runs it again immediately before packaging, and `--activate` fills just
+`storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
+Its source default is `None`; pre-protocol or unsupported predecessors leave
+it `None`, with an explicit **not-applicable**, never a passing rollback claim.
+A failed applicable reader/writer test stops the build. The literal ships in the
+wheel/sdist; there is no runtime network check, config switch, per-DB lineage or
+separate attestation registry. Local source-fixture tests validate the harness,
+not published-predecessor capability.
+
+### Existing backup lifecycle
+
+No-copy creates no backup attempt and changes no prior receipt or expiry clock.
+A restart cannot adopt a receipt whose exact target no longer matches the live
+stamp. Age maintenance may accept a **known, proven-additive, same-epoch** path
+from a ready receipt's target to the live stamp, so additive upgrades do not
+freeze otherwise eligible expiry. Failed, unconfirmed, restored and wrong-inode
+receipts remain protected; the original 72-hour clock and exact-position count
+retention are unchanged.
+
 ## Mechanical classification
 
 `storage.migration_policy` interprets a small literal Python grammar and rebuilds
@@ -124,16 +174,12 @@ conditional or other epoch rebindings are not literal declarations. Additive
 revisions do not declare an epoch boundary. Released migrations are not relabeled.
 None of this gate skips a runtime snapshot by itself.
 
-Remaining A work:
-
-1. The immediately previous release's real reader/writer contract test. Before
-   the bridge is released, that previous release does not implement this protocol
-   and is **not** a supported binary rollback target.
-2. Additive no-copy activation with valid existing bridge marker only, plus
-   exact-attempt backup/expiry tests and synthetic-volume latency evidence.
-   No receipt adoption or expiry-clock resets on the no-copy path.
-3. Align public English/Chinese upgrade documentation for the bridge and its
-   later activation. No public claim of a released snapshot-free path before then.
+Release-cadence dependency: the immediately previous published binary must
+contain the bridge and pass the real contract before a no-copy build can activate.
+Until that publication, PRs must say **predecessor not yet published**, not claim
+that a local bridge fixture proves a released rollback target. Public English and
+Chinese documentation must distinguish the conservative bridge from later
+verified no-copy releases; no release is created by this implementation.
 
 ## Validation
 
@@ -146,5 +192,11 @@ migration, readiness, backup expiry, locking and release-graph tests remain in
 place. Frozen historical downgrade tests reconstruct their pre-bridge fixture
 using `tests/migration_helpers.py`; that helper is not a product downgrade API.
 
+`tests/test_sqlite_no_copy.py` owns snapshot omission, conservative fallbacks,
+crash/resume, stale-attempt refusal and original-clock expiry across additive
+successors. `tests/test_sqlite_predecessor_contract.py` checks predecessor
+selection, fixture isolation and loss-detection in the probe; the separately
+executed published-wheel probe supplies release evidence.
+
 No live database, restart, release, remote operation or retention change is
-part of bridge validation.
+part of this validation.
