@@ -839,71 +839,75 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     // DIAGNOSTIC ONLY (draft PR): records the fixed-position layout viewport
-    // after WebKit switches a laid-out document to viewport-fit=cover.
+    // after WebKit switches a document to viewport-fit=cover, for a lock taken
+    // during parsing and for a lock taken after the page was laid out.
     @MainActor
     func testZZDiagnoseFixedViewportAfterCoverSwitch() async throws {
         let server = try LocalHTTPServer { _ in
-            LocalHTTPResponse.html(FullBleedFixture.diagnosticDocument)
+            LocalHTTPResponse.html(FullBleedFixture.diagnosticDocument(lockDelay: nil))
+        }
+        let lateServer = try LocalHTTPServer { _ in
+            LocalHTTPResponse.html(FullBleedFixture.diagnosticDocument(lockDelay: 600))
         }
         let baseURL = try await server.start()
-        defer { server.stop() }
-        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
-        for iteration in 1...25 {
-            let controller = makeRuntimeController(instanceOrigin: origin)
+        let lateBaseURL = try await lateServer.start()
+        defer {
+            server.stop()
+            lateServer.stop()
+        }
+        for iteration in 1...24 {
+            let late = iteration.isMultiple(of: 2)
+            let controller = makeRuntimeController(
+                instanceOrigin: try XCTUnwrap(
+                    WebOrigin(url: late ? lateBaseURL : baseURL, requiresHTTPS: false)
+                )
+            )
             let window = try await makeHomeIndicatorWindow(rootViewController: controller)
             let webView = try XCTUnwrap(
                 controller.view.subviews.compactMap { $0 as? WKWebView }.first
             )
-            let inset = window.safeAreaInsets.bottom
-            let clock = ContinuousClock()
+            _ = bottom(of: webView, in: window)
             try await waitForTitle("Workbench", in: webView)
-            let loaded = clock.now
-            try await waitUntil {
-                let padding = await self.paddingBottom(of: "#tab-bar", in: webView)
-                return abs((padding ?? -1) - inset) < 0.5
-                    && webView.scrollView.adjustedContentInset.bottom == 0
+            let timeline = try await diagnosticTimeline(webView, seconds: late ? 2.5 : 1.5)
+            print("AVIBE_DIAG iter=\(iteration) late=\(late) " + timeline)
+            if late {
+                _ = try await webView.callAsyncJavaScript(
+                    """
+                    await window.avibeNative.call("viewport.setOuterScrollLocked", {locked: false});
+                    return true;
+                    """,
+                    arguments: [:],
+                    in: nil,
+                    contentWorld: .page
+                )
+                let unlocked = try await diagnosticTimeline(webView, seconds: 1.5)
+                print("AVIBE_DIAG iter=\(iteration) unlock " + unlocked)
             }
-            let switched = clock.now
-            var lines: [String] = []
-            lines.append("switchAfterLoad=\(switched - loaded)")
-            lines.append("s0=\(await diagnosticSnapshot(webView))")
-            var firstFull: Duration?
-            var lastSnapshot = ""
-            while clock.now - switched < .seconds(3) {
-                let snapshot = await diagnosticSnapshot(webView)
-                lastSnapshot = snapshot
-                if snapshot.contains("\"tab\":\(Int(webView.bounds.height))") {
-                    firstFull = clock.now - switched
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-            lines.append("firstFull=\(firstFull.map { "\($0)" } ?? "never")")
-            if firstFull == nil {
-                lines.append("at3s=\(lastSnapshot)")
-                webView.setNeedsLayout()
-                webView.layoutIfNeeded()
-                try await Task.sleep(for: .milliseconds(500))
-                lines.append("afterLayoutIfNeeded=\(await diagnosticSnapshot(webView))")
-                webView.scrollView.setContentOffset(CGPoint(x: 0, y: 1), animated: false)
-                webView.scrollView.setContentOffset(.zero, animated: false)
-                try await Task.sleep(for: .milliseconds(500))
-                lines.append("afterOffsetNudge=\(await diagnosticSnapshot(webView))")
-                if let constraint = controller.view.constraints.first(where: {
-                    $0.firstItem === webView && $0.firstAttribute == .bottom
-                }) {
-                    constraint.constant -= 1
-                    controller.view.layoutIfNeeded()
-                    constraint.constant += 1
-                    controller.view.layoutIfNeeded()
-                    try await Task.sleep(for: .milliseconds(500))
-                    lines.append("afterFrameNudge=\(await diagnosticSnapshot(webView))")
-                }
-            }
-            print("AVIBE_DIAG iter=\(iteration) " + lines.joined(separator: " | "))
             window.rootViewController = nil
             window.isHidden = true
         }
+    }
+
+    /// Distinct page/native geometry states with their elapsed time.
+    @MainActor
+    private func diagnosticTimeline(
+        _ webView: WKWebView,
+        seconds: Double
+    ) async throws -> String {
+        let clock = ContinuousClock()
+        let start = clock.now
+        var states: [String] = []
+        var last = ""
+        while clock.now - start < .milliseconds(Int(seconds * 1000)) {
+            let snapshot = await diagnosticSnapshot(webView)
+            if snapshot != last {
+                let elapsed = clock.now - start
+                states.append("t=\(Int(elapsed / .milliseconds(1)))ms \(snapshot)")
+                last = snapshot
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return states.joined(separator: " | ")
     }
 
     @MainActor
@@ -913,17 +917,15 @@ final class NavigationPolicyTests: XCTestCase {
             JSON.stringify({
               tab: document.querySelector("#tab-bar").getBoundingClientRect().bottom,
               pad: parseFloat(getComputedStyle(document.querySelector("#tab-bar")).paddingBottom),
-              inner: window.innerHeight,
               client: document.documentElement.clientHeight,
               vv: window.visualViewport.height,
-              dvh: document.querySelector("#dvh").getBoundingClientRect().height,
-              svh: document.querySelector("#svh").getBoundingClientRect().height,
-              lvh: document.querySelector("#lvh").getBoundingClientRect().height
+              lvh: document.querySelector("#lvh")?.getBoundingClientRect().height ?? -1,
+              fit: document.querySelector('meta[name="viewport"]').content.includes("cover")
             })
             """
         ) as? String) ?? "js-failed"
         let scrollView = webView.scrollView
-        return page + " native{bounds:\(webView.bounds.height),adj:\(scrollView.adjustedContentInset.bottom),beh:\(scrollView.contentInsetAdjustmentBehavior.rawValue),content:\(scrollView.contentSize.height),safe:\(webView.safeAreaInsets.bottom)}"
+        return page + " adj=\(scrollView.adjustedContentInset.bottom) beh=\(scrollView.contentInsetAdjustmentBehavior.rawValue)"
     }
 
     @MainActor
@@ -996,6 +998,9 @@ final class NavigationPolicyTests: XCTestCase {
             """
         )
         let locked = try jsonObject(from: lockedResult)
+        if abs((locked["tabBarBottom"] as? Double ?? 0) - Double(webView.bounds.height)) > 0.5 {
+            print("AVIBE_DIAG original-test-mismatch " + (try await diagnosticTimeline(webView, seconds: 3)))
+        }
         // The tab bar's own background reaches the screen bottom.
         XCTAssertEqual(
             try XCTUnwrap(locked["tabBarBottom"] as? Double),
@@ -2507,37 +2512,37 @@ private enum FullBleedFixture {
         </html>
         """
 
-    static let diagnosticDocument = """
-        <!doctype html>
-        <html>
-          <head>
-            <meta name="viewport" content="\(workbenchViewport)">
-            <title>Workbench</title>
-            <style>
-              html, body { margin: 0; height: 100%; overflow: hidden; }
-              #tab-bar {
-                position: fixed;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                height: 56px;
-                padding-bottom: env(safe-area-inset-bottom);
-                background: #0891b2;
-              }
-              .probe { position: absolute; top: 0; width: 1px; }
-            </style>
-          </head>
-          <body>
-            <div id="dvh" class="probe" style="left: 0; height: 100dvh"></div>
-            <div id="svh" class="probe" style="left: 2px; height: 100svh"></div>
-            <div id="lvh" class="probe" style="left: 4px; height: 100lvh"></div>
-            <nav id="tab-bar"></nav>
-            <script>
-              window.avibeNative.call("viewport.setOuterScrollLocked", {locked: true});
-            </script>
-          </body>
-        </html>
-        """
+    static func diagnosticDocument(lockDelay: Int?) -> String {
+        let lock = #"window.avibeNative.call("viewport.setOuterScrollLocked", {locked: true});"#
+        let script = lockDelay.map { "setTimeout(() => { \(lock) }, \($0));" } ?? lock
+        return """
+            <!doctype html>
+            <html>
+              <head>
+                <meta name="viewport" content="\(workbenchViewport)">
+                <title>Workbench</title>
+                <style>
+                  html, body { margin: 0; height: 100%; overflow: hidden; }
+                  #tab-bar {
+                    position: fixed;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    height: 56px;
+                    padding-bottom: env(safe-area-inset-bottom);
+                    background: #0891b2;
+                  }
+                  #lvh { position: absolute; top: 0; left: 0; width: 1px; height: 100lvh; }
+                </style>
+              </head>
+              <body>
+                <div id="lvh"></div>
+                <nav id="tab-bar"></nav>
+                <script>\(script)</script>
+              </body>
+            </html>
+            """
+    }
 
     static func ordinaryDocument(title: String) -> String {
         """
