@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import urllib.parse
 import urllib.request
@@ -26,6 +25,7 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _NODE_REQUIREMENT_CLAUSE_RE = re.compile(r"(?:\^|>=)?\d+\.\d+\.\d+")
 UrlOpener = Callable[..., Any]
+read_bytes = run_path(str(Path(__file__).with_name("release_asset_download.py")))["read_bytes"]
 latest_official_release = run_path(
     str(Path(__file__).with_name("release_package_version.py"))
 )["latest_official_release"]
@@ -134,7 +134,7 @@ def prepare_manifest(
     if not isinstance(digest, str) or not digest.startswith("sha256:") or not _SHA256_RE.fullmatch(digest[7:]):
         raise RuntimeError(f"GitHub release {resolved_tag} is missing the manifest SHA256 digest")
 
-    content = _read_bytes(download_url, opener=opener)
+    content = _read_bytes(download_url, opener=opener, release_asset=asset)
     actual_digest = hashlib.sha256(content).hexdigest()
     if actual_digest != digest[7:]:
         raise RuntimeError(
@@ -186,14 +186,16 @@ def _read_json(url: str, *, opener: UrlOpener) -> Any:
     return value
 
 
-def _read_bytes(url: str, *, opener: UrlOpener, accept: str = "application/octet-stream") -> bytes:
+def _read_bytes(
+    url: str,
+    *,
+    opener: UrlOpener,
+    accept: str = "application/octet-stream",
+    release_asset: dict[str, Any] | None = None,
+) -> bytes:
     headers = {"Accept": accept, "User-Agent": "avibe-local-wheel-builder"}
-    token = os.environ.get("GITHUB_TOKEN")
-    if token and urllib.parse.urlparse(url).hostname in {"api.github.com", "github.com"}:
-        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         url,
         headers=headers,
     )
-    with opener(request, timeout=30) as response:
-        return response.read()
+    return read_bytes(request, opener=opener, release_asset=release_asset)

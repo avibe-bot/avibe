@@ -360,6 +360,7 @@ jobs:
           path: release-automation
           sparse-checkout: |
             scripts/show_runtime_manifest_asset.py
+            scripts/release_asset_download.py
             scripts/build_retired_companion.py
             scripts/release_package_version.py
             tests/test_distribution_artifacts.py

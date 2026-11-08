@@ -17,14 +17,16 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from runpy import run_path
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 
+
+download_to_path = run_path(str(Path(__file__).with_name("release_asset_download.py")))["download_to_path"]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # Bucket root of each mirrored repository. Avibe's own releases keep the bucket
@@ -95,6 +97,7 @@ class Asset:
     sha256: str
     url: str
     content_type: str
+    api_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,7 @@ def parse_releases(
                     sha256=digest,
                     url=expected,
                     content_type=raw.get("content_type") or "application/octet-stream",
+                    api_id=raw.get("id"),
                 )
             )
         releases.append(
@@ -350,30 +354,26 @@ def plan(
     )
 
 
-def download(asset: Asset, destination: Path, *, attempts: int = 3) -> None:
+def download(asset: Asset, destination: Path) -> None:
     """Download ``asset`` and prove its size and sha256 match GitHub's digest."""
     request = urllib.request.Request(asset.url, headers={"User-Agent": "avibe-release-mirror/1"})
-    for attempt in range(1, attempts + 1):
-        digest, size = hashlib.sha256(), 0
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as output:
-                while chunk := response.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > asset.size:
-                        break
-                    digest.update(chunk)
-                    output.write(chunk)
-        except urllib.error.HTTPError as exc:
-            if not (exc.code == 429 or 500 <= exc.code < 600) or attempt == attempts:
-                raise MirrorError(f"download failed ({exc.code}): {asset.url}") from exc
-        except (OSError, urllib.error.URLError) as exc:
-            if attempt == attempts:
-                raise MirrorError(f"download failed: {asset.url}: {exc}") from exc
-        else:
-            if size != asset.size or digest.hexdigest() != asset.sha256:
-                raise MirrorError(f"downloaded bytes do not match GitHub's digest: {asset.url}")
-            return
-        time.sleep(float(attempt))
+    metadata = None if asset.api_id is None else {
+        "id": asset.api_id, "name": asset.name, "browser_download_url": asset.url,
+    }
+    try:
+        download_to_path(request, destination, max_bytes=asset.size, release_asset=metadata)
+    except ValueError as exc:
+        raise MirrorError(f"downloaded bytes do not match GitHub's digest: {asset.url}") from exc
+    except urllib.error.HTTPError as exc:
+        raise MirrorError(f"download failed ({exc.code}): {asset.url}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise MirrorError(f"download failed: {asset.url}: {exc}") from exc
+    digest = hashlib.sha256()
+    with destination.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if destination.stat().st_size != asset.size or digest.hexdigest() != asset.sha256:
+        raise MirrorError(f"downloaded bytes do not match GitHub's digest: {asset.url}")
 
 
 def _run(command: Sequence[str]) -> str:

@@ -226,6 +226,47 @@ def test_a_zip_entry_that_leaves_the_runtime_or_links_out_is_refused(tmp_path: P
     assert not (tmp_path / "escape").exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="exercise the workflow's native PowerShell exit handling on Windows")
+@pytest.mark.parametrize("download_exit", [0, 1])
+def test_pinned_windows_zip_download_gates_fixture_tests(tmp_path: Path, monkeypatch, download_exit: int) -> None:
+    """A failed native download must stop the step, not become a missing-fixture assertion.
+
+    Transport tests cover retries; this runs the actual workflow script in its
+    shell, where a nonzero intermediate native exit code does not stop execution.
+    """
+    import yaml
+
+    workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/lint.yml").read_text())
+    step = next(
+        step for step in workflow["jobs"]["windows-control-ipc"]["steps"]
+        if step.get("name") == "Verify the managed ripgrep installs from its Windows zip"
+    )
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    # Replace only the external Python command: no network, tests, or installs
+    # run in the child. PowerShell itself owns whether the second call is reached.
+    prelude = f"""
+$ErrorActionPreference = 'Stop'
+$script:pythonCalls = 0
+function python {{
+    $script:pythonCalls++
+    Write-Output "PYTHON_CALL:$script:pythonCalls"
+    $global:LASTEXITCODE = {download_exit}
+}}
+"""
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", prelude + step["run"]],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert "PYTHON_CALL:1" in result.stdout
+    if download_exit:
+        assert result.returncode != 0
+        assert "fixture download failed" in result.stderr
+        assert "PYTHON_CALL:2" not in result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert "PYTHON_CALL:2" in result.stdout
+
+
 @pytest.mark.skipif(
     not os.environ.get("AVIBE_TEST_RIPGREP_ZIPS"),
     reason="needs ripgrep's Windows zips downloaded into AVIBE_TEST_RIPGREP_ZIPS (CI's Windows jobs)",
