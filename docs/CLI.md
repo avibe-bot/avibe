@@ -677,8 +677,10 @@ Session and includes Sessions connected by real Agent runs in either direction
 (including result callbacks and background workers), while excluding archived
 Sessions, runtime-owned system Sessions, and Harness-only callback plumbing.
 `--mine` and `--project` are mutually exclusive; either may be combined with
-`--type`. Project names are resolved case-insensitively, and an ambiguous name
-must be replaced with its Project id.
+`--type`. Project targets accept a stable id or an exact display name after
+normalizing input whitespace; duplicate names resolve by creation order.
+Disabled Projects are rejected, but a working directory is not required to list
+Sessions in a registered Project.
 
 Every command except `list` acts on one Session: `--session-id`, or the caller
 Session inside an Avibe Agent shell (see [Grammar](#grammar)). With `--if-untitled`,

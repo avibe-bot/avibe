@@ -360,18 +360,39 @@ def test_list_mine_requires_the_injected_caller_session(monkeypatch, tmp_path, c
     assert payload["code"] == "missing_caller_session"
 
 
-def test_list_project_resolves_a_project_name(monkeypatch, tmp_path, capsys):
+def test_list_project_matches_shared_resolution_contract(monkeypatch, tmp_path, capsys):
+    """Name/id matching must agree with Agent-run routing, including legacy duplicates."""
+    from storage import projects_service
+
     engine = _setup(monkeypatch, tmp_path)
     alpha = _seed(engine, "sesalpha", native="proj_alpha")
-    _seed(engine, "sesbeta", native="proj_beta")
+    beta = _seed(engine, "sesbeta", native="proj_beta")
     with engine.begin() as conn:
-        conn.execute(scopes.update().where(scopes.c.id == alpha).values(display_name="Alpha"))
+        # Deliberately reverse lexical id order and activity vs creation order.
+        conn.execute(scopes.update().where(scopes.c.id == alpha).values(
+            display_name="Alpha Project", first_seen_at="2026-06-10T09:00:00Z",
+        ))
+        conn.execute(scopes.update().where(scopes.c.id == beta).values(
+            display_name="Alpha Project", first_seen_at="2026-06-08T09:00:00Z",
+            last_seen_at="2026-06-08T09:00:00Z",
+        ))
+    for name, expected in (("Alpha Project", "sesbeta"), ("  Alpha \t Project  ", "sesbeta"), ("proj_alpha", "sesalpha")):
+        code, payload = _run(cli.cmd_session_list, ["session", "list", "--project", name], capsys)
+        assert code == 0
+        # These registered Projects have no working directory; listing still works.
+        assert [row["id"] for row in payload["sessions"]] == [expected]
 
-    _, payload = _run(cli.cmd_session_list, ["session", "list", "--project", "alpha"], capsys)
-    assert [row["id"] for row in payload["sessions"]] == ["sesalpha"]
+    for name, message in (("alpha project", "Project not found: alpha project"), ("", "Project name is required"), (" \t ", "Project name is required")):
+        code, payload = _run(cli.cmd_session_list, ["session", "list", "--project", name], capsys)
+        assert code == 1
+        assert payload["error"] == message
 
-    _, payload = _run(cli.cmd_session_list, ["session", "list", "--project", "proj_alpha"], capsys)
-    assert [row["id"] for row in payload["sessions"]] == ["sesalpha"]
+    with engine.begin() as conn:
+        projects_service.archive_project(conn, "proj_beta")
+    # Do not silently choose the later active duplicate when the first is disabled.
+    code, payload = _run(cli.cmd_session_list, ["session", "list", "--project", "Alpha Project"], capsys)
+    assert code == 1
+    assert payload["error"] == "Project is disabled: Alpha Project"
 
 
 def test_list_project_and_mine_are_mutually_exclusive():

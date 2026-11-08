@@ -8402,45 +8402,47 @@ def _session_row(payload: dict, *, brief: bool) -> dict:
 def _resolve_session_list_project(conn, value: str) -> str:
     """Resolve a Project name (or id) for the session list's narrow filter.
 
-    The Project command set owns the richer resolver. Until that lands, keep
-    this read-only path deliberately small and use the same visible project
-    projection, accepting either its display name or stable id.
+    The PROJECT lane owns the shared resolver. Until that contract lands on
+    master, use the existing visible-project projection with the same exact
+    name/id, whitespace, creation-order, and disabled-target semantics. Listing
+    Sessions does not require the Project to have a working directory.
     """
 
     from storage import projects_service
 
-    requested = str(value or "").strip()
+    requested = " ".join(str(value or "").split())
     if not requested:
         raise TaskCliError(
-            "--project must name a Project",
+            "Project name is required",
             code="invalid_project",
             hint="Pass a Project name or id.",
             help_command="vibe session list --help",
         )
-    projects = projects_service.list_projects(conn)
+    projects = projects_service.list_projects(conn, include_archived=True)
     exact = [
         project
         for project in projects
         if str(project.get("id") or "") == requested
-        or str(project.get("display_name") or "").casefold() == requested.casefold()
+        or str(project.get("display_name") or "") == requested
     ]
     if not exact:
         raise TaskCliError(
-            f"Project '{requested}' was not found",
+            f"Project not found: {requested}",
             code="project_not_found",
             hint="Pass an existing Project name or id.",
             help_command="vibe session list --help",
             details={"project": requested},
         )
-    if len(exact) > 1:
+    project = min(exact, key=lambda item: (str(item["created_at"]), str(item["scope_id"])))
+    if project["archived"]:
         raise TaskCliError(
-            f"Project name '{requested}' is ambiguous",
-            code="project_ambiguous",
-            hint="Use the Project id instead.",
+            f"Project is disabled: {requested}",
+            code="project_disabled",
+            hint="Enable the Project before listing its Sessions.",
             help_command="vibe session list --help",
-            details={"project": requested, "ids": [project["id"] for project in exact]},
+            details={"project": requested},
         )
-    return str(exact[0]["id"])
+    return str(project["id"])
 
 
 def _validate_session_type(platform: str) -> None:
@@ -8486,7 +8488,7 @@ def cmd_session_list(args):
 
         engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
-            project_id = _resolve_session_list_project(conn, project_name) if project_name else None
+            project_id = _resolve_session_list_project(conn, project_name) if project_name is not None else None
             result = sessions_service.list_sessions_page(
                 conn,
                 platform=platform,
