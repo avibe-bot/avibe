@@ -336,7 +336,7 @@ def test_local_cli_installation_items_fails_for_unknown_sqlite_revision(monkeypa
     )
 
 
-@pytest.mark.parametrize("epoch, expected", [("1", "pass"), ("2", "fail")])
+@pytest.mark.parametrize("epoch, expected", [("1", "pass"), ("2", "pass"), ("3", "fail")])
 def test_doctor_uses_epoch_preflight_for_a_future_revision(monkeypatch, tmp_path, sqlite_db_factory, epoch, expected):
     # Filename inventory used to report every newer revision as a failed
     # installation, even when the shared opener safely admitted its epoch.
