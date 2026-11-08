@@ -68,7 +68,8 @@ class BundledDataFactory {
 }
 
 // Pages this far (as a fraction of the viewport) above or below the visible area keep a canvas.
-const NEAR_MARGIN = '150% 0px';
+const NEAR_SHARE = 1.5;
+const NEAR_MARGIN = `${NEAR_SHARE * 100}% 0px`;
 // Horizontal padding around the page column (px-3 on each side), taken out of the fit width.
 const PAGE_GUTTER = 24;
 const WHEEL_ZOOM_SENSITIVITY = 0.01;
@@ -77,8 +78,15 @@ const ZOOM_BTN = 'h-8 w-8 rounded-full text-white hover:bg-white/15 hover:text-w
 
 // One IntersectionObserver for every page, rooted at the scroller. Pages register before the
 // scroller's effect attaches it (child effects run first), so ``attach`` observes what is waiting.
+//
+// An observer reports only with the browser's next rendering update, and a page that waits for
+// that report draws nothing until then: in a WebKit run on CI none came for seconds, and the
+// reader showed its page count over an empty column. So a page is also measured when it is
+// watched, and one already near the viewport draws at once; the observer reports every change
+// after that.
 class PageWatch {
   private io: IntersectionObserver | null = null;
+  private root: HTMLElement | null = null;
   private readonly callbacks = new Map<Element, (near: boolean) => void>();
 
   attach(root: HTMLElement): () => void {
@@ -89,21 +97,37 @@ class PageWatch {
       { root, rootMargin: NEAR_MARGIN },
     );
     this.io = io;
-    for (const el of this.callbacks.keys()) io.observe(el);
+    this.root = root;
+    for (const [el, onChange] of this.callbacks) {
+      io.observe(el);
+      if (isNear(el, root)) onChange(true);
+    }
     return () => {
       io.disconnect();
-      if (this.io === io) this.io = null;
+      if (this.io === io) {
+        this.io = null;
+        this.root = null;
+      }
     };
   }
 
   observe(el: Element, onChange: (near: boolean) => void): () => void {
     this.callbacks.set(el, onChange);
     this.io?.observe(el);
+    if (this.root && isNear(el, this.root)) onChange(true);
     return () => {
       this.callbacks.delete(el);
       this.io?.unobserve(el);
     };
   }
+}
+
+/** Whether ``el`` is within the observer's reach of ``root``'s viewport now (``NEAR_MARGIN``). */
+function isNear(el: Element, root: HTMLElement): boolean {
+  const view = root.getBoundingClientRect();
+  const box = el.getBoundingClientRect();
+  const reach = view.height * NEAR_SHARE;
+  return box.bottom >= view.top - reach && box.top <= view.bottom + reach && box.right >= view.left && box.left <= view.right;
 }
 
 type TextLayerClass = typeof TextLayer;
@@ -196,10 +220,15 @@ function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy
     return watch.attach(scroller);
   }, [scroller, watch]);
 
-  // Fit width follows the scroller (sheet resize, rotation). The observer reports once on observe.
-  React.useEffect(() => {
-    if (!scroller || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => setFitWidth(Math.max(0, Math.floor(scroller.clientWidth - PAGE_GUTTER))));
+  // Fit width follows the scroller (sheet resize, rotation). It is measured when the scroller
+  // mounts, before the first frame, rather than taken from the observer's first report, which
+  // comes only with a rendering update (see ``PageWatch``): until then there are no pages.
+  React.useLayoutEffect(() => {
+    if (!scroller) return;
+    const measure = () => setFitWidth(Math.max(0, Math.floor(scroller.clientWidth - PAGE_GUTTER)));
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
     ro.observe(scroller);
     return () => ro.disconnect();
   }, [scroller]);
