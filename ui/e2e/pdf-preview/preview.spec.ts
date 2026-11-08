@@ -150,6 +150,44 @@ test.describe('phones and tablets', () => {
     await expect(position(dialog)).toHaveText('3 / 5');
   });
 
+  // A browser reports its observers only with a rendering update, and in a WebKit run on CI none
+  // came for seconds: the reader showed its page count over an empty column. Its first screen does
+  // not wait for those reports; they are held here until the first page is drawn.
+  test('the first screen is drawn before the browser reports any observer', async ({ page }) => {
+    await page.addInitScript(() => {
+      const held: (() => void)[] = [];
+      let released = false;
+      type Callback = (...args: unknown[]) => void;
+      const holding = <T extends typeof ResizeObserver | typeof IntersectionObserver>(Native: T): T => {
+        const Base = Native as unknown as new (callback: Callback, options?: unknown) => object;
+        return class extends Base {
+          constructor(callback: Callback, options?: unknown) {
+            super((...args: unknown[]) => {
+              if (released) callback(...args);
+              else held.push(() => callback(...args));
+            }, options);
+          }
+        } as unknown as T;
+      };
+      window.ResizeObserver = holding(window.ResizeObserver);
+      window.IntersectionObserver = holding(window.IntersectionObserver);
+      (window as unknown as { releaseObservers: () => void }).releaseObservers = () => {
+        released = true;
+        for (const report of held.splice(0)) report();
+      };
+    });
+    const dialog = await openPreview(page, 'doc_five');
+    await expect(dialog.locator('[data-pdf-page]')).toHaveCount(5);
+    await expectDrawn(dialog, 1);
+    await expect(position(dialog)).toHaveText('1 / 5');
+
+    // Once the browser reports, the pages a scroll reaches are drawn as before.
+    await page.evaluate(() => (window as unknown as { releaseObservers: () => void }).releaseObservers());
+    await scroller(dialog).evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
+    await expectDrawn(dialog, 5);
+    await expect(position(dialog)).toHaveText('5 / 5');
+  });
+
   test('pages are fit to the viewer width', async ({ page }) => {
     const dialog = await openPreview(page, 'doc_five');
     await expectDrawn(dialog, 1);
