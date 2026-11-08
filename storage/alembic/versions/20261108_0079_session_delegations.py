@@ -1,13 +1,13 @@
 """Track pending Session exchanges without scanning Harness history.
 
 Revision ID: 20261108_0079
-Revises: 20261108_0077
+Revises: 20261108_0076
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "20261108_0079"
-down_revision = "20261108_0077"
+down_revision = "20261108_0076"
 branch_labels = None
 depends_on = None
 MIGRATION_SAFETY = "additive"

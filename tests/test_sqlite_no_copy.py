@@ -23,7 +23,7 @@ from tests.test_sqlite_backup_expiry import EXPIRES, _attempt
 from tests.test_sqlite_migration_preflight import _snapshot
 
 pytestmark = pytest.mark.no_sqlite_template
-CURRENT = "20261108_0079"
+CURRENT = "20261108_0082"
 FIRST = "20990101_9001"
 SECOND = "20990101_9002"
 

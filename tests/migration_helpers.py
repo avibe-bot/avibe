@@ -39,18 +39,14 @@ def downgrade_legacy_schema(config: Config, revision: str) -> None:
     # has no downgrade. Reconstruct that frozen legacy fixture only below.
     with closing(sqlite3.connect(path)) as conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
+    if stamp == [("20261108_0082",)]:
+        command.downgrade(config, "20261108_0079")
+    with closing(sqlite3.connect(path)) as conn:
+        stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
     if stamp == [("20261108_0079",)]:
         command.downgrade(config, "20261108_0076")
     with closing(sqlite3.connect(path)) as conn, conn:
         stamp = conn.execute("SELECT version_num FROM alembic_version").fetchall()
-        if stamp == [("20261108_0077",)]:
-            for index in (
-                "ix_session_turns_recovery_owner",
-                "ix_message_deliveries_recovery_owner",
-            ):
-                conn.execute(f'DROP INDEX IF EXISTS "{index}"')
-            conn.execute("UPDATE alembic_version SET version_num = '20261108_0076'")
-            stamp = [("20261108_0076",)]
         if stamp == [("20261108_0076",)]:
             assert conn.execute(
                 "SELECT value_json FROM state_meta WHERE key = 'compatibility_epoch'"

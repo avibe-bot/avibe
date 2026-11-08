@@ -15,7 +15,7 @@ from storage.migration_policy import classify_migration, classify_migration_sour
 def migration(body: str, *, declaration: str = 'MIGRATION_COMPATIBILITY = "additive"') -> str:
     return (
         "from alembic import op\nimport sqlalchemy as sa\n"
-        "revision = '20990101_9999'\ndown_revision = '20261108_0077'\n"
+        "revision = '20990101_9999'\ndown_revision = '20261108_0082'\n"
         + declaration
         + "\ndef upgrade() -> None:\n"
         + indent(dedent(body), "    ")
