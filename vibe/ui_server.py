@@ -9520,14 +9520,18 @@ def projects_update(project_id: str):
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            update_kwargs = {
+                "display_name": display_name,
+                "folder_path": folder_path,
+                "authorization_context": getattr(g, "authorization_context", None),
+                **agent_kwargs,
+            }
+            if description is not projects_service._UNSET:
+                update_kwargs["description"] = description
             project = projects_service.update_project(
                 conn,
                 project_id,
-                display_name=display_name,
-                folder_path=folder_path,
-                description=description,
-                authorization_context=getattr(g, "authorization_context", None),
-                **agent_kwargs,
+                **update_kwargs,
             )
     except projects_service.StaleProjectAgentBindingError as err:
         return _project_agent_conflict_response(err)

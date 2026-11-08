@@ -2139,7 +2139,7 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Inside an Agent shell a new Session takes the caller's scope and current directory.
+        Inside an Agent shell, new Sessions use the caller's scope and directory.
         Only --callback returns the final reply; a run that fails still tells the caller.
         --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
           apply only to a new or forked Session.
@@ -2147,7 +2147,6 @@ def _agent_run_examples_text() -> str:
         Examples:
           vibe agent run --agent reviewer --message 'Review the latest deployment result.'
           vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
-          vibe agent run --fork-self --message 'Explore the alternate fix from this context.'
         """
     )
 
@@ -7271,17 +7270,31 @@ def _project_cli_payload(project: Mapping[str, Any], *, recent_sessions: Any = N
 
 
 def cmd_project_list(args):
+    from core.managed_skills import CATALOG_PAGE_SIZE
     from core.system_prompt_injection import project_catalog_page
     from storage import projects_service
 
-    page = max(int(getattr(args, "page", 1) or 1), 1)
     try:
+        page_request = _page_request_from_args(args, help_command="vibe project list --help")
         with _projects_cli_engine(read_only=True).connect() as conn:
             projects = projects_service.list_projects(
                 conn, creation_order=True, authorization_context=None
             )
-        items, next_page = project_catalog_page(projects, page)
-        payload = {"projects": [_project_cli_payload(project) for project in items]}
+        page_size = page_request.limit or CATALOG_PAGE_SIZE
+        items, next_page = project_catalog_page(
+            projects,
+            page_request.page,
+            page_size=page_size,
+        )
+        payload = {
+            "projects": [_project_cli_payload(project) for project in items],
+            "pagination": {
+                "page": page_request.page,
+                "returned": len(items),
+                "has_more": next_page is not None,
+                "next_page": next_page,
+            },
+        }
         if next_page is not None:
             payload["next_page"] = next_page
         _print_cli_payload("projects", **payload)
@@ -18592,6 +18605,7 @@ def build_parser():
     project_subparsers.required = True
     project_list_parser = project_subparsers.add_parser("list", help="List active Projects")
     project_list_parser.add_argument("--page", type=int, default=1, help="Catalog page (default: 1)")
+    project_list_parser.add_argument("--limit", type=int, default=25, help="Rows per catalog page (default: 25)")
     _add_json_noop(project_list_parser)
     project_show_parser = project_subparsers.add_parser("show", help="Show a Project and recent Sessions")
     project_show_parser.add_argument("name", help="Project name or id")
@@ -18739,7 +18753,7 @@ def build_parser():
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the caller Session")
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place the new Session in the caller's scope")
     agent_run_parser.add_argument("--scope-id", metavar="ID", help="Place the new Session in this scopes.id")
-    agent_run_parser.add_argument("--project", metavar="NAME", help="Place the new Session in an active Project by name")
+    agent_run_parser.add_argument("--project", metavar="NAME", help="New Session Project placement")
     agent_run_parser.add_argument(
         "--visible",
         dest="visibility",

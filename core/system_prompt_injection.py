@@ -333,10 +333,20 @@ def _project_row_text(project: Any) -> str:
     )
 
 
-def project_catalog_page(projects: Iterable[Any], page: int = 1) -> tuple[Sequence[Any], int | None]:
-    from core.managed_skills import catalog_page_of
+def project_catalog_page(
+    projects: Iterable[Any],
+    page: int = 1,
+    *,
+    page_size: int | None = None,
+) -> tuple[Sequence[Any], int | None]:
+    from core.managed_skills import CATALOG_PAGE_SIZE, catalog_page_of
 
-    return catalog_page_of(list(projects), _project_row_text, page)
+    return catalog_page_of(
+        list(projects),
+        _project_row_text,
+        page,
+        page_size=CATALOG_PAGE_SIZE if page_size is None else page_size,
+    )
 
 
 def _format_project_rows(projects: Iterable[Any]) -> tuple[str, str]:

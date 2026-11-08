@@ -20,7 +20,7 @@ from core.control_requests import OPERATIONS, ControlRequest, failure, result
 logger = logging.getLogger(__name__)
 
 _AGENT_RUN_STRINGS = frozenset({
-    "agent", "bot", "session_id", "fork_session", "scope_id", "visibility",
+    "agent", "bot", "session_id", "fork_session", "scope_id", "project", "visibility",
     "model", "reasoning_effort", "cwd", "callback_session_id", "message", "message_file",
 })
 _AGENT_RUN_BOOLS = frozenset({
