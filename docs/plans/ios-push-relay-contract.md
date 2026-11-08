@@ -87,19 +87,20 @@ cannot distinguish an invalid or expired session from temporary upstream auth
 unavailability. It may return `502 auth_unavailable` when it can make that
 distinction. Both preserve pending push state and surface a recoverable bind
 failure; neither erases local credentials or registrations. A positively
-rejected installation credential follows section 2.3 candidate recovery
-instead of retrying one rejected value forever.
+rejected installation credential fails that request and is not retried as an
+account-auth failure.
 
 ### 2.2 Installation push credential
 
-All other management routes use a rotatable, installation-scoped credential:
+All management routes, including binding, use one installation-scoped
+credential:
 
 ```http
 Authorization: AvibeInstallation <installation_id>.<installation_secret>
 ```
 
 `installation_secret` is 32 random bytes encoded as base64url without padding.
-Native generates it, stores it in a non-App-Group
+Native generates it before the first bind, stores it in a non-App-Group
 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` Keychain item, and never
 exposes it to Web content, an instance, the bridge, or the NSE. The relay stores
 only a password-hash or keyed-hash representation suitable for bearer-secret
@@ -109,59 +110,43 @@ the same normalization and hash derivation.
 
 Possession authorizes push management for exactly one installation. It does
 not grant account access, read notification content, or manage another
-installation. This narrow credential is retained only when needed to finish a
-pending revoke or rebind after the account cookie has expired or been cleared.
-It supplies authorization, not background execution.
+installation. The credential remains stable across login, logout, and account
+switch in Phase 1. It is not deleted while a management or orphaned-revoke
+operation for that installation remains recoverable. Reinstall recovery moves
+the surviving old credential into the orphaned operation before creating a new
+installation identity. The credential supplies authorization, not background
+execution.
 
 The path installation ID and authorization-header installation ID must match.
-Credential validation, account ownership changes, old-registration revocation,
-and credential rotation happen under one locked installation transaction.
+Credential validation, account ownership changes, `bind_generation` update,
+and old-registration revocation happen under one locked installation
+transaction.
 
-### 2.3 Recoverable credential rotation
+### 2.3 Monotonic bind generation
 
-Native permits at most one credential-changing operation per installation. It
-persists `current_installation_secret` and a newly generated
-`pending_installation_secret` before sending the request.
+Native owns a monotonic `bind_generation` for each `installation_id`. It
+persists the generation before sending a bind and keeps it across process
+restart and account switch. One local sign-in activation allocates one
+generation; retries for that same sign-in reuse it. A later sign-in uses a
+higher generation. Generations may have gaps and never reset while the
+installation ID is reused.
 
-For both credential-changing routes, credential handling under the installation
-lock is exact:
+Under the installation lock, the relay handles a bind as follows:
 
-- when the Authorization secret and `next_installation_secret` both match the
-  stored verifier, the request is a replay. The relay returns `200` only if the
-  requested account, revocation, and credential postcondition already holds;
-  otherwise it returns mutation-free `409 credential_recovery_conflict`;
-- when Authorization matches the stored verifier and `next_installation_secret`
-  is different, the request is a normal rotation;
-- every other combination returns `401 installation_unauthorized`.
+- a generation greater than the stored value changes `account_id`, stores the
+  new generation, and revokes every registration for that installation whose
+  `bind_generation` is lower, all in one transaction;
+- a generation equal to the stored value with the same authenticated account
+  is an idempotent `200` replay;
+- a lower generation, or an equal generation with a different authenticated
+  account, returns mutation-free `409 stale_bind_generation`.
 
-The replay test runs before comparing the request's old revocation set with the
-current active set. A committed request may have made that old set empty; this
-ordering makes a lost response idempotent without a bind replay table.
-
-Native retains both current (`C`) and pending (`P`) candidates, the original
-request, and its captured registration IDs across process restart until a
-credential-changing operation is acknowledged or reconciled. If the account
-cookie required by the original bind is still valid, native may retry the exact
-request with `P`; a successful replay proves the original rotation committed.
-Without that cookie, or before an account switch, native uses the
-credential-only GET in section 5.1.2: it probes `P` first and then `C`.
-`GET(P)` success promotes `P`, while `GET(C)` success proves only that `C` was
-valid at that read. Timeouts, `5xx`, `401`, `404`, or a current-secret GET do
-not cancel an already-sent write and do not by themselves justify discarding
-either candidate.
-
-An account switch does not wait for an expired old cookie to become usable. If
-`GET(P)` is unauthorized but `GET(C)` succeeds while the old bind remains
-uncertain, the new-account cookie bind captures the returned current IDs and
-reuses the persisted `P` as `next_installation_secret` with Authorization `C`.
-Whichever old- or new-account `C -> P` mutation wins makes `C` invalid. If the
-old bind wins, the new bind fails authentication; a later `GET(P)` confirms
-`P`, and native then performs the ordinary new-account bind from `P` to a newly
-persisted candidate. If the new bind committed but its response was lost, an
-exact `P/P` replay returns `200` only for its new-account postcondition; a
-different stored account returns `409 credential_recovery_conflict` without
-transferring ownership. No path retains the old account session, adds an epoch,
-or treats the GET as a transaction fence.
+A lost bind response is retried with the same account session and generation.
+If that session expires or a different account signs in, the later sign-in uses
+a higher generation and supersedes the uncertain bind. A delayed old bind
+cannot move the installation back after the higher generation commits. There
+is no pending secret, credential rotation, credential-confirmation route, or
+durable bind-response replay table in Phase 1.
 
 ## 3. Data model and mutation invariants
 
@@ -173,7 +158,8 @@ The logical schema is independent of the backend storage library.
 | --- | --- | --- |
 | `installation_id` | UUID string, primary key | Native generates a UUIDv4 once for this app installation. |
 | `account_id` | Supabase subject string | Relay derives it from the account session; clients never supply it. |
-| `installation_secret_hash` | Secret-verifier bytes | Relay stores only the verifier for the current installation credential. |
+| `installation_secret_hash` | Secret-verifier bytes | Relay stores only the verifier for the stable Phase 1 installation credential. |
+| `bind_generation` | Positive integer | Native-owned monotonic login generation; accepted binds only move it forward. |
 | `device_token_ciphertext` | Nullable protected bytes | APNs token encrypted at rest or held in an equivalent secret store. |
 | `device_token_sha256` | Nullable 64-character lowercase hex | Relay-derived redacted equality and diagnostics value. |
 | `environment` | Nullable `sandbox` or `production` | Part of the complete provider state and validated against the deployment allowlist. |
@@ -205,6 +191,7 @@ installation ID begins again at generation `1`.
 | `registration_id` | 32 random bytes / 43 base64url characters, primary key | Native generates and persists it before the create request; it is immutable and never reused. |
 | `installation_id` | UUID foreign key | Exactly one owning installation. |
 | `account_id` | Supabase subject snapshot | Copied from the installation at creation for audit and isolation checks. |
+| `bind_generation` | Positive integer | Must equal the installation generation at creation and never changes. |
 | `vapid_key_sha256` | 64-character lowercase hex | SHA-256 of the decoded 65-byte uncompressed P-256 VAPID public key. |
 | `created_at` | UTC timestamp | Write once. |
 | `revoked_at` | Nullable UTC timestamp | Write once; the only transition is active to revoked. |
@@ -213,10 +200,10 @@ A revoked row is never reactivated. Its endpoint continues to return `410`.
 The relay retains rows for Phase 1; automatic installation or registration
 retention/deletion is not part of this contract.
 
-An account change on a device revokes all of that device's existing
-registrations in the same transaction as the bind. The client names the
-concrete set and the relay rejects a changed set instead of choosing a
-different set at execution time.
+Every accepted higher bind generation revokes all lower-generation
+registrations in the same transaction as the account binding. A registration
+from an older account cannot be reactivated or replaced into the newer
+generation.
 
 There is at most one active registration for an
 `(installation_id, vapid_key_sha256)` pair. Replacement is explicit: the
@@ -228,24 +215,30 @@ mutation.
 
 ### 3.3 Mutation ledger
 
-No delayed request may select an open-ended destructive scope when it executes.
-If current state differs from the caller's captured concrete IDs, the relay
-returns a conflict so native can persist the newly observed IDs before sending
-a new request.
+Every delayed mutation fixes its scope before send with a concrete registration
+ID, a captured bind generation, or a persisted provider generation. No delayed
+request may select the current account's unbounded future state when it
+executes.
 
 | Mutation | Scope fixed before send | Atomic rule |
 | --- | --- | --- |
-| Account bind or rebind | `installation_id`, authenticated account, next credential, concrete `revoke_registration_ids` | Validate account, exact Origin, current/pending credential, revocation set, ownership update, revocations, and credential rotation under one installation lock. An account change requires the supplied IDs to equal the current active set. |
+| Account bind or rebind | `installation_id`, authenticated account, persisted `bind_generation` | Validate account, exact Origin, stable credential, ownership update, and lower-generation revocation under one installation lock. Greater G commits; equal G/same account replays; stale or equal G/different account never mutates. |
 | Provider PATCH | Persisted `provider_generation` and complete provider tuple | Any generation greater than current replaces the tuple; equal and identical is idempotent; lower or equal and different never mutates. |
-| Registration create | Fresh `registration_id`, VAPID hash, concrete `replaces_registration_ids` | The supplied set must cover the target VAPID scope and contain only active rows owned by the installation; revoke exactly it and insert once. |
+| Registration create | Fresh `registration_id`, current `bind_generation`, VAPID hash, concrete `replaces_registration_ids` | Require the generation to equal the installation; the supplied set must cover the target VAPID scope and contain only active current-generation rows owned by the installation; revoke exactly it and insert once. |
 | Single revoke | One concrete `registration_id` | Revoke only that owned row; retry is idempotent. |
-| Logout bulk revoke | Complete captured active ID set plus next credential | Require the supplied set to equal the current active set, revoke exactly it, and rotate the credential in one transaction. |
+| Logout bulk revoke | Captured `through_bind_generation` | Revoke only rows for that installation whose generation is at most the captured value; a larger-than-current value is rejected. |
 | APNs invalidation | Captured generation plus complete token hash/environment/topic tuple | Mark invalid only while every captured value still matches; otherwise return a retryable race result and do not mutate. |
 
 Native serializes new push mutations through one provider/registration
 coordinator, but serialization alone is not the safety boundary: every relay
 mutation also enforces the fixed scope above because an already-sent request
-can outlive local cancellation.
+can outlive local cancellation. The one same-generation ordering dependency is
+explicit: before a logout bulk revoke can be sent or considered successful,
+native must reconcile every already-sent registration create for that
+generation by retrying its persisted registration ID to a terminal result.
+If execution ends first, both operations stay pending and the later foreground
+attempt completes create reconciliation before bulk revoke. No new create may
+start after logout freezes push mutations.
 
 ## 4. Native bridge
 
@@ -262,11 +255,14 @@ linked from `ios-app.md`:
 `push.status` never creates or replaces a registration. Native decodes and
 hashes a supplied `vapidPublicKey` exactly as `push.subscribe` does. It returns
 `state: "on"` and the existing public subscription only when that hash matches
-the stored active record. A missing or different key cannot prove that the
-record is current, so it returns `state: "off"` without endpoint or keys. The
-Web-owned enable/reconcile path may then call
-`push.subscribe({vapidPublicKey})`; a mismatch creates a fresh registration and
-names the old concrete IDs in `replaces_registration_ids`.
+the stored active record and that record's `bind_generation` equals the current
+native installation generation. A missing or different key, or a lower
+generation, returns `state: "off"` without endpoint or keys. The Web-owned
+enable/reconcile path may then call `push.subscribe({vapidPublicKey})`. A VAPID
+mismatch within the current generation names the old concrete IDs in
+`replaces_registration_ids`; a lower-generation record is already relay-revoked
+by bind and is retained only for accepted-notification decryption, not named as
+an active replacement.
 
 `push.unsubscribe().revoked` is true only after the relay confirmed the
 concrete registration was already revoked or is now revoked. False means local
@@ -304,14 +300,14 @@ maximum body size of 64 KiB. Error responses use:
 Messages never contain account cookies, installation secrets, APNs tokens,
 Web Push bodies, plaintext, private key material, or full endpoints.
 
-When a concrete registration set changed, the response has this exact
-additional shape:
+When the registration-create replacement set changed, the response has this
+exact additional shape:
 
 ```json
 {
   "ok": false,
   "error": {
-    "code": "registration_set_changed",
+    "code": "replacement_set_changed",
     "message": "Registration state changed; retry with the returned IDs."
   },
   "active_registration_ids": [
@@ -320,68 +316,52 @@ additional shape:
 }
 ```
 
-The registration-create route uses `replacement_set_changed` in the same
-shape. Returning IDs is permitted only after the installation credential has
-been verified.
+Returning IDs is permitted only after the installation credential has been
+verified.
 
-### 5.1 Installation binding and credential confirmation
-
-#### 5.1.1 Bind or rebind
+### 5.1 Bind or rebind an installation
 
 ```http
 PUT /api/push/apns/installations/<installation_id>/binding
 Origin: <PUBLIC_BASE_URL origin>
 Cookie: <existing account session>
-Authorization: AvibeInstallation <installation_id>.<current-or-pending-secret>
+Authorization: AvibeInstallation <installation_id>.<installation_secret>
 Content-Type: application/json
 ```
-
-`Authorization` is omitted only while the installation row does not exist.
 
 Request:
 
 ```json
 {
-  "next_installation_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-  "revoke_registration_ids": [
-    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-  ]
+  "bind_generation": 5
 }
 ```
 
-The next secret is exactly 32 decoded bytes. The revocation array contains
-unique, valid registration IDs captured before this request. It may be empty.
+`bind_generation` is an integer from `1` through `2^63-1`. Native persists it
+before sending and reuses it only for retries of the same local sign-in
+activation.
 
 The relay authenticates the account cookie and exact Origin before allocating
 anything. For a new installation it consumes the authenticated account
-creation limit, creates the row, stores the next-secret verifier, and returns
-`201`. A first creation requires an empty revocation array.
+creation limit, validates the 32-byte installation secret from Authorization,
+creates the row with the authenticated account and supplied generation, stores
+the secret verifier, and returns `201`.
 
 For an existing installation, the relay locks the row and validates the
-current credential inside the transaction. If the authenticated account
-differs from `account_id`, the supplied revocation set must equal all active
-registration IDs currently owned by the installation. The transaction then
-revokes exactly those IDs, changes `account_id`, and rotates the credential.
-If the account is unchanged, it revokes only the supplied owned IDs and
-rotates the credential; an unknown or differently owned supplied ID produces
-the same mutation-free set conflict. Binding never changes provider state or
-`provider_generation`.
+stable credential inside the transaction:
 
-If the set required for an account change differs, the relay makes no mutation
-and returns `409 registration_set_changed` with the current concrete active
-IDs. Native persists that new target set before retrying. A stale old-account
-request cannot run after a newer rebind because the newer transaction changed
-the credential; if the stale request wins the lock first, the newer coordinator
-reconciles and retries from the resulting current credential.
+- a generation greater than current sets `account_id` from the authenticated
+  session, stores the new generation, and revokes every registration for the
+  installation whose `bind_generation` is lower;
+- a generation equal to current with the same authenticated account returns
+  idempotent `200` without changing registrations or provider state;
+- a lower generation, or an equal generation with a different authenticated
+  account, returns `409 stale_bind_generation` without mutation.
 
-If the request is retried with the pending secret after a committed response
-was lost, the relay returns `200` when the requested account, credential, and
-revocation postcondition already hold. Specifically, Authorization and
-`next_installation_secret` both matching the stored verifier is an idempotent
-replay; a wrong account or revocation postcondition returns mutation-free `409
-credential_recovery_conflict`. Authorization matching the stored verifier with
-a different next secret is a normal rotation. Every other credential
-combination returns `401`. The relay never rotates twice.
+Binding never changes provider state or `provider_generation`. A delayed bind
+from an older account cannot retake the installation after a higher generation
+has committed. If the delayed request wins first, the higher generation still
+commits afterward and revokes the lower-generation registrations.
 
 Success:
 
@@ -390,7 +370,7 @@ Success:
   "ok": true,
   "installation_id": "00000000-0000-4000-8000-000000000000",
   "created": false,
-  "credential_rotated": true,
+  "bind_generation": 5,
   "active_registration_ids": [],
   "provider": {
     "provider_generation": 4,
@@ -405,64 +385,32 @@ Success:
 
 `provider` is `null` before the first provider PATCH. The response never
 returns the raw installation secret or device token.
+`active_registration_ids` contains only active rows at the returned
+`bind_generation`.
 
-| Status | `error.code` | Meaning |
-| --- | --- | --- |
-| `400` | `invalid_installation_id`, `invalid_installation_secret`, `invalid_registration_ids`, `invalid_json` | Invalid request. |
-| `401` | `login_unauthenticated`, `installation_credential_required`, `installation_unauthorized` | Account authentication failed or could not distinguish upstream unavailability, or installation authentication failed. |
-| `403` | `origin_forbidden` | Origin is absent or is not the exact configured origin. |
-| `404` | `installation_not_found` | A credential-authenticated retry addressed an installation that still does not exist. |
-| `409` | `registration_set_changed`, `credential_recovery_conflict` | The destructive target changed or the pending-secret replay postcondition is not true. |
-| `413` | `request_too_large` | Management body exceeds 64 KiB. |
-| `429` | `creation_rate_limited` | New-installation allocation exceeded the authenticated account bucket. |
-| `502` | `auth_unavailable` | Optional when account-session validation can distinguish upstream unavailability. |
-
-#### 5.1.2 Confirm credential and read installation state
-
-```http
-GET /api/push/apns/installations/<installation_id>
-Authorization: AvibeInstallation <installation_id>.<current-or-pending-secret>
-```
-
-This route uses no account cookie and performs no rotation, ownership change,
-revocation, provider mutation, or registration mutation. The relay verifies
-that the path and Authorization installation IDs match, verifies the
-credential, then returns:
-
-```http
-Cache-Control: no-store
-Content-Type: application/json
-```
+A stale response has this exact shape and does not expose either account ID:
 
 ```json
 {
-  "ok": true,
+  "ok": false,
+  "error": {
+    "code": "stale_bind_generation",
+    "message": "A newer or conflicting account bind already exists."
+  },
   "installation_id": "00000000-0000-4000-8000-000000000000",
-  "active_registration_ids": [
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-  ],
-  "provider": {
-    "provider_generation": 4,
-    "device_token_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "environment": "production",
-    "topic": "bot.avibe.ios",
-    "invalid": false
-  }
+  "bind_generation": 6
 }
 ```
 
-`provider` is `null` before the first provider PATCH. The response contains no
-account ID, secret, verifier, raw device token, or credential-slot label. A
-`200` proves only that the credential supplied on that request was valid at the
-read; native already knows whether it supplied its retained `C` or `P`.
-
-Every response carries `Cache-Control: no-store`. Malformed installation IDs
-return `400 invalid_installation_id`. A missing header returns
-`401 installation_credential_required`. An unknown installation, a path/header
-ID mismatch, or an invalid credential returns the same
-`401 installation_unauthorized` shape without registration IDs or provider
-metadata. Timeout or `5xx` is an unknown observation. No error proves that an
-earlier credential-changing request cannot commit later.
+| Status | `error.code` | Meaning |
+| --- | --- | --- |
+| `400` | `invalid_installation_id`, `invalid_installation_secret`, `invalid_bind_generation`, `invalid_json` | Invalid request. |
+| `401` | `login_unauthenticated`, `installation_credential_required`, `installation_unauthorized` | Account authentication failed or could not distinguish upstream unavailability, or installation authentication failed. |
+| `403` | `origin_forbidden` | Origin is absent or is not the exact configured origin. |
+| `409` | `stale_bind_generation` | The generation is lower, or equal with a different authenticated account. |
+| `413` | `request_too_large` | Management body exceeds 64 KiB. |
+| `429` | `creation_rate_limited` | New-installation allocation exceeded the authenticated account bucket. |
+| `502` | `auth_unavailable` | Optional when account-session validation can distinguish upstream unavailability. |
 
 ### 5.2 Replace provider state
 
@@ -563,6 +511,7 @@ Request:
 
 ```json
 {
+  "bind_generation": 5,
   "vapid_key_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "replaces_registration_ids": [
     "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
@@ -571,24 +520,27 @@ Request:
 ```
 
 Native generates and persists the new ID, P-256 key, 16-byte auth secret, VAPID
-hash, and concrete replacement IDs before sending.
+hash, current bind generation, and concrete replacement IDs before sending.
 
 For a new ID, the relay verifies the credential, checks the authenticated
 account creation limit before row allocation, and locks the installation,
-target VAPID scope, and supplied replacement rows. The supplied set must
-include every current active registration in the target VAPID scope. Every
-supplied replacement ID must also be active and belong to the same
-installation, but it may carry the previous VAPID hash so one
-`push.subscribe` operation can rotate an instance key. The relay revokes
-exactly the supplied rows and inserts the new row in one transaction. A
-missing, revoked, differently owned, or omitted target-scope ID is reported as
-`replacement_set_changed` without mutation.
+target VAPID scope, and supplied replacement rows. The request
+`bind_generation` must equal the installation's current value; any mismatch
+returns `409 stale_generation` before insertion. The supplied set must include
+every current active registration in the target VAPID scope. Every supplied
+replacement ID must also be active, belong to the same installation and bind
+generation, but it may carry the previous VAPID hash so one `push.subscribe`
+operation can rotate an instance key. The relay revokes exactly the supplied
+rows and inserts the new row with the current account and bind generation in
+one transaction. A missing, revoked, differently owned, stale-generation, or
+omitted target-scope ID is reported as `replacement_set_changed` without
+mutation.
 
 If the same registration ID already exists and is active with the same
-installation and VAPID hash, a lost-response retry returns `200` without
-processing a new replacement set. A reused ID with different ownership or
-content returns `409 registration_id_reuse`; a row revoked after creation
-returns `410 registration_revoked`.
+installation, bind generation, and VAPID hash, a lost-response retry returns
+`200` without processing a new replacement set. A reused ID with different
+ownership or content returns `409 registration_id_reuse`; a row revoked after
+creation returns `410 registration_revoked`.
 
 Success is `201` for insertion and `200` for an idempotent replay:
 
@@ -597,6 +549,7 @@ Success is `201` for insertion and `200` for an idempotent replay:
   "ok": true,
   "registration_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "endpoint": "https://avibe.bot/api/push/apns/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "bind_generation": 5,
   "vapid_key_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "created_at": "2026-11-09T00:00:00Z"
 }
@@ -607,16 +560,32 @@ first deployment example.
 
 | Status | `error.code` | Meaning |
 | --- | --- | --- |
-| `400` | `invalid_registration_id`, `invalid_vapid_key_hash`, `invalid_replacement_ids`, `invalid_json` | Invalid request. |
+| `400` | `invalid_registration_id`, `invalid_bind_generation`, `invalid_vapid_key_hash`, `invalid_replacement_ids`, `invalid_json` | Invalid request. |
 | `401` | `installation_credential_required`, `installation_unauthorized` | Invalid installation credential. |
 | `404` | `installation_not_found` | Installation does not exist. |
-| `409` | `replacement_set_changed`, `registration_id_reuse` | Current VAPID scope differs, or the ID was already used for different content. |
+| `409` | `stale_generation`, `replacement_set_changed`, `registration_id_reuse` | Bind generation is not current, current VAPID scope differs, or the ID was already used for different content. |
 | `410` | `registration_revoked` | The idempotency ID exists but is terminally revoked. |
 | `413` | `request_too_large` | Management body exceeds 64 KiB. |
 | `429` | `creation_rate_limited` | Account creation bucket exhausted before insertion. |
 
 `replacement_set_changed` includes `active_registration_ids`. Native persists
-that observed set before a new attempt.
+that observed set before a new attempt. `stale_generation` has this exact
+additional shape:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "stale_generation",
+    "message": "The registration bind generation is not current."
+  },
+  "installation_id": "00000000-0000-4000-8000-000000000000",
+  "bind_generation": 6
+}
+```
+
+Web/native must complete the current account bind before creating another
+registration.
 
 ### 5.4 Revoke registrations
 
@@ -641,51 +610,47 @@ It sets `revoked_at` only on that owned row and returns:
 Retrying an already-revoked owned row is `200`. Unknown or differently owned
 IDs are indistinguishable and return `404 registration_not_found`.
 
-Logout bulk revoke and credential rotation:
+Logout bulk revoke:
 
 ```http
 POST /api/push/apns/installations/<installation_id>/revoke
-Authorization: AvibeInstallation <installation_id>.<current-or-pending-secret>
+Authorization: AvibeInstallation <installation_id>.<installation_secret>
 Content-Type: application/json
 ```
 
 ```json
 {
-  "next_installation_secret": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
-  "registration_ids": [
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-  ]
+  "through_bind_generation": 5
 }
 ```
 
-The supplied set must equal the installation's current active registration
-set. Under one lock, the relay revokes exactly those IDs and rotates the
-credential. A mismatch returns `409 registration_set_changed` and the current
-active IDs without mutation; native persists them before retrying. This closes
-a race with a registration create that was already accepted by the server.
+`through_bind_generation` is an integer from `1` through `2^63-1`. Native
+captures the current generation before local account teardown and reconciles
+every already-sent create at that generation before sending this request.
+Under the installation lock, the relay revokes registrations for that
+installation whose `bind_generation` is at most the supplied value. A value
+equal to or lower than the installation's current generation is valid and
+idempotent; a higher value returns mutation-free `409 stale_generation`. The
+route never changes account ownership, installation credential, bind
+generation, or provider state.
 
-A pending-secret retry returns `200` when the credential is already current
-and the supplied IDs are already revoked with no active registration left.
-Authorization and `next_installation_secret` both matching the stored verifier
-uses the same replay test as section 5.1.1; a false revoke postcondition returns
-`409 credential_recovery_conflict` without mutation.
 Success is:
 
 ```json
 {
   "ok": true,
   "installation_id": "00000000-0000-4000-8000-000000000000",
-  "revoked_registration_ids": [
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-  ],
-  "credential_rotated": true,
+  "through_bind_generation": 5,
+  "revoked": true,
   "updated_at": "2026-11-09T00:00:00Z"
 }
 ```
 
 Both routes may return `401 installation_credential_required` or
-`installation_unauthorized`, `404 installation_not_found`, `413
-request_too_large`, or `409 registration_set_changed` for the bulk route.
+`installation_unauthorized` or `404 installation_not_found`. The bulk route
+also returns `400 invalid_bind_generation` or `invalid_json`, `413
+request_too_large`, and `409 stale_generation` using the current-generation
+shape from section 5.3.
 
 ### 5.5 Deliver encrypted Web Push
 
@@ -741,8 +706,8 @@ Success after APNs accepts the request is `201`:
 
 | Relay status | `error.code` | Condition |
 | --- | --- | --- |
-| `400` | `invalid_vapid`, `vapid_key_mismatch`, `invalid_audience`, `vapid_expired`, `vapid_exp_too_far`, `invalid_content_encoding`, `invalid_ttl`, `invalid_urgency`, `invalid_topic`, `invalid_request` | Request rejected; registration stays active. |
-| `410` | `registration_not_found`, `registration_revoked` | Missing or revoked endpoint; instance disables it. |
+| `400` | `invalid_vapid`, `invalid_audience`, `vapid_expired`, `vapid_exp_too_far`, `invalid_content_encoding`, `invalid_ttl`, `invalid_urgency`, `invalid_topic`, `invalid_request` | Request rejected; registration stays active. |
+| `410` | `registration_not_found`, `registration_revoked`, `vapid_key_mismatch` | Missing, revoked, or sender-key-mismatched endpoint; instance disables it. |
 | `410` | `apns_device_gone`, `apns_provider_invalid` | Matching APNs invalidation or provider already invalid; instance disables it. |
 | `413` | `encrypted_body_too_large`, `apns_payload_too_large` | Encrypted body or final APNs JSON exceeds its limit. |
 | `429` | `relay_rate_limited` | Per-registration delivery bucket exhausted; includes `Retry-After`. |
@@ -898,6 +863,7 @@ kid
 instance_origin
 account_id
 account_generation
+bind_generation
 private_key
 auth_secret
 state: pending | active | retiring
@@ -959,8 +925,9 @@ origin, or URL also takes this recovery path.
 
 | Field | Produced by | Consumed by | Signed or authenticated coverage | Supplied by |
 | --- | --- | --- | --- | --- |
-| `installation_id` | Native CSPRNG/UUIDv4 | Relay management; native coordinator | HTTPS plus installation credential after creation | ThisDeviceOnly Keychain |
+| `installation_id` | Native CSPRNG/UUIDv4 | Relay management; native coordinator | HTTPS plus installation credential on every management request | ThisDeviceOnly Keychain |
 | `installation_secret` | Native CSPRNG | Relay credential verifier | HTTPS Authorization; relay stores verifier only | Native Keychain |
+| `bind_generation` | Native account coordinator | Relay bind ordering, registration create, bulk revoke | Same-origin account bind plus installation credential; later management uses installation credential | Persisted native installation state |
 | `account_id` | Relay from account session | Installation and registration ownership; native local account state | Same-origin cookie plus exact Origin on bind | Existing account authority |
 | `provider_generation` | Native provider coordinator | Relay PATCH and APNs invalidation CAS | Installation-credential request; relay monotonic comparison | Persisted native provider state |
 | `device_token` | APNs callback | Relay APNs request builder | Installation-credential PATCH; protected at rest | APNs |
@@ -977,16 +944,21 @@ origin, or URL also takes this recovery path.
 ### 9.2 Enable
 
 1. After account login, `MobileAccountCoordinator` uses a short-lived hidden
-   transport backed by the account's persistent website data store to bind or
-   create the installation. Session expiry is shown as a recoverable failure.
-2. Native reconciles any uncertain credential rotation using the retained
-   current/pending candidates and the read-only confirmation route before
-   starting an unrelated rotation.
-3. On notification enable, Web calls `push.subscribe({vapidPublicKey})`.
+   transport backed by the account's persistent website data store. Native
+   persists the next bind generation before sending; retries for that sign-in
+   reuse it. The relay creates or binds the installation, and session expiry is
+   shown as a recoverable failure.
+2. A greater bind generation atomically establishes the account and revokes
+   lower-generation registrations. An equal-generation replay for the same
+   account is idempotent. Native no longer reports lower-generation key records
+   as active subscriptions.
+3. On notification enable or the next authenticated foreground reconcile, Web
+   calls `push.status({vapidPublicKey})`; an `off` result proceeds through
+   `push.subscribe({vapidPublicKey})`.
 4. Native obtains permission and an APNs token. It persists and PATCHes the
    next provider generation if needed.
 5. Native creates and persists a pending P-256 key, auth secret, registration
-   ID, VAPID hash, and concrete replacement set.
+   ID, current bind generation, VAPID hash, and concrete replacement set.
 6. The relay either atomically replaces that exact VAPID scope or returns its
    current IDs for a captured retry.
 7. Native marks the key record active and returns the public subscription.
@@ -1001,7 +973,9 @@ selects an endpoint.
 
 1. The instance applies existing gates, computes badge, serializes under the
    byte budget, encrypts, signs, and POSTs.
-2. The relay validates the bound VAPID sender and forwards only ciphertext.
+2. The relay validates the bound VAPID sender and forwards only ciphertext. A
+   VAPID key mismatch returns terminal `410`, so the instance disables that
+   stale subscription.
 3. APNs invokes the NSE, which decrypts and presents or keeps the fallback.
 4. APNs invalidation returns relay `410` only for the captured current provider;
    the instance follows its existing terminal disable path.
@@ -1040,26 +1014,28 @@ use fresh IDs, so retry cannot select them.
 ### 9.6 Logout and account switch
 
 Before local account teardown, native freezes new push mutations, captures all
-active registration IDs, persists the credential-rotation revoke operation,
-increments the shared account generation, deletes old account key records, and
-best-effort removes pending and delivered notifications whose `kid` is in the
-captured set.
+active registration IDs and the current bind generation, persists the bounded
+bulk-revoke operation, increments the shared account generation, deletes old
+account key records, and best-effort removes pending and delivered
+notifications whose `kid` is in the captured set.
 
-If execution and authorization are available, native sends the bulk revoke. If
-not, logout continues locally and the exact IDs remain pending. A later
-foreground opportunity uses the installation credential; it does not retain
-or recreate the old account cookie.
+Before sending the bulk revoke, native reconciles every already-sent
+registration create at the captured generation by retrying its persisted ID.
+Only then can a successful bulk response complete remote logout. If execution,
+authorization, or create reconciliation is unavailable, logout continues
+locally and the ordered create-then-revoke work remains pending. A later
+foreground opportunity uses the stable installation credential; it does not
+retain or recreate the old account cookie.
 
-For a new account, native first reconciles the retained credential candidates
-as specified in section 2.3. A current-secret GET is only a snapshot; while an
-old bind may still commit, the new-account cookie bind reuses the persisted
-pending secret as the `C -> P` target. Whichever bind wins makes `C` invalid.
-If the old bind wins, native confirms `P` and performs the ordinary new-account
-bind from `P` to a newly persisted candidate. The successful bind changes
-ownership, revokes the captured old set, and rotates authority atomically. A
-set conflict is persisted and retried before the new account can subscribe.
-Old requests authenticated with the prior credential then fail, and old
-concrete revoke IDs cannot match fresh registrations.
+For a new account, native persists a higher bind generation before sending the
+account-authenticated bind. The successful transaction changes ownership and
+revokes every registration from a lower generation. If a delayed old-account
+bind runs afterward, its lower generation returns
+`409 stale_bind_generation`; if it runs first, the higher new-account bind
+still commits afterward. A delayed registration create with the old generation
+returns `409 stale_generation`, a delayed bulk revoke through the old
+generation cannot select newer rows, and a concrete single-ID revoke cannot
+name a fresh registration ID.
 
 The accepted Phase 1 limitation is explicit:
 
@@ -1072,10 +1048,10 @@ The accepted Phase 1 limitation is explicit:
 - local generation checks and notification-center cleanup are best effort, not
   retroactive suppression.
 
-After a confirmed logout revoke, a still-signed-out app may delete the now
-unused installation credential. A later login then creates a new installation
-ID. If a new login arrives while recovery is pending, it completes the
-credential recovery and uses the atomic rebind path instead.
+The installation credential and bind generation remain in ThisDeviceOnly
+Keychain while the installation identity is reused. They are not deleted on
+logout, because they authorize the bounded revoke and the next
+account-authenticated bind.
 
 ### 9.7 Token rotation, reinstall, and uninstall
 
@@ -1087,10 +1063,11 @@ reactivates a registration.
 
 On reinstall detection, native treats app-container state as new even if
 Keychain items survived uninstall. It captures any surviving old
-installation credential and concrete registration IDs into a minimal orphaned
-revoke record, deletes old decryption keys, and creates a fresh installation
-ID for the new install. It may retry the orphaned concrete revokes later, but
-does not reuse old registration IDs or keys.
+installation credential and bind generation into a minimal orphaned revoke
+record that remains in ThisDeviceOnly storage, deletes old decryption keys,
+and creates a fresh installation ID, installation secret, and generation
+sequence for the new install. It may retry the orphaned generation-bounded
+revoke later, but does not reuse old registration IDs or keys.
 
 If no old credential survives, remote cleanup cannot be initiated by the app.
 Uninstall has no reliable callback. The first matching APNs invalid-token
@@ -1109,10 +1086,10 @@ the content.
 | --- | --- |
 | Open-relay abuse | Delivery requires a random stored registration, matching bound VAPID key, exact audience, bounded JWT expiry, strict encoding/body checks, and a per-registration rate limit. Clients cannot supply an APNs token or routing topic at delivery. |
 | Resource spraying | Installation and registration allocation share an authenticated-account creation bucket checked before allocation. |
-| Cross-account mutation | Account ownership changes require the exact account Origin/session plus the current installation credential; rebind, old-ID revocation, ownership, and credential rotation are one transaction. |
-| Delayed destructive request | Every revoke carries concrete IDs captured before send. A changed set causes a readback conflict, not server-selected destruction. Fresh registration IDs prevent an old target from naming a new row. |
+| Cross-account mutation | Account ownership changes require the exact account Origin/session plus the stable installation credential. Native persists bind generation before send; a greater generation changes ownership and revokes lower-generation registrations atomically, while stale or equal/different-account binds cannot mutate. |
+| Delayed destructive request | Single revokes carry concrete IDs; bulk revoke carries a captured upper generation. Registration create must match the current generation. Fresh IDs plus these generation bounds prevent old-account operations from selecting newer-account registrations. |
 | Stale provider write or invalidation | Native persists one monotonic generation; PATCH replaces the full tuple; APNs invalidation compares generation, token hash, environment, and topic. |
-| Installation credential leakage | The credential is deliberately usable after cookie logout but is restricted to one installation's push management, stored ThisDeviceOnly, hashed at the relay, rotated on bind/logout, excluded from Web/NSE/logs, and bounded by creation throttling. It cannot read account or notification data. |
+| Installation credential leakage | The credential is deliberately stable until reinstall and usable after cookie logout. It is restricted to one installation's push management, stored ThisDeviceOnly, hashed at the relay, and excluded from Web/NSE/logs. Leakage can disrupt that installation's push state or create rate-limited fallback-producing registrations, but cannot authenticate an account, read notification content, choose a non-allowlisted topic/environment, or manage another installation. Rotation is a Phase 2 candidate if real use requires reducing this lifetime. |
 | Cross-instance delivery | Registration stores the decoded VAPID public-key hash and every delivery must prove the matching ES256 key. |
 | APNs token leakage | Token is encrypted at rest, sent only to APNs over TLS, and represented elsewhere only by SHA-256. |
 | Content or log leakage | Relay never decrypts or stores body bytes and redacts authorization, full endpoint, device token, APNs body, ciphertext, and plaintext from logs, traces, and errors. |
@@ -1164,24 +1141,22 @@ Tests compare decoded bytes and all intermediate values, including the
    different VAPID sender is rejected; the relay test has no plaintext input
    and proves the ciphertext bytes are unchanged.
 
-2. **Concrete lifecycle and recovery.** Tests drop successful responses for
-   installation credential rotation and registration creation, restart native,
-   and prove pending-secret and same-registration-ID recovery. A delayed
-   logout/account request carries old concrete IDs and cannot revoke a fresh
-   registration after rebind. If current IDs changed before an account switch,
-   the first request is mutation-free `409`, native persists the readback, and
-   the retry converges. A later authenticated Web-owned reconcile re-POSTs an
+2. **Generation-bounded lifecycle and recovery.** Tests drop successful bind
+   and registration-create responses, restart native, and prove same-generation
+   bind replay plus same-registration-ID recovery. A race holds account A's
+   bind at generation `G`, commits account B's bind at `G+1`, and proves the
+   delayed A bind returns mutation-free `409`. The inverse order must converge
+   to B when `G+1` commits. A delayed create at `G` returns `409`, a bulk revoke
+   through `G` cannot revoke a registration at `G+1`, and a concrete old-ID
+   revoke cannot name a fresh row. When the app remains signed out, an
+   ambiguous create at `G` is reconciled by its persisted ID before the bulk
+   revoke through `G`; a successful logout revoke therefore cannot be followed
+   by that older create. A later authenticated Web-owned reconcile re-POSTs an
    existing subscription after provider recovery; after a VAPID hash change it
-   observes `off`, creates a fresh registration that replaces the old concrete
-   IDs, and POSTs the replacement. A committed bind with a lost response and an
-   expired old cookie is recovered from the retained `C/P` candidates before a
-   new-account bind. A test races successful `GET(C)` with the late old bind:
-   after process restart, whichever `C -> P` write wins invalidates `C`, a later
-   `GET(P)` observes the current credential, and the new account converges
-   without retaining the old session or letting an old request revoke a newer
-   registration.
+   observes `off`, creates a fresh current-generation registration that
+   replaces the captured old concrete IDs, and POSTs the replacement.
 
-3. **Newest provider wins.** Provider generation and pending tuple survive a
+3. **Newest provider wins.** Provider generation and desired tuple survive a
    process restart and account rebind. A terminally rejected `N+1` is not
    stored, and a later valid `N+2` succeeds because monotonic generations may
    have gaps. Once `N+2` is accepted, a generation `N` or `N+1` PATCH cannot
@@ -1257,9 +1232,12 @@ implementations must not assume them now:
 - ciphertext replay deduplication;
 - automatic registration sweep or installation retention/deletion;
 - leases, expiry, or renewal to impose a remote-stop deadline;
+- installation-credential rotation if operational evidence justifies reducing
+  the accepted stable-credential lifetime;
 - richer cleanup for orphaned reinstall records.
 
 Phase 1 deliberately has no epoch, durable bind-response replay table,
+pending-secret recovery protocol, credential-confirmation GET,
 five-installation cap, seven-day sweep, or ciphertext-dedup table.
 
 ## 13. Release gates
@@ -1267,8 +1245,8 @@ five-installation cap, seven-day sweep, or ciphertext-dedup table.
 Implementation is ready for integration only when:
 
 - the three acceptance properties pass across the owned boundaries;
-- all management routes enforce the mutation ledger and lost-response
-  recovery;
+- all management routes enforce the mutation ledger, bind-generation ordering,
+  and idempotent lost-response recovery;
 - payload math, APNs mapping, response codes, Keychain access, fallback, and
   tap-origin checks match this contract;
 - the current deployment allowlist is production-only while protocol tests

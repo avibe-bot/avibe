@@ -546,9 +546,12 @@ subscription disabling. The relay uses fresh stateful registration IDs, binds
 each one to an installation and VAPID public-key hash, forwards ciphertext to
 APNs without decryption, and returns the status mappings that the instance
 already understands. Account-cookie authentication is limited to installation
-binding; later management uses a rotatable native-only installation
-credential. Delayed revokes carry concrete registration IDs, and provider
-updates use one persisted monotonic generation.
+binding; all management requests also carry a stable native-only installation
+credential. Native persists a monotonic bind generation before each sign-in
+bind, registration creation carries the current generation, single revokes
+name concrete registration IDs, and logout bulk revokes are bounded by the
+captured generation. Provider updates use a separate persisted monotonic
+generation.
 
 The contract also fixes the 2800-byte UTF-8 plaintext budget, the compact
 APNs envelope, the shared Keychain record, the Notification Service
