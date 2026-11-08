@@ -153,6 +153,7 @@ _COMPLETED = ("completed", "ended_by_hook")
 _MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 _OPEN_RECOVERY_DELIVERY_STATES = ("claimed", "steering", "interrupt_waiting", "reconciling_steer")
+_NONTERMINAL_TURN_STATES = ("waiting", "starting", "active")
 
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
@@ -719,13 +720,17 @@ class VibeyAgent(BaseAgent):
     def _recovery_candidates(self) -> list[str]:
         return sorted({*self._sessions_with_open_tail(), *self._sessions_with_unconsumed_inputs()})
 
+    def _durable_recovery_turn_query(self, *, include_id: bool = False):
+        columns = (session_turns.c.session_id, session_turns.c.id) if include_id else (session_turns.c.session_id,)
+        return select(*columns).where(
+            session_turns.c.backend == BACKEND,
+            session_turns.c.state.in_(_NONTERMINAL_TURN_STATES),
+        )
+
     def _durable_recovery_query(self):
         unfinished_run_statuses = ("pending", "queued", "processing", "running")
         return union(
-            select(session_turns.c.session_id).where(
-                session_turns.c.backend == BACKEND,
-                session_turns.c.state != "terminal",
-            ),
+            self._durable_recovery_turn_query(),
             select(message_deliveries.c.session_id)
             .select_from(
                 message_deliveries.join(
@@ -811,12 +816,7 @@ class VibeyAgent(BaseAgent):
 
     def _durable_recovery_turns(self) -> dict[str, set[str]]:
         with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(session_turns.c.session_id, session_turns.c.id).where(
-                    session_turns.c.backend == BACKEND,
-                    session_turns.c.state != "terminal",
-                )
-            ).all()
+            rows = conn.execute(self._durable_recovery_turn_query(include_id=True)).all()
         turns: dict[str, set[str]] = {}
         for session_id, turn_id in rows:
             turns.setdefault(str(session_id), set()).add(str(turn_id))

@@ -938,6 +938,13 @@ session_turns = Table(
     ),
     Index("ix_session_turns_session_created", "session_id", "created_at", "id"),
     Index(
+        "ix_session_turns_recovery_owner",
+        "backend",
+        "state",
+        "session_id",
+        "id",
+    ),
+    Index(
         "uq_session_turns_live_session",
         "session_id",
         unique=True,

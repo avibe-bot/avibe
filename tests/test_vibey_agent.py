@@ -600,6 +600,9 @@ class _RecoveryProbe(SimpleNamespace):
     def _durable_recovery_query(self):
         return VibeyAgent._durable_recovery_query(self)
 
+    def _durable_recovery_turn_query(self, **kwargs):
+        return VibeyAgent._durable_recovery_turn_query(self, **kwargs)
+
     def _durable_recovery_sessions(self):
         return VibeyAgent._durable_recovery_sessions(self)
 
@@ -680,6 +683,17 @@ def test_vibey_recovery_candidate_query_plan_stays_on_durable_work_tables(engine
         ]
 
     assert any("session_turns" in detail for detail in details)
+    assert any("ix_session_turns_recovery_owner" in detail for detail in details)
+    turn_compiled = probe._durable_recovery_turn_query(include_id=True).compile(
+        engine, compile_kwargs={"literal_binds": True}
+    )
+    with engine.connect() as conn:
+        turn_details = [
+            str(row[3])
+            for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {turn_compiled}")
+        ]
+
+    assert any("ix_session_turns_recovery_owner" in detail for detail in turn_details)
     assert any("message_deliveries" in detail for detail in details)
     assert any("agent_runs" in detail for detail in details)
     interrupted_compiled = probe._unsettled_interrupted_sessions_query().compile(
