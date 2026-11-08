@@ -37,6 +37,8 @@ async function serveChat(
   await page.route(`**/api/sessions/${SESSION_ID}/queue`, (route) => route.fulfill({ json: [] }));
   await page.route(`**/api/sessions/${SESSION_ID}/turn-state`, (route) => route.fulfill({ json: turnState }));
   await page.route(`**/api/sessions/${SESSION_ID}/activity**`, (route) => route.fulfill({ json: { groups: [] } }));
+  // Typing saves the draft once the composer settles (600ms); a slow runner gets there before the checks end.
+  await page.route(`**/api/sessions/${SESSION_ID}/draft`, (route) => route.fulfill({ json: { ok: true, draft: { text: '', updated_at: null } } }));
   await page.route(`**/api/inbox/${SESSION_ID}/read`, (route) => route.fulfill({ json: { ok: true } }));
   await page.route('**/api/asr/status', (route) => route.fulfill({ json: { available: true } }));
   // The closed trigger names the model by its catalog label. A fast route reads

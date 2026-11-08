@@ -466,7 +466,7 @@ test.describe('phone tab bar under the Apps drawer', () => {
  * shown reports none at the bottom. The home indicator takes the place of the tab bar's own bottom
  * padding instead of adding to it, so the labels end where a native tab bar's do, 4px above the
  * inset; without an inset nothing moves. What clears the bar follows it, the main Bot keeps its
- * rise, the brand and chat headers are 48px below the top inset, and the chat composer rests on the
+ * rise, the brand and chat headers are 44px below the top inset, and the chat composer rests on the
  * inset rather than 16px above it. Measured with the browser reporting the owner's iPhone insets,
  * so a bar, a header, or a composer that went back to adding the inset fails here.
  */
@@ -518,7 +518,7 @@ test.describe('phone chrome on the safe area', () => {
         };
       }, MOBILE_NAV);
       const label = Math.max(16, inset.bottom + 4);
-      expect(home.header - inset.top, 'the brand header is 48px below the top inset').toBeCloseTo(48, 1);
+      expect(home.header - inset.top, 'the brand header is 44px below the top inset').toBeCloseTo(44, 1);
       expect(home.labels.length).toBe(4);
       for (const gap of home.labels) expect(gap, 'a tab label ends at native spacing').toBeCloseTo(label, 1);
       expect(home.centerLabel, "the main Bot's name stays level with the labels").toBeCloseTo(label, 1);
@@ -537,7 +537,7 @@ test.describe('phone chrome on the safe area', () => {
           composer: window.innerHeight - compose.firstElementChild!.getBoundingClientRect().bottom,
         };
       });
-      expect(chat.header - inset.top, 'the chat header is as tall as the brand header').toBeCloseTo(48, 1);
+      expect(chat.header - inset.top, 'the chat header is as tall as the brand header').toBeCloseTo(44, 1);
       expect(chat.composer, 'the composer rests on the inset, or 16px up without one').toBeCloseTo(Math.max(16, inset.bottom), 1);
       expect(denied).toEqual([]);
     });

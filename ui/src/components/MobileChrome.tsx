@@ -106,10 +106,12 @@ export const MobileBotCenter: React.FC<BotCenter> = ({ avatar, name, label, unre
       {/* Lifted out of the row, so the bar keeps its height and the avatar rises above its edge by
           `--mobile-nav-center-rise` (past the bar's top padding and border), the room a sheet that
           ends at the bar keeps for it. The name stays level with the other tabs' labels below.
-          The avatar fills the button to its ring: one circle, the Bot's face in it. */}
+          The avatar fills the button to its ring: one circle, the Bot's face in it. A flex box,
+          so the face sets its height alone: no line box (whose depth varies with the font)
+          makes the ring taller than wide or the button taller than the tabs. */}
       <span
         className={clsx(
-          'relative -mt-[calc(var(--mobile-nav-center-rise)+0.5rem+1px)] rounded-full bg-surface transition',
+          'relative flex -mt-[calc(var(--mobile-nav-center-rise)+0.5rem+1px)] rounded-full bg-surface transition',
           // At rest it is lit the way a selected Bot is (`.bot-avatar-selected`): a bright fine
           // edge and the theme's halo; the running dot says it is working.
           phase === 'idle' && 'bot-avatar-selected',
@@ -202,11 +204,11 @@ const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
 };
 
 // The mobile brand header above every tabbed page: the logo home link, on iOS Safari
-// the Add-to-Home-Screen nudge, and in the phone app the account avatar. 48px below the
-// safe area, the height of every mobile top bar (the chat's, a built-in app's): room for
-// a 44px touch target and little more, with the page's 16px top inset below it, so the
-// first section neither crowds the header nor floats far below it. The open tab names
-// the page for assistive tech only; the tab bar shows it to everyone else
+// the Add-to-Home-Screen nudge, and in the phone app the account avatar. 44px below the
+// safe area, a native navigation bar's height and the chat header's, exactly one 44px
+// touch target tall, with the page's 16px top inset below it, so the first section
+// neither crowds the header nor floats far below it. The open tab names the page for
+// assistive tech only; the tab bar shows it to everyone else
 // (ui/design: home/home/e-native-phone).
 const NativeHeaderAccountAction: React.FC = () => {
   const { t } = useTranslation();
@@ -244,7 +246,7 @@ export const MobileBrandHeader: React.FC<{
 }> = ({ title, nativeAccountAction = false }) => {
   const { t } = useTranslation();
   return (
-    <header className="sticky top-0 z-40 flex h-[calc(3rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
+    <header className="sticky top-0 z-40 flex h-[calc(2.75rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
       {title && <h1 className="sr-only">{title}</h1>}
       <Link
         to="/"

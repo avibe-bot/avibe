@@ -72,7 +72,7 @@ describe('native desktop drag surfaces', () => {
     renderHeaders();
     const header = document.querySelector('[data-chat-header]');
 
-    expect(header?.className).toContain('h-[calc(3rem+env(safe-area-inset-top))]');
+    expect(header?.className).toContain('h-[calc(2.75rem+env(safe-area-inset-top))]');
     expect(header?.className).toContain('pt-[env(safe-area-inset-top)]');
     expect(header?.className).toContain('bg-background/92');
     expect(header?.className).toContain('md:h-auto');
