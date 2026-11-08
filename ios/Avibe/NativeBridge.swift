@@ -238,6 +238,31 @@ enum NativeBridgeConfiguration {
           if (window !== window.top || window.location.origin !== config.instanceOrigin) return;
           if (Object.prototype.hasOwnProperty.call(window, "avibeNative")) return;
 
+          // A document holding the outer-scroll lock is a Workbench AppShell,
+          // which reserves every safe-area edge through env(). Declaring
+          // viewport-fit=cover for exactly that document lets WebKit report
+          // the Home indicator inset to it and drop the automatic scroll
+          // inset, while every other document keeps its own declaration.
+          const coveredViewports = new WeakMap();
+          const declaresViewportFit = (content) => content
+            .split(/[,;]/)
+            .some((entry) => entry.split("=")[0].trim().toLowerCase() === "viewport-fit");
+          const setViewportFitCover = (covered) => {
+            for (const meta of document.querySelectorAll('meta[name="viewport"]')) {
+              const content = meta.getAttribute("content") ?? "";
+              const applied = coveredViewports.get(meta);
+              if (covered) {
+                if (applied || declaresViewportFit(content)) continue;
+                const next = content.trim() ? `${content}, viewport-fit=cover` : "viewport-fit=cover";
+                coveredViewports.set(meta, { original: content, next });
+                meta.setAttribute("content", next);
+              } else if (applied) {
+                coveredViewports.delete(meta);
+                if (content === applied.next) meta.setAttribute("content", applied.original);
+              }
+            }
+          };
+
           const call = (method, params = {}) => {
             const handler = window.webkit?.messageHandlers?.[config.messageHandler];
             if (!handler || typeof handler.postMessage !== "function") {
@@ -245,6 +270,9 @@ enum NativeBridgeConfiguration {
                 code: "unavailable",
                 message: "The native bridge transport is unavailable."
               });
+            }
+            if (method === "viewport.setOuterScrollLocked" && typeof params?.locked === "boolean") {
+              setViewportFitCover(params.locked);
             }
             return Promise.resolve(handler.postMessage({ method, params })).then((reply) => {
               if (reply?.ok === true) return reply.result;

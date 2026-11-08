@@ -438,7 +438,8 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         let keyboardViewportLayoutController =
             KeyboardViewportLayoutController(
                 contentView: webView,
-                containerView: view
+                containerView: view,
+                bottomEdge: .container
             )
         self.keyboardViewportLayoutController =
             keyboardViewportLayoutController

@@ -76,6 +76,9 @@ private struct BrowserScreen: View {
                     )
                     .id(reloadID)
                     .ignoresSafeArea(.keyboard)
+                    // The controller decides where the page ends; the Web
+                    // UI reserves the Home indicator strip itself.
+                    .ignoresSafeArea(.container, edges: .bottom)
 
                     if isLoading && !failed {
                         ProgressView("browser.loading")
