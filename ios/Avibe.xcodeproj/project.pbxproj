@@ -28,6 +28,7 @@
 		100000000000000000000013 /* MobileOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* MobileOnboardingTests.swift */; };
 		100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */; };
 		100000000000000000000015 /* MobilePasskey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,6 +66,7 @@
 		200000000000000000000016 /* MobileOnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingTests.swift; sourceTree = "<group>"; };
 		200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransportIntegrationTests.swift; sourceTree = "<group>"; };
 		200000000000000000000018 /* MobilePasskey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePasskey.swift; sourceTree = "<group>"; };
+		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
 		200000000000000000000019 /* Avibe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Avibe.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -101,6 +103,7 @@
 				200000000000000000000001 /* AvibeApp.swift */,
 				200000000000000000000002 /* AppModel.swift */,
 				200000000000000000000019 /* Avibe.entitlements */,
+				2000000000000000000000A1 /* FormAccessoryBar.swift */,
 				200000000000000000000011 /* MobileAccount.swift */,
 				200000000000000000000012 /* MobileAuthTransport.swift */,
 				200000000000000000000013 /* MobileOnboardingBridge.swift */,
@@ -282,6 +285,7 @@
 			files = (
 				100000000000000000000002 /* AppModel.swift in Sources */,
 				100000000000000000000001 /* AvibeApp.swift in Sources */,
+				1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */,
 				10000000000000000000000E /* MobileAccount.swift in Sources */,
 				10000000000000000000000F /* MobileAuthTransport.swift in Sources */,
 				100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */,

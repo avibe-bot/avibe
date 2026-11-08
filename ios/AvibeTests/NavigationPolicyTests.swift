@@ -1871,3 +1871,61 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
 
 @MainActor
 private final class WebViewDelegateProbe: NSObject, WKNavigationDelegate, WKUIDelegate {}
+
+final class FormAccessoryBarTests: XCTestCase {
+    private let instance = WebOrigin.parseConfigured("https://alice-app.avibe.bot")!
+
+    @MainActor
+    func testInstanceWebViewsShowNoFormAccessoryBar() throws {
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
+        let delegate = WebViewDelegateProbe()
+        let primary = factory.makeWebView(delegate: delegate)
+        let child = factory.makeWebView(
+            configuration: primary.configuration,
+            delegate: delegate
+        )
+
+        let primaryContent = try XCTUnwrap(FormAccessoryBar.contentView(of: primary))
+        let childContent = try XCTUnwrap(FormAccessoryBar.contentView(of: child))
+        for content in [primaryContent, childContent] {
+            XCTAssertTrue(
+                NSStringFromClass(type(of: content)).hasSuffix(FormAccessoryBar.subclassSuffix)
+            )
+            XCTAssertNil(content.inputAccessoryView)
+        }
+        // Both content views share one runtime subclass.
+        XCTAssertEqual(
+            NSStringFromClass(type(of: primaryContent)),
+            NSStringFromClass(type(of: childContent))
+        )
+    }
+
+    @MainActor
+    func testHidingTwiceKeepsTheSameSubclass() throws {
+        let webView = WKWebView(frame: .zero)
+        XCTAssertTrue(FormAccessoryBar.hide(in: webView))
+        let first = NSStringFromClass(
+            type(of: try XCTUnwrap(FormAccessoryBar.contentView(of: webView)))
+        )
+        XCTAssertTrue(FormAccessoryBar.hide(in: webView))
+        let second = NSStringFromClass(
+            type(of: try XCTUnwrap(FormAccessoryBar.contentView(of: webView)))
+        )
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(second.hasSuffix(FormAccessoryBar.subclassSuffix))
+    }
+
+    @MainActor
+    func testTheSignInPageKeepsWebKitsDefaultAccessory() throws {
+        // The bundled sign-in WebView is not made by the instance factory, so
+        // its keyboard keeps WebKit's default accessory.
+        let webView = WKWebView(frame: .zero)
+        let content = try XCTUnwrap(FormAccessoryBar.contentView(of: webView))
+        XCTAssertFalse(
+            NSStringFromClass(type(of: content)).hasSuffix(FormAccessoryBar.subclassSuffix)
+        )
+    }
+}

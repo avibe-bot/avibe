@@ -43,6 +43,12 @@ and Web resizing cannot both run.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
 - Google authorization is intercepted with an email-code explanation.
+- Instance WebViews (primary and child) show no form accessory bar
+  (previous / next / Done) above the keyboard: `FormAccessoryBar` gives
+  WebKit's content view a runtime subclass whose `inputAccessoryView` is nil.
+  This uses a private WebKit class, an App Review risk the owner accepted on
+  2026-11-08 (`docs/plans/ios-app.md` section 5). Keyboard QuickType
+  suggestions are unaffected. The bundled sign-in page keeps the default bar.
 - External application schemes from top-level browsing contexts use
   `UIApplication`.
 - JavaScript alerts, confirmations, and prompts use native alerts. Their
