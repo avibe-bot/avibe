@@ -52,8 +52,8 @@ additive upgrades rather than optimizing its copying again.
 
 ### State, classification and bridge
 
-Bridge implementation and the proposed (not approved) release tags are tracked
-in [the bridge delivery contract](../maintenance/sqlite-compatibility.md).
+Bridge implementation and the owner-defined capability release boundary are
+tracked in [the bridge delivery contract](../maintenance/sqlite-compatibility.md).
 The bridge remains conservative; its presence alone does not enable no-copy
 upgrades or C-alt trace suppression.
 
@@ -86,15 +86,19 @@ new runtime. Cover omitted defaults, enum/JSON interpretation, unknown fields,
 one previous-release contract test, not an all-version matrix; semantic changes
 still require review and a breaking declaration rather than a false CI proof.
 
-Bridge: **R0 is the first release implementing the epoch protocol** (planning
-target `3.3.0`); **R1 is the first allowed to skip additive snapshots** (planning
-target `3.3.1`). Release owners must pin the actual tags before shipping; these
-numbers are not release commitments. Neither `3.2.4` nor `3.2.5rc18` understands
-the protocol. R0 uses the current conservative upgrade/backup path and writes
-epoch 1 after reaching its required schema. R1 skips a snapshot only when a
-valid bridge marker already exists and the entire batch is proven additive.
-Direct upgrades from pre-marker versions remain conservative. Do not relabel or
-edit released migrations to opt them in; fresh empty databases need no backup.
+Bridge: **R0 is the first release of any kind, RC or stable, implementing epoch
+protocol v1**. A prerelease establishes the bridge for each DB it opens; the
+per-DB marker, not a semver tag, is the authority. **R1 is a later release with
+no-copy activation**, allowed only when the DB already has valid bridge evidence
+from a different, earlier binary generation, so its rollback binary understands
+the epoch. A marker first written during the current upgrade does not qualify.
+Neither `3.2.4` nor `3.2.5rc18` understands the protocol. R0 uses the current
+conservative upgrade/backup path and writes epoch 1 after reaching its required
+schema. R1 skips a snapshot only with that prior-generation bridge evidence and
+an entirely proven-additive batch. Direct upgrades from pre-marker versions
+remain conservative. Do not relabel or edit released migrations to opt them in;
+fresh empty databases need no backup. Rolling back to a pre-protocol binary
+still requires the bridge-time backup.
 
 ### Open and upgrade rules
 

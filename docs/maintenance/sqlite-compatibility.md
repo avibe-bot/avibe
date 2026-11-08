@@ -53,14 +53,21 @@ traces. Do not suppress traces based only on the presence of epoch 1: the epoch
 must identify a **released projection-aware reader floor**, approved with that
 lane. The bridge by itself does not claim any projection capability.
 
-## Release decision: proposed, not approved
+## Release boundary (owner decision, 2026-11-08)
 
-Propose R0 **`v3.3.0`** (bridge) and R1 **`v3.3.1`** (first potentially
-snapshot-free additive upgrade), matching the plan's targets. The owner must
-pin the actual release tags, including any installable prerelease that becomes
-part of the boundary, before shipping. This PR cuts no release and changes no
-version. Keeping conservative snapshots in the bridge is unconditional; version
-strings do not enable the later path.
+**Bridge release (R0)** means the first release of any kind, RC or stable, whose
+binaries implement protocol v1. A prerelease establishes the bridge for each
+DB it opens; the per-DB integer marker is the authority, not a version number.
+The next release containing this implementation carries the bridge, and later
+stable releases carry the same protocol. This PR cuts no release or version.
+
+**First no-copy release (R1)** means a later release containing no-copy activation.
+It may skip a snapshot only when the DB already has valid bridge evidence from
+a different, earlier binary generation, so the rollback binary understands the
+epoch. A marker first written during the current upgrade is insufficient. The
+activation gates on marker and previous-generation evidence, never semver.
+Rolling back to any pre-protocol binary still requires the bridge-time backup.
+The bridge always retains conservative upgrade snapshots.
 
 Remaining A work, after the bridge contract lands:
 
@@ -72,8 +79,8 @@ Remaining A work, after the bridge contract lands:
 3. Additive no-copy activation with valid existing bridge marker only, plus
    exact-attempt backup/expiry tests and synthetic-volume latency evidence.
    No receipt adoption or expiry-clock resets on the no-copy path.
-4. Align public English/Chinese upgrade documentation when the release boundary
-   is approved. No public claim of a released snapshot-free path before then.
+4. Align public English/Chinese upgrade documentation for the bridge and its
+   later activation. No public claim of a released snapshot-free path before then.
 
 ## Validation
 
