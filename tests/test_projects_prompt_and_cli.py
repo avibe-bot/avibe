@@ -52,13 +52,15 @@ def test_project_description_round_trips_and_resolves_by_name_or_id(engine, tmp_
 
 def test_project_resolver_preserves_internal_name_whitespace(engine, tmp_path):
     folder = tmp_path / "spaced"
+    collapsed_folder = tmp_path / "collapsed"
     folder.mkdir()
+    collapsed_folder.mkdir()
     with engine.begin() as conn:
-        project = projects_service.create_project(conn, str(folder), display_name="Demo  App")
+        spaced = projects_service.create_project(conn, str(folder), display_name="Demo  App")
+        collapsed = projects_service.create_project(conn, str(collapsed_folder), display_name="Demo App")
     with engine.connect() as conn:
-        assert projects_service.resolve_project_target(conn, "  Demo  App  ")["id"] == project["id"]
-        with pytest.raises(LookupError, match="Project not found: Demo App"):
-            projects_service.resolve_project_target(conn, "Demo App")
+        assert projects_service.resolve_project_target(conn, "  Demo  App  ")["id"] == spaced["id"]
+        assert projects_service.resolve_project_target(conn, "Demo App")["id"] == collapsed["id"]
 
 
     folder = tmp_path / "disabled"

@@ -8563,52 +8563,6 @@ def _session_row(payload: dict, *, brief: bool) -> dict:
     return {key: value for key, value in payload.items() if key not in _SESSION_GET_OMIT}
 
 
-def _resolve_session_list_project(conn, value: str) -> str:
-    """Resolve a Project name (or id) for the session list's narrow filter.
-
-    The PROJECT lane owns the shared resolver. Until that contract lands on
-    master, use the existing visible-project projection with the same exact
-    name/id, whitespace, creation-order, and disabled-target semantics. Listing
-    Sessions does not require the Project to have a working directory.
-    """
-
-    from storage import projects_service
-
-    requested = " ".join(str(value or "").split())
-    if not requested:
-        raise TaskCliError(
-            "Project name is required",
-            code="invalid_project",
-            hint="Pass a Project name or id.",
-            help_command="vibe session list --help",
-        )
-    projects = projects_service.list_projects(conn, include_archived=True)
-    exact = [
-        project
-        for project in projects
-        if str(project.get("id") or "") == requested
-        or str(project.get("display_name") or "") == requested
-    ]
-    if not exact:
-        raise TaskCliError(
-            f"Project not found: {requested}",
-            code="project_not_found",
-            hint="Pass an existing Project name or id.",
-            help_command="vibe session list --help",
-            details={"project": requested},
-        )
-    project = min(exact, key=lambda item: (str(item["created_at"]), str(item["scope_id"])))
-    if project["archived"]:
-        raise TaskCliError(
-            f"Project is disabled: {requested}",
-            code="project_disabled",
-            hint="Enable the Project before listing its Sessions.",
-            help_command="vibe session list --help",
-            details={"project": requested},
-        )
-    return str(project["id"])
-
-
 def _validate_session_type(platform: str) -> None:
     from config.platform_registry import PLATFORM_REGISTRY
 
@@ -8652,7 +8606,17 @@ def cmd_session_list(args):
 
         engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
-            project_id = _resolve_session_list_project(conn, project_name) if project_name is not None else None
+            project_id = None
+            if project_name is not None:
+                from storage import projects_service
+
+                target = projects_service.resolve_project_target(
+                    conn,
+                    project_name,
+                    active_only=True,
+                    require_workdir=False,
+                )
+                project_id = target["id"]
             result = sessions_service.list_sessions_page(
                 conn,
                 platform=platform,

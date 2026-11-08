@@ -802,22 +802,23 @@ def resolve_project_target(
     The service owns the lookup and its user-facing failures so commands such as
     ``agent run`` and ``session list`` cannot drift in matching or disabled
     project semantics. Exact IDs win; duplicate exact names use the oldest
-    ``scope_settings.created_at`` / scope-id order.
+    ``scopes.first_seen_at`` / scope-id order.
     """
     needle = str(name or "").strip()
     if not needle:
         raise LookupError("Project name is required")
+    normalized_needle = " ".join(needle.split())
     rows = conn.execute(
         select(
             scopes.c.native_id,
             scopes.c.display_name,
             scope_settings.c.enabled,
             scope_settings.c.workdir,
-            scope_settings.c.created_at,
+            scopes.c.first_seen_at,
         )
         .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .order_by(scope_settings.c.created_at.asc(), scopes.c.id.asc())
+        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
     ).mappings().all()
     id_matches = [row for row in rows if str(row["native_id"]) == needle]
     if id_matches:
@@ -827,6 +828,11 @@ def resolve_project_target(
             row for row in rows
             if str(row["display_name"] or "").strip() == needle
         ]
+        if not name_matches and normalized_needle != needle:
+            name_matches = [
+                row for row in rows
+                if " ".join(str(row["display_name"] or "").split()) == normalized_needle
+            ]
         if not name_matches:
             raise LookupError(f"Project not found: {needle}")
         row = name_matches[0]
