@@ -77,6 +77,7 @@ HARNESS_SOURCE_FIELDS = (
     "source_kind",
     "source_actor",
     "source_session_id",
+    "source_session_title",
     "parent_run_id",
     "callback_session_id",
     "callback_mode",
@@ -119,6 +120,9 @@ def harness_source(spec: Mapping[str, Any]) -> str:
         parts = ["Task", definition, name, "on-failure"] if definition else ["hook send", run_id]
     elif trigger == "webhook":
         parts = ["webhook", definition, name]
+    elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("delegation-idle:"):
+        title = _token(spec.get("source_session_title")).replace('"', "'")
+        parts = ["Session", f'"{title}"' if title else "", f"#{session}", "went idle without reporting"]
     elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("vault:"):
         parts = ["Vault request", _token(actor[len("vault:") :])]
     elif trigger == "agent_run" and source_kind == "callback" and _NOTICE_ACTOR_MARKER in actor:

@@ -108,6 +108,7 @@ class RuntimeWorkLane(str, Enum):
     ACTIVITY_OUTPUTS = "activity_outputs"
     FAILURE_NOTICES = "failure_notices"
     STALE_RUNS = "stale_runs"
+    DELEGATION_SAFETY_NET = "delegation_safety_net"
 
 
 @dataclass(frozen=True)
@@ -165,17 +166,19 @@ class _Registration:
 
 
 _EVENT_LANES = {
-    QUEUE_UPDATED_EVENT: (RuntimeWorkLane.SESSION_DELIVERIES,),
+    QUEUE_UPDATED_EVENT: (RuntimeWorkLane.SESSION_DELIVERIES, RuntimeWorkLane.DELEGATION_SAFETY_NET),
     RUNS_UPDATED_EVENT: (
         RuntimeWorkLane.REQUESTS,
         RuntimeWorkLane.RUN_CALLBACKS,
         RuntimeWorkLane.FAILURE_NOTICES,
         RuntimeWorkLane.STALE_RUNS,
+        RuntimeWorkLane.DELEGATION_SAFETY_NET,
     ),
     VAULTS_UPDATED_EVENT: (RuntimeWorkLane.VAULT_CALLBACKS,),
     DEFINITIONS_UPDATED_EVENT: (
         RuntimeWorkLane.TASK_DEFINITIONS,
         RuntimeWorkLane.WATCH_DEFINITIONS,
+        RuntimeWorkLane.DELEGATION_SAFETY_NET,
     ),
 }
 

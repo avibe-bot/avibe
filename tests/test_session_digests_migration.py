@@ -16,7 +16,7 @@ from storage import migrations
 
 pytestmark = pytest.mark.no_sqlite_template
 
-HEAD_REVISION = "20261108_0076"
+HEAD_REVISION = "20261108_0079"
 PREVIOUS_REVISION = "20261020_0071"
 V5 = {
     "version": 1,

@@ -278,14 +278,20 @@ def create_app(
         # included -- for this private channel, not normalized by FastAPI.
         body = await request.body()
         payload = await asyncio.to_thread(_json_object, body)
-        if payload.get("operation") != "vault.fetch.await":
+        arguments = payload.get("arguments")
+        live_waiter = payload.get("operation") == "vault.fetch.await" or (
+            payload.get("operation") == "agent.run" and isinstance(arguments, dict)
+            and arguments.get("sync_run") is True
+        )
+        if not live_waiter:
             response = await handle_control_request(controller, payload, run_sync=_run_store_step)
             content = await asyncio.to_thread(_json_bytes, response)
             return Response(content=content, media_type="application/json")
 
-        # Unlike an admitted mutation, an approval waiter belongs to this live
-        # connection. Losing it must release its OS lock for the existing Vault
-        # callback arbiter. The handler lands in-flight store steps before cleanup.
+        # Approval and sync-result waiters belong to this live connection. On
+        # disconnect they must release Vault ownership / sync-wait suppression,
+        # not later acknowledge a result which no caller can receive. Ordinary
+        # admitted mutations still finish independently of their connection.
         operation = asyncio.create_task(handle_control_request(controller, payload, run_sync=_run_store_step))
 
         async def disconnect():
