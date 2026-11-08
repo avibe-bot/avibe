@@ -2679,6 +2679,7 @@ scenarios:
       - tests/test_model_hub_parallel.py::test_parallel_opt_in_dispatch_headers_and_teardown
       - tests/test_model_hub_parallel.py::test_parallel_persisted_collision_blocks_registered_dispatch
       - tests/test_model_hub_parallel.py::test_parallel_ignores_environment_https_proxy
+      - tests/test_model_hub_parallel.py::test_parallel_search_exchange_owns_retry_and_size
       - tests/test_model_hub_search_chain.py::test_order_placement_is_read_only_and_survives_reload
       - tests/test_model_hub_search_chain.py::test_skip_precedence_terminal_reason_and_attempts_without_execution
       - tests/test_model_hub_search_chain.py::test_billing_is_a_function_of_sent_status_and_original_results

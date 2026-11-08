@@ -276,8 +276,83 @@ async def test_parallel_rejects_redirects_and_oversized_responses(monkeypatch, b
     finally:
         await runner.cleanup()
     if boundary == 'redirect':
+        assert answer.http_status == 503  # Failed tools/list, followed by a redirect at teardown.
         assert ('/mcp', 'DELETE') in received
         assert all(path == '/mcp' for path, _ in received), received
     else:
         assert received == [('/mcp', 'initialize')]
     assert not answer.on_sent_fired
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('case', ['disconnect', 'limited', 'json', 'gzip_sse', 'oversize_json', 'oversize_sse'])
+async def test_parallel_search_exchange_owns_retry_and_size(monkeypatch, case):
+    """MH-SEARCH-SERVICES-001: only the search exchange owns its status, retry hints and wire budget."""
+    from config.v2_config import model_hub_search_service
+    from core.handlers.model_hub.search_services import map_response
+
+    async def peer(request):
+        if request.method != 'POST':
+            return web.Response(status=503, headers={'Retry-After': '999'})
+        message = await request.json()
+        method = message['method']
+        if method == 'notifications/initialized':
+            return web.Response(status=202)
+        if method == 'initialize':
+            result = {'protocolVersion': message['params']['protocolVersion'], 'capabilities': {'tools': {}},
+                      'serverInfo': {'name': 'test', 'version': '1'}}
+            headers = {'Mcp-Session-Id': 'test'}
+        elif method == 'tools/list':
+            result = {'tools': [{'name': 'web_search', 'inputSchema': {'type': 'object', 'properties': {
+                'objective': {}, 'search_queries': {}}}}]}
+            headers = {'Retry-After': '630'}
+        else:
+            assert method == 'tools/call'
+            if case == 'disconnect':
+                request.transport.abort()  # No response headers were sent for this exchange.
+                return web.Response()
+            if case == 'limited':
+                return web.Response(status=429, headers={'Retry-After': '41'})
+            # A structured result and its text fallback are both valid MCP output.
+            # The mapper always prefers the structured result and bounds its displayed excerpt.
+            row = {'url': 'https://example.org/guide', 'excerpts': ['x' * (1200 * 1024)]}
+            structured = {'results': [row]}
+            result = {'content': [{'type': 'text', 'text': json.dumps(structured)}], 'structuredContent': structured}
+            wire = json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}).encode()
+            if 'sse' in case:
+                wire = b'event: message\ndata: ' + wire + b'\n\n'
+                if case == 'oversize_sse':
+                    wire = (b':' + b' ' * 8192 + b'\n\n') * 1024 + wire
+                return web.Response(body=gzip.compress(wire), content_type='text/event-stream',
+                                    headers={'Content-Encoding': 'gzip'})
+            if case == 'oversize_json':
+                wire = b' ' * (8 * 1024 * 1024) + wire
+            return web.Response(body=wire, content_type='application/json')
+        return web.json_response({'jsonrpc': '2.0', 'id': message['id'], 'result': result}, headers=headers)
+
+    app = web.Application()
+    app.router.add_route('*', '/mcp', peer)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    try:
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        monkeypatch.setattr(parallel_mcp, 'ENDPOINT', f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
+        answer = await asyncio.wait_for(parallel_mcp.search_parallel({'objective': 'test'}), 5)
+    finally:
+        await runner.cleanup()
+
+    service = model_hub_search_service(model_hub_builtin_source(PARALLEL_SOURCE_ID))
+    record = map_response(service, answer, sent=answer.on_sent_fired, results=1, say=lambda key: key).record
+    assert answer.on_sent_fired
+    if case == 'disconnect':
+        assert (answer.http_status, answer.headers, answer.response_received_at) == (None, {}, None)
+        assert record['error_code'] == 'service_unavailable'
+    elif case == 'limited':
+        assert (answer.http_status, answer.headers) == (429, {'retry-after': '41'})
+        assert record['error_code'] == 'service_rate_limited'
+    elif case.startswith('oversize'):
+        assert record['status'] == 'failed'
+    else:
+        assert answer.http_status == 200 and answer.headers == {}
+        assert record['sources'] == [{'url': 'https://example.org/guide', 'snippet': 'x' * 1000}]

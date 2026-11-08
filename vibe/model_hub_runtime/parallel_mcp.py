@@ -17,11 +17,10 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import MCP_DEFAULT_TIMEOUT, MCP_DEFAULT_SSE_READ_TIMEOUT
 from mcp.types import Implementation
 
-from core.handlers.model_hub.adapter import SearchResponse
+from core.handlers.model_hub.adapter import SEARCH_RESPONSE_MAX_BYTES, SearchResponse
 from vibe import __version__
 
 ENDPOINT = "https://mcp.parallel.ai/mcp"
-_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class _SearchResponse(httpx2.Response):
@@ -31,7 +30,7 @@ class _SearchResponse(httpx2.Response):
         size = 0
         async for chunk in super().aiter_bytes(chunk_size):
             size += len(chunk)
-            if size > _MAX_RESPONSE_BYTES:
+            if size > SEARCH_RESPONSE_MAX_BYTES:
                 raise httpx2.StreamError("Model Hub search response exceeds 8 MiB")
             yield chunk
 
@@ -50,12 +49,23 @@ async def search_parallel(
     on_sent: Callable[[], Awaitable[None] | None] | None = None,
 ) -> SearchResponse:
     sent = False
+    primary_request = None
     status = None
     headers = {}
     received_at = None
 
     async def prepare(outgoing):
-        if outgoing.method != "POST" or json.loads(outgoing.content).get("method") != "tools/call":
+        nonlocal primary_request, status, headers, received_at
+        if outgoing.method != "POST":
+            return
+        method = json.loads(outgoing.content).get("method")
+        if method not in {"initialize", "tools/list", "tools/call"}:
+            return
+        # A new RPC can fail before reading any headers. Only its own response
+        # can supply the status and retry advice used by the service mapper.
+        primary_request = outgoing
+        status, headers, received_at = None, {}, None
+        if method != "tools/call":
             return
 
         async def before_headers(event, info):
@@ -76,8 +86,7 @@ async def search_parallel(
 
     async def received(response):
         nonlocal status, headers, received_at
-        # Background GET and DELETE cannot overwrite the primary outcome.
-        if response.request.method == "POST":
+        if response.request is primary_request:
             status = response.status_code
             headers = {k: v for k, v in response.headers.items() if k.lower() in {"retry-after", "x-ratelimit-reset"}}
             received_at = datetime.now(timezone.utc)
@@ -93,7 +102,8 @@ async def search_parallel(
         ) as http:
             http.event_hooks = {"request": [prepare], "response": [received]}
             async with Client(
-                streamable_http_client(ENDPOINT, http_client=http), mode="legacy",
+                streamable_http_client(ENDPOINT, http_client=http, max_sse_event_size=SEARCH_RESPONSE_MAX_BYTES),
+                mode="legacy",
                 client_info=Implementation(name="avibe", version=__version__),
             ) as client:
                 tools = await client.list_tools()
@@ -109,9 +119,7 @@ async def search_parallel(
                     envelope = {"error": exc.error.model_dump(mode="json", exclude_none=True)}
                 else:
                     envelope = {"result": result.model_dump(mode="json", by_alias=True, exclude_none=True)}
-                body = json.dumps(envelope).encode()
-                if len(body) > 2 * 1024 * 1024:
-                    body, error = None, "body_too_large"
+                body = await asyncio.to_thread(lambda: json.dumps(envelope, separators=(",", ":")).encode())
     except MCPError as exc:
         body = json.dumps({"error": exc.error.model_dump(mode="json", exclude_none=True)}).encode()
     except asyncio.CancelledError:
