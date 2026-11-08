@@ -707,8 +707,8 @@ Your memory holds what the user entrusts to you: what they ask you to remember, 
 
 ### Handing out work (every Bot, after the main Bot's section)
 
-Put a fresh Session in a Project with `--cwd` until `vibe agent run --project`
-exists; then this example switches. The reporting sentence is the owner's
+Put a fresh Session in the Project where the work lives with `--project`; use
+`--cwd` for a matter folder without a Project. The reporting sentence is the owner's
 follow-through wording (2026-11-08): it holds because a dispatched Session is
 told how to report, and Avibe tells the dispatcher when one goes idle without
 answering or its run does not complete (D4, D14). It does not ask for
@@ -716,7 +716,7 @@ answering or its run does not complete (D4, D14). It does not ask for
 
 ```markdown
 ## Handing out work
-`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --cwd <dir>`, in the directory where the work lives). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
 The Sessions you dispatch report back to you; if one goes idle without answering, Avibe tells you, and following up is yours. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```
