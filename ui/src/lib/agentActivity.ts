@@ -8,12 +8,24 @@ import { timestampOrderTimeMs } from './transcriptOrder';
 // backend ``storage/agent_activity_service.py`` shape (see the /activity endpoint).
 export type ActivityStatus = 'running' | 'done' | 'failed' | 'interrupted';
 
+// One tool step's state, from Vibey's canonical projection (``core/tool_activity.py``).
+// Legacy traces and other backends' rows carry none of these step fields.
+export type ActivityStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'interrupted' | 'unknown';
+
 export type ActivityRow = {
   id: string;
   kind: 'assistant' | 'tool_call';
   text: string;
   created_at: string;
-  order_micros?: number; // authoritative durable key; absent on live SSE rows
+  // Authoritative position: on every durable row, and on a live projected step.
+  order_micros?: number;
+  // Tiebreak at one ``order_micros`` (a response's block index). Present only on
+  // projected steps, so it also marks a row whose position is explicit.
+  order_index?: number;
+  status?: ActivityStepStatus;
+  started_at?: string | null;
+  ended_at?: string | null;
+  duration_ms?: number | null;
   // Source sidecar for an agent narration row whose text carries citation links
   // (see lib/citations). Absent on every other row, live or durable.
   citations?: CitationSource[];
@@ -21,17 +33,78 @@ export type ActivityRow = {
   hosted?: HostedActivity;
 };
 
+type ActivityStepFields = Pick<
+  ActivityRow,
+  'order_micros' | 'order_index' | 'status' | 'started_at' | 'ended_at' | 'duration_ms'
+>;
+
+const STEP_RANK: Record<ActivityStepStatus, number> = {
+  pending: 0,
+  unknown: 0,
+  running: 1,
+  completed: 2,
+  failed: 2,
+  interrupted: 2,
+};
+
+const isStepStatus = (value: unknown): value is ActivityStepStatus =>
+  typeof value === 'string' && Object.hasOwn(STEP_RANK, value);
+
+// The step fields a row carries: ``content.activity`` on a live message, top-level
+// on a durable row. A malformed value is dropped, so that field keeps today's behavior.
+const stepFields = (raw: unknown): ActivityStepFields => {
+  if (!raw || typeof raw !== 'object') return {};
+  const value = raw as Record<string, unknown>;
+  const fields: ActivityStepFields = {};
+  if (Number.isSafeInteger(value.order_micros)) fields.order_micros = value.order_micros as number;
+  if (Number.isSafeInteger(value.order_index)) fields.order_index = value.order_index as number;
+  if (isStepStatus(value.status)) fields.status = value.status;
+  for (const key of ['started_at', 'ended_at'] as const) {
+    if (typeof value[key] === 'string' || value[key] === null) fields[key] = value[key] as string | null;
+  }
+  if (Number.isFinite(value.duration_ms) || value.duration_ms === null) fields.duration_ms = value.duration_ms as number | null;
+  return fields;
+};
+
 // Storage owns persisted order, including clocks recovered from migration metadata.
 // Live rows without a durable key still carry their emission clock in the id.
-const activityRowTimeMs = (row: ActivityRow): number => {
-  if (row.order_micros !== undefined) return row.order_micros / 1000;
+const activityRowMicros = (row: ActivityRow): number => {
+  if (row.order_micros !== undefined) return row.order_micros;
   const clock = /^[^_]{3}_([0-9a-f]{15})/i.exec(row.id)?.[1];
   if (clock) {
     const micros = Number.parseInt(clock, 16);
-    if (Number.isSafeInteger(micros)) return micros / 1000;
+    if (Number.isSafeInteger(micros)) return micros;
   }
-  return timestampOrderTimeMs(row.created_at);
+  return timestampOrderTimeMs(row.created_at) * 1000;
 };
+
+const compareKeys = (a: number | string, b: number | string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+// Storage's order within a group: (emission microsecond, block index, id). A row
+// without a block index sorts as 0, so rows that lack one keep (time, id).
+const compareActivityRows = (a: ActivityRow, b: ActivityRow): number =>
+  compareKeys(activityRowMicros(a), activityRowMicros(b))
+  || compareKeys(a.order_index ?? 0, b.order_index ?? 0)
+  || compareKeys(a.id, b.id);
+
+// Insert a live row at its place. A row with explicit order is placed among all
+// rows; one without it is appended as before, moving ahead only of explicitly
+// ordered rows that sort after it.
+const placeRow = (rows: ActivityRow[], row: ActivityRow): ActivityRow[] => {
+  const explicit = row.order_index !== undefined;
+  let at = rows.length;
+  while (
+    at > 0
+    && (explicit || rows[at - 1].order_index !== undefined)
+    && compareActivityRows(rows[at - 1], row) > 0
+  ) at -= 1;
+  return [...rows.slice(0, at), row, ...rows.slice(at)];
+};
+
+// A step only moves forward: pending (or unknown) → running → settled. A durable
+// read and the live stream can deliver an older state of a step after a newer one.
+const isOlderStep = (held: ActivityRow, other: ActivityRow): boolean =>
+  held.status !== undefined && other.status !== undefined && STEP_RANK[other.status] < STEP_RANK[held.status];
 
 // A group is positioned relative to a transcript message that is AT OR BEFORE the
 // group's own end (never a future message): done/failed anchor to their terminal
@@ -96,6 +169,11 @@ export type TurnActivityGroupWire = {
     text: string;
     created_at: string;
     order_micros?: number;
+    order_index?: number;
+    status?: string;
+    started_at?: string | null;
+    ended_at?: string | null;
+    duration_ms?: number | null;
     citations?: CitationSource[];
     hosted?: unknown;
   }>;
@@ -111,7 +189,8 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   durationMs: wire.duration_ms ?? null,
   startedAt: wire.started_at ?? null,
   rows: wire.rows?.map((r) => ({
-    id: r.id, kind: r.kind, text: r.text, created_at: r.created_at, order_micros: r.order_micros,
+    id: r.id, kind: r.kind, text: r.text, created_at: r.created_at,
+    ...stepFields(r),
     citations: r.citations,
     hosted: hostedActivityFrom(r.hosted),
   })),
@@ -124,6 +203,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
   kind: msg.type === 'tool_call' ? 'tool_call' : 'assistant',
   text: msg.text ?? '',
   created_at: msg.created_at,
+  ...stepFields((msg.content as { activity?: unknown } | null | undefined)?.activity),
   citations: (msg.content as { citations?: CitationSource[] } | null | undefined)?.citations,
   hosted: hostedActivityFrom((msg.content as { hosted?: unknown } | null | undefined)?.hosted),
 });
@@ -191,18 +271,29 @@ export const liveActivityReducer = (
       // Visibility changes, navigation and output phase boundaries invalidate
       // every in-flight read from the previous visible group without settling work.
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
-    case 'row':
-      // Storage hydration can include a row before its SSE envelope arrives.
-      if (state.rows.some((row) => row.id === event.row.id)) return state;
+    case 'row': {
+      const at = state.rows.findIndex((row) => row.id === event.row.id);
+      if (at >= 0) {
+        // A step's state changes arrive under its id: update it in place, in any
+        // phase. A row without step state never changes, and storage hydration can
+        // include it before its SSE envelope arrives, so its repeat is a no-op.
+        const held = state.rows[at];
+        if (event.row.status === undefined || isOlderStep(held, event.row)) return state;
+        const rows = compareActivityRows(held, event.row) === 0
+          ? state.rows.map((row, index) => (index === at ? event.row : row))
+          : placeRow(state.rows.filter((_, index) => index !== at), event.row);
+        return { ...state, rows };
+      }
       if (state.settled) {
         // First row after a settle with no turn.start = an agent-initiated new turn.
         return { gen: state.gen + 1, settled: false, rows: [event.row], startedAt: event.now };
       }
       return {
         ...state,
-        rows: [...state.rows, event.row],
+        rows: placeRow(state.rows, event.row),
         startedAt: state.rows.length === 0 ? event.now : state.startedAt,
       };
+    }
     case 'settle':
       return state.settled ? state : { ...state, settled: true };
     case 'clear_for_gen':
@@ -210,20 +301,23 @@ export const liveActivityReducer = (
       // — but ONLY if still the same generation (a newer turn.start bumped gen, so
       // this resolution is a stale no-op and must not wipe the new turn's rows).
       return event.gen === state.gen ? { ...state, rows: [], startedAt: null } : state;
-    case 'rehydrate_for_gen':
+    case 'rehydrate_for_gen': {
       if (event.gen !== state.gen || state.settled) return state;
-      // Match storage's (emission time, id) order even when its bounded window
-      // advances. Stable timestamp-only sorting would move retained tied rows last.
-      // Durable rows win overlap so SSE cannot erase storage-only ordering keys.
+      // Match storage's order even when its bounded window advances. Stable
+      // timestamp-only sorting would move retained tied rows last. Durable rows win
+      // overlap so SSE cannot erase storage-only ordering keys, unless the durable
+      // read predates a step state the live stream already delivered.
+      const rows = new Map(state.rows.map((row) => [row.id, row]));
+      for (const row of event.rows) {
+        const held = rows.get(row.id);
+        if (!held || !isOlderStep(held, row)) rows.set(row.id, row);
+      }
       return {
         ...state,
-        rows: [...new Map([...state.rows, ...event.rows].map((row) => [row.id, row])).values()]
-          .sort((a, b) => {
-            const timeOrder = activityRowTimeMs(a) - activityRowTimeMs(b);
-            return timeOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-          }),
+        rows: [...rows.values()].sort(compareActivityRows),
         startedAt: Math.min(state.startedAt ?? event.startedAt, event.startedAt),
       };
+    }
     default:
       return state;
   }
