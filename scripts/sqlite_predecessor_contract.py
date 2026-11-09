@@ -281,6 +281,12 @@ def _projection_probe(action: str, home: Path) -> dict:
 
 
 def _run(*args: str, **kwargs) -> str:
+    if args[:2] == ("gh", "api") or args[:3] == ("gh", "release", "download"):
+        # Lazy import: isolated --probe processes must import only the actual
+        # predecessor wheel, not this checkout's scripts or dependencies.
+        from scripts.release_asset_download import run_gh_read
+
+        return run_gh_read(*args[1:], **kwargs)
     result = subprocess.run(args, check=True, capture_output=True, text=True, **kwargs)
     return result.stdout
 
@@ -446,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"Published predecessor {tag} lacks a checksummed {name}")
     with tempfile.TemporaryDirectory(prefix="sqlite-predecessor-") as directory:
         home = Path(directory).resolve()
-        _run("gh", "release", "download", tag, "--repo", args.repo, "--pattern", name, "--dir", str(home))
+        _run("gh", "release", "download", tag, "--repo", args.repo, "--pattern", name, "--dir", str(home), "--clobber")
         wheel = home / name
         digest = "sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest()
         if digest != asset["digest"]:

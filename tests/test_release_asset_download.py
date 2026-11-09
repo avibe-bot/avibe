@@ -110,12 +110,26 @@ def test_http_retries_only_transient_statuses(asset_server, retry_clock, tmp_pat
         assert not target.exists()
 
 
-def test_persistent_504_stops_after_four_attempts(asset_server, retry_clock):
-    asset_server.responses = [(504, b"unavailable")] * 4
+@pytest.mark.parametrize("message", ["secondary rate limit", "abuse detection mechanism"])
+def test_secondary_api_limit_retries_within_server_and_local_budget(asset_server, retry_clock, message):
+    asset_server.responses = [(403, message.encode(), {"Retry-After": "2"}), (200, b"complete")]
+    assert downloads.read_bytes(asset_server.url) == b"complete"
+    assert len(asset_server.requests) == 2 and retry_clock.sleeps == [2.0]
+
+
+def test_long_server_rate_limit_is_not_retried_early(asset_server, retry_clock):
+    asset_server.responses = [(429, b"slow down", {"Retry-After": "60"})]
+    with pytest.raises(RuntimeError, match="retry budget"):
+        downloads.read_bytes(asset_server.url)
+    assert len(asset_server.requests) == 1 and retry_clock.sleeps == []
+
+
+def test_persistent_504_stops_after_three_attempts(asset_server, retry_clock):
+    asset_server.responses = [(504, b"unavailable")] * 3
     with pytest.raises(urllib.error.HTTPError, match="504"):
         downloads.read_bytes(asset_server.url)
-    assert len(asset_server.requests) == 4
-    assert retry_clock.sleeps == [1.5, 2.5, 4.5]
+    assert len(asset_server.requests) == 3
+    assert retry_clock.sleeps == [1.5, 2.5]
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
@@ -131,10 +145,10 @@ def test_connection_failures_retry_with_a_subminute_budget(retry_clock, wrapped,
 
     with pytest.raises((urllib.error.URLError, error_type)):
         downloads.read_bytes("https://example.invalid/asset", opener=opener)
-    assert len(timeouts) == 4
-    assert retry_clock.sleeps == [1.5, 2.5, 4.5]
+    assert len(timeouts) == 3
+    assert retry_clock.sleeps == [1.5, 2.5]
     assert 0 < min(timeouts) <= max(timeouts) <= 10
-    assert retry_clock.now <= 45
+    assert retry_clock.now <= 30
 
 
 def test_elapsed_window_prevents_another_attempt(retry_clock):
@@ -330,6 +344,17 @@ def test_fallback_retries_do_not_repeat_permanent_api_errors(asset_server, retry
     assert retry_clock.sleeps == [1.5]
 
 
+@pytest.mark.parametrize("failure_path", [_API_LOOKUP, _API_ASSET])
+def test_rate_limited_api_is_not_replayed_during_public_asset_retry(asset_server, retry_clock, failure_path):
+    _api_routes(asset_server)
+    asset_server.routes[failure_path] = [(403, b"secondary rate limit", {"Retry-After": "60"})]
+    asset_server.routes[_BROWSER] = [(504, b"browser unavailable"), (200, b"verified bytes")]
+    assert downloads.read_bytes(_OWN_URL, opener=asset_server.opener) == b"verified bytes"
+    prefix = [_API_LOOKUP] if failure_path == _API_LOOKUP else [_API_LOOKUP, _API_ASSET]
+    assert asset_server.requests == prefix + [_BROWSER, _BROWSER]
+    assert retry_clock.sleeps == [1.5]
+
+
 def test_api_and_browser_fallback_share_the_retry_time_budget(retry_clock):
     calls = []
 
@@ -342,7 +367,7 @@ def test_api_and_browser_fallback_share_the_retry_time_budget(retry_clock):
         downloads.read_bytes(_OWN_URL, opener=opener)
     assert any("api.github.com" in url for url in calls)
     assert _OWN_URL in calls
-    assert retry_clock.now <= 45
+    assert retry_clock.now <= 30
 
 
 def test_api_size_failure_does_not_fall_back(asset_server, retry_clock, monkeypatch, tmp_path):

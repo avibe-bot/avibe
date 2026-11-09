@@ -756,7 +756,7 @@ jobs:
         run: |
           set -o pipefail
           output="$RUNNER_TEMP/migration-release-guard.log"
-          python -m pytest tests/test_migration_release_guard.py -ra | tee "$output"
+          python -m pytest tests/test_migration_release_guard.py tests/test_github_read_retry.py -ra | tee "$output"
           # The release-history properties skip themselves when no tags are reachable so
           # the sharded unit job stays green on its shallow checkout. This job is the one
           # that supplies the history, so here a skip means the guard proved nothing.
