@@ -359,19 +359,22 @@ final class NativePushCoordinator {
 
     func subscribe(
         vapidPublicKey: String,
-        instanceOrigin: String
+        instanceOrigin: String,
+        forceReplacement: Bool = false
     ) async throws -> [String: Any] {
         try await enqueueMutation {
             try await self.subscribeNow(
                 vapidPublicKey: vapidPublicKey,
-                instanceOrigin: instanceOrigin
+                instanceOrigin: instanceOrigin,
+                forceReplacement: forceReplacement
             )
         }
     }
 
     private func subscribeNow(
         vapidPublicKey: String,
-        instanceOrigin: String
+        instanceOrigin: String,
+        forceReplacement: Bool
     ) async throws -> [String: Any] {
         guard !isFrozen else {
             throw NativePushError.unavailable
@@ -400,7 +403,8 @@ final class NativePushCoordinator {
                 && $0.instanceOrigin == instanceOrigin
                 && $0.vapidKeyHash == vapidKeyHash
         }
-        if recoveredRecords.count == 1,
+        if !forceReplacement,
+           recoveredRecords.count == 1,
            let recoveredRecord = recoveredRecords.first
         {
             return recoveredRecord.publicSubscription
@@ -612,6 +616,11 @@ final class NativePushCoordinator {
             forKids: notificationKids,
             center: notificationCenter
         )
+        if let latest = try? keychain.loadInstallation() {
+            installation.providerGeneration = latest.providerGeneration
+            installation.provider = latest.provider
+            installation.providerPatchPending = latest.providerPatchPending
+        }
         try? keychain.saveInstallation(installation)
         guard createsReconciled else {
             return

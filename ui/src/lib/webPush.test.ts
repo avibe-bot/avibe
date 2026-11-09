@@ -36,8 +36,11 @@ function disabledIntentStore(
 ): NativePushDisabledIntentStore & {
   value: NativePushDisableRecord | null;
 } {
+  let revision = initial ? 1 : 0;
   const initialRecord = (): NativePushDisableRecord => ({
-    version: 2,
+    version: 3,
+    intentRevision: revision,
+    phase: 'cleanup',
     userIntent: 'disabled',
     endpoint: null,
     instanceCleanup: 'pending',
@@ -51,16 +54,39 @@ function disabledIntentStore(
     read() {
       return this.value;
     },
+    readIntent() {
+      return {
+        revision,
+        userIntent: this.value ? 'disabled' : 'enabled',
+      };
+    },
+    isCurrentIntentRevision(currentRevision) {
+      return currentRevision === revision;
+    },
     beginDisable() {
-      if (this.value) return { record: this.value, created: false };
+      if (this.value) {
+        return {
+          record: this.value,
+          created: false,
+          revision,
+        };
+      }
+      revision += 1;
       this.value = {
-        version: 2,
+        version: 3,
+        intentRevision: revision,
+        phase: 'capture_pending',
         userIntent: 'disabled',
         endpoint: null,
         instanceCleanup: 'unknown',
         nativeRevoke: 'unknown',
       };
-      return { record: this.value, created: true };
+      return { record: this.value, created: true, revision };
+    },
+    beginEnable() {
+      revision += 1;
+      this.value = null;
+      return { revision };
     },
     update(patch) {
       if (!this.value) throw new Error('missing disable record');
@@ -74,12 +100,17 @@ function disabledIntentStore(
       this.value = {
         ...this.value,
         ...patch,
+        intentRevision: revision,
+        phase: patch.phase
+          ?? (patch.endpoint && this.value.phase === 'capture_pending'
+            ? 'cleanup'
+            : this.value.phase),
         endpoint: this.value.endpoint ?? patch.endpoint ?? null,
       };
       return this.value;
     },
     clear() {
-      this.value = null;
+      this.beginEnable();
     },
   };
 }
@@ -93,6 +124,15 @@ function memoryStorage() {
       setItem: (key: string, value: string) => values.set(key, value),
       removeItem: (key: string) => values.delete(key),
     },
+  };
+}
+
+function writableLocalStorage() {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
   };
 }
 
@@ -382,10 +422,12 @@ describe('web push recovery', () => {
     expect(JSON.parse(localStorage.get('vibe.nativePush.disabledIntent') ?? '{}'))
       .toEqual({
         endpoint: 'https://avibe.bot/api/push/apns/native-old',
+        intentRevision: 2,
         instanceCleanup: 'confirmed',
         nativeRevoke: 'confirmed',
+        phase: 'cleanup',
         userIntent: 'disabled',
-        version: 2,
+        version: 3,
       });
     expect(api.getWebPushStatus).not.toHaveBeenCalled();
     expect(api.subscribeWebPush).toHaveBeenCalledOnce();
@@ -410,11 +452,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(),
@@ -460,11 +498,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -535,11 +569,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -586,11 +616,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -680,10 +706,12 @@ describe('web push recovery', () => {
     expect(JSON.parse(localStorage.values.get('vibe.nativePush.disabledIntent') ?? '{}'))
       .toEqual({
         endpoint,
+        intentRevision: 1,
         instanceCleanup: 'confirmed',
         nativeRevoke: 'confirmed',
+        phase: 'cleanup',
         userIntent: 'disabled',
-        version: 2,
+        version: 3,
       });
   });
 
@@ -708,11 +736,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -731,7 +755,10 @@ describe('web push recovery', () => {
     const disabled: NativePushDisabledIntentStore = {
       isDisabled: () => false,
       read: () => null,
+      readIntent: () => ({ revision: 0, userIntent: 'enabled' }),
+      isCurrentIntentRevision: () => true,
       beginDisable: () => { throw new Error('storage blocked'); },
+      beginEnable: () => ({ revision: 1 }),
       update: vi.fn(),
       clear: vi.fn(),
     };
@@ -745,11 +772,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(),
@@ -788,11 +811,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -826,11 +845,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -871,7 +886,9 @@ describe('web push recovery', () => {
     const reloadedPage = createNativePushDisabledIntentStore(accountA.storage);
     expect(reloadedPage.isDisabled()).toBe(true);
     expect(reloadedPage.read()).toEqual({
-      version: 2,
+      version: 3,
+      intentRevision: 1,
+      phase: 'cleanup',
       userIntent: 'disabled',
       endpoint: 'https://push.example.test/sub/old',
       instanceCleanup: 'failed',
@@ -928,6 +945,38 @@ describe('web push recovery', () => {
     expect(api.unsubscribeWebPush).not.toHaveBeenCalled();
     expect(api.subscribeWebPush).not.toHaveBeenCalled();
     expect(call).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when native intent storage cannot be read', async () => {
+    const blockedStorage = {
+      getItem: () => { throw new Error('storage blocked'); },
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    };
+    const call = vi.fn();
+    const disabled = createNativePushDisabledIntentStore(blockedStorage);
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: blockedStorage,
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(),
+      subscribeWebPush: vi.fn(),
+      unsubscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(
+      reconcileWebPush(api, pendingRegistrationStore(), disabled),
+    ).resolves.toMatchObject({ status: 'disable_failed' });
+    expect(call).not.toHaveBeenCalled();
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
   });
 
   it('reports a persisted native opt-out as off without reading native state', async () => {
@@ -1001,13 +1050,206 @@ describe('web push recovery', () => {
     const reconciliation = reconcileWebPush(api, pendingRegistrationStore(), disabled);
     await vi.waitFor(() => expect(api.getWebPushStatus).toHaveBeenCalledOnce());
     const disabling = disableWebPush(api, disabled);
-    expect(disabled.isDisabled()).toBe(true);
+    await vi.waitFor(() => expect(disabled.isDisabled()).toBe(true));
 
     releaseStatus();
     await expect(reconciliation).resolves.toMatchObject({ status: 'disabled' });
     await expect(disabling).resolves.toMatchObject({ status: 'disabled' });
     expect(api.subscribeWebPush).not.toHaveBeenCalled();
     expect(api.unsubscribeWebPush).toHaveBeenCalledOnce();
+  });
+
+  it('lets a newer same-origin disable supersede an earlier enable before subscribe', async () => {
+    const sharedStorage = memoryStorage();
+    const firstDocument = createNativePushDisabledIntentStore(sharedStorage.storage);
+    const secondDocument = createNativePushDisabledIntentStore(sharedStorage.storage);
+    let releaseVapid!: () => void;
+    const vapidReady = new Promise<void>((resolve) => {
+      releaseVapid = resolve;
+    });
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return { state: 'off' as const, revokeState: 'absent' as const };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: sharedStorage.storage,
+    });
+    let vapidCalls = 0;
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => {
+        vapidCalls += 1;
+        if (vapidCalls === 1) await vapidReady;
+        return { public_key: 'AQIDBA' };
+      }),
+      subscribeWebPush: vi.fn(),
+      unsubscribeWebPush: vi.fn(async () => ({ ok: true, disabled: true })),
+    } as unknown as ApiContextType;
+
+    const enable = enableWebPush(api, {
+      disabledIntentStore: firstDocument,
+    });
+    await vi.waitFor(() => expect(api.getWebPushVapidPublicKey).toHaveBeenCalledOnce());
+
+    const disable = disableWebPush(api, secondDocument);
+    await vi.waitFor(() => expect(secondDocument.isDisabled()).toBe(true));
+    releaseVapid();
+
+    await expect(enable).rejects.toThrow('native_push_stale_intent');
+    await expect(disable).resolves.toMatchObject({ status: 'disabled' });
+    expect(call).not.toHaveBeenCalledWith('push.subscribe', expect.anything());
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    expect(secondDocument.readIntent()).toMatchObject({
+      revision: 2,
+      userIntent: 'disabled',
+    });
+  });
+
+  it('compensates a stale native endpoint before posting it', async () => {
+    const sharedStorage = memoryStorage();
+    const firstDocument = createNativePushDisabledIntentStore(sharedStorage.storage);
+    const secondDocument = createNativePushDisabledIntentStore(sharedStorage.storage);
+    let releaseCache!: () => void;
+    const cacheReady = new Promise<void>((resolve) => {
+      releaseCache = resolve;
+    });
+    const cache = {
+      match: vi.fn(async () => {
+        await cacheReady;
+        return undefined;
+      }),
+    };
+    const endpoint = 'https://avibe.bot/api/push/apns/stale-enable';
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return { state: 'off' as const, revokeState: 'absent' as const };
+      }
+      if (method === 'push.subscribe') {
+        return {
+          endpoint,
+          keys: { p256dh: 'key', auth: 'auth' },
+        };
+      }
+      if (method === 'push.unsubscribe') {
+        return { revoked: true, revoke: 'confirmed' };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      caches: {
+        open: vi.fn(async () => cache),
+      },
+      location: { origin: 'https://avibe.bot' },
+      localStorage: sharedStorage.storage,
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
+      unsubscribeWebPush: vi.fn(async () => ({ ok: true, disabled: true })),
+    } as unknown as ApiContextType;
+
+    const enable = enableWebPush(api, {
+      disabledIntentStore: firstDocument,
+    });
+    await vi.waitFor(() => expect(call).toHaveBeenCalledWith(
+      'push.subscribe',
+      { vapidPublicKey: 'AQIDBA' },
+    ));
+    await vi.waitFor(() => expect(cache.match).toHaveBeenCalledOnce());
+
+    const disable = disableWebPush(api, secondDocument);
+    await vi.waitFor(() => expect(secondDocument.isDisabled()).toBe(true));
+    releaseCache();
+
+    await expect(enable).rejects.toThrow('native_push_stale_intent');
+    await expect(disable).resolves.toMatchObject({ status: 'disabled' });
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    expect(call.mock.calls.filter(([method]) => method === 'push.unsubscribe')).not.toHaveLength(0);
+    expect(secondDocument.read()).toMatchObject({
+      endpoint: null,
+      instanceCleanup: 'confirmed',
+      nativeRevoke: 'not_needed',
+    });
+  });
+
+  it('resumes an interrupted first endpoint capture from capture_pending', async () => {
+    const localStorage = memoryStorage();
+    const disabled = createNativePushDisabledIntentStore(localStorage.storage);
+    const endpoint = 'https://avibe.bot/api/push/apns/captured-on-retry';
+    let nativeUnsubscribeCount = 0;
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return {
+          state: 'on' as const,
+          revokeState: 'active' as const,
+          endpoint,
+          keys: { p256dh: 'key', auth: 'auth' },
+        };
+      }
+      if (method === 'push.unsubscribe') {
+        nativeUnsubscribeCount += 1;
+        return nativeUnsubscribeCount === 1
+          ? { revoked: false, revoke: 'pending' as const }
+          : { revoked: true, revoke: 'confirmed' as const };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: localStorage.storage,
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn()
+        .mockRejectedValueOnce(new Error('interrupted'))
+        .mockResolvedValue({ public_key: 'AQIDBA' }),
+      unsubscribeWebPush: vi.fn(async () => ({ ok: true, disabled: true })),
+      subscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(disableWebPush(api, disabled)).resolves.toMatchObject({
+      status: 'failed',
+    });
+    expect(disabled.read()).toMatchObject({
+      phase: 'capture_pending',
+      endpoint: null,
+    });
+
+    await expect(disableWebPush(api, disabled)).resolves.toMatchObject({
+      status: 'pending',
+      instanceCleanup: 'confirmed',
+      nativeRevoked: 'pending',
+    });
+    await expect(disableWebPush(api, disabled)).resolves.toMatchObject({
+      status: 'disabled',
+      nativeRevoked: 'confirmed',
+    });
+    expect(api.unsubscribeWebPush).toHaveBeenCalledWith(endpoint);
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    expect(disabled.read()?.endpoint).toBe(endpoint);
   });
 
   it('re-posts an existing native subscription when the instance is disabled', async () => {
@@ -1030,11 +1272,7 @@ describe('web push recovery', () => {
         }),
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -1077,11 +1315,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -1127,11 +1361,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -1189,11 +1419,7 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: {
-        getItem: () => null,
-        setItem: vi.fn(),
-        removeItem: vi.fn(),
-      },
+      localStorage: writableLocalStorage(),
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),

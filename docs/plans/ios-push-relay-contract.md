@@ -247,9 +247,9 @@ linked from `ios-app.md`:
 
 | Direction | Method or event | Exact shape |
 | --- | --- | --- |
-| Web -> native | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}` |
-| Web -> native | `push.subscribe({vapidPublicKey})` | `{endpoint: string, keys: {p256dh: string, auth: string}}` |
-| Web -> native | `push.unsubscribe()` | `{revoked: boolean}` |
+| Web -> native | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" \| "off" \| "on", revokeState: "active" \| "absent" \| "pending", endpoint?: string, keys?: {p256dh: string, auth: string}}` |
+| Web -> native | `push.subscribe({vapidPublicKey, forceResubscribe?: boolean})` | `{endpoint: string, keys: {p256dh: string, auth: string}}`; `forceResubscribe` explicitly bypasses the active-registration reuse path and creates a concrete replacement |
+| Web -> native | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" \| "pending" \| "not_needed"}` |
 | Web -> native | `push.openedAck({id})` | `{}`; acknowledges one delivered tap ID from the trusted instance main frame. |
 | Native -> Web | `push.opened({id, url})` | Same-origin path event after the target instance loads; native may re-dispatch the same ID until acknowledged. |
 
@@ -267,7 +267,11 @@ an active replacement.
 
 `push.unsubscribe().revoked` is true only after the relay confirmed the
 concrete registration was already revoked or is now revoked. False means local
-key deletion succeeded and a pending remote revoke remains.
+key deletion succeeded and a pending remote revoke remains. `revokeState:
+"pending"` is also surfaced by `push.status` with the concrete endpoint so the
+Web-owned cleanup saga can retry the same target; `revokeState: "absent"` means
+there is no scoped native target and is the only status that permits a
+`not_needed` cleanup projection.
 
 The Web UI obtains `vapidPublicKey` from the instance's existing
 `GET /api/web-push/vapid-public-key`. While the user has notifications enabled,
@@ -276,15 +280,19 @@ load and later authenticated foreground sessions. It POSTs an `on`
 subscription to the existing `POST /api/web-push/subscriptions`; for `off` it
 uses the same Web-owned enable/reconcile path to call `push.subscribe` and then
 POSTs the result. Native does not initiate a Web call or POST to an instance.
-After an explicit native disable, the Web UI persists an opt-out marker in the
-current instance origin and account website-data store before destructive
-remote work. Automatic reconciliation, including `on` re-POST and pending
-registration replay, must observe that marker and perform no native or
+After an explicit native disable, the Web UI persists a versioned intent and
+cleanup record in the current instance origin and account website-data store
+before destructive remote work. The intent has a monotonic revision and keeps
+`userIntent: "disabled"` until an explicit Enable. The cleanup record stores
+the capture phase, concrete endpoint, instance DELETE state, and native revoke
+state independently. Automatic reconciliation, including `on` re-POST and
+pending registration replay, must observe that intent and perform no native or
 instance subscription write. Endpoint history remains cleanup evidence and
-does not grant opt-in authority. The marker also stores the concrete endpoint
+does not grant opt-in authority. A new record in `capture_pending` may resume
+its first endpoint capture; an endpoint-less legacy marker remains fail-closed
+and never guesses a target. The marker also stores the concrete endpoint
 selected for the instance DELETE, so a later cleanup retry uses that endpoint
-even when native state is already `off`. An older marker without an endpoint
-fails closed and reports cleanup failure rather than guessing from history.
+even when native state is already `off`.
 Only a later explicit enable clears the marker. The control reports the local
 opt-out separately from unconfirmed remote cleanup.
 Inside the native app the Web UI does not use `PushManager`; browser and

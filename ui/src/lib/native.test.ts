@@ -8,6 +8,7 @@ import {
   nativeAppInfo,
   nativeHapticImpact,
   nativePushStatusOutcome,
+  nativePushSubscribe,
   nativePushUnsubscribeOutcome,
   nativeShowAccount,
   nativeVoicePermission,
@@ -183,6 +184,36 @@ describe('native shell bridge', () => {
         endpoint: 'https://avibe.bot/api/push/apns/pending',
       },
     });
+  });
+
+  it('sends force replacement as an additive subscribe option', async () => {
+    const call = vi.fn(async (_method: string, params?: Record<string, unknown>) => ({
+      endpoint: 'https://avibe.bot/api/push/apns/registration',
+      keys: { p256dh: 'key', auth: 'auth' },
+      params,
+    }));
+    installBridge({
+      capabilities: { push: 1 },
+      call,
+    });
+
+    await expect(nativePushSubscribe('AQIDBA')).resolves.toMatchObject({
+      endpoint: 'https://avibe.bot/api/push/apns/registration',
+    });
+    await expect(nativePushSubscribe('AQIDBA', true)).resolves.toMatchObject({
+      endpoint: 'https://avibe.bot/api/push/apns/registration',
+    });
+
+    expect(call.mock.calls).toEqual([
+      [
+        'push.subscribe',
+        { vapidPublicKey: 'AQIDBA' },
+      ],
+      [
+        'push.subscribe',
+        { vapidPublicKey: 'AQIDBA', forceResubscribe: true },
+      ],
+    ]);
   });
 
   it('normalizes same-origin native notification paths and rejects foreign origins', () => {

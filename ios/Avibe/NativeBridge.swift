@@ -210,8 +210,9 @@ enum NativeBridgeConfiguration {
         },
         pushSubscribe: @escaping @MainActor (
             String,
+            Bool,
             WebOrigin
-        ) async throws -> [String: Any] = { _, _ in
+        ) async throws -> [String: Any] = { _, _, _ in
             throw NativePushError.unavailable
         },
         pushUnsubscribe: @escaping @MainActor (
@@ -503,6 +504,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     ) async throws -> [String: Any]
     private let pushSubscribe: @MainActor (
         String,
+        Bool,
         WebOrigin
     ) async throws -> [String: Any]
     private let pushUnsubscribe: @MainActor (
@@ -527,6 +529,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         ) async throws -> [String: Any],
         pushSubscribe: @escaping @MainActor (
             String,
+            Bool,
             WebOrigin
         ) async throws -> [String: Any],
         pushUnsubscribe: @escaping @MainActor (
@@ -637,17 +640,24 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
         case .pushSubscribe:
             guard
-                request.params.count == 1,
-                let vapidPublicKey = request.params["vapidPublicKey"] as? String
+                let vapidPublicKey = request.params["vapidPublicKey"] as? String,
+                request.params.keys.allSatisfy({
+                    $0 == "vapidPublicKey" || $0 == "forceResubscribe"
+                }),
+                request.params.count <= 2,
+                request.params["forceResubscribe"] == nil
+                    || request.params["forceResubscribe"] is Bool
             else {
                 reply(
                     replyHandler,
                     error: .invalidArgument(
-                        "push.subscribe requires a vapidPublicKey string."
+                        "push.subscribe requires a vapidPublicKey string and accepts an optional forceResubscribe boolean."
                     )
                 )
                 return
             }
+            let forceResubscribe =
+                request.params["forceResubscribe"] as? Bool ?? false
             Task { @MainActor [weak self] in
                 guard let self else {
                     replyHandler(nil, nil)
@@ -656,6 +666,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 do {
                     let result = try await self.pushSubscribe(
                         vapidPublicKey,
+                        forceResubscribe,
                         instanceOrigin
                     )
                     self.reply(replyHandler, result: result)

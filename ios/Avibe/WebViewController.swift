@@ -355,13 +355,14 @@ final class WebViewFactory {
                 instanceOrigin: origin.serialized
             )
         },
-        pushSubscribe: { [weak self] vapidPublicKey, origin in
+        pushSubscribe: { [weak self] vapidPublicKey, forceResubscribe, origin in
             guard let coordinator = self?.pushCoordinator else {
                 throw NativePushError.unavailable
             }
             return try await coordinator.subscribe(
                 vapidPublicKey: vapidPublicKey,
-                instanceOrigin: origin.serialized
+                instanceOrigin: origin.serialized,
+                forceReplacement: forceResubscribe
             )
         },
         pushUnsubscribe: { [weak self] origin in

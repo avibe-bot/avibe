@@ -218,12 +218,15 @@ export async function nativePushStatusOutcome(
 
 export async function nativePushSubscribe(
   vapidPublicKey: string,
+  forceResubscribe = false,
 ): Promise<NativePushSubscription | null> {
   try {
     return await callNative<NativePushSubscription>(
       'push',
       'push.subscribe',
-      { vapidPublicKey },
+      forceResubscribe
+        ? { vapidPublicKey, forceResubscribe: true }
+        : { vapidPublicKey },
     );
   } catch {
     return null;

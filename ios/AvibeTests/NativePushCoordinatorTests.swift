@@ -1048,6 +1048,60 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
     }
 
+    func testForcedReplacementCreatesAConcreteRegistrationInsteadOfReusingActive()
+        async throws
+    {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 16, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let first = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+        let firstRecord = try XCTUnwrap(try store.listRecords().first)
+
+        let replacement = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin,
+            forceReplacement: true
+        )
+
+        let creates = recorder.requests.filter {
+            $0.method == "PUT" && $0.path.contains("/registrations/")
+        }
+        XCTAssertEqual(creates.count, 2)
+        XCTAssertNotEqual(
+            first["endpoint"] as? String,
+            replacement["endpoint"] as? String
+        )
+        let replacementBody = try XCTUnwrap(jsonBody(creates[1]))
+        XCTAssertEqual(
+            replacementBody["replaces_registration_ids"] as? [String],
+            [firstRecord.kid]
+        )
+        let records = try store.listRecords()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertTrue(records.contains { $0.state == .active })
+        XCTAssertTrue(
+            records.contains {
+                $0.kid == firstRecord.kid && $0.state == .retiring
+            }
+        )
+    }
+
     func testFirstSubscriptionCreatesOneActiveRegistration() async throws {
         let store = makeInstallationStore(
             providerGeneration: 1,
@@ -1399,6 +1453,53 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(thirdOutcome, .notNeeded)
         XCTAssertEqual(recorder.requests.count, 2)
+    }
+
+    func testLogoutAndAPNsCallbackPreserveTheNewestProviderTuple() async throws {
+        let oldToken = Data(repeating: 17, count: 32)
+        let newToken = Data(repeating: 18, count: 32)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: oldToken,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { request in
+            if request.method == "POST" {
+                await recorder.waitForReleaseIfNeeded()
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let logout = Task {
+            await coordinator.prepareForLogout(throughBindGeneration: 1)
+        }
+        try await recorder.waitForRequestCount(1)
+        XCTAssertEqual(recorder.requests.first?.method, "POST")
+
+        coordinator.didRegister(
+            deviceToken: newToken,
+            environment: "production"
+        )
+        recorder.release()
+        await logout.value
+
+        try await waitUntil {
+            store.installation?.provider?.deviceToken == newToken
+        }
+        XCTAssertEqual(store.installation?.provider?.deviceToken, newToken)
+        XCTAssertEqual(store.installation?.provider?.environment, "production")
+        XCTAssertEqual(store.installation?.provider?.generation, 2)
+        XCTAssertEqual(store.installation?.providerGeneration, 2)
     }
 
     func testLogoutRemovesNotificationsForTheFormerAccount() async throws {
