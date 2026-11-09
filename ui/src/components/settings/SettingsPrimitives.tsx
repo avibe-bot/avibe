@@ -57,15 +57,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   // radius 12 (`rounded-lg` here), not the 16 the `panel` variant renders:
   // le5QU and Q8zxF1 both draw this card at 12.
   //
-  // The fill is `bg-background`, not the surface-2 those two boards draw. A card
-  // is one concept across Settings, and every other page (Backends,
-  // Dependencies, Service) renders it as border-only on the page fill; a white
-  // card on General alone read as a different kind of object rather than as the
-  // same card holding a quieter control. Deliberate divergence from the boards,
-  // recorded in the PR rather than silently reconciled here.
+  // A card is one concept across Settings: one step above the page (`bg-surface`)
+  // with the resting edge in place of a grey line (ui/design:
+  // system/elevation/settings-general).
   if (variant === 'preference') {
     return (
-      <section className={clsx('rounded-lg border border-border bg-background', className)}>
+      <section className={clsx('rounded-lg border border-edge bg-surface shadow-elevation-0', className)}>
         <div className="flex flex-col gap-5 p-[22px]">
           {header}
           {children}
@@ -77,7 +74,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   return (
     <section
       className={clsx(
-        'flex flex-col overflow-hidden rounded-xl border border-border bg-background',
+        'flex flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0',
         className
       )}
     >

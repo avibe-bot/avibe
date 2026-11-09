@@ -6068,7 +6068,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
           size="icon"
           onClick={jumpToLatest}
           aria-label={t('chat.scrollToBottom')}
-          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full border-border-strong shadow-lg"
+          // Floating over the transcript, so opaque, at level 2 (ui/design: system/elevation/scale).
+          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full bg-popover shadow-elevation-2 hover:bg-popover active:bg-popover"
         >
           <ChevronDown className="size-4" />
         </Button>

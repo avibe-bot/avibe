@@ -46,7 +46,7 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
     # future candidates from being reviewed against the existing lint ledger.
     ui = next(item for item in updates if item["directory"] == "/ui")
     refresh_ignores = [item for item in ui.get("ignore", []) if item["dependency-name"] == "eslint-plugin-react-refresh"]
-    assert refresh_ignores == [{"dependency-name": "eslint-plugin-react-refresh", "versions": ["0.5.6", "0.5.7"]}]
+    assert refresh_ignores == [{"dependency-name": "eslint-plugin-react-refresh", "versions": ["0.5.5", "0.5.6", "0.5.7"]}]
 
     # Known-incompatible Windows IPC versions must not overwrite the safety pin.
     # Keep the exclusion version-scoped so later fixes still receive review.
@@ -91,3 +91,18 @@ def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
     assert lock["packages"][""]["devDependencies"]["jsdom"] == package["devDependencies"]["jsdom"]
     assert lock["packages"]["node_modules/jsdom"]["version"] == "29.1.1"
     assert "^20." in lock["packages"]["node_modules/jsdom"]["engines"]["node"]
+
+
+def test_ui_playwright_hold_keeps_the_test_runner_and_browser_driver_coherent() -> None:
+    # 1.65.0 regresses the unchanged activity-expiry consumer. Exclude only that
+    # tested candidate and retain one matching runner/driver set for npm ci.
+    ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
+    assert [item for item in ui["ignore"] if item["dependency-name"] == "@playwright/test"] == [
+        {"dependency-name": "@playwright/test", "versions": ["1.65.0"]}
+    ]
+    package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
+    assert package["devDependencies"]["@playwright/test"] == "1.64.1"
+    assert lock["packages"][""]["devDependencies"]["@playwright/test"] == "1.64.1"
+    for name in ("@playwright/test", "playwright", "playwright-core"):
+        assert lock["packages"][f"node_modules/{name}"]["version"] == "1.64.1"

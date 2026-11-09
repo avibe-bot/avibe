@@ -11,7 +11,8 @@ import { Section, Sheet, Specimen } from '../../frames/system/sheet';
 import { useDraft } from '../draft';
 
 const busy = Array.from({ length: 6 }, (_, i) => i);
-const composer = 'relative flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 pl-3.5 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]';
+// The shipped composer box (components/workbench/Composer.tsx).
+const composer = 'composer-edge relative flex w-full items-end gap-1.5 rounded-2xl border py-2 pr-2 pl-3.5 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus';
 
 export function ElevationEdgeSheet() {
   const d = useDraft();
@@ -95,7 +96,7 @@ export function ElevationEdgeSheet() {
           </div>
         </Specimen>
         <Specimen name={d('输入框 · Agent 工作中', 'Composer · Agent working')} use={d('流光（截图是静止的一帧）', 'sweep (a still frame)')} className="w-[340px]">
-          <div className={composer}>
+          <div className={composer} data-working>
             <span className="flex-1 py-2 text-[13px] text-muted">{d('歪比正在忙，有话可以接着说…', 'The Bot is busy; keep typing…')}</span>
             <button type="button" className="grid size-9 place-items-center rounded-lg border border-pink/45 bg-pink/15 text-pink-ink">
               <Square className="size-4" />

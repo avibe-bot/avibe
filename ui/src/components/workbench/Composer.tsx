@@ -2453,8 +2453,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
            Send on the right. */
         <div
           {...boxHoldProps}
+          data-working={busyControls || undefined}
           className={cn(
-            'relative flex w-full flex-col gap-1 rounded-2xl border border-border-strong bg-surface-2 p-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
+            'composer-edge relative flex w-full flex-col gap-1 rounded-2xl border p-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
             holdRaised && 'z-50',
           )}
         >
@@ -2475,8 +2476,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       ) : (
         <div
           {...boxHoldProps}
+          data-working={busyControls || undefined}
           className={cn(
-            'relative flex w-full items-end gap-1.5 rounded-2xl border border-border-strong bg-surface-2 py-2 pr-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]',
+            'composer-edge relative flex w-full items-end gap-1.5 rounded-2xl border py-2 pr-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
             mediaEnabled ? 'pl-1.5' : 'pl-3.5',
             holdRaised && 'z-50',
           )}

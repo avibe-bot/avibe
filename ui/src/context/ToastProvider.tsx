@@ -359,12 +359,14 @@ function ToastCard({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerEnd}
       onPointerCancel={onPointerEnd}
-      className={`flex touch-pan-y items-center gap-3 px-4 py-3 rounded-lg shadow-lg border ${
+      // Floating over whatever is under it, so opaque: the popover fill with its tone washed over it,
+      // level 2, no outline (ui/design: system/elevation/toast).
+      className={`flex touch-pan-y items-center gap-3 px-4 py-3 rounded-lg border border-edge bg-popover shadow-elevation-2 ${
         toast.type === 'success'
-          ? 'bg-mint/10 border-mint/30 text-mint-ink'
+          ? 'bg-linear-to-r from-mint/10 to-mint/10 text-mint-ink'
           : toast.type === 'warning'
-          ? 'bg-gold/10 border-gold/30 text-gold-ink'
-          : 'bg-destructive/10 border-destructive/30 text-destructive-ink'
+          ? 'bg-linear-to-r from-gold/10 to-gold/10 text-gold-ink'
+          : 'bg-linear-to-r from-destructive/10 to-destructive/10 text-destructive-ink'
       }`}
     >
       {children}
