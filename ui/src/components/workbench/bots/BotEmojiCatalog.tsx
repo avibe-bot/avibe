@@ -288,7 +288,7 @@ export default function BotEmojiCatalog({ current, onPick, onBack, columns, auto
               autoFocus={autoFocus}
               placeholder={t('bots.emojiPicker.search')}
               aria-label={t('bots.emojiPicker.search')}
-              className="h-8 w-full min-w-0 rounded-lg border border-border bg-surface pl-8 pr-2.5 text-[13px] text-foreground outline-none transition placeholder:text-muted focus-visible:border-mint/60 focus-visible:ring-2 focus-visible:ring-mint/30 [&::-webkit-search-cancel-button]:hidden"
+              className="h-8 w-full min-w-0 rounded-lg border border-field-edge bg-field pl-8 pr-2.5 text-[13px] text-foreground outline-none transition placeholder:text-muted focus-visible:border-mint/60 focus-visible:ring-2 focus-visible:ring-mint/30 [&::-webkit-search-cancel-button]:hidden"
             />
           </label>
           <SkinToneButton toneLabels={toneLabels} />

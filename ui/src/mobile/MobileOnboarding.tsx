@@ -300,7 +300,7 @@ function Brand({
           variant="ghost"
           size="icon"
           disabled={disabled}
-          className="rounded-full border border-border bg-surface/70"
+          className="rounded-full border border-edge bg-field"
           aria-label={t('mobileApp.account.title')}
           onClick={onAccount}
         >
@@ -331,7 +331,7 @@ function Primary({
       size="lg"
       disabled={disabled}
       onClick={onClick}
-      className="w-full gap-3 rounded-full shadow-mint-card-sm"
+      className="w-full gap-3 rounded-full"
     >
       {children}
       <ArrowRight className="size-4" />
@@ -354,7 +354,7 @@ function PageTitle({
   );
 }
 
-const raised = 'rounded-3xl border border-border bg-surface/80 p-5 shadow-mint-card-sm';
+const raised = 'rounded-3xl border border-edge bg-surface/80 p-5 shadow-elevation-0';
 /** A secondary way through a step, below its primary action. */
 const alternative = 'h-auto max-w-full whitespace-normal px-0 text-sm text-foreground underline';
 
@@ -363,8 +363,8 @@ function PageMark({ children, warn = false }: { children: ReactNode; warn?: bool
   return (
     <span
       className={cn(
-        'mb-5 grid size-16 place-items-center rounded-3xl border bg-surface/80 shadow-mint-card-sm',
-        warn ? 'border-gold/40' : 'border-border',
+        'mb-5 grid size-16 place-items-center rounded-3xl border bg-surface/80 shadow-elevation-0',
+        warn ? 'border-gold/40' : 'border-edge',
       )}
     >
       {children}
@@ -416,17 +416,17 @@ function Welcome({
       <Brand />
       <div className="relative flex flex-1 flex-col items-center justify-center py-8">
         <div className="relative mb-8 grid size-64 place-items-center">
-          <div className="absolute inset-0 rounded-full border border-mint/20 bg-surface/30 shadow-mint-card-lg" />
+          <div className="absolute inset-0 rounded-full border border-edge bg-surface/30 shadow-elevation-0" />
           <div className="absolute inset-6 rounded-full border border-surface/70 bg-surface/30" />
           <img
             src={heroMascot}
             alt={t('mobileApp.welcome.mascotAlt')}
             className="relative size-52 object-contain motion-safe:animate-[mobile-mascot-arrive_var(--motion-spring-smooth-duration)_var(--motion-spring-smooth)_both]"
           />
-          <span className="absolute -right-1 top-9 grid size-12 rotate-12 place-items-center rounded-2xl border border-border bg-surface shadow-mint-card-sm">
+          <span className="absolute -right-1 top-9 grid size-12 rotate-12 place-items-center rounded-2xl border border-edge bg-surface shadow-elevation-0">
             <Sparkles className="size-5 text-mint-ink" />
           </span>
-          <span className="absolute -left-1 bottom-5 rounded-full border border-border bg-surface px-4 py-2 text-sm shadow-mint-card-sm">
+          <span className="absolute -left-1 bottom-5 rounded-full border border-edge bg-surface px-4 py-2 text-sm shadow-elevation-0">
             {t('mobileApp.welcome.greeting')}
           </span>
         </div>
@@ -552,7 +552,7 @@ function EmailEntry({
         ref={actionRegion}
         noValidate
         onSubmit={submit}
-        className="scroll-mb-4 rounded-3xl border border-border bg-surface/70 p-6 shadow-mint-card"
+        className="scroll-mb-4 rounded-3xl border border-edge bg-surface/70 p-6 shadow-elevation-0"
       >
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-3">
@@ -765,8 +765,8 @@ function OtpCells({
           <span
             key={index}
             className={cn(
-              'grid aspect-square min-w-0 place-items-center rounded-2xl border bg-surface text-2xl font-medium tabular-nums shadow-mint-card-sm transition-colors duration-(--motion-duration-fast)',
-              invalid ? 'border-destructive text-destructive-ink' : 'border-border',
+              'grid aspect-square min-w-0 place-items-center rounded-2xl border bg-surface text-2xl font-medium tabular-nums shadow-elevation-0 transition-colors duration-(--motion-duration-fast)',
+              invalid ? 'border-destructive text-destructive-ink' : 'border-edge',
               !invalid && !busy && index === code.length && 'border-mint ring-2 ring-mint/30',
             )}
           >
@@ -1086,7 +1086,7 @@ function SecondFactor({
               variant="brand"
               size="lg"
               disabled={locked}
-              className="w-full gap-2 rounded-full shadow-mint-card-sm"
+              className="w-full gap-2 rounded-full"
               onClick={onOpenSecurity}
             >
               <ExternalLink className="size-4" />
@@ -1479,7 +1479,7 @@ function EmptyInstances({
         onAccount={onAccount}
       />
       <div className="pt-7">
-        <span className="grid size-16 place-items-center rounded-3xl border border-border bg-surface/80 shadow-mint-card-sm">
+        <span className="grid size-16 place-items-center rounded-3xl border border-edge bg-surface/80 shadow-elevation-0">
           <Laptop className="size-7 text-mint-ink" />
         </span>
       </div>

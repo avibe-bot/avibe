@@ -125,7 +125,7 @@ export const WebFetchOrder: React.FC<{
       pending={pending}
       label={t('settings.models.webFetch.order')}
       listRef={list}
-      rowClassName={(row) => cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', !row.settings.enabled && 'is-off')}
+      rowClassName={(row) => cn('model-hub-tool-executor-row grid items-center rounded-lg border border-edge bg-surface shadow-elevation-0', !row.settings.enabled && 'is-off')}
       rowAttrs={(row) => ({ 'data-executor': row.source_id })}
       onReorder={(shown, from, to) => onSave({ executor_order: executorOrderAfterReorder(tool.executor_order, shown, from, to) })}
     >
@@ -149,6 +149,6 @@ export const WebFetchOrder: React.FC<{
       }}
     </SortableOrderList>
     <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" size="sm" disabled={pending} onClick={(event) => onAdd?.(event.currentTarget)}><Plus aria-hidden />{t('settings.models.webFetch.add')}</Button><p className="model-hub-tool-note flex items-center gap-1.5" title={t('settings.models.webFetch.custody') as string}><LockKeyhole className="size-3.5 shrink-0" aria-hidden />{t('settings.models.searchServices.custodyShort')}</p></div>
-    {detail && <Dialog open onOpenChange={(open) => { if (!open) setDetail(null); }}><DialogContent className="max-w-xl border-border-strong bg-surface" closeLabel={t('common.close')}><DialogHeader><DialogTitle>{name(detail)}</DialogTitle><DialogDescription>{t('settings.models.webFetch.custody')}</DialogDescription></DialogHeader><FetchServiceSettings sourceId={detail} tool={tool} pending={pending} onSave={onSave} onRetry={(id) => onRetry?.(id)} /></DialogContent></Dialog>}
+    {detail && <Dialog open onOpenChange={(open) => { if (!open) setDetail(null); }}><DialogContent className="max-w-xl" closeLabel={t('common.close')}><DialogHeader><DialogTitle>{name(detail)}</DialogTitle><DialogDescription>{t('settings.models.webFetch.custody')}</DialogDescription></DialogHeader><FetchServiceSettings sourceId={detail} tool={tool} pending={pending} onSave={onSave} onRetry={(id) => onRetry?.(id)} /></DialogContent></Dialog>}
   </div>;
 };

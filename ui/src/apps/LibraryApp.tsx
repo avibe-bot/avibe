@@ -250,7 +250,7 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
       {leading}
       {def && Icon ? (
         <span
-          className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border"
+          className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-edge shadow-elevation-0"
           style={{ color: `var(${def.accent})`, backgroundColor: `color-mix(in srgb, var(${def.accent}) 14%, transparent)` }}
         >
           <Icon className="size-[18px]" />

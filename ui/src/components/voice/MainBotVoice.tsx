@@ -88,7 +88,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
     return () => clearTimeout(timer);
   }, [outcome, dismiss]);
   if (!outcome && !failed) return null;
-  const tone = outcome === 'denied' || failed ? 'border-destructive/35' : outcome === 'sent' ? 'border-mint/40 shadow-glow-md-mint' : 'border-border-strong';
+  const tone = outcome === 'denied' || failed ? 'border-destructive/35' : outcome === 'sent' ? 'border-mint/40 shadow-glow-md-mint' : 'border-edge';
   return (
     <div
       className={clsx(
@@ -97,7 +97,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
       )}
       role="status"
     >
-      <div className={clsx('pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-xl', tone)}>
+      <div className={clsx('pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-elevation-2', tone)}>
         {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
         {(outcome === 'cancelled' || outcome === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'too-short' || outcome === 'asking') && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}

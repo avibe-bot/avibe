@@ -2409,7 +2409,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {attachments.map((att) => (
             <div
               key={att.localId}
-              className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 py-1 pl-1.5 pr-1 text-[12px]"
+              className="flex items-center gap-2 rounded-lg border border-edge bg-surface-2 py-1 pl-1.5 pr-1 text-[12px] shadow-elevation-0"
             >
               <AttachmentThumbnail att={att} gallery={stagedImageUrls} />
               <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink-ink' : 'text-foreground')}>

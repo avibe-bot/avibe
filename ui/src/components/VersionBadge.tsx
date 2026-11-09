@@ -560,7 +560,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               collisionPadding: 12,
             } : {})}
             className={clsx(
-              'z-50 rounded-lg border border-border bg-popover p-0 text-popover-foreground shadow-xl',
+              'z-50 rounded-lg border border-edge bg-popover p-0 text-popover-foreground shadow-elevation-2',
               isDesktop
                 ? 'max-h-[var(--radix-popover-content-available-height)] w-72 overflow-y-auto'
                 : mobileHeaderPopoverClassName,
@@ -644,7 +644,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 })}</p>
               )}
               {remoteDesktopWeb && remoteRequest && (
-                <div role="status" className="space-y-2 rounded-md border border-border px-3 py-2 text-sm">
+                <div role="status" className="space-y-2 rounded-md border border-edge px-3 py-2 text-sm shadow-elevation-0">
                   <p>{remoteStatusText}</p>
                   {remoteRequest.phase === 'failed' && remoteRequest.error_code === 'requires_host' && (
                     <p>{t('dashboard.desktopRemoteUpdateRequiresHost')}</p>
@@ -672,7 +672,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   <span>{t('dashboard.upgradeSuccess')}</span>
                 </div>
               ) : isDesktopManaged && desktopUpdateState?.phase === 'disabled' ? (
-                <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted">
+                <div className="flex items-center gap-2 rounded-md border border-edge bg-muted/30 px-3 py-2 text-sm text-muted shadow-elevation-0">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.checkFailed')}</span>
                 </div>

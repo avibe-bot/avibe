@@ -36,7 +36,7 @@ export const readComputerUseStatus = async (): Promise<ComputerUseStatusRead | n
 };
 
 export const computerUseToneClass: Record<StatusTone, string> = {
-  muted: 'border-border bg-surface text-muted',
+  muted: 'border-edge bg-field text-muted',
   mint: 'border-mint/30 bg-mint-soft text-mint-ink',
   gold: 'border-gold/35 bg-gold/[0.08] text-gold-ink',
   destructive: 'border-destructive/35 bg-destructive/[0.06] text-destructive-ink',

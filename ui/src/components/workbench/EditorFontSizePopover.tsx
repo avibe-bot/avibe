@@ -63,7 +63,7 @@ export const EditorFontSizePopover: React.FC<{ trigger: 'activity' | 'mobile' }>
             <div
               role="group"
               aria-label={t('apps.editor.fontSize')}
-              className="flex h-8 shrink-0 items-center overflow-hidden rounded-md border border-border"
+              className="flex h-8 shrink-0 items-center overflow-hidden rounded-md border border-edge shadow-elevation-0"
             >
               <Button
                 type="button"

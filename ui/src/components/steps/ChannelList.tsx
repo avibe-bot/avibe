@@ -1071,7 +1071,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             <p className="text-muted">{t('wechat.noChannels')}</p>
           </div>
         </div>
-        <div className="rounded-2xl border border-border bg-surface-2/40 p-8 text-center shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
+        <div className="rounded-2xl border border-edge bg-surface-2/40 p-8 text-center shadow-elevation-0">
           <div className="w-16 h-16 bg-accent/10 text-accent-ink rounded-full flex items-center justify-center border border-accent/20 mx-auto mb-4">
             <MessageSquare size={32} />
           </div>
@@ -1310,7 +1310,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               These seed newly-enabled groups (copy-on-enable); a per-group value
               overrides. Hidden on "All channels" since defaults are per-platform. */}
           {pageTab !== 'all' && (
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-border bg-surface-2/40 px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-edge bg-surface-2/40 px-4 py-2.5 shadow-elevation-0">
               <span
                 className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted"
                 title={t('channelList.groupDefaultsHint') as string}
@@ -1339,7 +1339,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
 
           {/* Discord guild picker — only on Discord tab */}
           {pageTab === 'discord' && (
-            <div className="rounded-xl border border-border bg-surface-2/40 p-3 text-sm shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
+            <div className="rounded-xl border border-edge bg-surface-2/40 p-3 text-sm shadow-elevation-0">
               <div className="grid gap-3 md:grid-cols-[minmax(220px,280px)_1fr]">
                 <div className="space-y-1">
                   <label className="font-medium text-foreground">{t('channelList.guildBrowse')}</label>
@@ -1370,7 +1370,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                             'inline-flex items-center gap-2 rounded-lg border px-2 py-1 text-xs transition-colors',
                             selectedGuildIds.includes(g.id)
                               ? 'border-mint/40 bg-mint-soft text-foreground'
-                              : 'border-border bg-surface text-muted hover:text-foreground'
+                              : 'border-edge text-muted hover:text-foreground bg-field hover:bg-field-hover'
                           )}
                         >
                           <input
@@ -1429,7 +1429,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   <HelpCircle size={13} />
                   {t('channelList.cantFindChannel')}
                 </span>
-                <span className="pointer-events-none absolute bottom-full left-0 z-10 mb-2 w-[min(16rem,calc(100vw-2.5rem))] whitespace-normal rounded bg-text px-3 py-2 text-xs text-bg opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                <span className="pointer-events-none absolute bottom-full left-0 z-10 mb-2 w-[min(16rem,calc(100vw-2.5rem))] whitespace-normal rounded bg-text px-3 py-2 text-xs text-bg opacity-0 shadow-elevation-2 transition-opacity group-hover:opacity-100">
                   {pageTab === 'discord'
                     ? t('channelList.discordInviteBotHint')
                     : pageTab === 'lark'
@@ -1536,8 +1536,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
-                      ? 'border-mint/30 bg-surface-2/70 shadow-glow-lg-mint'
-                      : 'border-border bg-background hover:border-border-strong'
+                      ? 'border-mint/30 bg-surface-2/70'
+                      : 'border-edge bg-surface shadow-elevation-0'
                   )}
                 >
                   {/* Top row */}
@@ -1597,7 +1597,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                           'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
                           channelEnabled
                             ? 'border-mint/40 bg-mint-soft text-mint-ink'
-                            : 'border-border bg-foreground/[0.04] text-muted'
+                            : 'border-edge text-muted bg-field'
                         )}
                       >
                         <span
@@ -1619,7 +1619,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                           void handleRemoveChannel(channelPlatform, channel.id, channel.name);
                         }}
                         disabled={removingChannelId === channel.id}
-                        className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-muted hover:border-red-500/50 hover:text-red-500 disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-muted hover:border-red-500/50 hover:text-red-500 disabled:opacity-50 bg-field"
                         title={t('channelList.removeChannel')}
                       >
                         <Trash2 size={12} />
@@ -1763,7 +1763,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         </div>
 
         {isPage && (
-          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-surface-2/40 px-4 py-3 text-sm text-muted shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
+          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-edge bg-surface-2/40 px-4 py-3 text-sm text-muted shadow-elevation-0">
             <span className="rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 text-xs font-medium text-mint-ink">
               {t('channelList.enabledCount', { count: selectedCount })}
             </span>
@@ -1784,8 +1784,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors',
                 platform === candidate
-                  ? 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-glow-md-mint'
-                  : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
+                  ? 'border-mint/50 bg-mint/[0.16] text-mint-ink'
+                  : 'border-edge text-foreground bg-field'
               )}
             >
               {platformText(t, candidate, 'title')}
@@ -1794,7 +1794,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         </div>
       )}
 
-      <div className="mb-4 space-y-3 rounded-2xl border border-border bg-surface-2/40 p-4 shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
+      <div className="mb-4 space-y-3 rounded-2xl border border-edge bg-surface-2/40 p-4 shadow-elevation-0">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <Button
@@ -1830,7 +1830,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 <HelpCircle size={14} />
                 {t('channelList.cantFindChannel')}
               </span>
-              <span className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-text text-bg text-xs rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 w-[min(16rem,calc(100vw-2.5rem))] whitespace-normal">
+              <span className="absolute bottom-full left-0 mb-2 px-3 py-2 bg-text text-bg text-xs rounded shadow-elevation-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 w-[min(16rem,calc(100vw-2.5rem))] whitespace-normal">
                 {platform === 'discord'
                   ? t('channelList.discordInviteBotHint')
                   : platform === 'lark'
@@ -1847,7 +1847,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           <span className="text-sm text-muted font-mono">{t('channelList.enabledCount', { count: selectedCount })}</span>
         </div>
         {platform === 'discord' && (
-          <div className="rounded-xl border border-border bg-surface-3/60 p-3 text-sm">
+          <div className="rounded-xl border border-edge bg-surface-3/60 p-3 text-sm shadow-elevation-0">
             <div className="grid gap-3 md:grid-cols-[minmax(220px,280px)_1fr]">
               <div className="space-y-1">
                 <label className="font-medium text-foreground">{t('channelList.guildBrowse')}</label>
@@ -1878,7 +1878,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                            'inline-flex items-center gap-2 rounded-lg border px-2 py-1 text-xs transition-colors',
                            selectedGuildIds.includes(g.id)
                              ? 'border-mint/40 bg-mint-soft text-foreground'
-                             : 'border-border bg-surface text-muted hover:text-foreground'
+                             : 'border-edge text-muted hover:text-foreground bg-field hover:bg-field-hover'
                          )}
                       >
                         <input
@@ -1922,7 +1922,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto rounded-2xl border border-border bg-surface-2/40 p-3 shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)] space-y-3">
+      <div className="flex-1 overflow-y-auto rounded-2xl border border-edge bg-surface-2/40 p-3 shadow-elevation-0 space-y-3">
         {!loading && channels.length === 0 && !botToken && platform !== 'lark' && (
           <div className="rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-muted">
             {t('channelList.addTokenFirst')}
@@ -1952,7 +1952,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             require_bind: rawConfig.require_bind !== undefined ? rawConfig.require_bind : def.require_bind,
           };
           return (
-            <div key={channel.id} className="rounded-xl border border-border bg-surface-3/60 p-4 transition-colors hover:border-border-strong hover:bg-surface-2/70">
+            <div key={channel.id} className="rounded-xl border border-edge bg-surface-3/60 p-4 transition-colors hover:bg-surface-2/70 shadow-elevation-0">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 flex-1 items-center gap-3">
                   <button
@@ -1996,7 +1996,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   className={clsx(
                     'shrink-0 whitespace-nowrap text-xs px-2 py-0.5 rounded-full border',
                     platform === 'discord'
-                      ? 'bg-surface text-foreground border-border'
+                      ? 'text-foreground border-edge bg-field'
                       : platform === 'telegram'
                         ? channel.supports_topics
                           ? 'bg-accent/10 text-accent-ink border-accent/20'
@@ -2004,7 +2004,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                             ? 'bg-mint/10 text-mint-ink border-mint/20'
                             : channel.is_private
                               ? 'bg-gold/10 text-gold-ink border-gold/20'
-                              : 'bg-surface text-foreground border-border'
+                              : 'text-foreground border-edge bg-field'
                       : channel.is_private
                         ? 'bg-gold/10 text-gold-ink border-gold/20'
                         : 'bg-mint/10 text-mint-ink border-mint/20'

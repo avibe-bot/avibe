@@ -53,7 +53,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
           <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
             <GitBranch size={15} className="text-cyan-ink" />
             {t('channelList.topicSettingsTitle')}
-            <span className="rounded-full border border-border bg-foreground/[0.04] px-2 py-0.5 text-[10px] font-medium text-muted">
+            <span className="rounded-full border border-edge px-2 py-0.5 text-[10px] font-medium text-muted bg-field">
               {topics.length}
             </span>
           </div>
@@ -71,7 +71,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
               key={topic.id}
               className={clsx(
                 'overflow-hidden rounded-lg border transition-colors',
-                customized ? 'border-cyan/30 bg-cyan-soft/10' : 'border-border bg-surface-2/45',
+                customized ? 'border-cyan/30 bg-cyan-soft/10' : 'border-edge bg-surface-2/45 shadow-elevation-0',
               )}
             >
               <div className="flex items-center gap-3 px-3.5 py-3">
@@ -94,7 +94,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
                     'rounded-full border px-2 py-0.5 text-[10px] font-medium',
                     customized
                       ? 'border-cyan/30 bg-cyan-soft/25 text-cyan-ink'
-                      : 'border-border bg-foreground/[0.04] text-muted',
+                      : 'border-edge text-muted bg-field',
                   )}
                 >
                   {customized ? t('channelList.topicCustomBadge') : t('channelList.topicInheritedBadge')}

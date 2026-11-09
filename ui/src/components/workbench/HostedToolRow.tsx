@@ -190,7 +190,7 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
   const cost = useHostedCost(card);
   const name = fileName(image.path);
   return (
-    <figure className="overflow-hidden rounded-lg border border-border bg-background" data-hosted-image={card.call_id}>
+    <figure className="overflow-hidden rounded-lg border border-edge bg-surface shadow-elevation-0" data-hosted-image={card.call_id}>
       {image.media_url
         ? <ChatImage src={image.media_url} alt={card.revised_prompt ?? card.subject ?? name} width={image.width} height={image.height} />
         : null}
@@ -281,7 +281,7 @@ const HostedFetchDetail: React.FC<{ card: HostedActivity; cost: string | null }>
   const unknown = t('chat.agentActivity.hosted.fetch.unknown');
   const number = (value: number | null) => value === null ? unknown : new Intl.NumberFormat(i18n.language).format(value);
   const row = (ordinal: number, title: React.ReactNode, body: React.ReactNode) => <li className="flex gap-2.5 border-b border-border px-2.5 py-2 last:border-b-0"><span className="mt-px inline-flex size-[18px] shrink-0 items-center justify-center rounded border border-cyan/30 bg-cyan-soft text-[10px] font-semibold text-cyan-ink">{ordinal}</span><div className="min-w-0 flex-1"><div className="text-[12px] font-medium text-foreground">{title}</div><div className="break-words text-[11px] leading-relaxed text-muted">{body}</div></div></li>;
-  return <div className="mx-1.5 mb-1 mt-0.5 overflow-hidden rounded-md border border-border bg-foreground/[0.03]" data-hosted-fetch={card.call_id}>
+  return <div className="mx-1.5 mb-1 mt-0.5 overflow-hidden rounded-md border border-edge bg-foreground/[0.03] shadow-elevation-0" data-hosted-fetch={card.call_id}>
     <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5 text-[11px] text-muted"><Waypoints className="size-3 text-cyan-ink" aria-hidden />{[runnerLabel(card, t), t('chat.agentActivity.hosted.fetch.budget'), record.truncated && t('chat.agentActivity.hosted.fetch.truncated')].filter(Boolean).join(' · ')}</div>
     <ol>
       {row(1, <>{record.title ?? unknown} <span className="ml-2 font-normal text-muted">{record.source_content_type ?? record.content_type ?? unknown}</span></>, <dl className="grid grid-cols-[auto_1fr] gap-x-2">
@@ -317,7 +317,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
     cost,
   ].filter(Boolean);
   return (
-    <div className="mx-1.5 mb-1 mt-0.5 flex flex-col overflow-hidden rounded-md border border-border bg-foreground/[0.03]">
+    <div className="mx-1.5 mb-1 mt-0.5 flex flex-col overflow-hidden rounded-md border border-edge bg-foreground/[0.03] shadow-elevation-0">
       {facts.length > 0 && (
         <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5 text-[11px] text-muted">
           {completed && (card.mode === 'native'
@@ -416,7 +416,7 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
         <Icon className="size-3.5 shrink-0 text-cyan-ink" aria-hidden="true" />
         <span className="shrink-0 font-mono text-[11px] font-medium text-foreground">{card.tool}</span>
         {card.subject
-          ? <span className="min-w-0 flex-1 truncate"><span className="rounded-md border border-border bg-foreground/[0.03] px-1.5 py-px text-[12px] text-foreground/90" title={card.subject}>{card.subject}</span></span>
+          ? <span className="min-w-0 flex-1 truncate"><span className="rounded-md border border-edge bg-foreground/[0.03] px-1.5 py-px text-[12px] text-foreground/90 shadow-elevation-0" title={card.subject}>{card.subject}</span></span>
           : <span className="min-w-0 flex-1" />}
         <HostedModeChip card={card} />
         {cost && <span className="shrink-0 text-[11px] text-muted">{cost}</span>}

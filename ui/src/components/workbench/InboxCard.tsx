@@ -92,9 +92,9 @@ export const InboxCard = memo(function InboxCard({
             'has-[a:focus-visible]:ring-2 has-[a:focus-visible]:ring-ring has-[a:focus-visible]:ring-offset-2 has-[a:focus-visible]:ring-offset-background',
             unread > 0
               ? quiet
-                ? 'border-border-strong bg-foreground/[0.03] hover:bg-foreground/[0.05] [&:active:not(:has(button:active))]:bg-foreground/[0.05]'
-                : 'border-mint/30 bg-mint/[0.05] shadow-glow-md-mint hover:bg-mint/[0.08] [&:active:not(:has(button:active))]:bg-mint/[0.08]'
-              : 'border-border bg-surface hover:bg-foreground/[0.03] [&:active:not(:has(button:active))]:bg-foreground/[0.03]',
+                ? 'border-edge bg-foreground/[0.03] hover:bg-foreground/[0.05] [&:active:not(:has(button:active))]:bg-foreground/[0.05] shadow-elevation-0'
+                : 'border-mint/45 bg-mint/[0.05] hover:bg-mint/[0.08] [&:active:not(:has(button:active))]:bg-mint/[0.08]'
+              : 'border-edge bg-surface hover:bg-foreground/[0.03] [&:active:not(:has(button:active))]:bg-foreground/[0.03] shadow-elevation-0',
           )}
         >
           <div className="flex items-center gap-2 text-[11px]">
@@ -109,7 +109,7 @@ export const InboxCard = memo(function InboxCard({
               </>
             ) : (
               <>
-                <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
+                <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-edge bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink shadow-elevation-0">
                   {projectLabel}
                 </span>
                 <span className="text-muted">·</span>
@@ -165,7 +165,7 @@ export const InboxCard = memo(function InboxCard({
               <button
                 type="button"
                 onClick={() => onMarkRead(s.session_id)}
-                className="press inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[11px] font-medium text-foreground hover:bg-foreground/[0.04] active:bg-foreground/[0.04]"
+                className="press inline-flex items-center gap-1.5 rounded-md border border-edge px-3 py-1.5 text-[11px] font-medium text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
               >
                 <CheckCheck className="size-3" />
                 {t('workbench.inbox.markRead')}

@@ -18,7 +18,7 @@ export const DiagnosticsSectionTabs: React.FC = () => {
   return (
     <nav
       aria-label={t('settings.diagnosticsNavigationLabel')}
-      className="inline-flex w-fit rounded-lg border border-border bg-foreground/[0.03] p-1"
+      className="inline-flex w-fit rounded-lg border border-edge bg-foreground/[0.03] p-1 shadow-elevation-0"
     >
       {tabs.map((tab) => {
         const Icon = tab.icon;
@@ -29,7 +29,7 @@ export const DiagnosticsSectionTabs: React.FC = () => {
             end={tab.end}
             className={({ isActive }) => clsx(
               'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
-              isActive ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-foreground',
+              isActive ? 'bg-surface text-foreground shadow-elevation-1' : 'text-muted hover:text-foreground',
             )}
           >
             <Icon className="size-3.5" />

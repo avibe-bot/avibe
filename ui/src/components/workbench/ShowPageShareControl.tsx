@@ -328,7 +328,7 @@ export const ShowPageShareControl: React.FC<{
         {payload && canPinToDock ? (
           <div className="border-t border-border pt-3">
             <div className="flex items-center gap-3">
-              <span className="grid size-9 shrink-0 place-items-center rounded-md border border-border bg-foreground/[0.03] text-cyan-ink">
+              <span className="grid size-9 shrink-0 place-items-center rounded-md border border-edge bg-foreground/[0.03] text-cyan-ink shadow-elevation-0">
                 <LayoutGrid className="size-4" />
               </span>
               <div className="min-w-0 flex-1">

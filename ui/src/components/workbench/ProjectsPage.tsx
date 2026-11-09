@@ -598,14 +598,14 @@ export const ProjectsPage: React.FC = () => {
         <button
           type="button"
           onClick={() => void refreshProjects()}
-          className="flex items-center justify-center gap-2 rounded-xl border border-border bg-surface px-4 py-10 text-sm text-muted transition hover:text-foreground"
+          className="flex items-center justify-center gap-2 rounded-xl border border-edge bg-surface px-4 py-10 text-sm text-muted transition hover:text-foreground shadow-elevation-0"
         >
           <RotateCw className="size-4" />
           {t('projects.loadFailed')}
         </button>
       )}
       {projects !== null && list.length === 0 && !projectsError && (
-        <div className="rounded-xl border border-border bg-surface px-4 py-10 text-center text-sm text-muted">
+        <div className="rounded-xl border border-edge bg-surface px-4 py-10 text-center text-sm text-muted shadow-elevation-0">
           {t('projects.empty')}
         </div>
       )}
@@ -624,7 +624,7 @@ export const ProjectsPage: React.FC = () => {
         const hasHiddenCachedSessions = allSessionRows.length > visibleSessionCount;
         const hasMoreSessions = hasHiddenCachedSessions || !!state.cursor;
         return (
-          <div key={project.id} data-flip-id={`project:${project.id}`} className={clsx('overflow-hidden rounded-xl border border-border bg-surface', projectsHandover)}>
+          <div key={project.id} data-flip-id={`project:${project.id}`} className={clsx('overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0', projectsHandover)}>
             <MobileProjectRow
               dragHandle={dragHandle}
               project={project}

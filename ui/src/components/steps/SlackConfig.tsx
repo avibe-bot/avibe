@@ -191,7 +191,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
                       <ChevronDown size={14} className="transition-transform group-open:rotate-180" />
                       {t('slackConfig.viewManifest')}
                     </summary>
-                    <pre className="mt-2 max-h-40 overflow-auto rounded-lg border border-border bg-background px-3 py-3 font-mono text-[11px] text-foreground">
+                    <pre className="mt-2 max-h-40 overflow-auto rounded-lg border border-edge bg-surface px-3 py-3 font-mono text-[11px] text-foreground shadow-elevation-0">
                       {manifest}
                     </pre>
                   </details>
@@ -380,7 +380,7 @@ export const SlackConfig: React.FC<SlackConfigProps> = ({ data, onNext, onBack, 
               {t('slackConfig.selfHostDescription')}
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
+          <div className="flex items-center gap-2 rounded-full border border-edge px-3 py-1.5 bg-field">
             <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 4
             </span>

@@ -110,10 +110,10 @@ export const SearchVendorFacts: React.FC<{ vendor: HostedSearchServiceVendor }> 
   return <>
     <p className="model-hub-tool-note">{t(`settings.models.searchServices.vendor.${vendor.id}`, { defaultValue: t(vendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch') })}</p>
     <span className="model-hub-tool-note flex flex-wrap gap-2">
-      {vendor.free_tier !== null && <span className="model-hub-pill border border-border">{vendor.facts.built_in ? t('settings.models.searchServices.freeTier') : vendor.free_tier}</span>}
-      {vendor.facts.built_in && <span className="model-hub-pill border border-border">{t('settings.models.searchServices.noSetup')}</span>}
-      <span className="model-hub-pill border border-border">{t('settings.models.searchServices.maxResults', { count: vendor.results_max })}</span>
-      {vendor.id === 'deepseek' && <span className="model-hub-pill border border-border">{t('settings.models.searchServices.deepseekFacts')}</span>}
+      {vendor.free_tier !== null && <span className="model-hub-pill border border-edge bg-field">{vendor.facts.built_in ? t('settings.models.searchServices.freeTier') : vendor.free_tier}</span>}
+      {vendor.facts.built_in && <span className="model-hub-pill border border-edge bg-field">{t('settings.models.searchServices.noSetup')}</span>}
+      <span className="model-hub-pill border border-edge bg-field">{t('settings.models.searchServices.maxResults', { count: vendor.results_max })}</span>
+      {vendor.id === 'deepseek' && <span className="model-hub-pill border border-edge bg-field">{t('settings.models.searchServices.deepseekFacts')}</span>}
     </span>
   </>;
 };

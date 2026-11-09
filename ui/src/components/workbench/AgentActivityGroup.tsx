@@ -109,8 +109,8 @@ const ToolsEyePill: React.FC<{ shown: boolean; onToggle: () => void }> = ({ show
       className={clsx(
         'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors',
         shown
-          ? 'border-border bg-foreground/[0.04] text-foreground/80 hover:bg-foreground/[0.08]'
-          : 'border-border bg-transparent text-muted hover:bg-foreground/[0.05]',
+          ? 'border-edge text-foreground/80 hover:bg-foreground/[0.08] bg-field'
+          : 'border-edge text-muted hover:bg-foreground/[0.05] bg-field',
       )}
     >
       {shown ? <Eye className="size-3.5" aria-hidden="true" /> : <EyeOff className="size-3.5" aria-hidden="true" />}
@@ -148,7 +148,7 @@ const ToolJsonDialog: React.FC<{ open: boolean; onClose: () => void; parsed: Par
           <button
             type="button"
             onClick={copy}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors hover:bg-foreground/[0.06]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors bg-field hover:bg-field-hover"
           >
             {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
             {copied ? t('chat.agentActivity.copied') : t('chat.agentActivity.copy')}
@@ -227,7 +227,7 @@ const ToolSummary: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
         {chips.map((chip) => (
           <span
             key={chip.key}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-foreground/[0.03] px-1.5 py-px text-[11px]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge bg-foreground/[0.03] px-1.5 py-px text-[11px] shadow-elevation-0"
           >
             <span className="font-mono text-muted">{chip.key}</span>
             <span className="max-w-[16ch] truncate text-foreground/80">{chip.value}</span>
@@ -255,7 +255,7 @@ const ToolDetail: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
   const [jsonOpen, setJsonOpen] = useState(false);
   const params = parsed.args ? toolParams(parsed.args) : null;
   return (
-    <div className="mx-1.5 mb-1 mt-0.5 rounded-md border border-border bg-foreground/[0.03]">
+    <div className="mx-1.5 mb-1 mt-0.5 rounded-md border border-edge bg-foreground/[0.03] shadow-elevation-0">
       <div className="flex items-center gap-2 border-b border-border px-2.5 py-1.5">
         <span className="flex-1 text-[11px] font-medium uppercase tracking-wide text-muted">
           {t('chat.agentActivity.params')}
@@ -263,7 +263,7 @@ const ToolDetail: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
         <button
           type="button"
           onClick={() => setJsonOpen(true)}
-          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] font-medium text-foreground/80 transition-colors hover:bg-foreground/[0.06]"
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge px-1.5 py-0.5 text-[11px] font-medium text-foreground/80 transition-colors bg-field hover:bg-field-hover"
         >
           <Braces className="size-3" aria-hidden="true" />
           {t('chat.agentActivity.viewJson')}
@@ -514,7 +514,7 @@ export const ActivityCard: React.FC<{
               onClick={onDisableActivity}
               aria-label={t('chat.agentActivity.disable')}
               title={t('chat.agentActivity.disable')}
-              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-foreground/[0.04] text-foreground/80 transition-colors hover:bg-foreground/[0.08]"
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-edge text-foreground/80 transition-colors hover:bg-foreground/[0.08] bg-field"
             >
               <X className="size-3.5" aria-hidden="true" />
             </button>
@@ -554,7 +554,7 @@ export const ActivityCard: React.FC<{
                   if (el) el.scrollTop = el.scrollHeight;
                   setFollowing(true);
                 }}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-mint/40 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-mint-ink shadow-sm backdrop-blur"
+                className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-mint/40 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-mint-ink shadow-elevation-1 backdrop-blur"
               >
                 {t('chat.agentActivity.jumpToLatest')}
               </button>
@@ -674,7 +674,7 @@ export const ActivityChip: React.FC<{
         <button
           type="button"
           onClick={onRetry}
-          className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-cyan-ink transition-colors hover:bg-surface-2"
+          className="shrink-0 rounded-md border border-edge px-2 py-0.5 text-[11px] font-medium text-cyan-ink transition-colors bg-field hover:bg-field-hover active:bg-field-hover"
         >
           {t('chat.agentActivity.retry')}
         </button>
@@ -733,7 +733,7 @@ export const ActivityChip: React.FC<{
           <div
             {...{ [REVEAL_ATTRIBUTE]: '' }}
             aria-hidden={panel.closing || undefined}
-            className={clsx('w-full overflow-hidden rounded-xl rounded-tl-md border border-border bg-foreground/[0.02]', panel.closing && 'motion-disclose-leaving')}
+            className={clsx('w-full overflow-hidden rounded-xl rounded-tl-md border border-edge bg-foreground/[0.02] shadow-elevation-0', panel.closing && 'motion-disclose-leaving')}
           >
             <div {...{ [SUMMARY_HEAD_ATTRIBUTE]: '' }} className={clsx('flex items-center gap-2 border-b px-3 py-2', statusChipClasses(group.status))}>
               <button

@@ -99,7 +99,7 @@ export const AgentGraphSearch: React.FC<AgentGraphSearchProps> = ({
 
   return (
     <div ref={containerRef} className="relative w-full sm:w-[300px]">
-      <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring">
+      <div className="flex h-9 w-full items-center gap-2 rounded-md border border-field-edge px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring bg-field">
         <Search className="size-3.5 shrink-0 text-muted" />
         <input
           value={query}
@@ -128,7 +128,7 @@ export const AgentGraphSearch: React.FC<AgentGraphSearchProps> = ({
           id="agent-graph-search-list"
           ref={listRef}
           role="listbox"
-          className="absolute z-30 mt-1.5 max-h-[320px] w-full min-w-[280px] overflow-y-auto rounded-lg border border-border-strong bg-surface p-1 shadow-lg"
+          className="absolute z-30 mt-1.5 max-h-[320px] w-full min-w-[280px] overflow-y-auto rounded-lg border border-edge bg-popover p-1 shadow-elevation-2"
         >
           {shown.length === 0 ? (
             <div className="px-3 py-6 text-center text-[12px] text-muted">

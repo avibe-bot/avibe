@@ -955,7 +955,7 @@ const MentionMenu = forwardRef<HTMLUListElement, BeautifulMentionsMenuProps>(
       }}
       data-mention-picker
       // Never wider than the screen less its gaps, so the shift above can always fit it.
-      className="absolute left-0 z-50 mb-4 !bottom-full !top-auto max-h-64 min-w-[min(15rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] list-none overflow-y-auto overflow-x-hidden rounded-md border border-border bg-panel p-1 text-text shadow-md"
+      className="absolute left-0 z-50 mb-4 !bottom-full !top-auto max-h-64 min-w-[min(15rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] list-none overflow-y-auto overflow-x-hidden rounded-md border border-edge bg-popover p-1 text-text shadow-elevation-2"
       {...props}
     >
       {children}

@@ -285,7 +285,7 @@ export const SkillsPage: React.FC = () => {
         {scope === 'project' && projects.length > 0 ? (
           <ProjectPicker projects={projects} value={projectId} onChange={setProjectId} />
         ) : null}
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
+        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}
@@ -319,7 +319,7 @@ export const SkillsPage: React.FC = () => {
       </div>
 
       {scope === 'project' && activeProject?.folder_path ? (
-        <div className="flex items-center gap-2 rounded-[10px] border border-border-strong bg-surface-2 px-3.5 py-2.5">
+        <div className="flex items-center gap-2 rounded-[10px] border border-edge bg-surface-2 px-3.5 py-2.5 shadow-elevation-0">
           <span className="truncate font-mono text-[10.5px] text-muted">
             {showMcp ? <>{activeProject.folder_path}/.mcp.json</> : <>{activeProject.folder_path}/.agents/skills</>}
           </span>

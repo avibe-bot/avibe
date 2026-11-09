@@ -139,7 +139,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
 
   return (
     <>
-      <div className="flex items-center gap-3 rounded-xl border border-border bg-surface px-3.5 py-3">
+      <div className="flex items-center gap-3 rounded-xl border border-edge bg-surface px-3.5 py-3 shadow-elevation-0">
         <div className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${meta.tint}`}>{meta.icon}</div>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="text-[12px] text-muted">{meta.title}</span>

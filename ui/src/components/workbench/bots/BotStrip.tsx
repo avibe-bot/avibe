@@ -486,7 +486,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
               className={clsx('transition', heldHere && holdFaceClass(heldHere))}
             />
             {unread > 0 && !voice && (
-              <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+              <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground">
                 {unreadLabel(unread)}
               </span>
             )}
@@ -513,7 +513,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
           aria-label={t('bots.menu.label', { name })}
           data-settings-interaction-owner="true"
           onOpenAutoFocus={(event) => event.preventDefault()}
-          className="flex w-[208px] flex-col gap-0.5 rounded-2xl border-border-strong bg-surface-2 p-1.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+          className="flex w-[208px] flex-col gap-0.5 rounded-2xl p-1.5"
         >
           <button
             type="button"
@@ -554,7 +554,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
           onOpenAutoFocus={(event) => event.preventDefault()}
           onMouseEnter={queueOpen}
           onMouseLeave={queueClose}
-          className="w-[248px] rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+          className="w-[248px] rounded-2xl p-0"
         >
           <button
             type="button"

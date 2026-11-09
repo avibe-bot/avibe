@@ -80,7 +80,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
         closeLabel={t('common.close')}
         // A card near the top on a phone, not a bottom sheet: it grows in place.
         mobilePresentation="card"
-        className="max-w-[760px] w-[calc(100vw-2rem)] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:w-[calc(100vw-5rem)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-auto max-md:left-1/2 max-md:right-auto max-md:top-4 max-md:w-[calc(100vw-2rem)] max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-[-50%] max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
+        className="max-w-[760px] w-[calc(100vw-2rem)] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl p-0 sm:w-[calc(100vw-5rem)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-auto max-md:left-1/2 max-md:right-auto max-md:top-4 max-md:w-[calc(100vw-2rem)] max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-[-50%] max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
       >
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-cyan/40 bg-cyan-soft text-cyan-ink">
@@ -93,7 +93,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
         </div>
 
         <div className="flex flex-col gap-3.5 p-5">
-          <div className="flex min-w-0 items-center gap-2.5 rounded-[10px] border border-border-strong bg-surface px-3.5 py-2.5">
+          <div className="flex min-w-0 items-center gap-2.5 rounded-[10px] border border-edge bg-surface px-3.5 py-2.5 shadow-elevation-0">
             <Search className="size-[15px] shrink-0 text-muted" />
             <input
               autoFocus
@@ -114,7 +114,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                 onClick={() => setTag(null)}
                 className={clsx(
                   'rounded-full border px-2.5 py-1 text-[11.5px] transition',
-                  tag === null ? 'border-mint/40 bg-mint-soft font-semibold text-mint-ink' : 'border-border-strong text-muted hover:text-foreground',
+                  tag === null ? 'border-mint/40 bg-mint-soft font-semibold text-mint-ink' : 'border-edge text-muted hover:text-foreground bg-field',
                 )}
               >
                 {t('skills.browse.tagAll')}
@@ -126,7 +126,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                   onClick={() => setTag(tg)}
                   className={clsx(
                     'rounded-full border px-2.5 py-1 text-[11.5px] transition',
-                    tag === tg ? 'border-mint/40 bg-mint-soft font-semibold text-mint-ink' : 'border-border-strong text-muted hover:text-foreground',
+                    tag === tg ? 'border-mint/40 bg-mint-soft font-semibold text-mint-ink' : 'border-edge text-muted hover:text-foreground bg-field',
                   )}
                 >
                   {tg}
@@ -145,7 +145,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
               const installed = installedNames.has(item.name);
               const isInstalling = installing === item.installSource;
               return (
-                <div key={String(item.id)} className="flex items-center gap-3 rounded-xl border border-border bg-surface px-3.5 py-3.5">
+                <div key={String(item.id)} className="flex items-center gap-3 rounded-xl border border-edge bg-surface px-3.5 py-3.5 shadow-elevation-0">
                   <div className="flex min-w-0 flex-1 flex-col gap-1.5">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="min-w-0 break-words text-[14px] font-semibold text-foreground [overflow-wrap:anywhere]">{item.name}</span>
@@ -159,7 +159,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                     <div className="line-clamp-2 text-[11.5px] text-muted">{item.description}</div>
                     <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted">
                       {(item.tags ?? []).slice(0, 3).map((tg) => (
-                        <span key={tg} className="max-w-full break-all rounded border border-border bg-surface-3 px-1.5 py-0.5">
+                        <span key={tg} className="max-w-full break-all rounded border border-edge bg-surface-3 px-1.5 py-0.5 shadow-elevation-0">
                           {tg}
                         </span>
                       ))}
@@ -172,7 +172,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                     </div>
                   </div>
                   {installed ? (
-                    <span className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border-strong bg-surface-3 px-3 py-2 text-[12px] font-medium text-muted">
+                    <span className="flex shrink-0 items-center gap-1.5 rounded-lg border border-edge bg-surface-3 px-3 py-2 text-[12px] font-medium text-muted shadow-elevation-0">
                       <Check className="size-3.5 text-mint-ink" />
                       {t('skills.browse.installed')}
                     </span>
@@ -202,7 +202,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg border border-border-strong px-4 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+            className="rounded-lg border border-edge px-4 py-2 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
           >
             {t('skills.browse.done')}
           </button>

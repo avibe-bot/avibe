@@ -120,7 +120,7 @@ export const ProjectSettingsDialog: React.FC<{
             {/* 1. Working directory (read-only). */}
             <section className="flex flex-col gap-1.5">
               <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.workdir.label')}</span>
-              <div className="break-all rounded-lg border border-border bg-surface-2 px-3 py-2 font-mono text-[12px] text-foreground">
+              <div className="break-all rounded-lg border border-edge bg-surface-2 px-3 py-2 font-mono text-[12px] text-foreground shadow-elevation-0">
                 {project.folder_path || t('projectSettings.workdir.unset')}
               </div>
               <span className="text-[11px] leading-relaxed text-muted">{t('projectSettings.workdir.hint')}</span>

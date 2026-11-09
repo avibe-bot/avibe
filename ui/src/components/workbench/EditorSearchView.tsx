@@ -289,7 +289,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
             {showReplace && (
               <div className="flex items-center gap-1">
                 <CornerDownRight className="size-3.5 shrink-0 text-muted" />
-                <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-surface-3 px-2 py-1">
+                <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-edge bg-surface-3 px-2 py-1 shadow-elevation-0">
                   <input
                     value={replacement}
                     onChange={(e) => setReplacement(e.target.value)}
@@ -324,14 +324,14 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
                   onChange={(e) => setInclude(e.target.value)}
                   placeholder={t('apps.editor.search.include')}
                   spellCheck={false}
-                  className="rounded-md border border-border bg-surface-3 px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted focus:border-cyan focus:outline-none"
+                  className="rounded-md border border-field-edge px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted focus:border-cyan focus:outline-none bg-field"
                 />
                 <input
                   value={exclude}
                   onChange={(e) => setExclude(e.target.value)}
                   placeholder={t('apps.editor.search.exclude')}
                   spellCheck={false}
-                  className="rounded-md border border-border bg-surface-3 px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted focus:border-cyan focus:outline-none"
+                  className="rounded-md border border-field-edge px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted focus:border-cyan focus:outline-none bg-field"
                 />
               </div>
             )}

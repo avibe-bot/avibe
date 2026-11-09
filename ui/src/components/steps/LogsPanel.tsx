@@ -20,7 +20,7 @@ import { Select } from '../ui/select';
 type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'ALL';
 
 const LEVEL_PILL: Record<string, string> = {
-  DEBUG: 'border-border bg-foreground/[0.04] text-muted',
+  DEBUG: 'border-edge bg-field text-muted',
   INFO: 'border-cyan/30 bg-cyan/[0.08] text-cyan-ink',
   WARNING: 'border-gold/30 bg-gold/[0.08] text-gold-ink',
   ERROR: 'border-destructive/30 bg-destructive/[0.08] text-destructive-ink',
@@ -162,7 +162,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               'inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-[12px] font-medium transition',
               autoRefresh
                 ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
-                : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
+                : 'border-edge text-foreground bg-field hover:bg-field-hover'
             )}
           >
             {autoRefresh ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
@@ -220,8 +220,8 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               className={clsx(
                 'inline-flex h-7 items-center gap-1 rounded-full border px-3 text-[11px] font-medium transition-colors',
                 selectedSource === source.key
-                  ? 'border-mint/35 bg-mint/[0.08] text-mint-ink shadow-glow-xs-mint'
-                  : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
+                  ? 'border-mint/35 bg-mint/[0.08] text-mint-ink'
+                  : 'border-edge text-muted hover:text-foreground bg-field'
               )}
             >
               {getSourceLabel(source.key)}
@@ -243,7 +243,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
               'inline-flex h-7 items-center gap-1 rounded-full border px-3 text-[11px] font-medium transition-colors',
               levelFilter === level
                 ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
-                : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
+                : 'border-edge text-muted hover:text-foreground bg-field'
             )}
           >
             {level === 'ALL' ? t('logs.all') : level}
@@ -254,7 +254,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
         ))}
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-foreground/[0.02] px-4 py-2.5">
           <span className="font-mono text-[11px] font-medium text-muted">
             {t('logs.entriesCount', { filtered: filteredLogs.length, total: logs.length })}
@@ -268,7 +268,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
             >
               <ArrowDown className="size-3" /> {t('logs.jumpToLatest')}
             </button>
-            <code className="rounded border border-border bg-background px-2 py-0.5 font-mono text-[10px] text-muted">
+            <code className="rounded border border-edge bg-surface px-2 py-0.5 font-mono text-[10px] text-muted shadow-elevation-0">
               {selectedSourceMeta?.path || t('logs.allFiles')}
             </code>
           </div>
