@@ -403,6 +403,8 @@ def test_without_the_internal_group_distribution_fails(groups):
 
 def test_the_testflight_workflow_runs_by_hand_from_master_and_scopes_its_secrets():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ios-testflight.yml").read_text(encoding="utf-8"))
+    workflow_text = (ROOT / ".github/workflows/ios-testflight.yml").read_text(encoding="utf-8")
+    project_text = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
     assert workflow[True] == {"workflow_dispatch": None}
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {"group": "ios-testflight", "cancel-in-progress": False}
@@ -430,6 +432,14 @@ def test_the_testflight_workflow_runs_by_hand_from_master_and_scopes_its_secrets
     assert [name for name in names if name in order] == order
     with_secrets = [step["name"] for step in steps if "secrets." in json.dumps(step)]
     assert with_secrets == ["Import Apple Distribution identity and App Store profile"]
+    assert 'APP_PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME"' in workflow_text
+    assert 'NOTIFICATION_SERVICE_PROFILE_SPECIFIER="$IOS_NOTIFICATION_SERVICE_PROFILE_NAME"' in workflow_text
+    assert '\n            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME"' not in workflow_text
+    app_release = project_text.split(
+        "C00000000000000000000004 /* Release */ = {", 1
+    )[1].split("C00000000000000000000005 /* Debug */ =", 1)[0]
+    assert 'PROVISIONING_PROFILE_SPECIFIER = "$(APP_PROVISIONING_PROFILE_SPECIFIER)";' in app_release
+    assert 'PROVISIONING_PROFILE_SPECIFIER = "$(NOTIFICATION_SERVICE_PROFILE_SPECIFIER)";' in project_text
     cleanup = steps[-1]
     assert cleanup["name"] == "Remove Apple signing material"
     assert cleanup["if"] == "always()"
