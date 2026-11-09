@@ -134,6 +134,18 @@ def app_store_connect_key(value: str) -> bytes:
 # Provisioning profile
 
 
+def keychain_profile_grant_covers(required_group: str, grant: object) -> bool:
+    """Whether one profile allowlist entry authorizes an exact signed group."""
+    if not isinstance(grant, str):
+        return False
+    if grant == required_group:
+        return True
+    if grant.count("*") != 1 or not grant.endswith(".*"):
+        return False
+    prefix = grant[:-1]
+    return prefix.startswith(f"{TEAM_ID}.") and required_group.startswith(prefix)
+
+
 def check_profile(
     profile: dict,
     *,
@@ -171,15 +183,40 @@ def check_profile(
             raise TestFlightError("The App Store profile must grant aps-environment=production")
         if actual is None:
             raise TestFlightError(f"The profile does not grant {key}; enable it on the App ID and regenerate")
+        if key == "keychain-access-groups":
+            if isinstance(actual, str):
+                actual_values = [actual]
+            elif isinstance(actual, list):
+                actual_values = actual
+            else:
+                actual_values = []
+            grants_are_relevant = all(
+                any(
+                    keychain_profile_grant_covers(required_group, grant)
+                    for required_group in required
+                )
+                for grant in actual_values
+            )
+            requirements_are_covered = all(
+                any(
+                    keychain_profile_grant_covers(required_group, grant)
+                    for grant in actual_values
+                )
+                for required_group in required
+            )
+            if not actual_values or not grants_are_relevant or not requirements_are_covered:
+                raise TestFlightError(
+                    "The profile must grant exactly the required "
+                    "keychain-access-groups values or covering wildcards"
+                )
+            continue
         if isinstance(actual, str):
             actual_values = {actual}
         else:
-            actual_values = set(actual)
-        if key == "keychain-access-groups" and actual_values != set(required):
-            raise TestFlightError(
-                "The profile must grant exactly the required "
-                "keychain-access-groups values"
-            )
+            try:
+                actual_values = set(actual)
+            except (TypeError, ValueError):
+                actual_values = set()
         if not set(required) <= actual_values:
             raise TestFlightError(
                 f"The profile does not grant the required {key} values; "

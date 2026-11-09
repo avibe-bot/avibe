@@ -88,6 +88,48 @@ def test_a_current_app_store_profile_for_this_app_is_accepted():
     testflight.check_profile(app_store_profile(), now=NOW)
 
 
+def test_profile_keychain_grants_accept_exact_or_covering_wildcards():
+    exact = app_store_profile()
+    testflight.check_profile(exact, now=NOW)
+
+    wildcard = app_store_profile()
+    wildcard["Entitlements"]["keychain-access-groups"] = [
+        f"{testflight.TEAM_ID}.*"
+    ]
+    testflight.check_profile(wildcard, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "grants",
+    [
+        ["ZZZZZZZZZZ.*"],
+        [f"{testflight.TEAM_ID}.bot.avibe.desktop.*"],
+        [f"{testflight.TEAM_ID}.bot.*.push"],
+        [f"{testflight.TEAM_ID}.bot.avibe.ios*"],
+        [f"{testflight.TEAM_ID}.bot.avibe.ios.push.*"],
+        [testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP, 7],
+        {testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP: True},
+    ],
+    ids=[
+        "unrelated-team",
+        "unrelated-prefix",
+        "embedded-wildcard",
+        "missing-dot-before-wildcard",
+        "insufficient-child-prefix",
+        "non-string",
+        "mapping",
+    ],
+)
+def test_profile_keychain_grants_reject_unrelated_malformed_or_insufficient_values(
+    grants,
+):
+    profile = app_store_profile()
+    profile["Entitlements"]["keychain-access-groups"] = grants
+
+    with pytest.raises(testflight.TestFlightError, match="covering wildcards"):
+        testflight.check_profile(profile, now=NOW)
+
+
 def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
     profile = app_store_profile()
     profile["Entitlements"]["aps-environment"] = "development"
@@ -209,6 +251,42 @@ def test_a_distribution_signed_notification_service_with_shared_entitlements_pas
         required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
         build="7.1",
     )
+
+
+def test_signed_keychain_groups_remain_exact_and_target_isolated():
+    app_info, app_entitlements = signed(
+        entitlements={
+            "keychain-access-groups": [f"{testflight.TEAM_ID}.*"],
+        }
+    )
+    with pytest.raises(testflight.TestFlightError, match="exactly"):
+        testflight.check_signed_app(
+            app_info,
+            app_entitlements,
+            build="7.1",
+        )
+
+    service_info, service_entitlements = signed(
+        info={"CFBundleIdentifier": testflight.NOTIFICATION_SERVICE_BUNDLE_ID},
+        entitlements={
+            "application-identifier": testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+            "com.apple.developer.associated-domains": [],
+            "keychain-access-groups": [
+                testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
+                testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
+            ],
+        },
+    )
+    service_entitlements.pop("aps-environment", None)
+    with pytest.raises(testflight.TestFlightError, match="exactly"):
+        testflight.check_signed_bundle(
+            service_info,
+            service_entitlements,
+            bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
+            application_identifier=testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+            required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+            build="7.1",
+        )
 
 
 def test_a_notification_service_profile_has_shared_groups_but_no_apns():
