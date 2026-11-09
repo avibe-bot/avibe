@@ -65,7 +65,7 @@ const designFrames = frames([
   }),
   screen('short', '设置向导 · AI 助手 · 矮窗口 1366×768', {}, { width: 1366, height: 768 }),
   screen('large', '设置向导 · AI 助手 · 大屏 1920×1080', {}, { width: 1920, height: 1080 }),
-  screen('phone', '设置向导 · AI 助手 · 手机', {}, { width: 390, height: 1800 }),
+  screen('phone', '设置向导 · AI 助手 · 手机（卡片随内容高，操作栏固定在底部）', {}, { width: 390, height: 844 }),
 ]);
 
 export default designFrames;

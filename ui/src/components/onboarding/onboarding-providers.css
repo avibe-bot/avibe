@@ -651,15 +651,27 @@
 @media (max-width: 759px) {
   .setup-provider-stage { gap: 10px; }
   .setup-provider-grid { grid-template-columns: minmax(0, 1fr); }
-  .setup-destinations { grid-auto-flow: row; }
+  /* The assistants the gateway serves are names, not more cards to press: a two-by-two
+     block of the desktop's own centred tiles, rather than four full-width rows that
+     read like a second list of providers and pushed the action a screen further down.
+     Scoped to the stage so it outranks the shared track rule in `onboarding.css`
+     whichever of the two sheets a bundle happens to load last. */
+  .setup-provider-stage .setup-destinations { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .setup-provider-grid,
   .setup-destinations {
     height: auto;
     gap: 10px;
   }
-  .setup-provider-card,
-  .setup-destination { height: calc(64 * var(--ob-u)); }
-  .setup-destination { justify-content: flex-start; }
+  .setup-provider-card { height: calc(64 * var(--ob-u)); }
+  /* Half a phone is narrow enough that the built-in tag can outgrow its tile in
+     English; it wraps under the name rather than truncating the name to fit. */
+  .setup-destination {
+    height: calc(50 * var(--ob-u));
+    padding-inline: var(--obp-card-ph);
+    flex-wrap: wrap;
+    align-content: center;
+    row-gap: 2px;
+  }
   .setup-wires { display: none; }
   .setup-gateway { height: calc(64 * var(--ob-u)); }
   .setup-provider-summary { height: auto; min-height: var(--obp-summary-h); }

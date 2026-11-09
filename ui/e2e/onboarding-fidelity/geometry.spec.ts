@@ -541,6 +541,14 @@ const ANCHOR_TIERS = [
   { width: 1920, height: 1080 }, { width: 1366, height: 768 }, { width: 1200, height: 800 },
   { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 568 },
 ] as const;
+/** Below 760 the pair is held by pinning it to the window, not by reserving room. */
+const isPhone = (viewport: { width: number }) => viewport.width < 760;
+
+/** The shell's own scroll, to its far end: where the bar finally rests in flow. */
+const toEnd = (page: Page) => page.evaluate(() => {
+  const shell = document.querySelector('.onboarding-shell') as HTMLElement;
+  shell.scrollTop = shell.scrollHeight;
+});
 
 /** The pair's real rects, measured whether or not the back row is drawn: it reserves its
  *  box through `visibility` on the first screen, so filtering for visibility would drop
@@ -674,7 +682,7 @@ test.describe('shared screen anchors', () => {
 });
 
 test.describe('shared action anchor', () => {
-  for (const viewport of ANCHOR_TIERS) {
+  for (const viewport of ANCHOR_TIERS.filter((tier) => !isPhone(tier))) {
     for (const lang of ['en', 'zh'] as const) {
       test(`${size(viewport)} ${lang} keeps one action pair across every registered screen`, async ({ page }) => {
         await page.setViewportSize(viewport);
@@ -728,6 +736,101 @@ test.describe('shared action anchor', () => {
         // to stay live too: it is an aside, not a decoration.
         await page.locator('.onboarding-setup-hint').getByRole('button').first().click();
         // Back is one step at a time through the sequence.
+        await page.locator('.onboarding-back-action').click();
+        await page.clock.runFor(950);
+        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', sequence.at(-2)!);
+        expect(denied).toEqual([]);
+      });
+    }
+  }
+});
+
+/**
+ * A phone scrolls, so the anchor is a bar pinned to the bottom of the window rather than a
+ * position below a reserved composition (owner, 2026-11-10). Reserving room on a phone is
+ * what drew the setup as blank screens with the action a full scroll away, so this walks
+ * every screen and holds both halves: the bar is on the window's bottom edge with the same
+ * action box everywhere a way back exists, and no screen spends blank it did not draw —
+ * its stage starts one band under its heading and ends at its own content, and at the end
+ * of the scroll the content stops one band above the bar.
+ */
+test.describe('pinned phone action bar', () => {
+  for (const viewport of ANCHOR_TIERS.filter(isPhone)) {
+    for (const lang of ['en', 'zh'] as const) {
+      test(`${size(viewport)} ${lang} pins one action bar to the window and reserves no blank on any screen`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const denied = await serveProduct(page);
+        await serveSetupSource(page);
+        await openOnboarding(page, { lang });
+        const bandGap = await page.locator('.onboarding-shell').evaluate((node) =>
+          parseFloat(getComputedStyle(node).getPropertyValue('--ob-band-gap')));
+        const sequence = (await page.locator('[data-setup-sequence]').getAttribute('data-setup-sequence'))!.split(' ');
+        let withBack: Pair | null = null;
+        for (const [index, id] of sequence.entries()) {
+          if (index > 0) {
+            await page.locator('.onboarding-primary-action').click();
+            await page.clock.runFor(950);
+          }
+          await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', id);
+          await toTop(page);
+          // Pinned: the bar rests on the window's bottom edge with the action fully in view,
+          // before any scroll.
+          const bar = await box(page, '.onboarding-setup-footer');
+          expect(Math.abs(bar.y + bar.height - viewport.height)).toBeLessThanOrEqual(1);
+          await expect(page.locator('.onboarding-primary-action')).toBeInViewport({ ratio: 1 });
+          // The first screen has no way back and draws no empty row for one; every other
+          // screen draws the same pair in the same place.
+          const back = page.locator('.onboarding-back-action');
+          if (index === 0) {
+            await expect(back).toBeHidden();
+          } else {
+            await expect(back).toBeVisible();
+            const now = await pair(page);
+            if (!withBack) withBack = now;
+            else await expectSamePair(page, withBack);
+          }
+          // No reservation: the stage starts one band under the heading's own lines and is
+          // exactly as tall as what it draws.
+          const geometry = await page.evaluate(() => {
+            const root = document.querySelector('[data-setup-screen-root]:not([hidden])')!;
+            const rect = (node: Element) => node.getBoundingClientRect();
+            const heading = rect(root.querySelector('.onboarding-heading')!);
+            const lines = [...root.querySelectorAll('.onboarding-heading > *')].map(rect);
+            const stage = rect(root.querySelector('.onboarding-stage')!);
+            const drawn = [...root.querySelectorAll('.onboarding-stage > *')].map(rect).filter((one) => one.height > 0);
+            return {
+              headingSlack: heading.bottom - Math.max(...lines.map((line) => line.bottom)),
+              headingToStage: stage.top - heading.bottom,
+              stageSlack: stage.bottom - Math.max(...drawn.map((one) => one.bottom)),
+            };
+          });
+          expect(geometry.headingSlack).toBeCloseTo(0, 0);
+          expect(geometry.headingToStage).toBeCloseTo(bandGap, 0);
+          expect(geometry.stageSlack).toBeCloseTo(0, 0);
+          // At the end of the scroll the bar is back in flow, one band under the content —
+          // unless the screen is shorter than the window, which then has nothing to scroll.
+          await toEnd(page);
+          const end = await page.evaluate(() => {
+            const shell = document.querySelector('.onboarding-shell') as HTMLElement;
+            const root = document.querySelector('[data-setup-screen-root]:not([hidden]) .onboarding-stage')!;
+            return {
+              scrolls: shell.scrollHeight > shell.clientHeight,
+              stageBottom: root.getBoundingClientRect().bottom,
+              barTop: document.querySelector('.onboarding-setup-footer')!.getBoundingClientRect().top,
+            };
+          });
+          expect(end.barTop).toBeGreaterThanOrEqual(end.stageBottom - 0.5);
+          if (end.scrolls) expect(end.barTop - end.stageBottom).toBeCloseTo(bandGap, 0);
+          expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+          if (index > 0) expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
+          await expect(page.locator('[data-setup-screen-root]:not([hidden]) h1')).toBeFocused();
+          await expect(page.locator('[data-setup-screen-root][hidden]:not([inert])')).toHaveCount(0);
+        }
+        // The readiness caption is in flow under the cards, above the bar, and live.
+        await toEnd(page);
+        const caption = await box(page, '.onboarding-setup-hint');
+        expect(caption.y + caption.height).toBeLessThanOrEqual((await box(page, '.onboarding-setup-footer')).y);
+        await page.locator('.onboarding-setup-hint').getByRole('button').first().click();
         await page.locator('.onboarding-back-action').click();
         await page.clock.runFor(950);
         await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', sequence.at(-2)!);
@@ -796,10 +899,19 @@ test.describe('post-action aside', () => {
         const aside = page.locator('.onboarding-action-aside');
         await aside.getByText(lang === 'zh' ? '查看详情' : 'View details').click();
         await expect(aside.locator('details')).toContainText(LONG_DETAIL);
-        expect(await aside.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
-        await expectSamePair(page, before);
-        const opened = await box(page, '.onboarding-action-aside');
-        expect(opened.y + opened.height).toBeLessThanOrEqual(before.primary.y);
+        if (isPhone(viewport)) {
+          // A phone's slot is a row in flow under the screen: it lengthens the scroll, and
+          // at its end it still stops above the pinned bar.
+          await expectSamePair(page, before);
+          await toEnd(page);
+          const opened = await box(page, '.onboarding-action-aside');
+          expect(opened.y + opened.height).toBeLessThanOrEqual((await box(page, '.onboarding-setup-footer')).y + 0.5);
+        } else {
+          expect(await aside.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+          await expectSamePair(page, before);
+          const opened = await box(page, '.onboarding-action-aside');
+          expect(opened.y + opened.height).toBeLessThanOrEqual(before.primary.y);
+        }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
 
         expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
