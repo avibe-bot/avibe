@@ -357,6 +357,39 @@ function offsetOf(el: Element): number {
   return translateOf(el) + (transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0);
 }
 
+/** How many times a read is taken again to take it at one moment. */
+const ONE_MOMENT_READS = 4;
+/** Takes `read` again until what moves (`clocks`: their own offsets) reads the same before and after it, a few
+ *  times at the most. WebKit samples a running animation at the time of each read, to the millisecond, not once
+ *  per frame as Chromium does: two boxes read a moment apart while they move can disagree by as far as they
+ *  moved in it. */
+function atOneMoment<T>(clocks: Element[], read: () => T): T {
+  let value!: T;
+  for (let attempt = 0; attempt < ONE_MOMENT_READS; attempt += 1) {
+    const before = clocks.map(offsetOf);
+    value = read();
+    if (clocks.every((clock, index) => offsetOf(clock) === before[index])) break;
+  }
+  return value;
+}
+
+/** Where the layout puts `el` in the column (px from the column's top): without what a glide draws the column
+ *  at, nor what a disclosure draws its item at (read at one moment with them). The layout's place, unlike where
+ *  it is drawn, is the same whenever it is read, so places read apart can be compared. */
+function layoutBox(column: HTMLElement, el: Element): { top: number; bottom: number } {
+  const item = itemOf(column, el) ?? el;
+  return atOneMoment([column, item], () => {
+    const origin = column.getBoundingClientRect().top + offsetOf(item);
+    const box = el.getBoundingClientRect();
+    return { top: box.top - origin, bottom: box.bottom - origin };
+  });
+}
+/** The top and the bottom the layout gives `els` together (px from the column's top). */
+function layoutSpan(column: HTMLElement, els: Element[]): { top: number; bottom: number } {
+  const boxes = els.map((el) => layoutBox(column, el));
+  return { top: Math.min(...boxes.map((box) => box.top)), bottom: Math.max(...boxes.map((box) => box.bottom)) };
+}
+
 /** The colour the transcript is drawn on: the curtain is laid in it. */
 function backdropOf(column: HTMLElement): string {
   for (let el: HTMLElement | null = column; el; el = el.parentElement) {
@@ -370,14 +403,13 @@ function backdropOf(column: HTMLElement): string {
  *  have to be drawn to lie on `twin`: a translate and a scale (by font size, from its top-left corner). */
 type Shared = { el: HTMLElement; twin: HTMLElement; translate: string; scale: string };
 /** Where each shared part of what closes would have to be drawn to lie on the summary's. */
-function sharedMoves(summary: Element, nodes: HTMLElement[]): Shared[] {
+function sharedMoves(column: HTMLElement, summary: Element, nodes: HTMLElement[]): Shared[] {
   const moves: Shared[] = [];
   for (const target of Array.from(summary.querySelectorAll<HTMLElement | SVGElement>(`[${SHARED_ATTRIBUTE}]`))) {
     const key = target.getAttribute(SHARED_ATTRIBUTE);
     const el = nodes.map((node) => node.querySelector<HTMLElement>(`[${SHARED_ATTRIBUTE}="${key}"]`)).find(Boolean);
     if (!el) continue;
-    const a = el.getBoundingClientRect();
-    const b = target.getBoundingClientRect();
+    const [a, b] = atOneMoment([column, itemOf(column, el) ?? el], () => [el.getBoundingClientRect(), target.getBoundingClientRect()]);
     const ratio = parseFloat(getComputedStyle(target).fontSize) / (parseFloat(getComputedStyle(el).fontSize) || 1);
     const scale = el instanceof SVGElement || !Number.isFinite(ratio) ? 1 : ratio;
     // Centre on centre vertically, left edge on left edge.
@@ -511,10 +543,9 @@ function curtainFor(entry: Disclosing): HTMLElement {
     positioned.set(host, host.style.position);
     host.style.position = 'relative';
   }
-  // Both boxes are drawn with whatever moves the host, so the offset between them is the layout's.
-  const hostBox = host.getBoundingClientRect();
-  const columnBox = column.getBoundingClientRect();
-  const top = Math.min(...nodes.map((node) => node.getBoundingClientRect().top)) - hostBox.top - host.clientTop;
+  // Where the content starts, from the host's own top, as the layout puts both.
+  const top = layoutSpan(column, nodes).top - layoutBox(column, host).top - host.clientTop;
+  const [hostBox, columnBox] = atOneMoment([column, host], () => [host.getBoundingClientRect(), column.getBoundingClientRect()]);
   const clip = document.createElement('div');
   clip.setAttribute('aria-hidden', 'true');
   clip.dataset.transcriptCurtainClip = '';
@@ -653,8 +684,8 @@ function shareLeft(entry: Disclosing, from: State, closing: boolean, reduced: bo
  *  layout grew; where a summary copy waits, the opening cross-fades out of it. The rows below start where they
  *  were and make room on the same curve. */
 function unfold(column: HTMLElement, item: Element, nodes: HTMLElement[], growth: number, room: number | null, next: HTMLElement | null, viewportBottom: number, tokens: Tokens, reduced: boolean) {
-  const rects = nodes.map((node) => node.getBoundingClientRect());
-  const height = Math.max(...rects.map((rect) => rect.bottom)) - Math.min(...rects.map((rect) => rect.top));
+  const span = layoutSpan(column, nodes);
+  const height = span.bottom - span.top;
   const keep = Math.max(0, Math.min(height, height - growth));
   summaries.set(item, { keep, room });
   const copy = item.querySelector<HTMLElement>(`[${SUMMARY_ATTRIBUTE}]`);
@@ -664,7 +695,7 @@ function unfold(column: HTMLElement, item: Element, nodes: HTMLElement[], growth
   const entry: Disclosing = {
     column, nodes, rows, trail, rise: growth, keep, open: height + EDGE_PAD, copy,
     late: copy ? Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_LATE_ATTRIBUTE}]`)) : [],
-    shared: copy ? sharedMoves(copy, nodes) : [],
+    shared: copy ? sharedMoves(column, copy, nodes) : [],
     curtain: null,
     edge: [],
     animations: [],
@@ -691,35 +722,33 @@ function unfold(column: HTMLElement, item: Element, nodes: HTMLElement[], growth
  *  whatever loaded or streamed in since). */
 const summaries = new WeakMap<Element, { keep: number; room: number | null }>();
 
-/** Where the layout puts an element's top on screen, without the offset a disclosure draws it at. */
-const layoutTop = (el: Element) => el.getBoundingClientRect().top - offsetOf(el);
-
 /** How a disclosure about to fold measures: the content's height, where the edge stops (`keep`, px below its
  *  top), and how far the rows below rise (`rise`). From its opening's measure when there is one; else from its
  *  summary copy, which lies where what stands for it closed will be (a group a link opened); else from the
  *  content itself (a Harness row's body). */
 function measureFold(column: HTMLElement, nodes: HTMLElement[], stays: Element | null, next: HTMLElement | null) {
   const [first] = nodes;
-  const rects = nodes.map((node) => node.getBoundingClientRect());
-  const top = Math.min(...rects.map((rect) => rect.top));
-  const height = Math.max(...rects.map((rect) => rect.bottom)) - top;
+  const span = layoutSpan(column, nodes);
+  const { top } = span;
+  const height = span.bottom - top;
+  const below = (from: Element, to: Element) => layoutBox(column, to).top - layoutBox(column, from).top;
   const measured = stays ? summaries.get(stays) : undefined;
   const copy = stays?.querySelector<HTMLElement>(`[${SUMMARY_ATTRIBUTE}]`) ?? null;
   let keep: number;
   let rise: number;
   if (measured) {
     keep = Math.max(0, Math.min(height, measured.keep));
-    rise = measured.room != null && next && stays ? Math.max(0, layoutTop(next) - layoutTop(stays) - measured.room) : height - keep;
+    rise = measured.room != null && next && stays ? Math.max(0, below(stays, next) - measured.room) : height - keep;
   } else if (copy && stays) {
-    const summaryBox = copy.getBoundingClientRect();
-    keep = Math.max(0, Math.min(height, summaryBox.bottom - top));
-    const room = summaryBox.bottom - stays.getBoundingClientRect().top + (parseFloat(getComputedStyle(column).rowGap) || 0);
-    rise = next ? Math.max(0, layoutTop(next) - layoutTop(stays) - room) : height - keep;
+    const summaryBottom = layoutBox(column, copy).bottom;
+    keep = Math.max(0, Math.min(height, summaryBottom - top));
+    const room = summaryBottom - layoutBox(column, stays).top + (parseFloat(getComputedStyle(column).rowGap) || 0);
+    rise = next ? Math.max(0, below(stays, next) - room) : height - keep;
   } else {
     // A panel whose head carries the control that closes it keeps its head; the layout gives back the rest, and
     // the gap its container leaves before it.
     const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
-    keep = Math.max(0, Math.min(height, head ? head.getBoundingClientRect().bottom - top : 0));
+    keep = Math.max(0, Math.min(height, head ? layoutBox(column, head).bottom - top : 0));
     const container = nodes.length === 1 && first.previousElementSibling && first.parentElement ? getComputedStyle(first.parentElement) : null;
     rise = height - keep + (container && /flex|grid/.test(container.display) ? parseFloat(container.rowGap) || 0 : 0);
   }
@@ -765,7 +794,7 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     entry = {
       column, nodes, rows: [...trail, ...(next ? [next, ...itemsBelow(next, viewportBottom(), rise)] : [])], trail, rise, keep, open: height + EDGE_PAD, copy,
       late: copy ? Array.from(copy.querySelectorAll<HTMLElement>(`[${SUMMARY_LATE_ATTRIBUTE}]`)) : [],
-      shared: copy ? sharedMoves(copy, nodes) : [],
+      shared: copy ? sharedMoves(column, copy, nodes) : [],
       curtain: null,
       edge: [],
       animations: [],
@@ -782,7 +811,7 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
   // How far after the item that stays the layout puts what follows the content (the next item, else what
   // the item itself draws after it).
   const probe = next ?? entry.trail[0] ?? null;
-  const gap = () => (probe && anchor ? layoutTop(probe) - layoutTop(anchor) : 0);
+  const gap = () => (probe && anchor ? layoutBox(column, probe).top - layoutBox(column, anchor).top : 0);
   const before = gap();
   const settled = entry;
   const settle = new MutationObserver(() => {
@@ -996,8 +1025,8 @@ export function useTranscriptMotion({
     opening.current = null;
     if (column && pending && pending.session === sessionId && pending.item.isConnected && performance.now() - pending.at <= DISCLOSURE_WINDOW_MS) {
       const next = nextItem(pending.item);
-      const box = pending.item.getBoundingClientRect();
-      opening.current = { item: pending.item, next, extent: (next ? next.getBoundingClientRect().top : box.bottom) - box.top };
+      const box = layoutBox(column, pending.item);
+      opening.current = { item: pending.item, next, extent: (next ? layoutBox(column, next).top : box.bottom) - box.top };
     }
     // What open disclosures are still loading (a skeleton, `aria-busy`), and how tall they are now.
     loading.current = new Map();
@@ -1127,9 +1156,9 @@ export function useTranscriptMotion({
     if (revealing.length > 0 && opened) {
       // How far the tapped item's room grew, from just before this commit to now.
       const nodes = revealing.map(({ node }) => node);
-      const box = opened.item.getBoundingClientRect();
+      const box = layoutBox(column, opened.item);
       const next = measured && measured.item === opened.item && measured.next?.parentElement === column ? measured.next : null;
-      const end = next ? next.getBoundingClientRect().top : Math.max(box.bottom, ...nodes.map((node) => node.getBoundingClientRect().bottom));
+      const end = next ? layoutBox(column, next).top : Math.max(box.bottom, layoutSpan(column, nodes).bottom);
       const ours = measured && measured.item === opened.item ? measured : null;
       const growth = ours ? end - box.top - ours.extent : 0;
       unfold(column, opened.item, nodes, growth, ours && next ? ours.extent : null, next, viewportBottom(), tokens, reduced);

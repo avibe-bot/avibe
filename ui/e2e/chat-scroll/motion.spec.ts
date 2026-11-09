@@ -685,14 +685,22 @@ test('while the reader is scrolled up, what comes in live enters without moving 
 // ----- Disclosures (docs/plans/web-ui-motion.md M3): what opens is revealed top to bottom and the rows
 // below make room; closing folds back and cross-fades into what stands for it closed. -----
 
-/** One frame of a disclosure, read at every animation frame and at every change. */
+/** One read of a disclosure, taken at every animation frame and at every change. Every value in a read is taken
+ *  at one moment of the animations' own clock (`at`): WebKit samples a running animation at the time of each
+ *  read (to the millisecond), not once per frame as Chromium does, so two boxes read a moment apart while they
+ *  move can disagree by as far as they moved in it. A read is taken again until a clock animation reads the
+ *  same before and after it (`exact`). */
 type Disclosed = {
   t: number;
-  /** Read at an animation frame (not at a change in between): that frame's time (ms, on the clock the
-   *  animations are sampled at), else null. */
+  /** When the read's values were drawn, on the animations' clock (ms since the clock started). */
+  at: number;
+  exact: boolean;
+  /** WebKit samples an animation it has run before at the time of the read, and one started since the last frame
+   *  was drawn at that frame's time: the two agree only in a read taken within a millisecond of its frame's
+   *  time (`onTime`). Chromium samples every animation at its frame's time. */
+  onTime: boolean;
+  /** Read at an animation frame (not at a change in between): that frame's time, else null. */
   frame: number | null;
-  /** How late after its frame's time a frame read ran (ms). */
-  lag: number | null;
   /** Read after the second tap (`then`), if there is one. */
   turned: boolean;
   /** The tapped item is drawn moving by a disclosure's share (one above it is still opening). */
@@ -766,6 +774,15 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
     const out: Disclosed[] = [];
     const t0 = performance.now();
     let tapped = false;
+    // The animations' own clock: an element moved 1px per ms by an animation of its own, read like the others.
+    const clock = document.createElement('div');
+    clock.setAttribute('aria-hidden', 'true');
+    Object.assign(clock.style, { position: 'fixed', top: '0', left: '0', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' });
+    document.body.append(clock);
+    const ticking = clock.animate([{ translate: '0 0px' }, { translate: '0 600000px' }], { duration: 600000, easing: 'linear', fill: 'both' });
+    ticking.startTime = document.timeline.currentTime;
+    const clockAt = () => clock.getBoundingClientRect().top;
+    const clockStart = Number(ticking.startTime);
     // What the tapped item draws after what it opens, once there is something open to find it by.
     let trailEl: Element | null = null;
     const findTrail = () => {
@@ -776,7 +793,22 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
       }
       return null;
     };
+    // Takes a read until the clock reads the same before and after it, at most a few times.
     const read = (frame: number | null = null) => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const before = clockAt();
+        const value = take(frame);
+        const after = clockAt();
+        value.at = (before + after) / 2;
+        value.exact = before === after;
+        value.onTime = value.exact && Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5;
+        if (value.exact || attempt === 7) {
+          out.push(value);
+          return;
+        }
+      }
+    };
+    const take = (frame: number | null): Disclosed => {
       // What it opened: inside the tapped item, or the items it laid out right under it (a group's members).
       const opened: HTMLElement[] = [...item.querySelectorAll<HTMLElement>('[data-transcript-reveal]')];
       let next: Element | null = null;
@@ -810,10 +842,12 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         const target = (animation.effect as KeyframeEffect | null)?.target;
         return animation.playState === 'running' && !!target && transcript.contains(target);
       }).flatMap((animation) => Object.keys((animation.effect as KeyframeEffect).getKeyframes()[0] ?? {}));
-      out.push({
+      return {
         t: performance.now() - t0,
+        at: 0,
+        exact: false,
+        onTime: false,
         frame,
-        lag: frame === null ? null : performance.now() - frame,
         turned: tapped,
         moving: item.getAnimations().some((animation) => animation.id === 'transcript-disclose' && animation.playState === 'running'),
         tapped: item.getBoundingClientRect().top,
@@ -855,7 +889,7 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
           const rows = [...box.children].find((child) => !child.querySelector('[role="status"]'));
           return 1 - (1 - (skeleton ? shownOpacity(skeleton) : 0)) * (1 - (rows ? shownOpacity(rows) : 0));
         })(),
-      });
+      };
     };
     read();
     // Read at every change too, not only at frames: on a slow runner one frame can outlast a whole fade. Read
@@ -873,6 +907,8 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
       }
     }
     changes.disconnect();
+    ticking.cancel();
+    clock.remove();
     return out;
   }, { controlSelector: control, summarySelector: summary, second: then, first: before, count: frames });
 }
@@ -892,10 +928,9 @@ function expectRowsWithEdge(all: Disclosed[]) {
   expect(Math.min(Infinity, ...gaps)).toBeGreaterThanOrEqual(-0.5);
   const resting = frames.filter(({ next, shown, curtainAt }) => next !== null && shown !== null && curtainAt === null).map(({ next, shown }) => next! - shown!);
   if (resting.length > 0) expect(Math.max(...gaps)).toBeLessThanOrEqual(Math.max(...resting) + 8);
-  const off = frames.filter(({ curtainAt }) => curtainAt !== null).map(({ curtainAt }) => Math.abs(curtainAt!));
-  // Within 5 px: while what holds them moves fast (a glide, a disclosure above), WebKit can measure two boxes in
-  // it a moment apart; a curtain out of place is out by tens of px (the glide's offset, what opened above).
-  expect(Math.max(0, ...off)).toBeLessThanOrEqual(5);
+  // The curtain of the disclosure tapped (from the tap on; one still down before it belongs to what moved before).
+  const off = frames.filter(({ frame, curtainAt }) => frame !== null && curtainAt !== null).map(({ curtainAt }) => Math.abs(curtainAt!));
+  expect(Math.max(0, ...off)).toBeLessThanOrEqual(1);
   expect(Math.min(1, ...all.filter(({ curtainOpacity }) => curtainOpacity !== null).map(({ curtainOpacity }) => curtainOpacity!))).toBeGreaterThanOrEqual(0.99);
   expect(all.some(({ layout }) => layout)).toBe(false);
 }
@@ -915,46 +950,75 @@ function expectNoDoubledLabel(frames: Disclosed[], { moves = true }: { moves?: b
   // The one that shows moves between the panel head's place and the pill's: read at any time during its move it
   // is somewhere in between, where one that jumped there is only ever at either end. Judged where the reads come
   // closer together than the move lasts (over 120 ms), so one of them falls in it.
-  const places = frames.map(({ title }) => title).filter((place): place is [number, number] => place !== null);
+  const seen = ownPath(frames);
+  const places = seen.map(({ title }) => title).filter((place): place is [number, number] => place !== null);
   const apart = (a: [number, number], b: [number, number]) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
   const [start, end] = [places[0], places.at(-1)!];
-  const reads = frames.filter(({ frame }) => frame !== null).map(({ t }) => t);
-  const sparsest = Math.max(0, ...reads.slice(1).map((t, index) => t - reads[index]));
+  const reads = seen.map(({ at }) => at);
+  const sparsest = Math.max(0, ...reads.slice(1).map((at, index) => at - reads[index]));
   if (apart(start, end) > 2 && sparsest < 110) {
     expect(places.filter((place) => apart(place, start) > 1 && apart(place, end) > 1).length).toBeGreaterThanOrEqual(1);
   }
 }
 /** Closing lifts the rows below by exactly what the layout gives back: once what closed is gone, nothing moves on. */
-function expectLandsAsItGoes(frames: Disclosed[]) {
+function expectLandsAsItGoes(all: Disclosed[]) {
+  const frames = drawn(all);
   const gone = frames.findIndex(({ content }) => content === null);
   expect(gone).toBeGreaterThan(0);
   const after = frames.slice(gone).map(({ next }) => next).filter((top): top is number => top !== null);
   expect(Math.max(...after) - Math.min(...after)).toBeLessThanOrEqual(0.5);
 }
-/** The frame reads taken on time, where things are where they are drawn. Between frames, or in a frame read
- *  long after its time on a busy runner, an engine may place an element with an animation of its own at that
- *  moment and another at the frame's time, so where they are drawn is judged on these. */
-const ON_TIME_MS = 4;
+/** The reads that show where things are drawn, relative to each other and in time: the one before the tap
+ *  (nothing moves yet), and those taken at animation frames (they run right before the frame is drawn; a read at
+ *  a change in between can catch a state the next commit replaces before anything is drawn) whose values were
+ *  all taken at one moment, which is the frame's own. */
 function drawn(frames: Disclosed[]) {
-  const onTime = frames.filter(({ frame, lag }) => frame !== null && lag! <= ON_TIME_MS);
-  expect(onTime.length).toBeGreaterThanOrEqual(5);
+  const onTime = frames.filter(({ frame, onTime: atFrame }, index) => index === 0 || (frame !== null && atFrame));
+  // On a busy runner WebKit runs few frame reads on time; a few are enough, so long as there are some.
+  expect(onTime.length).toBeGreaterThanOrEqual(4);
   return onTime;
 }
+/** Where one element is drawn, read after read: the one before the tap, and every read at a frame whose values
+ *  were all taken at one moment (an element is always at a point of its own path, whenever it is sampled). */
+function ownPath(frames: Disclosed[]) {
+  return frames.filter(({ frame, exact }, index) => index === 0 || (frame !== null && exact));
+}
 /** How far the row below moves in all, how fast at its fastest (px/ms, on the animations' clock), and how
- *  often it turns back, as drawn (at frames). */
+ *  often it turns back, as drawn. */
 function rowPath(frames: Disclosed[]) {
-  const tops = drawn(frames).map(({ next }) => next).filter((top): top is number => top !== null);
+  const tops = ownPath(frames).map(({ next }) => next).filter((top): top is number => top !== null);
+  const timed = drawn(frames).filter(({ next }) => next !== null);
   const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
   const turns = steps.slice(1).filter((step, index) => Math.sign(step) !== Math.sign(steps[index])).length;
-  // Over at least two frames' time, so a frame drawn a little early or late does not read as a burst of speed.
-  const timed = drawn(frames).filter(({ next }) => next !== null);
-  const speeds = timed.flatMap(({ frame, next }, index) => {
-    const later = timed.slice(index + 1).find((other) => other.frame! - frame! >= 30);
-    return later ? [Math.abs(later.next! - next!) / (later.frame! - frame!)] : [];
+  // Over at least 16 ms of the animations' clock (WebKit counts it in whole milliseconds).
+  const speeds = timed.flatMap(({ at, next }, index) => {
+    const later = timed.slice(index + 1).find((other) => other.at - at >= 16);
+    return later ? [Math.abs(later.next! - next!) / (later.at - at)] : [];
   });
   // In all, from before the tap (nothing moving) to the end.
   const all = frames.map(({ next }) => next).filter((top): top is number => top !== null);
   return { travel: all.at(-1)! - all[0], fastest: Math.max(0, ...speeds), turns };
+}
+
+/** How fast a disclosure's move can go at the most (px/ms): `distance` over `duration` (ms) on the move curve
+ *  (`--motion-ease-move`), at its steepest. */
+async function fastestMove(page: Page) {
+  const tokens = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      open: parseFloat(style.getPropertyValue('--motion-disclose-open-duration')),
+      close: parseFloat(style.getPropertyValue('--motion-disclose-close-duration')),
+      ease: style.getPropertyValue('--motion-ease-move').trim(),
+    };
+  });
+  const [x1, y1, x2, y2] = /cubic-bezier\(([^)]*)\)/.exec(tokens.ease)![1].split(',').map(Number);
+  const at = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3;
+  let steepest = 0;
+  for (let step = 0; step < 1000; step += 1) {
+    const [t1, t2] = [step / 1000, (step + 1) / 1000];
+    steepest = Math.max(steepest, (at(t2, y1, y2) - at(t1, y1, y2)) / (at(t2, x1, x2) - at(t1, x1, x2)));
+  }
+  return { open: (distance: number) => (steepest * Math.abs(distance)) / tokens.open, close: (distance: number) => (steepest * Math.abs(distance)) / tokens.close };
 }
 
 const CHIP = '[data-transcript-key^="activity:"]';
@@ -1112,16 +1176,18 @@ test('closing a chip while it still opens turns back from where it is, as smooth
   await page.waitForTimeout(300);
   const turned = await discloseAndWatch(page, `${CHIP} button[aria-expanded="false"]`, { then: { control: `${CHIP} button[aria-expanded="true"]`, after: 100 }, frames: 70 });
   const path = rowPath(turned);
-  // Down, then back up once, never faster than the uninterrupted opening or closing goes, and nothing is drawn
-  // over the panel, empty, or twice on the way.
+  // Down, then back up once, never faster than the uninterrupted opening or closing can go (their distance on
+  // the move curve, at its steepest), and nothing is drawn over the panel, empty, or twice on the way.
   expect(path.turns).toBe(1);
-  expect(path.fastest).toBeLessThanOrEqual(Math.max(rowPath(opening).fastest, rowPath(closing).fastest) * 1.1);
+  const move = await fastestMove(page);
+  expect(path.fastest).toBeLessThanOrEqual(Math.max(move.open(rowPath(opening).travel), move.close(rowPath(closing).travel)) * 1.15);
   // It turns from where it is: once tapped again, the row below never goes further down than it stood, but for
   // the one frame the opening may still draw before the turn takes over.
-  const down = turned.filter(({ turned: after, frame, next }) => !after && frame !== null && next !== null).map(({ next }) => next!);
-  const stood = down.at(-1)!;
-  const lastStep = Math.max(0, stood - down.at(-2)!);
-  expect(Math.max(...turned.filter(({ turned: after, next }) => after && next !== null).map(({ next }) => next!))).toBeLessThanOrEqual(stood + lastStep + 1);
+  const seen = ownPath(turned).filter(({ next }) => next !== null);
+  const down = seen.filter(({ turned: after }) => !after).map(({ next }) => next!);
+  const stood = Math.max(...down);
+  const lastStep = Math.max(0, down.at(-1)! - down.at(-2)!);
+  expect(Math.max(...seen.filter(({ turned: after }) => after).map(({ next }) => next!))).toBeLessThanOrEqual(stood + lastStep + 1);
   expect(Math.abs(path.travel)).toBeLessThanOrEqual(1);
   expectInPlace(turned);
   expectCovered(turned.filter(({ summary }) => summary !== null));
@@ -1207,11 +1273,13 @@ test('a chip whose steps are still loading opens straight to their skeleton, and
   const path = rowPath(frames);
   expect(path.turns).toBe(0);
   expectInPlace(frames);
-  // Where the rows landed among the frames as drawn, from the last one with the skeleton on.
+  // Never faster than one move over the whole way could go (the opening's and the rest's together, each on the
+  // move curve over the opening's time), so the rows landing never jump it; and some of the way is left for after.
+  const move = await fastestMove(page);
+  expect(path.fastest).toBeLessThanOrEqual(move.open(path.travel) * 1.15);
   const seen = drawn(frames);
   const landed = seen.findIndex(({ busy }, index) => index > 0 && !busy && seen[index - 1].busy);
   expect(landed).toBeGreaterThan(0);
-  expect(rowPath(seen.slice(landed - 1)).fastest).toBeLessThanOrEqual(rowPath(seen.slice(0, landed)).fastest * 1.1);
   expect(rowPath(seen.slice(landed - 1)).travel).toBeGreaterThan(20);
   // The rows take the skeleton's place with no empty frame: it fades out under them as they fade in (at every
   // read from the landing on).
