@@ -180,7 +180,7 @@ def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, c
     lines = prepared.render("Review the login flow.", SimpleNamespace(include_time_info=False)).splitlines()
     assert lines == [
         f"[Harness: agent run {stored['id']} from @<bot:main>]",
-        "[No callback. When the work is done or you need a decision, you can report to @<bot:main> with "
+        "[When the work is done or you need a decision, you can report to @<bot:main> with "
         "`vibe agent run --bot main --message ...`.]",
         "Review the login flow.",
     ]
@@ -192,15 +192,15 @@ def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, c
         # From an Agent shell: no callback for a Bot unless asked; a failure always returns.
         ("ses_main", ["--bot", "cso"], ("ses_main", "failure")),
         ("ses_main", ["--bot", "cso", "--no-callback"], ("ses_main", "failure")),
-        ("ses_main", ["--bot", "cso", "--callback"], ("ses_main", None)),
-        ("ses_main", ["--bot", "cso", "--callback-session-id", "ses_cso"], ("ses_cso", None)),
+        ("ses_main", ["--bot", "cso", "--callback"], ("ses_main", "failure")),
+        ("ses_main", ["--bot", "cso", "--callback-session-id", "ses_cso"], ("ses_main", "failure")),
         ("ses_main", ["--bot", "cso", "--sync", "--wait-timeout", "0.01"], ("ses_main", "failure")),
         # The same rule for every other target.
         ("ses_main", ["--session-id", "ses_cso"], ("ses_main", "failure")),
         ("ses_main", ["--session-id", "ses_cso", "--no-callback"], ("ses_main", "failure")),
-        ("ses_main", ["--session-id", "ses_cso", "--callback"], ("ses_main", None)),
+        ("ses_main", ["--session-id", "ses_cso", "--callback"], ("ses_main", "failure")),
         ("ses_main", ["--agent", "main"], ("ses_main", "failure")),
-        ("ses_main", ["--agent", "main", "--callback"], ("ses_main", None)),
+        ("ses_main", ["--agent", "main", "--callback"], ("ses_main", "failure")),
         # A run on the caller's own Session lands there already.
         ("ses_main", ["--bot", "main"], (None, None)),
         # A caller Session Avibe cannot post to drops the failure notice it added; it does not refuse the run.
@@ -211,11 +211,18 @@ def test_a_bot_message_has_no_callback_and_tells_the_bot_where_to_report(home, c
         (None, ["--session-id", "ses_cso", "--no-callback"], (None, None)),
         (None, ["--session-id", "ses_cso"], (None, None)),
         (None, ["--agent", "main"], (None, None)),
-        # Refused.
-        ("ses_main", ["--bot", "cso", "--callback", "--no-callback"], "conflicting_callback_policy"),
-        (None, ["--bot", "cso", "--callback"], "callback_without_caller"),
-        # A callback the caller asked for still has to reach a Session.
-        ("ses_gone", ["--bot", "cso", "--callback"], "invalid_session_id"),
+        # Deprecated flags are ignored, including combined flags and unusable targets.
+        ("ses_main", ["--bot", "cso", "--callback", "--no-callback"], ("ses_main", "failure")),
+        (None, ["--bot", "cso", "--callback"], (None, None)),
+        ("ses_gone", ["--bot", "cso", "--callback"], (None, None)),
+        ("ses_main", ["--bot", "cso", "--callback-session-id", "missing"], ("ses_main", "failure")),
+        # No-reply is durable but retains the failure notice.
+        ("ses_main", ["--bot", "cso", "--no-reply"], ("ses_main", "failure")),
+        ("ses_main", ["--session-id", "ses_cso", "--no-reply"], ("ses_main", "failure")),
+        ("ses_main", ["--bot", "cso", "--no-reply", "--sync"], "invalid_no_reply_policy"),
+        ("ses_main", ["--agent", "vibey", "--no-reply"], "invalid_no_reply_policy"),
+        ("ses_main", ["--fork-self", "--no-reply"], "invalid_no_reply_policy"),
+        ("ses_main", ["--fork-session", "ses_cso", "--no-reply"], "invalid_no_reply_policy"),
     ],
 )
 def test_the_callback_flag_matrix(home, capsys, monkeypatch, caller, argv, route):
@@ -233,3 +240,4 @@ def test_the_callback_flag_matrix(home, capsys, monkeypatch, caller, argv, route
     assert result == 0, payload
     stored = store.get_run(payload["run"]["id"])
     assert (stored["callback_session_id"], (stored["metadata"] or {}).get("callback_mode")) == route
+    assert (stored["metadata"].get("no_reply") is True) == ("--no-reply" in argv)

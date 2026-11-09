@@ -89,9 +89,9 @@ describe('activityKindI18nKey', () => {
 });
 
 describe('activityReturnI18nKey', () => {
-  it('says whether a delegated run returns here or is reported back', () => {
+  it('preserves legacy final callbacks without promising a report from new runs', () => {
     expect(activityReturnI18nKey(item({ item_kind: 'agent_run', returns_here: true }))).toBe('returnsHere');
-    expect(activityReturnI18nKey(item({ item_kind: 'agent_run', returns_here: false }))).toBe('reportsBack');
+    expect(activityReturnI18nKey(item({ item_kind: 'agent_run', returns_here: false }))).toBeNull();
   });
 
   it('says nothing for other rows, or when the server does not say', () => {

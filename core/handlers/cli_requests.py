@@ -24,7 +24,7 @@ _AGENT_RUN_STRINGS = frozenset({
     "model", "reasoning_effort", "cwd", "callback_session_id", "message", "message_file",
 })
 _AGENT_RUN_BOOLS = frozenset({
-    "queue", "fork_self", "same_scope", "callback", "no_callback", "close_after", "sync_run", "json",
+    "queue", "fork_self", "same_scope", "callback", "no_callback", "no_reply", "close_after", "sync_run", "json",
 })
 
 #: The ``help_command`` each command's own error printer adds to an error that names none.

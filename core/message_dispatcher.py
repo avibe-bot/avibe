@@ -44,6 +44,7 @@ from core.presentation import (
     validate_decision,
 )
 from core.message_output import (
+    DEFAULT_RESULT_MAX_CHARS,
     HARNESS_RUN_ID_TRIGGER_KINDS,
     HARNESS_TRIGGER_KINDS,
     MessageOutput,
@@ -2447,7 +2448,7 @@ class ConsolidatedMessageDispatcher:
     def _get_result_max_chars(self, context: MessageContext) -> int:
         if self._get_platform(context) == "discord":
             return 1900
-        return 30000
+        return DEFAULT_RESULT_MAX_CHARS
 
     def _get_result_max_bytes(self, context: MessageContext) -> Optional[int]:
         if self._get_platform(context) == "wechat":

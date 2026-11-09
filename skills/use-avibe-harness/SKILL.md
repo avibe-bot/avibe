@@ -2,7 +2,7 @@
 name: use-avibe-harness
 slug: use-avibe-harness
 description: Use Avibe Harness for durable Agent delegation, Sessions, scheduled Tasks, Watches, Runs, queues, and work that must continue beyond the current turn.
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Use Avibe Harness
@@ -37,6 +37,11 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 | Recurring specialist role | `vibe agent create` or `vibe agent update`, plus Tasks, Watches, or runs |
 
 To pick the Agent, model, and effort for new work, load the `choose-model` Skill.
+
+### Reporting
+A dispatched Session is told how to report to its sender. If it handles a message without writing back, Avibe sends one read receipt with its last reply once it is idle with no pending input, delegate, Task, or Watch. A run that fails, is canceled, or is interrupted still sends an immediate notice. `--sync` waits inline; otherwise read a Run with `vibe runs show`.
+
+For an informational message, use `vibe agent run --session-id <id> --no-reply --message ...` (or `--bot <bot>`). The receiver sees `[No reply needed.]`: it may act, but should not answer. This opens no delegation, sends no read receipt, and leaves any existing delegation unchanged. It cannot be combined with `--sync` or a new/forked Session. The old Agent Run callback flags are deprecated no-ops; Vault approval auto-resume is unchanged.
 
 ### Tasks and Watches
 Tasks and Watches created from an Agent shell report to this Session by default. Write cron weekdays as names (`0 9 * * mon-fri`); numeric weekdays are rejected. A command Task is silent on success and sends a failure notice naming the exit code; `--on-failure agent --message "..."` hands each failure to an Agent instead.
