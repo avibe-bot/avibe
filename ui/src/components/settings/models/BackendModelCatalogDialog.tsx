@@ -752,7 +752,7 @@ export const BackendModelCatalogDialog: React.FC<{
         <DialogContent
           mobileSheetHeight="tall"
           closeLabel={t('common.close') as string}
-          className="model-hub-catalog-dialog flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
+          className="model-hub-catalog-dialog flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
           onEscapeKeyDown={(event) => { if (busy || grabbedId) event.preventDefault(); }}
           onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
         >
@@ -846,7 +846,7 @@ export const BackendModelCatalogDialog: React.FC<{
                           <div className="flex min-w-0 items-center gap-3">
                             <Lock className="model-hub-catalog-grip-icon shrink-0" aria-hidden="true" />
                             {rowBody(model)}
-                            <span className="model-hub-pill model-hub-fill-0a shrink-0 border border-border text-muted">
+                            <span className="model-hub-pill model-hub-fill-0a shrink-0 border border-edge text-muted">
                               {t('settings.models.gateway.catalog.lockedBadge')}
                             </span>
                           </div>

@@ -47,7 +47,7 @@ export function FileDropzone({ file, onFile, accept = '.zip', hint, replaceLabel
     >
       <input ref={inputRef} type="file" accept={accept} className="hidden" onChange={(e) => onFile(e.target.files?.[0] ?? null)} />
       {file ? (
-        <div className="flex items-center gap-2.5 rounded-lg border border-border-strong bg-surface px-3 py-2">
+        <div className="flex items-center gap-2.5 rounded-lg border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint-soft text-mint-ink">
             <FileArchive className="size-4" />
           </span>
@@ -58,7 +58,7 @@ export function FileDropzone({ file, onFile, accept = '.zip', hint, replaceLabel
           <button
             type="button"
             onClick={pick}
-            className="flex shrink-0 items-center gap-1.5 rounded-md border border-border-strong px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+            className="flex shrink-0 items-center gap-1.5 rounded-md border border-edge px-2.5 py-1.5 text-[11px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
           >
             <RefreshCw className="size-3 text-muted" />
             {replaceLabel}

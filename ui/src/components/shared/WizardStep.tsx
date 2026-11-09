@@ -12,8 +12,8 @@ export const StepShell: React.FC<StepShellProps> = ({ active, children }) => (
     className={clsx(
       'overflow-hidden rounded-xl border transition-colors',
       active
-        ? 'border-mint/35 bg-surface-2 shadow-mint-card-sm'
-        : 'border-border bg-background'
+        ? 'border-mint/35 bg-surface-2'
+        : 'border-edge bg-surface shadow-elevation-0'
     )}
   >
     {children}

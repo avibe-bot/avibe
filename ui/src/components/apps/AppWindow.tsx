@@ -320,8 +320,8 @@ export const AppWindow: React.FC<{
         // window shrinks toward the Dock (inline transform above) and stops taking pointer events.
         win.minimized ? 'pointer-events-none opacity-0' : 'pointer-events-auto',
         focused
-          ? 'border-border-strong shadow-[0_28px_60px_-12px_rgba(0,0,0,0.7)]'
-          : 'border-border shadow-[0_16px_40px_-16px_rgba(0,0,0,0.6)]',
+          ? 'border-edge shadow-elevation-3'
+          : 'border-edge shadow-elevation-2',
       )}
       style={style}
     >

@@ -72,7 +72,7 @@ export function PendingVoiceItem({ take, retrying = false, failed = false, onRet
     <div
       role="status"
       className={clsx(
-        'flex w-full flex-col gap-1.5 rounded-2xl border bg-surface py-2 pr-2 pl-3.5 shadow-xl',
+        'flex w-full flex-col gap-1.5 rounded-2xl border bg-surface py-2 pr-2 pl-3.5 shadow-elevation-2',
         ready ? 'border-mint/35' : 'border-gold/45',
       )}
     >

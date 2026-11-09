@@ -46,7 +46,7 @@ export const CapabilityTabs: React.FC = () => {
             to={to}
             className={clsx(
               'flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[12.5px] font-medium transition',
-              active ? 'border-mint/40 bg-mint-soft text-mint-ink' : 'border-border-strong text-muted',
+              active ? 'border-mint/40 bg-mint-soft text-mint-ink' : 'border-edge text-muted bg-field',
             )}
           >
             <Icon className="size-3.5" />

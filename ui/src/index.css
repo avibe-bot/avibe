@@ -320,17 +320,6 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --radius-2xl: 20px;
   --radius-3xl: 24px;
 
-  /* Card wash shadows (ui/design: system/shape/radius-shadows). The colour is `--card-wash` rather
-     than a literal because this block is `@theme inline`: Tailwind substitutes
-     each entry's value into the generated utility, so a light-theme override of
-     the token itself would compile to nothing and the wash would keep the dark
-     neon on a white page. Every other entry here is the same shape for the same
-     reason -- `--color-mint: var(--mint)` and friends -- so theming happens in
-     the runtime variable, never in the token. */
-  --shadow-mint-card-sm: 0 8px 32px -8px var(--card-wash);
-  --shadow-mint-card: 0 24px 48px -12px var(--card-wash);
-  --shadow-mint-card-lg: 0 32px 64px -12px var(--card-wash);
-
   /* The accent glow scale (ui/design: system/shape/glows): `dot` is a status
      dot, `xs` a control track, `sm` an icon tile and the Doctor pulse, `md` a
      nav CTA, the eyebrow badge and the Dashboard hero pulse, `lg` a hero
@@ -412,15 +401,6 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --shadow-glow-cta-cyan: 0 0 var(--brand-glow-blur) -4px rgba(63, 224, 229, 0.6);
   --shadow-glow-cta-violet: 0 0 var(--brand-glow-blur) -4px rgba(124, 91, 255, 0.6);
   --shadow-glow-cta-gold: 0 0 var(--brand-glow-blur) -4px rgba(255, 200, 87, 0.6);
-
-  /* The approved Workbench sidebar draws its selected nav row with a halo at the
-     sized scale's own `sm` geometry and alpha -- 16/-4 at 0.44 -- but the design
-     table gives it #10B98170 in Light beside #5BFFA070 in Dark, so the hue has to
-     follow the palette. A written-out RGB cannot: the sized rungs stay on the dark
-     neon precisely because their channels are spelled out. Mixing the live accent
-     is what `wire` already does for the same reason, which is why this is a role
-     named for its use rather than a fifth rung on the scale. */
-  --shadow-glow-nav-mint: 0 0 16px -4px color-mix(in srgb, var(--mint) 44%, transparent);
 
   /* The selected Bot's avatar (`.bot-avatar-selected`): its edge lit, with a halo
      that has to read in both themes. Dark draws the sized scale's own `md`
@@ -507,14 +487,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --sidebar-background: #0e0e18;
   --nav-selected-bg: #5bffa029;
   --nav-selected-border: #5bffa059;
-  --nav-hover-bg: #1a1a26;
   /* The well behind the brand mark, and the hairline around the decorative theme
-     preview artwork in General Settings. --desktop-overlay-shadow is the shared
-     shadow colour for surfaces that float above the shell (the settings/connection
-     dialogs); it is a colour token, not a geometry one. */
+     preview artwork in General Settings. */
   --logo-well-background: #ffffff04;
   --illustration-card-border: #ffffff1c;
-  --desktop-overlay-shadow: #00000088;
 
   --mint: #5bffa0;
   --route-manual: #8bb4ff;
@@ -563,9 +539,8 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --selected-glow-blur: 24px;
   --selected-glow-spread: -6px;
   --selected-glow-alpha: 44%;
-  /* Colour of the card wash shadows (`--shadow-mint-card*`): each theme's own
-     brand mint at 0.078, which is why it is the one part of those shadows that
-     moves between themes. */
+  /* The onboarding provider cards' wash (onboarding-providers.css): each theme's
+     own brand mint at 0.078. */
   --card-wash: rgba(91, 255, 160, 0.078);
 
   /* Elevation and edges (see the @theme entries). Dark separates layers by
@@ -706,10 +681,8 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
     --sidebar-background: #fcfcfe;
     --nav-selected-bg: #10b98114;
     --nav-selected-border: #10b98160;
-    --nav-hover-bg: #f5f5f6;
     --logo-well-background: #eef1f780;
     --illustration-card-border: #08081212;
-    --desktop-overlay-shadow: #0a0a1424;
 
     --mint: #10b981;
     --route-manual: #245bcd;
@@ -861,10 +834,8 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --sidebar-background: #fcfcfe;
   --nav-selected-bg: #10b98114;
   --nav-selected-border: #10b98160;
-  --nav-hover-bg: #f5f5f6;
   --logo-well-background: #eef1f780;
   --illustration-card-border: #08081212;
-  --desktop-overlay-shadow: #0a0a1424;
 
   --mint: #10b981;
   --route-manual: #245bcd;

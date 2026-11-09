@@ -48,7 +48,7 @@ export function GettingStarted({
   const copy = (item: SetupItem, part: 'title' | 'why' | 'action') =>
     t(`workbench.home.setup.${item}.${part}`, { name });
   return (
-    <section className="flex w-full flex-col rounded-2xl border border-border bg-surface p-1.5 shadow-mint-card-sm">
+    <section className="flex w-full flex-col rounded-2xl border border-edge bg-surface p-1.5 shadow-elevation-0">
       <header className={clsx('flex items-center gap-2 px-2.5', desktop ? 'h-8' : 'h-7')}>
         <Rocket className="size-4 text-mint-ink" />
         <h2 className="text-sm font-semibold text-foreground">{t('workbench.home.setup.title')}</h2>

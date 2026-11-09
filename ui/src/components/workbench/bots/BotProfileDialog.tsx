@@ -339,12 +339,12 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
           className="relative shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
         >
           <BotAvatar avatar={shownAvatar} name={avatarName} size={64} previewUrl={previewUrl} />
-          <span className="absolute -bottom-0.5 -right-0.5 grid size-6 place-items-center rounded-full border border-border-strong bg-surface-2 text-foreground">
+          <span className="absolute -bottom-0.5 -right-0.5 grid size-6 place-items-center rounded-full border border-edge text-foreground bg-field">
             <Pencil className="size-3" />
           </span>
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[300px] rounded-2xl border-border-strong bg-surface-2 p-3.5">
+      <PopoverContent align="start" className="w-[300px] rounded-2xl p-3.5">
         <BotAvatarPicker
           current={avatar.kind === 'emoji'
             ? { emoji: avatar.emoji, hue: avatar.hue }
@@ -434,7 +434,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
 
       <div className="flex flex-col gap-4 px-5 py-4">
         {placesTaken && (
-          <p role="status" className="flex items-start gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2 text-[12px] leading-relaxed text-muted">
+          <p role="status" className="flex items-start gap-2 rounded-lg border border-edge bg-foreground/[0.03] px-3 py-2 text-[12px] leading-relaxed text-muted shadow-elevation-0">
             <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
             <span className="min-w-0 flex-1">
               <BotLimitReason limit={placesTaken} mainName={mainName} />
@@ -468,11 +468,11 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
                     className={clsx(
                       'flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition',
                       unavailable
-                        ? 'cursor-not-allowed border-border opacity-60'
-                        : picked ? 'border-mint bg-mint-soft' : 'border-border hover:bg-foreground/[0.03]',
+                        ? 'cursor-not-allowed border-edge opacity-60 bg-field hover:bg-field-hover'
+                        : picked ? 'border-mint bg-mint-soft' : 'border-edge bg-field hover:bg-field-hover',
                     )}
                   >
-                    <span className={clsx('grid size-4 shrink-0 place-items-center rounded-full border', picked ? 'border-mint' : 'border-border-strong')}>
+                    <span className={clsx('grid size-4 shrink-0 place-items-center rounded-full border', picked ? 'border-mint' : 'border-edge bg-field')}>
                       {picked && <span className="size-2 rounded-full bg-mint" />}
                     </span>
                     <BotIcon className="size-4 shrink-0 text-muted" />

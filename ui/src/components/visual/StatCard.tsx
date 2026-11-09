@@ -20,7 +20,7 @@ export const StatCard: React.FC<StatCardProps> = ({
 }) => (
   <div
     className={cn(
-      'flex flex-col gap-1.5 rounded-xl border border-border bg-background px-5 py-5',
+      'flex flex-col gap-1.5 rounded-xl border border-edge bg-surface px-5 py-5 shadow-elevation-0',
       className
     )}
     {...props}

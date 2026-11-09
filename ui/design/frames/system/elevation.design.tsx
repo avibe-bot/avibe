@@ -15,20 +15,12 @@ import { ElevationProposal } from '../../kit/elevation/ElevationProposal';
 import { ElevationEdgeSheet } from '../../kit/elevation/ElevationEdgeSheet';
 import { ElevationSheet } from '../../kit/elevation/ElevationSheet';
 import { approved, pick } from '../../kit/elevation/pairs';
-import agentDialogs from '../agents/dialogs.design';
 import agentsPage from '../agents/agents-page.design';
 import dock from '../apps/dock.design';
-import chatComposer from '../chat/composer.design';
-import chatConversation from '../chat/conversation.design';
 import home from '../home/home.design';
-import appsLibrary from '../apps/library.design';
-import botConversation from '../mobile/bot-conversation.design';
-import searchPalette from '../search/search-palette.design';
 import settingsGeneral from '../settings/general.design';
 import inboxPage from '../inbox/inbox-page.design';
-import appsDrawer from '../mobile/apps-drawer.design';
 import workbenchTab from '../mobile/workbench-tab.design';
-import inboxPopover from '../sidebar/inbox-popover.design';
 import sidebarBots from '../sidebar/bots.design';
 import workbenchSidebar from '../sidebar/workbench-sidebar.design';
 import { RUNTIMES } from '../models/backends.fixtures';
@@ -110,18 +102,11 @@ const designFrames = frames([
 
   // Desktop pages.
   after('inbox-unread', 'inbox/inbox-page', inboxPage, 'unread'),
-  after('inbox-popover', 'sidebar/inbox-popover', inboxPopover, 'open'),
   after('sidebar-hover-card', 'sidebar/bots', sidebarBots, 'hover-card'),
   after('sidebar-selected', 'sidebar/workbench-sidebar', workbenchSidebar, 'skills-selected'),
-  after('chat', 'chat/conversation', chatConversation, 'default'),
-  after('composer-route-picker', 'chat/composer', chatComposer, 'route-picker'),
-  after('agents', 'agents/agents-page', agentsPage, 'definitions'),
-  after('agents-new', 'agents/dialogs', agentDialogs, 'new-agent'),
   after('dock', 'apps/dock', dock, 'open'),
   after('home', 'home/home', home, 'b-partial-desktop'),
-  after('apps-library', 'apps/library', appsLibrary, 'apps'),
   after('settings-general', 'settings/general', settingsGeneral, 'default'),
-  after('search-palette', 'search/search-palette', searchPalette, 'open'),
   { name: 'toast-before', title: '现状 · 提示条盖在内容上', status: 'shipped', ...toastFrame, render: toastOverContent },
   {
     name: 'toast',
@@ -133,12 +118,8 @@ const designFrames = frames([
 
   // Phone.
   after('phone-inbox', 'inbox/inbox-page', inboxPage, 'phone'),
-  after('phone-chat', 'chat/conversation', chatConversation, 'phone'),
-  after('phone-chat-running', 'mobile/bot-conversation', botConversation, 'main-running'),
   after('phone-tabbar', 'mobile/workbench-tab', workbenchTab, 'team'),
-  after('phone-tabbar-member', 'mobile/workbench-tab', workbenchTab, 'member'),
   after('phone-tabbar-recording', 'mobile/workbench-tab', workbenchTab, 'hold-main-recording'),
-  after('phone-apps-drawer', 'mobile/apps-drawer', appsDrawer, 'open'),
 
   ...reviewFrames,
 ]);

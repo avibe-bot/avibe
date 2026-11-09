@@ -15,7 +15,7 @@ export const SettingsPlaceholderPage: React.FC<{
 
   return (
     <SettingsPageShell activeTab={tab} title={t(titleKey)} subtitle={t(subtitleKey)}>
-      <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-6 py-5">
+      <div className="flex flex-col gap-3 rounded-xl border border-edge bg-surface px-6 py-5 shadow-elevation-0">
         <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
           <Sparkles className="size-4 text-cyan-ink" />
           {t('settings.inProgressTitle')}
@@ -25,7 +25,7 @@ export const SettingsPlaceholderPage: React.FC<{
           <span className="text-[12px] text-muted">{t('settings.inProgressHint')}</span>
           <Link
             to="/setup"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-foreground/[0.04] px-3 py-2 text-[12px] font-medium text-foreground transition hover:border-border-strong"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-edge px-3 py-2 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
           >
             {t('settings.openSetup')}
             <ArrowRight className="size-3.5" strokeWidth={2.25} />

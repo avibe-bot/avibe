@@ -150,7 +150,7 @@ export const BotAvatarPicker: React.FC<BotAvatarPickerProps> = ({ current, onPic
               {pickedElsewhere ? (
                 <>
                   {pickedElsewhere}
-                  <span className="absolute -bottom-1 -right-1 grid size-3.5 place-items-center rounded-full border border-border-strong bg-surface-2 text-muted" aria-hidden="true">
+                  <span className="absolute -bottom-1 -right-1 grid size-3.5 place-items-center rounded-full border border-edge text-muted bg-field" aria-hidden="true">
                     <Ellipsis className="size-2.5" />
                   </span>
                 </>

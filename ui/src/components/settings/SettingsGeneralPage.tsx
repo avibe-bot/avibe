@@ -82,7 +82,7 @@ const ThemeMiniature: React.FC<{ mode: ThemeMode }> = ({ mode }) => (
 const PlacementMiniature: React.FC<{ placement: SettingsMenuPlacement }> = ({ placement }) => (
   <div
     aria-hidden="true"
-    className="flex h-[88px] w-full overflow-hidden rounded-sm border border-border bg-background"
+    className="flex h-[88px] w-full overflow-hidden rounded-sm border border-edge bg-surface shadow-elevation-0"
   >
     {placement === 'inline' && (
       <div className="flex w-[26px] shrink-0 flex-col gap-[5px] border-r border-border bg-[var(--sidebar-background)] p-1.5">
@@ -104,8 +104,8 @@ const PlacementMiniature: React.FC<{ placement: SettingsMenuPlacement }> = ({ pl
     </div>
     <div className="flex min-w-0 flex-1 flex-col gap-[6px] p-2.5">
       <div className="h-[6px] w-[55%] rounded-sm bg-muted/60" />
-      <div className="h-[13px] w-full rounded border border-border" />
-      <div className="h-[13px] w-full rounded border border-border" />
+      <div className="h-[13px] w-full rounded border border-edge shadow-elevation-0" />
+      <div className="h-[13px] w-full rounded border border-edge shadow-elevation-0" />
     </div>
   </div>
 );
@@ -175,7 +175,7 @@ function ChoiceCards<T extends string>({
               // extra pixel so picking a card never nudges the row.
               selected
                 ? 'border-2 border-mint bg-mint-soft p-[9px]'
-                : 'border border-border-strong bg-surface p-2.5 hover:bg-foreground/[0.03]',
+                : 'border border-edge bg-surface p-2.5 hover:bg-foreground/[0.03] shadow-elevation-0',
             )}
           >
             {miniature}

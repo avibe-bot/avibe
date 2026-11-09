@@ -4057,7 +4057,6 @@ const ActivityStrip: React.FC<{
       aria-live="polite"
       className={clsx(
         'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
-        !queuedOnly && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
@@ -4111,7 +4110,7 @@ const ActivityStrip: React.FC<{
               // (a downward flip would cover the composer). Disable Radix
               // collision flipping so the popover stays above even when zoomed.
               avoidCollisions={false}
-              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border-border-strong p-0 shadow-lg"
+              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg p-0"
             >
               <div className="flex max-h-[300px] flex-col gap-0.5 overflow-y-auto p-1">
                 {active.map((item) => (

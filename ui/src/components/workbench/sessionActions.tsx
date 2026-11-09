@@ -202,7 +202,7 @@ export const SessionActionMenu: React.FC<{
                 id={reasonId}
                 role="tooltip"
                 className={clsx(
-                  'pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background shadow-md transition-opacity',
+                  'pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background shadow-elevation-2 transition-opacity',
                   disclosedReasonId === action.id
                     ? 'opacity-100'
                     : 'opacity-0 group-hover/action:opacity-100 group-focus-within/action:opacity-100',

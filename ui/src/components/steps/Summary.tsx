@@ -177,7 +177,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
                 <p className="text-[11px] text-muted">{t('summary.bindCodeDesc')}</p>
               </div>
             </div>
-            <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5">
+            <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
               <code className="min-w-0 flex-1 select-all break-all font-mono text-[13px] text-foreground">bind {bindCode}</code>
               <button
                 onClick={copyBindCode}
@@ -220,7 +220,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         </div>
 
         {/* Recap card */}
-        <div className="overflow-hidden rounded-xl border border-border bg-background">
+        <div className="overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
           {recapRows.map((row, idx) => (
             <div
               key={row.label}
@@ -241,7 +241,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         </div>
 
         {/* Auto Update */}
-        <div className="flex items-center justify-between rounded-xl border border-border bg-background px-5 py-4">
+        <div className="flex items-center justify-between rounded-xl border border-edge bg-surface px-5 py-4 shadow-elevation-0">
           <div>
             <h3 className="text-[13px] font-semibold text-foreground">{t('summary.autoUpdate')}</h3>
             <p className="mt-0.5 text-[11px] text-muted">{t('summary.autoUpdateHint')}</p>

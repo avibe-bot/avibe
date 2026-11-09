@@ -63,7 +63,7 @@ export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
                 />
               ) : (
                 <span
-                  className="grid size-7 shrink-0 place-items-center rounded-md border border-border bg-foreground/[0.03]"
+                  className="grid size-7 shrink-0 place-items-center rounded-md border border-edge bg-foreground/[0.03] shadow-elevation-0"
                   style={{ color: `var(${def.accent})` }}
                 >
                   <Icon className="size-3.5" />

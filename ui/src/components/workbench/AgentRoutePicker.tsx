@@ -442,7 +442,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     <>
       {showModelSearch && (
         <div className="sticky top-0 z-10 -mx-1.5 mb-1 bg-panel px-1.5 pb-1 pt-0.5">
-          <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 focus-within:border-cyan/50">
+          <div className="flex items-center gap-1.5 rounded-md border border-edge bg-surface-2 px-2 focus-within:border-cyan/50 shadow-elevation-0">
             <Search className="size-3 shrink-0 text-muted" />
             <Input
               variant="bare"
@@ -709,7 +709,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             <div
               role="radiogroup"
               aria-label={t('chat.picker.effort')}
-              className="flex flex-wrap gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5"
+              className="flex flex-wrap gap-0.5 rounded-md border border-edge bg-field p-0.5"
             >
               {refusedEffort && (
                 <EffortChip active refused label={effortLabel(refusedEffort)} onClick={() => setOpen(false)} />
@@ -1029,7 +1029,7 @@ const FastToggle: React.FC<{
         className={clsx(
           'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors',
           'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 disabled:cursor-not-allowed disabled:opacity-50',
-          active ? 'border-gold/30 bg-gold-soft text-gold-ink/80' : 'border-border text-muted hover:text-foreground',
+          active ? 'border-gold/30 bg-gold-soft text-gold-ink/80' : 'border-edge text-muted hover:text-foreground bg-field',
         )}
       >
         <FastMark hollow={on && unconfirmed} className={active ? (unconfirmed ? 'text-gold/70' : 'text-gold/60') : undefined} />
@@ -1038,7 +1038,7 @@ const FastToggle: React.FC<{
       <span
         id={tipId}
         role="tooltip"
-        className="pointer-events-none absolute bottom-full right-0 z-50 mb-1.5 w-56 rounded-md bg-foreground px-2.5 py-2 text-[11px] leading-snug text-background opacity-0 shadow-md transition-opacity group-hover/fast:opacity-100 group-has-[:focus-visible]/fast:opacity-100"
+        className="pointer-events-none absolute bottom-full right-0 z-50 mb-1.5 w-56 rounded-md bg-foreground px-2.5 py-2 text-[11px] leading-snug text-background opacity-0 shadow-elevation-2 transition-opacity group-hover/fast:opacity-100 group-has-[:focus-visible]/fast:opacity-100"
       >
         <span className="block font-semibold">{t('chat.picker.fastTitle')}</span>
         <span className="block">{t('chat.picker.fastDescription')}</span>

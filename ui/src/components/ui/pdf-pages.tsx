@@ -417,7 +417,7 @@ function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy
       {/* Control cluster, as in the image preview; the bottom padding of the column keeps the last
           page scrollable clear of it, and the safe-area inset keeps it off the home indicator. */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-3" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
-        <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-black/55 px-1 py-1 text-white shadow-lg backdrop-blur-sm">
+        <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-black/55 px-1 py-1 text-white shadow-elevation-2 backdrop-blur-sm">
           <Button variant="ghost" size="icon" className={ZOOM_BTN} onClick={() => applyZoom(stepPdfZoom(zoomRef.current, -1))} disabled={atFit} aria-label={t('preview.zoomOut')}>
             <ZoomOut className="size-4" />
           </Button>
@@ -607,7 +607,7 @@ const PdfPage = React.memo(function PdfPage({
       role="group"
       aria-label={label}
       data-pdf-page={pageNumber}
-      className="relative shrink-0 bg-white shadow-[0_1px_4px_rgba(0,0,0,0.5)]"
+      className="relative shrink-0 bg-white shadow-elevation-1"
       style={{ width, height: Math.round(width * (ratio ?? fallbackRatio)), ['--scale-round-x' as string]: '1px', ['--scale-round-y' as string]: '1px' }}
     />
   );

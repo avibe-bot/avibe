@@ -20,7 +20,7 @@ export function ElevationEdgeSheet() {
     <Sheet>
       <Section title={d('边与面 · 没有灰色实线边框', 'Edges · no opaque grey borders')} note={d('卡片靠底色 + 极淡的环（浅色带品牌色调的柔影，深色是白色细线 + 顶部高光）；输入框和次要按钮是浅底填充，聚焦出环', 'Cards: fill plus a faint ring; inputs and soft buttons are filled, focus draws a ring')}>
         <Specimen name={d('卡片', 'Card')} use="rounded-xl border-border → edge-card" className="w-56">
-          <div className="w-56 rounded-xl border border-border bg-surface p-3">
+          <div className="w-56 rounded-xl border border-edge bg-surface p-3 shadow-elevation-0">
             <div className="text-[13px] font-semibold">avibe</div>
             <div className="mt-1 text-[12px] text-muted">{d('修复中途断缓存 · 12 分钟前', 'Fix the cache break · 12 min ago')}</div>
           </div>
@@ -68,7 +68,7 @@ export function ElevationEdgeSheet() {
                 </div>
               ))}
             </div>
-            <div role="menu" className="absolute right-4 top-6 w-44 rounded-lg border border-border bg-surface-3 p-1 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]">
+            <div role="menu" className="absolute right-4 top-6 w-44 rounded-lg border border-edge bg-popover p-1 shadow-elevation-2">
               <div className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px]">
                 <Pencil className="size-3.5 text-muted" />
                 {d('重命名', 'Rename')}
@@ -107,7 +107,7 @@ export function ElevationEdgeSheet() {
 
       <Section title={d('光 · 浅色里换成品牌色柔影', 'Light · a tinted soft shadow in Light')} note={d('品牌主按钮、选中伙伴、状态点保持现状；未读卡和装饰图标块在浅色里是同色柔影，深色不变', 'CTA, selected Bot and dots unchanged; in Light, unread cards and decorative tiles get a same-hue soft shadow')}>
         <Specimen name={d('未读卡', 'Unread card')} use={d('浅色：同色柔影', 'Light: same-hue soft shadow')} className="w-64">
-          <div className="flex w-64 flex-col gap-1.5 rounded-xl border border-mint/30 bg-mint/[0.05] p-3 shadow-glow-md-mint">
+          <div className="flex w-64 flex-col gap-1.5 rounded-xl border border-mint/45 bg-mint/[0.05] p-3">
             <div className="text-[13px] font-semibold">{d('首席安全官', 'Security lead')}</div>
             <div className="text-[12px] text-muted">{d('发现 2 个高危漏洞，要我开 PR 吗？', 'Found 2 critical issues; open a PR?')}</div>
           </div>

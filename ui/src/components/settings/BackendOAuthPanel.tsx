@@ -197,7 +197,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       : t('settings.backends.oauthRemove');
 
   return (
-    <div className="flex flex-col gap-4 rounded-lg border border-border bg-surface-2/60 p-4">
+    <div className="flex flex-col gap-4 rounded-lg border border-edge bg-surface-2/60 p-4 shadow-elevation-0">
       <div className="flex flex-col gap-1">
         <p className="text-[13px] font-semibold text-foreground">{title}</p>
         <p className="text-[12px] leading-relaxed text-muted">{subtitle}</p>
@@ -247,7 +247,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       )}
 
       {url && (state === 'awaiting_code' || state === 'starting' || state === 'verifying') && (
-        <div className="flex flex-col gap-2 rounded-md border border-border bg-background px-3 py-2.5">
+        <div className="flex flex-col gap-2 rounded-md border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
           <Label className="text-[11px] font-medium uppercase tracking-wide text-muted">
             {t('settings.backends.oauthAuthUrlLabel')}
           </Label>
@@ -256,7 +256,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       )}
 
       {showDeviceBlock && (
-        <div className="flex flex-col gap-2 rounded-md border border-border bg-background px-3 py-2.5">
+        <div className="flex flex-col gap-2 rounded-md border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
           <Label className="text-[11px] font-medium uppercase tracking-wide text-muted">
             {t('settings.backends.codexDeviceCodeLabel')}
           </Label>

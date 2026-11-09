@@ -228,7 +228,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
   const bodyContent = (
     <>
         {/* Domain selector */}
-        <div className="space-y-2 rounded-xl border border-border bg-background px-5 py-4">
+        <div className="space-y-2 rounded-xl border border-edge bg-surface px-5 py-4 shadow-elevation-0">
           <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
             <Globe size={14} className="text-cyan-ink" /> {t('larkConfig.domainLabel')}
           </label>
@@ -244,8 +244,8 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                 className={clsx(
                   'flex-1 rounded-lg border px-3 py-2 text-[12px] font-semibold transition',
                   domain === opt
-                    ? 'border-mint/45 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint'
-                    : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
+                    ? 'border-mint/45 bg-mint/[0.08] text-mint-ink'
+                    : 'border-edge text-muted hover:text-foreground bg-field hover:bg-field-hover'
                 )}
               >
                 {opt === 'feishu' ? t('larkConfig.domainFeishu') : t('larkConfig.domainLark')}
@@ -375,7 +375,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
                       <MessageSquare size={14} className="text-cyan-ink" /> {t('larkConfig.chatListLabel')}
                     </label>
                     <p className="text-[11px] text-muted">{t('larkConfig.chatListHint')}</p>
-                    <div className="max-h-32 overflow-y-auto rounded-lg border border-border bg-background px-3 py-2.5">
+                    <div className="max-h-32 overflow-y-auto rounded-lg border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
                       <ul className="space-y-1 text-[12px] text-foreground">
                         {chats.map((c: any) => (
                           <li key={c.id} className="flex items-center gap-2">
@@ -549,7 +549,7 @@ export const LarkConfig: React.FC<LarkConfigProps> = ({ data, onNext, onBack, em
               {t('larkConfig.subtitle')}
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
+          <div className="flex items-center gap-2 rounded-full border border-edge px-3 py-1.5 bg-field">
             <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 5
             </span>
