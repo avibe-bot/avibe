@@ -281,9 +281,12 @@ current instance origin and account website-data store before destructive
 remote work. Automatic reconciliation, including `on` re-POST and pending
 registration replay, must observe that marker and perform no native or
 instance subscription write. Endpoint history remains cleanup evidence and
-does not grant opt-in authority. Only a later explicit enable clears the
-marker. The control reports the local opt-out separately from unconfirmed
-remote cleanup.
+does not grant opt-in authority. The marker also stores the concrete endpoint
+selected for the instance DELETE, so a later cleanup retry uses that endpoint
+even when native state is already `off`. An older marker without an endpoint
+fails closed and reports cleanup failure rather than guessing from history.
+Only a later explicit enable clears the marker. The control reports the local
+opt-out separately from unconfirmed remote cleanup.
 Inside the native app the Web UI does not use `PushManager`; browser and
 installed-PWA behavior remains unchanged.
 
@@ -1021,7 +1024,10 @@ deletes its private/auth key, and attempts the single-ID relay revoke. Web also
 deletes the endpoint from the instance. An offline relay failure leaves a
 pending revoke for that ID and returns `revoked: false`; later subscriptions
 use fresh IDs, so retry cannot select them.
-The Web UI records its durable opt-out before these destructive calls. A
+The Web UI records its durable opt-out and the concrete instance endpoint
+before these destructive calls. A cleanup retry replays the instance deletion
+against that captured endpoint even if native already reports `off`; a marker
+without an endpoint fails closed rather than choosing from endpoint history. A
 `revoked: false` result is shown as cleanup pending, while a bridge transport
 failure is shown as an unconfirmed cleanup failure; neither result permits
 automatic re-subscription. A later explicit enable clears the opt-out and

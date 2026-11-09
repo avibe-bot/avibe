@@ -35,19 +35,27 @@ function disabledIntentStore(
 ): NativePushDisabledIntentStore & {
   value: boolean;
   cleanup: 'pending' | 'failed' | 'confirmed' | null;
+  endpoint: string | null;
 } {
   return {
     value: initial,
     cleanup: initial ? 'pending' : null,
+    endpoint: null,
     isDisabled() {
       return this.cleanup !== null;
     },
     cleanupStatus() {
       return this.cleanup;
     },
+    cleanupEndpoint() {
+      return this.endpoint;
+    },
     disable() {
       this.value = true;
       this.cleanup = 'pending';
+    },
+    setCleanupEndpoint(endpoint) {
+      this.endpoint = endpoint;
     },
     setCleanupStatus(status) {
       this.value = true;
@@ -56,6 +64,7 @@ function disabledIntentStore(
     clear() {
       this.value = false;
       this.cleanup = null;
+      this.endpoint = null;
     },
   };
 }
@@ -356,7 +365,10 @@ describe('web push recovery', () => {
       'push.unsubscribe',
     ]);
     expect(JSON.parse(localStorage.get('vibe.nativePush.disabledIntent') ?? '{}'))
-      .toEqual({ cleanup: 'confirmed' });
+      .toEqual({
+        cleanup: 'confirmed',
+        endpoint: 'https://avibe.bot/api/push/apns/native-old',
+      });
     expect(api.getWebPushStatus).not.toHaveBeenCalled();
     expect(api.subscribeWebPush).toHaveBeenCalledOnce();
   });
@@ -403,15 +415,21 @@ describe('web push recovery', () => {
 
   it('reports a deferred native revoke without allowing automatic recovery', async () => {
     const disabled = disabledIntentStore();
+    let nativeEnabled = true;
     const call = vi.fn(async (method: string) => {
       if (method === 'push.status') {
-        return {
-          state: 'on' as const,
-          endpoint: 'https://avibe.bot/api/push/apns/native-old',
-          keys: { p256dh: 'key', auth: 'auth' },
-        };
+        return nativeEnabled
+          ? {
+              state: 'on' as const,
+              endpoint: 'https://avibe.bot/api/push/apns/native-old',
+              keys: { p256dh: 'key', auth: 'auth' },
+            }
+          : { state: 'off' as const };
       }
-      if (method === 'push.unsubscribe') return { revoked: false };
+      if (method === 'push.unsubscribe') {
+        nativeEnabled = false;
+        return { revoked: false };
+      }
       throw new Error(`unexpected method ${method}`);
     });
     vi.stubGlobal('window', {
@@ -446,6 +464,19 @@ describe('web push recovery', () => {
     expect(disabled.value).toBe(true);
     expect(disabled.cleanup).toBe('pending');
     expect(api.subscribeWebPush).not.toHaveBeenCalled();
+
+    await expect(disableWebPush(api, disabled)).resolves.toMatchObject({
+      status: 'pending',
+      remoteRevoked: true,
+      nativeRevoked: 'not_needed',
+    });
+    expect(api.unsubscribeWebPush).toHaveBeenCalledTimes(2);
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      'push.status',
+      'push.unsubscribe',
+      'push.status',
+    ]);
   });
 
   it('reports a bridge failure after instance deletion without allowing recovery', async () => {
@@ -544,6 +575,73 @@ describe('web push recovery', () => {
     expect(api.subscribeWebPush).not.toHaveBeenCalled();
   });
 
+  it('retries the captured instance endpoint after native unsubscribe leaves state off', async () => {
+    const localStorage = memoryStorage();
+    let nativeEnabled = true;
+    const endpoint = 'https://avibe.bot/api/push/apns/native-old';
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return nativeEnabled
+          ? {
+              state: 'on' as const,
+              endpoint,
+              keys: { p256dh: 'key', auth: 'auth' },
+            }
+          : { state: 'off' as const };
+      }
+      if (method === 'push.unsubscribe') {
+        nativeEnabled = false;
+        return { revoked: true };
+      }
+      if (method === 'push.subscribe') {
+        throw new Error('native subscribe must not run during cleanup retry');
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: localStorage.storage,
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      unsubscribeWebPush: vi.fn()
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce({ ok: true, disabled: true }),
+      subscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    const first = await disableWebPush(api);
+    const second = await disableWebPush(api);
+
+    expect(first).toMatchObject({
+      status: 'failed',
+      remoteRevoked: false,
+      nativeRevoked: 'confirmed',
+    });
+    expect(second).toMatchObject({
+      status: 'disabled',
+      remoteRevoked: true,
+      nativeRevoked: 'not_needed',
+    });
+    expect(api.unsubscribeWebPush).toHaveBeenNthCalledWith(1, endpoint);
+    expect(api.unsubscribeWebPush).toHaveBeenNthCalledWith(2, endpoint);
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      'push.status',
+      'push.unsubscribe',
+      'push.status',
+    ]);
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.values.get('vibe.nativePush.disabledIntent') ?? '{}'))
+      .toEqual({ cleanup: 'confirmed', endpoint });
+  });
+
   it('releases the native opt-out only through explicit enable', async () => {
     const disabled = disabledIntentStore(true);
     const call = vi.fn(async (method: string) => {
@@ -588,7 +686,9 @@ describe('web push recovery', () => {
     const disabled: NativePushDisabledIntentStore = {
       isDisabled: () => false,
       cleanupStatus: () => null,
+      cleanupEndpoint: () => null,
       disable: () => { throw new Error('storage blocked'); },
+      setCleanupEndpoint: vi.fn(),
       setCleanupStatus: vi.fn(),
       clear: vi.fn(),
     };
@@ -615,6 +715,51 @@ describe('web push recovery', () => {
 
     await expect(disableWebPush(api, disabled)).rejects.toThrow('storage blocked');
     expect(call).not.toHaveBeenCalled();
+    expect(api.unsubscribeWebPush).not.toHaveBeenCalled();
+  });
+
+  it('does not start cleanup when the captured endpoint cannot be persisted', async () => {
+    const disabled = disabledIntentStore();
+    disabled.setCleanupEndpoint = () => {
+      throw new Error('storage blocked');
+    };
+    const endpoint = 'https://avibe.bot/api/push/apns/native-old';
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return {
+          state: 'on' as const,
+          endpoint,
+          keys: { p256dh: 'key', auth: 'auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: {
+        getItem: () => null,
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      unsubscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(disableWebPush(api, disabled)).resolves.toMatchObject({
+      status: 'failed',
+      remoteRevoked: false,
+      nativeRevoked: 'failed',
+    });
+    expect(call).toHaveBeenCalledOnce();
     expect(api.unsubscribeWebPush).not.toHaveBeenCalled();
   });
 
@@ -669,16 +814,58 @@ describe('web push recovery', () => {
     const otherAccount = createNativePushDisabledIntentStore(accountB.storage);
 
     firstPage.disable();
+    firstPage.setCleanupEndpoint('https://push.example.test/sub/old');
     firstPage.setCleanupStatus('failed');
 
     const reloadedPage = createNativePushDisabledIntentStore(accountA.storage);
     expect(reloadedPage.isDisabled()).toBe(true);
     expect(reloadedPage.cleanupStatus()).toBe('failed');
+    expect(reloadedPage.cleanupEndpoint()).toBe('https://push.example.test/sub/old');
     expect(otherAccount.isDisabled()).toBe(false);
     expect(otherAccount.cleanupStatus()).toBeNull();
+    expect(otherAccount.cleanupEndpoint()).toBeNull();
 
     reloadedPage.clear();
     expect(firstPage.isDisabled()).toBe(false);
+    expect(firstPage.cleanupEndpoint()).toBeNull();
+  });
+
+  it('fails closed for an old opt-out marker without a captured endpoint', async () => {
+    const localStorage = memoryStorage();
+    localStorage.storage.setItem(
+      'vibe.nativePush.disabledIntent',
+      JSON.stringify({ cleanup: 'failed' }),
+    );
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') return { state: 'off' as const };
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: localStorage.storage,
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      unsubscribeWebPush: vi.fn(),
+      subscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(disableWebPush(api)).resolves.toMatchObject({
+      status: 'failed',
+      remoteRevoked: false,
+      nativeRevoked: 'not_needed',
+    });
+
+    expect(api.unsubscribeWebPush).not.toHaveBeenCalled();
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    expect(call).toHaveBeenCalledWith('push.status', { vapidPublicKey: 'AQIDBA' });
   });
 
   it('reports a persisted native opt-out as off without reading native state', async () => {

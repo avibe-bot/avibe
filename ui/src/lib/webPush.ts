@@ -196,7 +196,9 @@ export interface NativePushPendingRegistrationStore {
 export interface NativePushDisabledIntentStore {
   isDisabled(): boolean;
   cleanupStatus(): 'pending' | 'failed' | 'confirmed' | null;
+  cleanupEndpoint(): string | null;
   disable(): void;
+  setCleanupEndpoint(endpoint: string): void;
   setCleanupStatus(status: 'pending' | 'failed' | 'confirmed'): void;
   clear(): void;
 }
@@ -204,33 +206,60 @@ export interface NativePushDisabledIntentStore {
 export function createNativePushDisabledIntentStore(
   storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>,
 ): NativePushDisabledIntentStore {
-  const read = (): 'pending' | 'failed' | 'confirmed' | null => {
+  type CleanupStatus = 'pending' | 'failed' | 'confirmed';
+  type DisabledIntentRecord = {
+    cleanup: CleanupStatus;
+    endpoint: string | null;
+  };
+  const readRecord = (): DisabledIntentRecord | null => {
     const raw = storage.getItem(NATIVE_PUSH_DISABLED_INTENT_KEY);
     if (!raw) return null;
     try {
-      const parsed = JSON.parse(raw) as { cleanup?: unknown };
-      return parsed.cleanup === 'pending'
+      const parsed = JSON.parse(raw) as { cleanup?: unknown; endpoint?: unknown };
+      const cleanup = parsed.cleanup === 'pending'
         || parsed.cleanup === 'failed'
         || parsed.cleanup === 'confirmed'
         ? parsed.cleanup
         : null;
+      if (!cleanup) return null;
+      return {
+        cleanup,
+        endpoint: typeof parsed.endpoint === 'string' && parsed.endpoint.length > 0
+          ? parsed.endpoint
+          : null,
+      };
     } catch {
       return null;
     }
   };
-  const write = (cleanup: 'pending' | 'failed' | 'confirmed') => {
+  const read = (): CleanupStatus | null => readRecord()?.cleanup ?? null;
+  const write = (cleanup: CleanupStatus, endpoint = readRecord()?.endpoint ?? null) => {
     storage.setItem(
       NATIVE_PUSH_DISABLED_INTENT_KEY,
-      JSON.stringify({ cleanup }),
+      JSON.stringify({
+        cleanup,
+        ...(endpoint ? { endpoint } : {}),
+      }),
     );
     if (read() !== cleanup) {
+      throw new Error('native_push_disable_persistence_failed');
+    }
+    if (endpoint !== (readRecord()?.endpoint ?? null)) {
       throw new Error('native_push_disable_persistence_failed');
     }
   };
   return {
     isDisabled: () => read() !== null,
     cleanupStatus: read,
+    cleanupEndpoint: () => readRecord()?.endpoint ?? null,
     disable: () => write('pending'),
+    setCleanupEndpoint: (endpoint) => {
+      const record = readRecord();
+      if (!record) {
+        throw new Error('native_push_disable_persistence_failed');
+      }
+      write(record.cleanup, endpoint);
+    },
     setCleanupStatus: write,
     clear: () => {
       storage.removeItem(NATIVE_PUSH_DISABLED_INTENT_KEY);
@@ -477,6 +506,7 @@ async function disableWebPushOnce(
 ): Promise<WebPushDisableResult> {
   if (hasNativeCapability('push')) {
     const intentStore = disabledIntentStore ?? getBrowserNativePushDisabledIntentStore();
+    const previousCleanupStatus = intentStore.cleanupStatus();
     intentStore.disable();
     let status: Awaited<ReturnType<typeof nativePushStatus>>;
     try {
@@ -500,24 +530,47 @@ async function disableWebPushOnce(
         nativeRevoked: 'failed',
       };
     }
-    if (status.state !== 'on') {
+    let endpoint = intentStore.cleanupEndpoint();
+    if (!endpoint && status.state === 'on') {
+      endpoint = status.endpoint;
+      try {
+        intentStore.setCleanupEndpoint(endpoint);
+      } catch {
+        persistNativePushCleanupStatus(intentStore, 'failed');
+        return {
+          accepted: true,
+          status: 'failed',
+          remoteRevoked: false,
+          nativeRevoked: 'failed',
+        };
+      }
+    }
+    if (!endpoint) {
+      persistNativePushCleanupStatus(intentStore, 'failed');
       return {
         accepted: true,
-        status: 'pending',
+        status: 'failed',
         remoteRevoked: false,
         nativeRevoked: 'not_needed',
       };
     }
-    await rememberWebPushEndpoint(status.endpoint);
+    await rememberWebPushEndpoint(endpoint);
     let remoteRevoked: boolean;
     try {
-      const result = await api.unsubscribeWebPush(status.endpoint);
+      const result = await api.unsubscribeWebPush(endpoint);
       remoteRevoked = result.disabled === true;
     } catch {
       remoteRevoked = false;
     }
-    const nativeOutcome = await nativePushUnsubscribeOutcome();
-    const statusResult = remoteRevoked && nativeOutcome.status === 'confirmed'
+    const nativeWasOn = status.state === 'on';
+    const nativeOutcome = nativeWasOn
+      ? await nativePushUnsubscribeOutcome()
+      : { status: 'not_needed' as const };
+    const nativeCleanupConfirmed =
+      nativeOutcome.status === 'confirmed' || nativeOutcome.status === 'not_needed';
+    const deferredNativeRevoke =
+      !nativeWasOn && previousCleanupStatus === 'pending';
+    const statusResult = remoteRevoked && nativeCleanupConfirmed && !deferredNativeRevoke
       ? 'disabled'
       : !remoteRevoked || nativeOutcome.status === 'failed'
         ? 'failed'
