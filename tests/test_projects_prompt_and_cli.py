@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from modules.agents.vibey.prompt_snapshot import Component, component_tier
-from core.system_prompt_injection import BotPromptInfo, build_system_prompt_blocks
+from core.system_prompt_injection import BotPromptInfo, build_system_prompt_blocks, build_system_prompt_injection
 from modules.im import MessageContext
 from storage import projects_service, workbench_sessions_service
 from storage.agent_session_rows import create_agent_session_row
@@ -148,12 +148,35 @@ def test_projects_prompt_is_bot_only_ordered_and_path_free():
     assert not any(block.module_id == "projects-prompt" for block in worker_blocks)
 
 
-def test_projects_prompt_pages_and_is_tier_two():
+_INTRO = "Lasting work lives in Projects. Dispatch into one with `vibe agent run --project <name>`;"
+_TABLE = "| Project | Description |\n| --- | --- |\n"
+
+
+@pytest.mark.parametrize("projects,catalog_start,catalog_end", [
+    ([], "There are no enabled Projects.", "There are no enabled Projects."),
+    ([{"name": "First", "description": "Long work"}], _TABLE + "| First | Long work |", "| First | Long work |"),
+    (
+        [{"name": f"Project {index}", "description": "x" * 500} for index in range(60)],
+        _TABLE + "| Project 0 |",
+        "| Project 24 | " + "x" * 500 + " |\n\nMore Projects are available. Run `vibe project list --page 2` to view more.",
+    ),
+], ids=["zero", "one", "many"])
+def test_projects_prompt_is_its_own_paragraph_with_a_table_or_a_none_line(projects, catalog_start, catalog_end):
     bot = BotPromptInfo("main", "", "", "ses-projects", builtin=True)
-    projects = [{"name": f"Project {index}", "description": "x" * 500} for index in range(60)]
-    blocks = build_system_prompt_blocks(context=_context(), bot=bot, projects=projects)
+    roster = [{"name": "main", "backend": "vibey", "bot": {"handle": "main", "builtin": True}}]
+    text = build_system_prompt_injection(context=_context(), bot=bot, enabled_agents=roster, projects=projects)
+    before, intro, after = text.partition(_INTRO)
+    block, _, _ = after.partition("\n## Project Context and History")
+    assert intro and before.endswith("a bare `@` or `#` in prose is ordinary text.\n\n")
+    assert "`vibe project create` starts one.\n\n" + catalog_start in block
+    assert block.endswith(catalog_end + "\n")
+    assert ("| Project |" in block) == bool(projects)
+
+
+def test_projects_prompt_is_tier_two():
+    bot = BotPromptInfo("main", "", "", "ses-projects", builtin=True)
+    blocks = build_system_prompt_blocks(context=_context(), bot=bot, projects=[{"name": "First", "description": ""}])
     text = next(block.text for block in blocks if block.module_id == "projects-prompt")
-    assert "More Projects are available." in text
     assert component_tier(None, Component("projects-prompt", text)) == 2
 
 
