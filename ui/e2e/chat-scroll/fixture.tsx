@@ -13,7 +13,9 @@
 // steps it took, else it has none), activityDelay (ms a group's rows take to load,
 // 0), recordsRepeat (a group's rows are its steps that many times over, so they
 // take long to render when they land, 1), msg (opens the chat at that message, as
-// a link to it does).
+// a link to it does), chips (with activity=1: replies, by index, that get a chip of
+// their own besides every third one, e.g. 371,377 to put a disclosure right next to
+// another).
 import '../../design/shell/storage';
 
 import { createRoot } from 'react-dom/client';
@@ -43,13 +45,14 @@ const sendFails = params.get('send') === 'fail';
 const records = params.get('records') === '1';
 const activityDelay = Number(params.get('activityDelay') ?? 0);
 const recordsRepeat = Math.max(1, Number(params.get('recordsRepeat') ?? 1));
+const chips = (params.get('chips') ?? '').split(',').filter(Boolean).map(Number);
 
 const history = conversation(count).map((message) =>
   images ? message : { ...message, text: message.text.replace(/!\[[^\]]*\]\([^)]*\)/g, '(chart)') },
 );
 const PAGE = 50;
 const tail = history.slice(-PAGE);
-const initialGroups = activity ? activityGroups(history, records) : [];
+const initialGroups = activity ? activityGroups(history, records, chips) : [];
 
 installDesignNetwork();
 
