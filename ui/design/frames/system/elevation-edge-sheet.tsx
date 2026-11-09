@@ -1,14 +1,13 @@
 // Edges designed with elevation (cards, inputs, soft buttons, the borders that stay), a floating
 // surface over busy content, the composer, and where the brand light comes back in Light. Specimens
-// carry the same classes the shipped components do, so ./elevation.css draws them exactly as it
-// would draw the product.
+// carry the same classes the shipped components do.
 import { Check, Inbox, MoreHorizontal, Pencil, Plus, Send, Square, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-import { Section, Sheet, Specimen } from '../../frames/system/sheet';
-import { useDraft } from '../draft';
+import { useDraft } from '../../kit/draft';
+import { Section, Sheet, Specimen } from './sheet';
 
 const busy = Array.from({ length: 6 }, (_, i) => i);
 // The shipped composer box (components/workbench/Composer.tsx).

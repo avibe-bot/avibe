@@ -1,11 +1,12 @@
-// The approved system on one sheet: four levels, the state treatments that replace shadows and
-// glows, and the glows that stay. Specimens are drawn with the shipped tokens and primitives.
+// The elevation system on one sheet (docs/plans/elevation-system.md): four levels, the state
+// treatments that replace shadows and glows, and the glows that stay. Specimens are drawn with the
+// shipped tokens and primitives.
 import { Bell, Bot, Check, Inbox, Mic, MoreHorizontal, Pencil, Sparkles, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-import { Section, Sheet, Specimen } from '../../frames/system/sheet';
+import { Section, Sheet, Specimen } from './sheet';
 
 const page = 'relative flex h-44 w-64 items-center justify-center overflow-hidden rounded-xl border border-border bg-background p-4';
 
@@ -67,7 +68,7 @@ export function ElevationSheet() {
       </Section>
 
       <Section title="状态 · 不用阴影，也不用光晕" note="选中、未读、展开、激活：底色 + 边框；焦点：一种 2px 环">
-        <Specimen name="选中行" use="--nav-selected-bg + --nav-selected-border（已有令牌，至今未用）" className="w-64">
+        <Specimen name="选中行" use="--nav-selected-bg + --nav-selected-border（侧栏导航）" className="w-64">
           <div className="flex w-64 flex-col gap-1 rounded-xl border border-edge bg-surface p-2 shadow-elevation-0">
             <div className="flex items-center gap-2.5 rounded-lg border border-(--nav-selected-border) bg-(--nav-selected-bg) px-3 py-2 text-[13px] font-medium">
               <Bot className="size-4 text-mint-ink" />

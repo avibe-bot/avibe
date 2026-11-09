@@ -205,7 +205,7 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
   /* The one hover and press wash (other fixes #1 and #3, docs/plans/elevation-system.md;
-     ui/design: system/elevation/hover-*): the foreground at 4% under the pointer and 6%
+     ui/design: system/elevation/scale): the foreground at 4% under the pointer and 6%
      pressed, over whatever the element rests on. Light's surfaces are all white, so a hover
      that swaps one surface for another shows nothing there; a wash shows in both themes. An
      element that rests on `bg-surface` takes `surface-wash`, the same wash mixed into its
@@ -1686,8 +1686,8 @@ pre,
    2px aside and below, 6px above. The room it borrows on the left fades in, so a
    scrolled avatar does not show past the strip's edge. While nothing is hidden
    past its right end, it borrows the same room on the right, under Add, so the
-   last Bot's halo is not cut off in a straight line (ui/design:
-   system/elevation/bots-selected-pm); while the strip overflows, that end fades
+   last Bot's halo is not cut off in a straight line (other fix #12,
+   docs/plans/elevation-system.md); while the strip overflows, that end fades
    out instead, and borrowing room there would show the next Bot under Add. */
 /* The hold-to-talk card's halo (VoiceCard, owner decision 2026-11-04): instead of the whole page,
    only the page right around the card is dimmed and blurred, strongest at the card's edge and
@@ -1767,8 +1767,8 @@ pre,
   }
 }
 
-/* The composer's edge (ui/design: system/elevation/edges, system/elevation/chat,
-   system/elevation/phone-chat-running). At rest a gradient hairline (mint, cyan,
+/* The composer's edge (ui/design: system/elevation/edges, chat/conversation/default,
+   mobile/bot-conversation/main-running). At rest a gradient hairline (mint, cyan,
    violet) drawn as its border over a soft edge; focused, a mint ring outside it;
    while an Agent works (`data-working`), a light sweeps the hairline, one turn in
    2.8 s, and holds still under reduced motion. The fill is the composer's

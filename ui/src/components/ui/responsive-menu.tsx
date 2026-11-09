@@ -105,7 +105,7 @@ export const ResponsiveMenu: React.FC<{
           tabIndex={-1}
           className={cn(
             // `motion-sheet` (index.css): rises on the sheet spring, leaves faster. It casts upward,
-            // from the bottom edge (ui/design: system/elevation/phone-menu).
+            // from the bottom edge (ui/design: system/overlays/menu-phone).
             'motion-sheet fixed inset-x-0 bottom-0 z-50 flex max-h-[88dvh] flex-col rounded-t-2xl border-t border-edge bg-card pb-[env(safe-area-inset-bottom)] shadow-elevation-3-up outline-none',
           )}
         >
