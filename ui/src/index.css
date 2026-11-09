@@ -1674,7 +1674,11 @@ pre,
    included, so it reaches past its place by the halo's room on the top and the
    left (where nothing else is drawn) and pads the avatars back to where they sat:
    2px aside and below, 6px above. The room it borrows on the left fades in, so a
-   scrolled avatar does not show past the strip's edge. */
+   scrolled avatar does not show past the strip's edge. While nothing is hidden
+   past its right end, it borrows the same room on the right, under Add, so the
+   last Bot's halo is not cut off in a straight line (ui/design:
+   system/elevation/bots-selected-pm); while the strip overflows, that end fades
+   out instead, and borrowing room there would show the next Bot under Add. */
 /* The hold-to-talk card's halo (VoiceCard, owner decision 2026-11-04): instead of the whole page,
    only the page right around the card is dimmed and blurred, strongest at the card's edge and
    clear `--voice-card-halo` away, so the rest of the screen stays readable while the user talks.
@@ -1728,6 +1732,10 @@ pre,
   mask-image: linear-gradient(to right, transparent, #000 12px);
 }
 /* The strip scrolls sideways once it overflows; its right edge fades out. */
+.bot-strip-scroller:not(.bot-strip-fade) {
+  margin-right: -12px;
+  padding-right: 14px;
+}
 .bot-strip-scroller.bot-strip-fade {
   mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
 }
