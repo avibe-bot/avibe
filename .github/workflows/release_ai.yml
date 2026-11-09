@@ -74,6 +74,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
           TEST_ENABLED: ${{ vars.DESKTOP_UPDATER_TEST }}
           STABLE_ENABLED: ${{ vars.DESKTOP_UPDATER_STABLE }}
+          BACKSTOP_SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
         shell: bash
         run: |
           enabled=false
@@ -88,7 +89,7 @@ jobs:
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
           echo "updater_enabled=$updater_enabled" >> "$GITHUB_OUTPUT"
           if [ "$enabled" = true ]; then
-            python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --source-sha "${{ needs.release-backstop.outputs.source_sha }}" --output "$GITHUB_OUTPUT"
+            python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --source-sha "$BACKSTOP_SOURCE_SHA" --output "$GITHUB_OUTPUT"
           fi
 
   desktop-packages:

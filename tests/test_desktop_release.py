@@ -171,6 +171,34 @@ def test_real_tag_resolution_and_prepare_pin_runtime_before_build(tmp_path, monk
         release.resolve(TAG, "b" * 40)
 
 
+@pytest.mark.parametrize("tag", [TAG, "v3.1.2"])
+@pytest.mark.parametrize("matching", [True, False])
+def test_resolver_cli_enforces_backstop_sha_before_writing_outputs(tmp_path, tag, matching):
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "--allow-empty", "-qm", "release fixture")
+    source = git(tmp_path, "rev-parse", "HEAD")
+    git(tmp_path, "tag", tag)
+    output = tmp_path / "output"
+    existing = "enabled=true\nupdater_enabled=false\n"
+    output.write_text(existing)
+    command = [sys.executable, str(ROOT / "scripts/desktop_release.py"), "resolve",
+               "--tag", tag, "--source-sha", source if matching else "b" * 40,
+               "--output", str(output)]
+    result = subprocess.run(command, cwd=tmp_path, text=True, capture_output=True)
+    if matching:
+        assert result.returncode == 0, result.stderr
+        fields = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert fields["source_sha"] == source and fields["tag"] == tag
+        assert fields["enabled"] == "true" and fields["updater_enabled"] == "false"
+    else:
+        assert result.returncode != 0 and "exact source SHA" in result.stderr
+        assert output.read_text() == existing
+        output.unlink()
+        result = subprocess.run(command, cwd=tmp_path, text=True, capture_output=True)
+        assert result.returncode != 0 and not output.exists()
+
+
 @pytest.mark.parametrize("tag", ["gh-v3.1.2", "gh-v3.1.2-rc1", "gh-v03.1.2rc1", "gh-v3.1.2rc01",
                                  "v3.1.2rc1", "gh-vnext", "gh-v3.1.2rc1\n", "--help", ""])
 def test_malformed_test_tags_fail_before_git_or_publication(tag, monkeypatch):
