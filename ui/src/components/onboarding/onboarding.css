@@ -588,6 +588,10 @@
   border-radius: 18px;
   border: 1px solid var(--ob-card-border);
   background: var(--ob-card);
+  /* Flat at rest, as the reference draws it: the `Card` primitive's resting edge
+     shadow is the Workbench's card edge, and this card's edge is its own border. Only
+     the active rule below gives it a shadow, the halo that says which card is working. */
+  box-shadow: none;
   /* The bottom inset is the side inset, not the top one: what sits on the bottom edge
      is a full-width row of actions, and a row that stops 20 from the sides and 70 from
      the floor reads as floating rather than as the card's own last line. */
