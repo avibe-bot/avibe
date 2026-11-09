@@ -560,11 +560,13 @@ function removeCurtain(entry: Disclosing) {
   }
 }
 
-/** Takes the curtain away once nothing moves it any more (it is only needed while what it covers unfolds). */
+/** Takes the curtain away once nothing moves it any more (it is only needed while what it covers unfolds). What
+ *  moves it may be replaced on the way (its growth, drawn again as more grows under it): it looks again then. */
 function dropWhenStill(entry: Disclosing, curtain: HTMLElement) {
   const moving = curtain.getAnimations().filter((animation) => animation.playState === 'running');
   if (moving.length > 0) {
-    void Promise.all(moving.map((animation) => animation.finished)).then(() => dropWhenStill(entry, curtain), () => {});
+    const again = () => dropWhenStill(entry, curtain);
+    void Promise.all(moving.map((animation) => animation.finished)).then(again, again);
     return;
   }
   if (entry.curtain === curtain) {
@@ -817,7 +819,12 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     // still opening): its room, and how far the rows below rise, are measured again; everything starts from
     // where it is drawn.
     const measure = measureFold(column, nodes, stays, next);
-    const rows = [...trail, ...(next ? [next, ...itemsBelow(next, viewportBottom(), measure.rise)] : [])];
+    // What made room as its parts (a collapse bar holding the curtain of what this opened inside) folds back
+    // the same way, from where they are drawn.
+    const rows = [...trail, ...(next ? [next, ...itemsBelow(next, viewportBottom(), measure.rise)] : [])].flatMap((row) => {
+      const parts = entry.rows.filter((old) => old !== row && old.parentElement === row);
+      return parts.length > 0 ? parts : [row];
+    });
     const now = clockNow();
     from.rows = rows.map((row) => {
       const share = entry.moves.get(row);
@@ -860,11 +867,20 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     const known = probe?.isConnected && anchor?.isConnected;
     const shrink = known ? before - gap() : 0;
     const now = clockNow();
+    const holders = new Set<Element>();
     rows.forEach((row) => {
       const own = settled.moves.get(row);
       const left = (own ? shareAt(own, now) : 0) + shrink;
-      // The layout put it `shrink` further up; the fold showed that as movement (and what is left glides).
-      if (known && row.isConnected) noteShift(row, -shrink);
+      // The layout put it `shrink` further up; the fold showed that as movement (and what is left glides). Where
+      // an item's parts made room for it, the item itself is what the layout moved.
+      if (known && row.isConnected) {
+        noteShift(row, -shrink);
+        const holder = row.parentElement;
+        if (holder && holder !== column && holder !== anchor && isItem(holder) && !holders.has(holder)) {
+          holders.add(holder);
+          noteShift(holder, -shrink);
+        }
+      }
       const glides = known && row.isConnected && Math.abs(left) >= 0.5;
       setShare(settled.moves, row, glides ? { start: now, duration: tokens.discloseOpen.duration, from: left, to: 0, curve: curveOf(tokens.discloseOpen.easing), hold: false } : null);
     });

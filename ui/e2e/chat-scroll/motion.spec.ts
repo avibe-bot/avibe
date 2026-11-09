@@ -1195,6 +1195,78 @@ for (const [where, block] of [['below the screen', 'center'], ['on screen', 'sta
   });
 }
 
+test('a second member opened as its group stops opening, while the first one still grows, leaves no curtain once all of it has come to rest', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  await transcript(page).evaluate((scroller) => [...scroller.querySelectorAll('[data-harness-group]')].at(-1)!.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(400);
+  const replaced = await page.evaluate(async () => {
+    const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = scroller.firstElementChild!.firstElementChild!;
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    [...scroller.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+    for (let count = 0; count < 6; count += 1) await frame();
+    const group = [...column.children].filter((el) => /^harness-(member|collapse):/.test((el as HTMLElement).dataset.transcriptKey ?? '')) as HTMLElement[];
+    const [first, second] = group;
+    first.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+    // The group's own slide has ended, and what the first body grew under its curtain still moves it: the second
+    // body opens then.
+    for (let count = 0; count < 120; count += 1) {
+      await frame();
+      // The group's own curtain, in its collapse bar (the bodies have theirs in their own rows).
+      const curtain = group.at(-1)!.querySelector(':scope > [data-transcript-curtain-clip] > [data-transcript-curtain]');
+      if (!curtain) return false;
+      const animations = curtain.getAnimations();
+      const slide = animations.find((animation) => 'transform' in ((animation.effect as KeyframeEffect).getKeyframes()[0] ?? {}));
+      if (slide?.playState === 'finished' && animations.some((animation) => animation.playState === 'running')) {
+        second.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+        return true;
+      }
+    }
+    return false;
+  });
+  expect(replaced).toBe(true);
+  // Once all of it has come to rest, no curtain is left over what it revealed.
+  await page.waitForTimeout(1500);
+  await expect(transcript(page).locator('[data-transcript-curtain-clip]')).toHaveCount(0);
+});
+
+test('a body closed while it still opens in a group that still opens turns back from where its collapse bar is drawn', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  await transcript(page).evaluate((scroller) => [...scroller.querySelectorAll('[data-harness-group]')].at(-1)!.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(400);
+  const { onScreen, path, closedAt } = await page.evaluate(async () => {
+    const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = scroller.firstElementChild!.firstElementChild!;
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    [...scroller.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+    for (let count = 0; count < 2; count += 1) await frame();
+    const group = [...column.children].filter((el) => /^harness-(member|collapse):/.test((el as HTMLElement).dataset.transcriptKey ?? '')) as HTMLElement[];
+    const [member] = group;
+    // What the collapse bar shows (not the curtain it holds).
+    const bar = [...group.at(-1)!.children].find((part) => !part.hasAttribute('data-transcript-curtain-clip'))!;
+    const onScreen = group.at(-1)!.getBoundingClientRect().bottom < scroller.getBoundingClientRect().bottom;
+    const out = [bar.getBoundingClientRect().top];
+    member.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+    let closedAt = -1;
+    for (let count = 0; count < 50; count += 1) {
+      await frame();
+      out.push(bar.getBoundingClientRect().top);
+      // Closed early, with most of the way down still ahead of the bar.
+      if (count === 1) {
+        member.querySelector<HTMLElement>('button[aria-expanded="true"]')!.click();
+        closedAt = out.length - 1;
+      }
+    }
+    return { onScreen, path: out, closedAt };
+  });
+  expect(onScreen).toBe(true);
+  // It went down with the body; from where it was drawn as the body closed it goes back up, never further down
+  // first, and comes to rest where it started.
+  expect(path[closedAt] - path[0]).toBeGreaterThan(5);
+  expect(Math.max(...path.slice(closedAt)) - path[closedAt]).toBeLessThanOrEqual(1);
+  expect(Math.abs(path.at(-1)! - path[0])).toBeLessThanOrEqual(1);
+});
+
 test('a Harness group a link opened folds back into its card when closed, rising once to where the layout puts the rows', async ({ page }) => {
   // Opened by a link to one of its members, not by a tap: nothing was measured as it opened.
   await open(page, 'delay=0&count=392&msg=msg_00373');
