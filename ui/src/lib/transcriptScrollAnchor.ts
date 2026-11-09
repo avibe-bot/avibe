@@ -44,6 +44,8 @@
 // a message can change element without leaving the transcript: a Harness row
 // that an older page turns into a group member is re-mounted inside the group,
 // or folded into its collapsed head. ``resolveScrollAnchor`` follows it there.
+import { placeIn } from './layoutBox';
+
 export type ScrollAnchor = { el: HTMLElement; top: number; rowId?: string; rowTop?: number; key?: string };
 
 /** The visible band of the scroll container, in viewport coordinates. */
@@ -68,6 +70,7 @@ export const pickScrollAnchor = (
   children: readonly HTMLElement[],
   viewport: ScrollViewport,
   contentTop: number,
+  content?: Element,
 ): ScrollAnchor | null => {
   // Everything before the first row holds still while the content grows above it,
   // so it can never restore anything.
@@ -83,10 +86,10 @@ export const pickScrollAnchor = (
       straddling ??= { el, rect };
       continue;
     }
-    if (rect.top < viewport.bottom || !straddling) return anchorAt(el, rect, contentTop);
+    if (rect.top < viewport.bottom || !straddling) return anchorAt(el, rect, contentTop, content);
     break;
   }
-  return straddling ? anchorAt(straddling.el, straddling.rect, contentTop) : null;
+  return straddling ? anchorAt(straddling.el, straddling.rect, contentTop, content) : null;
 };
 
 /**
@@ -100,16 +103,28 @@ export const anchorForTouched = (
   children: readonly HTMLElement[],
   target: Node,
   contentTop: number,
+  content?: Element,
 ): ScrollAnchor | null => {
   const firstRow = children.findIndex(isTranscriptRow);
   const touched = children.findIndex((child) => child.contains(target));
   if (firstRow < 0 || touched < firstRow) return null;
   const el = children[touched];
-  return anchorAt(el, el.getBoundingClientRect(), contentTop);
+  return anchorAt(el, el.getBoundingClientRect(), contentTop, content);
 };
 
-function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number): ScrollAnchor {
-  const anchor: ScrollAnchor = { el, top: rect.top - contentTop };
+/** Where `el`'s top is inside the content: given the content, where the layout puts it there, less what a
+ *  disclosure's motion shows as movement (a row a disclosure above it still pushes down is drawn away from its
+ *  layout place, and the motion, not the scroll position, makes up the difference; lib/layoutBox), else where
+ *  it is drawn, from `contentTop`. */
+export const topInContent = (el: Element, contentTop: number, content?: Element, rect?: DOMRect): number => {
+  if (!content || !content.contains(el)) return (rect ?? el.getBoundingClientRect()).top - contentTop;
+  let item: Element = el;
+  while (item.parentElement && item.parentElement !== content) item = item.parentElement;
+  return placeIn(content, el, item);
+};
+
+function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number, content?: Element): ScrollAnchor {
+  const anchor: ScrollAnchor = { el, top: topInContent(el, contentTop, content, rect) };
   // A transcript item that is not a message (an activity card or chip, a
   // Harness group's members, its collapse bar) names itself, so it can be found
   // again when it re-mounts.
@@ -117,7 +132,7 @@ function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number): ScrollAnc
   const row = el.dataset.messageId !== undefined ? el : el.querySelector<HTMLElement>('[data-message-id]');
   if (row?.dataset.messageId) {
     anchor.rowId = row.dataset.messageId;
-    anchor.rowTop = row.getBoundingClientRect().top - contentTop;
+    anchor.rowTop = topInContent(row, contentTop, content);
   } else if (el.dataset.harnessMembers) {
     // A group head stands for its members; should the group dissolve, its
     // first message's row takes the head's place.
