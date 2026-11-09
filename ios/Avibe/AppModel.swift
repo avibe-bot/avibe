@@ -60,6 +60,12 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
+    private let pushKeychain: PushKeychainStoring
+    private let pushGenerationStore: PushGenerationStoring
+    private let pushInstallationMarker: PushInstallationMarkerStoring
+    private let pushNotificationCenter: PushNotificationCentering?
+    private let pushOpenedNow: () -> Date
+    private let pushOpenedLifetime: TimeInterval
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -85,6 +91,8 @@ final class AppModel: ObservableObject {
     )
 
     private lazy var nativePushCoordinator = NativePushCoordinator(
+        keychain: pushKeychain,
+        generationStore: pushGenerationStore,
         managementRequest: { [weak self] request in
             guard let self else {
                 throw NativePushError.unavailable
@@ -96,6 +104,8 @@ final class AppModel: ObservableObject {
         accountProvider: { [weak self] in
             self?.mobileSessionCoordinator.currentAccount
         },
+        installationMarker: pushInstallationMarker,
+        notificationCenter: pushNotificationCenter,
         onTap: { [weak self] tap in
             self?.handlePushTap(tap)
         },
@@ -118,10 +128,25 @@ final class AppModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
-        controlPlane: MobileControlPlaneConfiguration = MobileControlPlaneConfiguration()
+        controlPlane: MobileControlPlaneConfiguration =
+            MobileControlPlaneConfiguration(),
+        pushKeychain: PushKeychainStoring = PushKeychainStore(),
+        pushGenerationStore: PushGenerationStoring =
+            SharedPushGenerationStore(),
+        pushInstallationMarker: PushInstallationMarkerStoring =
+            UserDefaultsPushInstallationMarkerStore(),
+        pushNotificationCenter: PushNotificationCentering? = nil,
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        pushOpenedLifetime: TimeInterval = 120
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
+        self.pushKeychain = pushKeychain
+        self.pushGenerationStore = pushGenerationStore
+        self.pushInstallationMarker = pushInstallationMarker
+        self.pushNotificationCenter = pushNotificationCenter
+        self.pushOpenedNow = pushOpenedNow
+        self.pushOpenedLifetime = pushOpenedLifetime
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
 
@@ -250,7 +275,9 @@ final class AppModel: ObservableObject {
         else {
             return
         }
-        guard pendingPushOpened.createdAt.addingTimeInterval(120) > Date(),
+        guard pendingPushOpened.createdAt.addingTimeInterval(
+            pushOpenedLifetime
+        ) > pushOpenedNow(),
               pendingPushOpened.runtimeIdentity == runtimeIdentity,
               sessionCoordinator.currentAccount?.id == pendingPushOpened.accountID,
               sessionCoordinator.currentInstances.contains(where: {
@@ -275,7 +302,9 @@ final class AppModel: ObservableObject {
             pendingPushOpened.id == id,
             pendingPushOpened.instanceOrigin == origin.serialized,
             pendingPushOpened.runtimeIdentity == runtimeIdentity,
-            pendingPushOpened.createdAt.addingTimeInterval(120) > Date(),
+            pendingPushOpened.createdAt.addingTimeInterval(
+                pushOpenedLifetime
+            ) > pushOpenedNow(),
             sessionCoordinator.currentAccount?.id == pendingPushOpened.accountID,
             let runtime = route.runtime,
             WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
@@ -313,12 +342,13 @@ final class AppModel: ObservableObject {
             instanceOrigin: tap.instanceOrigin,
             url: tap.url,
             runtimeIdentity: runtimeIdentity + 1,
-            createdAt: Date()
+            createdAt: pushOpenedNow()
         )
         pendingPushOpened = pending
         pendingPushOpenedExpiryTask?.cancel()
+        let lifetime = pushOpenedLifetime
         pendingPushOpenedExpiryTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 120_000_000_000)
+            try? await Task.sleep(for: .seconds(lifetime))
             guard !Task.isCancelled else {
                 return
             }

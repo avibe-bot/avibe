@@ -43,7 +43,10 @@ def app_store_profile(**overrides) -> dict:
             "aps-environment": "production",
             "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
             "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-            "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
+            "keychain-access-groups": [
+                testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
+                testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
+            ],
             "get-task-allow": False,
         },
     }
@@ -96,6 +99,13 @@ def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
     with pytest.raises(testflight.TestFlightError, match="forbidden entitlements"):
         testflight.check_profile(profile, now=NOW)
 
+    profile = app_store_profile()
+    profile["Entitlements"]["keychain-access-groups"] = [
+        testflight.SHARED_KEYCHAIN_ACCESS_GROUP
+    ]
+    with pytest.raises(testflight.TestFlightError, match="exactly"):
+        testflight.check_profile(profile, now=NOW)
+
 
 @pytest.mark.parametrize(
     ("overrides", "message"),
@@ -110,7 +120,10 @@ def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
                            "aps-environment": "production",
                            "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
                            "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-                           "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
+                           "keychain-access-groups": [
+                               testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
+                               testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
+                           ],
                            "get-task-allow": True}}, "debugging"),
     ],
     ids=["team", "app", "devices", "expired", "associated-domains", "debuggable"],
@@ -164,7 +177,10 @@ def signed(info=None, entitlements=None):
                          "aps-environment": "production",
                          "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
                          "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-                         "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP]}
+                         "keychain-access-groups": [
+                             testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
+                             testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
+                         ]}
     return {**base_info, **(info or {})}, {**base_entitlements, **(entitlements or {})}
 
 
@@ -179,6 +195,9 @@ def test_a_distribution_signed_notification_service_with_shared_entitlements_pas
         entitlements={
             "application-identifier": testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
             "com.apple.developer.associated-domains": [],
+            "keychain-access-groups": [
+                testflight.SHARED_KEYCHAIN_ACCESS_GROUP
+            ],
         },
     )
     entitlements.pop("aps-environment", None)
@@ -197,7 +216,7 @@ def test_a_notification_service_profile_has_shared_groups_but_no_apns():
     profile["Entitlements"] = {
         "application-identifier": testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
         "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-        "keychain-access-groups": [testflight.KEYCHAIN_ACCESS_GROUP],
+        "keychain-access-groups": [testflight.SHARED_KEYCHAIN_ACCESS_GROUP],
         "get-task-allow": False,
     }
     testflight.check_profile(
@@ -209,6 +228,24 @@ def test_a_notification_service_profile_has_shared_groups_but_no_apns():
 
     profile["Entitlements"]["aps-environment"] = "production"
     with pytest.raises(testflight.TestFlightError, match="forbidden entitlements"):
+        testflight.check_profile(
+            profile,
+            bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
+            required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+            now=NOW,
+        )
+
+    profile = app_store_profile()
+    profile["Entitlements"] = {
+        "application-identifier": testflight.NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+        "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+        "keychain-access-groups": [
+            testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
+            testflight.SHARED_KEYCHAIN_ACCESS_GROUP,
+        ],
+        "get-task-allow": False,
+    }
+    with pytest.raises(testflight.TestFlightError, match="exactly"):
         testflight.check_profile(
             profile,
             bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,

@@ -932,7 +932,6 @@ const NON_KEY_LITERALS = [
   'session.refresh',
   'session.selectInstance',
   'push.opened',
-  'push.openedAck',
   'push.status',
   'push.subscribe',
   'push.unsubscribe',
@@ -966,6 +965,7 @@ const NON_KEY_LITERALS = [
   'avibe.terminal.sessionId',
   'avibe.vault.crypto',
   'avibe.workbench.windows.v1',
+  'vibe.nativePush.pendingRegistration',
   'vibe.webPush.deviceId',
   'vibe.webPush.endpoints',
 

@@ -7276,15 +7276,10 @@ def web_push_unsubscribe():
 @app.route("/api/web-push/test", methods=["POST"])
 def web_push_test():
     from core.web_push import send_web_push
+    from core.web_push_notifications import _badge_count_for_user_key
     from storage import web_push_service
 
     payload = request.json or {}
-    notification = {
-        "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
-        "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
-        "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
-        "tag": "web-push-test",
-    }
     endpoint = payload.get("endpoint")
     if not isinstance(endpoint, str) or not endpoint.strip():
         return jsonify({"ok": False, "error": "endpoint_required"}), 400
@@ -7298,8 +7293,26 @@ def web_push_test():
             endpoint=endpoint,
             user_key=user_key,
         )
+        context = _request_authorization_context()
+        contexts = (
+            {user_key: context}
+            if user_key != "local" and context is not None
+            else {}
+        )
+        badge_count = _badge_count_for_user_key(
+            conn,
+            user_key=user_key,
+            contexts=contexts,
+        )
     if not subscription:
         return jsonify({"ok": False, "error": "no_subscription"}), 404
+    notification = {
+        "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
+        "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
+        "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
+        "tag": "web-push-test",
+        "badge_count": badge_count,
+    }
     try:
         send_web_push(subscription=subscription, payload=notification)
         with engine.begin() as conn:

@@ -153,25 +153,79 @@ protocol PushKeychainStoring: AnyObject {
     func listRecords() throws -> [PushKeyRecord]
 }
 
+protocol PushKeychainItemAccessing {
+    func copyMatching(_ query: [String: Any]) -> (OSStatus, Any?)
+    func update(
+        _ query: [String: Any],
+        attributes: [String: Any]
+    ) -> OSStatus
+    func add(_ attributes: [String: Any]) -> OSStatus
+    func delete(_ query: [String: Any]) -> OSStatus
+}
+
+private struct SystemPushKeychainItemAccess: PushKeychainItemAccessing {
+    func copyMatching(_ query: [String: Any]) -> (OSStatus, Any?) {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return (status, result)
+    }
+
+    func update(
+        _ query: [String: Any],
+        attributes: [String: Any]
+    ) -> OSStatus {
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
+
+    func add(_ attributes: [String: Any]) -> OSStatus {
+        SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
 final class PushKeychainStore: PushKeychainStoring {
     static let installationService = "bot.avibe.ios.push.installation"
     static let orphanedInstallationService = "bot.avibe.ios.push.orphaned"
     static let recordService = "bot.avibe.ios.push.record"
-    static let accessGroupInfoKey = "AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"
+    static let privateAccessGroupInfoKey =
+        "AVIBE_PRIVATE_KEYCHAIN_ACCESS_GROUP"
+    static let sharedAccessGroupInfoKey =
+        "AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"
 
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private let bundle: Bundle
+    private let privateAccessGroupValue: String?
+    private let sharedAccessGroupValue: String?
+    private let itemAccess: PushKeychainItemAccessing
 
     init(bundle: Bundle = .main) {
-        self.bundle = bundle
+        privateAccessGroupValue = bundle.object(
+            forInfoDictionaryKey: Self.privateAccessGroupInfoKey
+        ) as? String
+        sharedAccessGroupValue = bundle.object(
+            forInfoDictionaryKey: Self.sharedAccessGroupInfoKey
+        ) as? String
+        itemAccess = SystemPushKeychainItemAccess()
+    }
+
+    init(
+        privateAccessGroup: String?,
+        sharedAccessGroup: String?,
+        itemAccess: PushKeychainItemAccessing
+    ) {
+        privateAccessGroupValue = privateAccessGroup
+        sharedAccessGroupValue = sharedAccessGroup
+        self.itemAccess = itemAccess
     }
 
     func loadInstallation() throws -> PushInstallationState? {
         try load(
             service: Self.installationService,
             account: "installation",
-            accessGroup: nil
+            accessGroup: privateAccessGroup()
         )
     }
 
@@ -180,7 +234,7 @@ final class PushKeychainStore: PushKeychainStoring {
             state,
             service: Self.installationService,
             account: "installation",
-            accessGroup: nil
+            accessGroup: privateAccessGroup()
         )
     }
 
@@ -188,7 +242,7 @@ final class PushKeychainStore: PushKeychainStoring {
         try load(
             service: Self.orphanedInstallationService,
             account: "installations",
-            accessGroup: nil
+            accessGroup: privateAccessGroup()
         ) ?? []
     }
 
@@ -199,7 +253,7 @@ final class PushKeychainStore: PushKeychainStoring {
             installations,
             service: Self.orphanedInstallationService,
             account: "installations",
-            accessGroup: nil
+            accessGroup: privateAccessGroup()
         )
     }
 
@@ -226,7 +280,7 @@ final class PushKeychainStore: PushKeychainStoring {
             account: kid,
             accessGroup: try sharedAccessGroup()
         )
-        let status = SecItemDelete(query as CFDictionary)
+        let status = itemAccess.delete(query)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PushKeychainError.unavailable(status)
         }
@@ -240,8 +294,7 @@ final class PushKeychainStore: PushKeychainStoring {
         )
         query[kSecMatchLimit as String] = kSecMatchLimitAll
         query[kSecReturnData as String] = true
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let (status, result) = itemAccess.copyMatching(query)
         if status == errSecItemNotFound {
             return []
         }
@@ -254,7 +307,7 @@ final class PushKeychainStore: PushKeychainStoring {
         return try values.map { try decoder.decode(PushKeyRecord.self, from: $0) }
     }
 
-    static func resolveSharedAccessGroup(_ value: Any?) throws -> String {
+    static func resolveAccessGroup(_ value: Any?) throws -> String {
         guard
             let value = value as? String,
             !value.isEmpty,
@@ -266,10 +319,16 @@ final class PushKeychainStore: PushKeychainStoring {
         return value
     }
 
+    static func resolveSharedAccessGroup(_ value: Any?) throws -> String {
+        try resolveAccessGroup(value)
+    }
+
+    private func privateAccessGroup() throws -> String {
+        try Self.resolveAccessGroup(privateAccessGroupValue)
+    }
+
     private func sharedAccessGroup() throws -> String {
-        try Self.resolveSharedAccessGroup(
-            bundle.object(forInfoDictionaryKey: Self.accessGroupInfoKey)
-        )
+        try Self.resolveAccessGroup(sharedAccessGroupValue)
     }
 
     private func load<Value: Decodable>(
@@ -284,8 +343,7 @@ final class PushKeychainStore: PushKeychainStoring {
         )
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecReturnData as String] = true
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let (status, result) = itemAccess.copyMatching(query)
         if status == errSecItemNotFound {
             return nil
         }
@@ -320,11 +378,14 @@ final class PushKeychainStore: PushKeychainStoring {
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        let updateStatus = itemAccess.update(
+            query,
+            attributes: attributes
+        )
         if updateStatus == errSecItemNotFound {
             var insert = query
             insert.merge(attributes) { _, new in new }
-            let status = SecItemAdd(insert as CFDictionary, nil)
+            let status = itemAccess.add(insert)
             guard status == errSecSuccess else {
                 throw PushKeychainError.unavailable(status)
             }

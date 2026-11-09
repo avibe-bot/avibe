@@ -184,7 +184,9 @@ final class NativePushCoordinatorTests: XCTestCase {
         try await waitUntil { registrationCalls == 1 }
     }
 
-    func testDeniedOrUndeterminedAuthorizationMakesStatusOff() async throws {
+    func testDeniedOrUndeterminedAuthorizationMakesStatusUnavailable()
+        async throws
+    {
         let authorization = Locked(UNAuthorizationStatus.denied)
         let coordinator = makeCoordinator(
             store: InMemoryPushKeychainStore(),
@@ -196,14 +198,14 @@ final class NativePushCoordinatorTests: XCTestCase {
             vapidPublicKey: Self.vapidPublicKey,
             instanceOrigin: Self.instanceOrigin
         )["state"] as? String
-        XCTAssertEqual(deniedStatus, "off")
+        XCTAssertEqual(deniedStatus, "unavailable")
 
         authorization.value = .notDetermined
         let undeterminedStatus = try await coordinator.status(
             vapidPublicKey: Self.vapidPublicKey,
             instanceOrigin: Self.instanceOrigin
         )["state"] as? String
-        XCTAssertEqual(undeterminedStatus, "off")
+        XCTAssertEqual(undeterminedStatus, "unavailable")
     }
 
     func testProviderPatchFailuresKeepTheCompleteTuplePending() async throws {

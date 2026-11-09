@@ -277,7 +277,7 @@ final class NativePushCoordinator {
         }
         let authorizationStatus = await notificationAuthorizationStatus()
         guard Self.authorizationAllowsAlerts(authorizationStatus) else {
-            return ["state": "off"]
+            return ["state": "unavailable"]
         }
         guard
             let installation = try keychain.loadInstallation(),

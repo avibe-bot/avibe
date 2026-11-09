@@ -12,6 +12,7 @@ const WEB_PUSH_ENDPOINTS_KEY = 'vibe.webPush.endpoints';
 const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
 const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
 const WEB_PUSH_DEVICE_ENTRY_PATH = '/__avibe/web-push-device-id';
+const NATIVE_PUSH_PENDING_REGISTRATION_KEY = 'vibe.nativePush.pendingRegistration';
 
 export type WebPushSupportState =
   | { supported: true; standalone: boolean; requiresStandalone: boolean }
@@ -166,7 +167,122 @@ export type WebPushReconcileResult = {
 export type EnableWebPushOptions = {
   forceResubscribe?: boolean;
   recoverOnly?: boolean;
+  pendingRegistrationStore?: NativePushPendingRegistrationStore;
 };
+
+export type NativePushPendingRegistration = {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  previousEndpoints: string[];
+  vapidPublicKey: string;
+};
+
+export interface NativePushPendingRegistrationStore {
+  read(): NativePushPendingRegistration | null;
+  write(registration: NativePushPendingRegistration): void;
+  clear(): void;
+}
+
+const browserNativePushPendingRegistrationStore: NativePushPendingRegistrationStore = {
+  read: () => {
+    try {
+      const raw = window.localStorage.getItem(NATIVE_PUSH_PENDING_REGISTRATION_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (
+        !parsed
+        || typeof parsed.endpoint !== 'string'
+        || typeof parsed.vapidPublicKey !== 'string'
+        || typeof parsed.keys?.p256dh !== 'string'
+        || typeof parsed.keys?.auth !== 'string'
+        || !Array.isArray(parsed.previousEndpoints)
+        || parsed.previousEndpoints.some((endpoint: unknown) => typeof endpoint !== 'string')
+      ) {
+        return null;
+      }
+      return {
+        endpoint: parsed.endpoint,
+        keys: {
+          p256dh: parsed.keys.p256dh,
+          auth: parsed.keys.auth,
+        },
+        previousEndpoints: parsed.previousEndpoints,
+        vapidPublicKey: parsed.vapidPublicKey,
+      };
+    } catch {
+      return null;
+    }
+  },
+  write: (registration) => {
+    window.localStorage.setItem(
+      NATIVE_PUSH_PENDING_REGISTRATION_KEY,
+      JSON.stringify(registration),
+    );
+  },
+  clear: () => {
+    window.localStorage.removeItem(NATIVE_PUSH_PENDING_REGISTRATION_KEY);
+  },
+};
+
+async function postNativePushRegistration(
+  api: ApiContextType,
+  registration: NativePushPendingRegistration,
+  store: NativePushPendingRegistrationStore,
+  recoverOnly?: boolean,
+): Promise<void> {
+  store.write(registration);
+  const result = await api.subscribeWebPush(
+    {
+      endpoint: registration.endpoint,
+      keys: registration.keys,
+    },
+    'iPhone App',
+    undefined,
+    registration.previousEndpoints,
+    recoverOnly,
+  );
+  if (!result.accepted) {
+    if (recoverOnly) {
+      await nativePushUnsubscribe();
+      store.clear();
+      throw new Error('recovery_not_authorized');
+    }
+    throw new Error('native_push_registration_not_accepted');
+  }
+  store.clear();
+  await rememberWebPushEndpoint(registration.endpoint);
+}
+
+async function enableNativeWebPush(
+  api: ApiContextType,
+  publicKey: string,
+  existing: Awaited<ReturnType<typeof nativePushStatus>>,
+  options: EnableWebPushOptions,
+): Promise<PushSubscriptionJSON> {
+  const subscription = existing?.state === 'on' && !options.forceResubscribe
+    ? existing
+    : await nativePushSubscribe(publicKey);
+  if (!subscription) throw new Error('native_push_unavailable');
+  const json: PushSubscriptionJSON = {
+    endpoint: subscription.endpoint,
+    keys: subscription.keys,
+  };
+  const previousEndpoints = [
+    ...(existing?.state === 'on' ? [existing.endpoint] : []),
+    ...await getRememberedWebPushEndpoints(),
+  ].filter((endpoint, index, endpoints) => endpoints.indexOf(endpoint) === index);
+  await postNativePushRegistration(
+    api,
+    {
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+      previousEndpoints,
+      vapidPublicKey: publicKey,
+    },
+    options.pendingRegistrationStore ?? browserNativePushPendingRegistrationStore,
+    options.recoverOnly,
+  );
+  return json;
+}
 
 export async function enableWebPush(
   api: ApiContextType,
@@ -175,31 +291,7 @@ export async function enableWebPush(
   if (hasNativeCapability('push')) {
     const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
     const existing = await nativePushStatus(publicKey);
-    const subscription = existing?.state === 'on' && !options.forceResubscribe
-      ? existing
-      : await nativePushSubscribe(publicKey);
-    if (!subscription) throw new Error('native_push_unavailable');
-    const json: PushSubscriptionJSON = {
-      endpoint: subscription.endpoint,
-      keys: subscription.keys,
-    };
-    const previousEndpoints = [
-      ...(existing?.state === 'on' ? [existing.endpoint] : []),
-      ...await getRememberedWebPushEndpoints(),
-    ];
-    const result = await api.subscribeWebPush(
-      json,
-      'iPhone App',
-      undefined,
-      previousEndpoints,
-      options.recoverOnly,
-    );
-    if (options.recoverOnly && !result.accepted) {
-      await nativePushUnsubscribe();
-      throw new Error('recovery_not_authorized');
-    }
-    await rememberWebPushEndpoint(json.endpoint);
-    return json;
+    return enableNativeWebPush(api, publicKey, existing, options);
   }
   const support = getWebPushSupportState();
   if (!support.supported) {
@@ -278,14 +370,23 @@ export async function disableWebPush(api: ApiContextType): Promise<boolean> {
 
 let webPushReconciliation: Promise<WebPushReconcileResult> | null = null;
 
-async function reconcileWebPushOnce(api: ApiContextType): Promise<WebPushReconcileResult> {
+async function reconcileWebPushOnce(
+  api: ApiContextType,
+  pendingRegistrationStore: NativePushPendingRegistrationStore,
+): Promise<WebPushReconcileResult> {
   const support = getWebPushSupportState();
   if (hasNativeCapability('push')) {
     try {
       const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
       const nativeState = await nativePushStatus(publicKey);
-      if (nativeState?.state !== 'on') {
+      if (!nativeState || nativeState.state === 'unavailable') {
         return { support, status: 'disabled' };
+      }
+      if (nativeState.state !== 'on') {
+        await enableNativeWebPush(api, publicKey, nativeState, {
+          pendingRegistrationStore,
+        });
+        return { support, status: 'enabled' };
       }
       const previousEndpoints = [
         nativeState.endpoint,
@@ -295,6 +396,19 @@ async function reconcileWebPushOnce(api: ApiContextType): Promise<WebPushReconci
         endpoint: nativeState.endpoint,
         keys: nativeState.keys,
       };
+      const pendingRegistration = pendingRegistrationStore.read();
+      if (
+        pendingRegistration
+        && pendingRegistration.endpoint === nativeState.endpoint
+        && pendingRegistration.vapidPublicKey === publicKey
+      ) {
+        await postNativePushRegistration(
+          api,
+          pendingRegistration,
+          pendingRegistrationStore,
+        );
+        return { support, status: 'enabled' };
+      }
       const serverStatus = await api.getWebPushStatus({
         endpoint: nativeState.endpoint,
         subscription: nativeSubscription,
@@ -302,12 +416,17 @@ async function reconcileWebPushOnce(api: ApiContextType): Promise<WebPushReconci
         previous_endpoints: previousEndpoints,
       });
       if (serverStatus.current_subscription_enabled) {
+        if (pendingRegistration) pendingRegistrationStore.clear();
         await rememberWebPushEndpoint(nativeState.endpoint);
         return { support, status: 'enabled' };
       }
       if (serverStatus.current_subscription_repairable) {
         try {
-          await enableWebPush(api, { forceResubscribe: true, recoverOnly: true });
+          await enableNativeWebPush(api, publicKey, nativeState, {
+            forceResubscribe: true,
+            recoverOnly: true,
+            pendingRegistrationStore,
+          });
           const repaired = await nativePushStatus(publicKey);
           if (repaired?.state === 'on') {
             const repairedStatus = await api.getWebPushStatus({
@@ -327,6 +446,18 @@ async function reconcileWebPushOnce(api: ApiContextType): Promise<WebPushReconci
         } catch {
           // Keep the next foreground or manual settings action recoverable.
         }
+      } else {
+        await postNativePushRegistration(
+          api,
+          {
+            endpoint: nativeState.endpoint,
+            keys: nativeState.keys,
+            previousEndpoints,
+            vapidPublicKey: publicKey,
+          },
+          pendingRegistrationStore,
+        );
+        return { support, status: 'enabled' };
       }
       return { support, status: 'disabled' };
     } catch {
@@ -401,9 +532,13 @@ async function reconcileWebPushOnce(api: ApiContextType): Promise<WebPushReconci
 }
 
 /** Reconcile the current native or browser subscription with the instance once at a time. */
-export function reconcileWebPush(api: ApiContextType): Promise<WebPushReconcileResult> {
+export function reconcileWebPush(
+  api: ApiContextType,
+  pendingRegistrationStore: NativePushPendingRegistrationStore =
+    browserNativePushPendingRegistrationStore,
+): Promise<WebPushReconcileResult> {
   if (!webPushReconciliation) {
-    webPushReconciliation = reconcileWebPushOnce(api).finally(() => {
+    webPushReconciliation = reconcileWebPushOnce(api, pendingRegistrationStore).finally(() => {
       webPushReconciliation = null;
     });
   }

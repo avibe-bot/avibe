@@ -4,9 +4,28 @@ import type { ApiContextType } from '@/context/ApiContext';
 import {
   disableWebPush,
   enableWebPush,
+  type NativePushPendingRegistration,
+  type NativePushPendingRegistrationStore,
   reconcileWebPush,
   webPushSubscriptionUsesVapidKey,
 } from './webPush';
+
+function pendingRegistrationStore(): NativePushPendingRegistrationStore & {
+  value: NativePushPendingRegistration | null;
+} {
+  return {
+    value: null,
+    read() {
+      return this.value;
+    },
+    write(registration) {
+      this.value = registration;
+    },
+    clear() {
+      this.value = null;
+    },
+  };
+}
 
 describe('web push recovery', () => {
   afterEach(() => {
@@ -226,7 +245,11 @@ describe('web push recovery', () => {
         }),
         on: vi.fn(() => () => undefined),
       },
-      localStorage: { getItem: () => null, setItem: vi.fn() },
+      localStorage: {
+        getItem: () => null,
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -276,7 +299,11 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: { getItem: () => null, setItem: vi.fn() },
+      localStorage: {
+        getItem: () => null,
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -292,7 +319,7 @@ describe('web push recovery', () => {
       subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
     } as unknown as ApiContextType;
 
-    await expect(reconcileWebPush(api)).resolves.toMatchObject({
+    await expect(reconcileWebPush(api, pendingRegistrationStore())).resolves.toMatchObject({
       status: 'enabled',
     });
     expect(api.subscribeWebPush).toHaveBeenCalledWith(
@@ -307,6 +334,244 @@ describe('web push recovery', () => {
     );
   });
 
+  it('clears a rejected native recovery after unsubscribing it', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return {
+          state: 'on' as const,
+          endpoint: 'https://avibe.bot/api/push/apns/native-old',
+          keys: { p256dh: 'old-key', auth: 'old-auth' },
+        };
+      }
+      if (method === 'push.subscribe') {
+        return {
+          endpoint: 'https://avibe.bot/api/push/apns/native-new',
+          keys: { p256dh: 'new-key', auth: 'new-auth' },
+        };
+      }
+      if (method === 'push.unsubscribe') return { revoked: true };
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: {
+        getItem: () => null,
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      getWebPushStatus: vi.fn(async () => ({
+        current_subscription_enabled: false,
+        current_subscription_repairable: true,
+      })),
+      subscribeWebPush: vi.fn(async () => ({
+        ok: true,
+        accepted: false,
+        subscription: null,
+      })),
+    } as unknown as ApiContextType;
+    const store = pendingRegistrationStore();
+
+    await expect(reconcileWebPush(api, store)).resolves.toMatchObject({
+      status: 'disabled',
+    });
+
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      'push.status',
+      'push.subscribe',
+      'push.unsubscribe',
+    ]);
+    expect(store.value).toBeNull();
+  });
+
+  it('subscribes and posts when native status is off', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') return { state: 'off' as const };
+      if (method === 'push.subscribe') {
+        return {
+          endpoint: 'https://avibe.bot/api/push/apns/native-new',
+          keys: { p256dh: 'new-key', auth: 'new-auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: { getItem: () => null, setItem: vi.fn() },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
+    } as unknown as ApiContextType;
+    const store = pendingRegistrationStore();
+
+    await expect(reconcileWebPush(api, store)).resolves.toMatchObject({
+      status: 'enabled',
+    });
+
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      'push.status',
+      'push.subscribe',
+    ]);
+    expect(api.subscribeWebPush).toHaveBeenCalledWith(
+      {
+        endpoint: 'https://avibe.bot/api/push/apns/native-new',
+        keys: { p256dh: 'new-key', auth: 'new-auth' },
+      },
+      'iPhone App',
+      undefined,
+      [],
+      undefined,
+    );
+    expect(store.value).toBeNull();
+  });
+
+  it('retries an interrupted native POST without creating another subscription', async () => {
+    let statusRead = 0;
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        statusRead += 1;
+        return statusRead === 1
+          ? { state: 'off' as const }
+          : {
+              state: 'on' as const,
+              endpoint: 'https://avibe.bot/api/push/apns/native-new',
+              keys: { p256dh: 'new-key', auth: 'new-auth' },
+            };
+      }
+      if (method === 'push.subscribe') {
+        return {
+          endpoint: 'https://avibe.bot/api/push/apns/native-new',
+          keys: { p256dh: 'new-key', auth: 'new-auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: { getItem: () => null, setItem: vi.fn() },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn()
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce({ ok: true, accepted: true }),
+    } as unknown as ApiContextType;
+    const store = pendingRegistrationStore();
+
+    await expect(reconcileWebPush(api, store)).resolves.toMatchObject({
+      status: 'disabled',
+    });
+    expect(store.value?.endpoint).toBe(
+      'https://avibe.bot/api/push/apns/native-new',
+    );
+
+    await expect(reconcileWebPush(api, store)).resolves.toMatchObject({
+      status: 'enabled',
+    });
+    expect(call.mock.calls.filter(([method]) => method === 'push.subscribe')).toHaveLength(1);
+    expect(api.subscribeWebPush).toHaveBeenCalledTimes(2);
+    expect(store.value).toBeNull();
+  });
+
+  it('posts the current native subscription when the instance has no row', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return {
+          state: 'on' as const,
+          endpoint: 'https://avibe.bot/api/push/apns/native-current',
+          keys: { p256dh: 'key', auth: 'auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: { getItem: () => null, setItem: vi.fn() },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      getWebPushStatus: vi.fn(async () => ({
+        current_subscription_enabled: false,
+        current_subscription_repairable: false,
+      })),
+      subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
+    } as unknown as ApiContextType;
+
+    await expect(
+      reconcileWebPush(api, pendingRegistrationStore()),
+    ).resolves.toMatchObject({ status: 'enabled' });
+
+    expect(call.mock.calls.map(([method]) => method)).toEqual(['push.status']);
+    expect(api.subscribeWebPush).toHaveBeenCalledWith(
+      {
+        endpoint: 'https://avibe.bot/api/push/apns/native-current',
+        keys: { p256dh: 'key', auth: 'auth' },
+      },
+      'iPhone App',
+      undefined,
+      ['https://avibe.bot/api/push/apns/native-current'],
+      undefined,
+    );
+  });
+
+  it('does not subscribe when native push is unavailable', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') return { state: 'unavailable' as const };
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(
+      reconcileWebPush(api, pendingRegistrationStore()),
+    ).resolves.toMatchObject({ status: 'disabled' });
+    expect(call).toHaveBeenCalledOnce();
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+  });
+
   it('shares one in-flight reconciliation between load and foreground', async () => {
     let releaseKey: (() => void) | undefined;
     const keyReady = new Promise<void>((resolve) => {
@@ -314,7 +579,7 @@ describe('web push recovery', () => {
     });
     const call = vi.fn(async (method: string) => {
       if (method === 'push.status') {
-        return { state: 'off' as const };
+        return { state: 'unavailable' as const };
       }
       throw new Error(`unexpected method ${method}`);
     });
@@ -336,8 +601,9 @@ describe('web push recovery', () => {
       }),
     } as unknown as ApiContextType;
 
-    const first = reconcileWebPush(api);
-    const second = reconcileWebPush(api);
+    const store = pendingRegistrationStore();
+    const first = reconcileWebPush(api, store);
+    const second = reconcileWebPush(api, store);
 
     expect(second).toBe(first);
     expect(api.getWebPushVapidPublicKey).toHaveBeenCalledOnce();

@@ -651,12 +651,18 @@ def test_ios_app_builds_carry_the_avibe_bot_webcredentials_domain() -> None:
         "aps-environment": "development",
         "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
         "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-        "keychain-access-groups": ["$(AppIdentifierPrefix)bot.avibe.ios.push"],
+        "keychain-access-groups": [
+            "$(AppIdentifierPrefix)bot.avibe.ios",
+            "$(AppIdentifierPrefix)bot.avibe.ios.push",
+        ],
     }
     app_info = plistlib.loads((ROOT / "ios/Avibe/Resources/Info.plist").read_bytes())
     extension_info = plistlib.loads((ROOT / "ios/NotificationService/Info.plist").read_bytes())
     assert app_info["AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"] == (
         "$(AppIdentifierPrefix)bot.avibe.ios.push"
+    )
+    assert app_info["AVIBE_PRIVATE_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios"
     )
     assert extension_info["AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"] == (
         "$(AppIdentifierPrefix)bot.avibe.ios.push"

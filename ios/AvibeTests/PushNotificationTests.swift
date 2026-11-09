@@ -39,6 +39,72 @@ final class PushNotificationTests: XCTestCase {
         )
     }
 
+    func testInstallationCredentialsUseOnlyThePrivateAccessGroup() throws {
+        let itemAccess = RecordingPushKeychainItemAccess()
+        let store = PushKeychainStore(
+            privateAccessGroup: "68B2SQ6YK3.bot.avibe.ios",
+            sharedAccessGroup: "68B2SQ6YK3.bot.avibe.ios.push",
+            itemAccess: itemAccess
+        )
+
+        XCTAssertNil(try store.loadInstallation())
+        XCTAssertEqual(
+            itemAccess.queries.last?[kSecAttrAccessGroup as String] as? String,
+            "68B2SQ6YK3.bot.avibe.ios"
+        )
+        _ = try store.loadOrphanedInstallations()
+        XCTAssertEqual(
+            itemAccess.queries.last?[kSecAttrAccessGroup as String] as? String,
+            "68B2SQ6YK3.bot.avibe.ios"
+        )
+        XCTAssertNil(try store.loadRecord(kid: "record"))
+        XCTAssertEqual(
+            itemAccess.queries.last?[kSecAttrAccessGroup as String] as? String,
+            "68B2SQ6YK3.bot.avibe.ios.push"
+        )
+    }
+
+    func testNotificationServiceScopedStoreCannotReadInstallationCredentials() {
+        let itemAccess = RecordingPushKeychainItemAccess()
+        let store = PushKeychainStore(
+            privateAccessGroup: nil,
+            sharedAccessGroup: "68B2SQ6YK3.bot.avibe.ios.push",
+            itemAccess: itemAccess
+        )
+
+        XCTAssertThrowsError(try store.loadInstallation()) { error in
+            XCTAssertEqual(error as? PushKeychainError, .invalidAccessGroup)
+        }
+        XCTAssertThrowsError(try store.loadOrphanedInstallations()) { error in
+            XCTAssertEqual(error as? PushKeychainError, .invalidAccessGroup)
+        }
+        XCTAssertTrue(itemAccess.queries.isEmpty)
+    }
+
+    func testNativePayloadAcceptsMissingOptionalPresentationFields()
+        throws
+    {
+        let payload = try JSONDecoder().decode(
+            NativePushPayload.self,
+            from: Data(
+                """
+                {
+                  "title": "Hello",
+                  "body": "World",
+                  "url": "/inbox"
+                }
+                """.utf8
+            )
+        )
+
+        XCTAssertEqual(payload.title, "Hello")
+        XCTAssertEqual(payload.body, "World")
+        XCTAssertEqual(payload.url, "/inbox")
+        XCTAssertNil(payload.badgeCount)
+        XCTAssertNil(payload.tag)
+        XCTAssertNil(payload.category)
+    }
+
     func testNativeSubscriptionUsesX963PublicKeyEncoding() throws {
         let fixture = try loadNativeSubscriptionFixture()
         let privateKey = try P256.KeyAgreement.PrivateKey(
@@ -265,6 +331,35 @@ final class PushNotificationTests: XCTestCase {
             pendingRevoke: true
         )
         assertFallback(result)
+    }
+}
+
+private final class RecordingPushKeychainItemAccess:
+    PushKeychainItemAccessing
+{
+    private(set) var queries: [[String: Any]] = []
+
+    func copyMatching(_ query: [String: Any]) -> (OSStatus, Any?) {
+        queries.append(query)
+        return (errSecItemNotFound, nil)
+    }
+
+    func update(
+        _ query: [String: Any],
+        attributes: [String: Any]
+    ) -> OSStatus {
+        queries.append(query)
+        return errSecItemNotFound
+    }
+
+    func add(_ attributes: [String: Any]) -> OSStatus {
+        queries.append(attributes)
+        return errSecSuccess
+    }
+
+    func delete(_ query: [String: Any]) -> OSStatus {
+        queries.append(query)
+        return errSecSuccess
     }
 }
 

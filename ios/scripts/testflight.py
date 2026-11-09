@@ -48,16 +48,22 @@ NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER = (
 INTERNAL_GROUP = "Avibe Internal"
 KEYCHAIN_NAME = "avibe-ios-signing.keychain-db"
 ASC_API = "https://api.appstoreconnect.apple.com"
-KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios.push"
+PRIVATE_KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios"
+SHARED_KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios.push"
+# Kept as the shared-group alias for older callers and fixtures.
+KEYCHAIN_ACCESS_GROUP = SHARED_KEYCHAIN_ACCESS_GROUP
 MAIN_REQUIRED_ENTITLEMENTS = {
     "aps-environment": ["production"],
     "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-    "keychain-access-groups": [KEYCHAIN_ACCESS_GROUP],
+    "keychain-access-groups": [
+        PRIVATE_KEYCHAIN_ACCESS_GROUP,
+        SHARED_KEYCHAIN_ACCESS_GROUP,
+    ],
 }
 NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS = {
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
-    "keychain-access-groups": [KEYCHAIN_ACCESS_GROUP],
+    "keychain-access-groups": [SHARED_KEYCHAIN_ACCESS_GROUP],
 }
 FORBIDDEN_ENTITLEMENTS = {
     "com.apple.developer.usernotifications.filtering",
@@ -169,6 +175,11 @@ def check_profile(
             actual_values = {actual}
         else:
             actual_values = set(actual)
+        if key == "keychain-access-groups" and actual_values != set(required):
+            raise TestFlightError(
+                "The profile must grant exactly the required "
+                "keychain-access-groups values"
+            )
         if not set(required) <= actual_values:
             raise TestFlightError(
                 f"The profile does not grant the required {key} values; "
@@ -395,6 +406,11 @@ def check_signed_bundle(
         if key == "aps-environment" and actual != "production":
             raise TestFlightError("The signed app must carry aps-environment=production")
         actual_values = {actual} if isinstance(actual, str) else set(actual)
+        if key == "keychain-access-groups" and actual_values != set(required):
+            raise TestFlightError(
+                "The bundle must carry exactly the required "
+                "keychain-access-groups values"
+            )
         if not set(required) <= actual_values:
             raise TestFlightError(f"The bundle's {key} entitlement lacks {required}")
 

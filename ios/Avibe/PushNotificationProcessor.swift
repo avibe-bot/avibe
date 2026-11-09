@@ -2,12 +2,12 @@ import CryptoKit
 import Foundation
 import UserNotifications
 
-private struct NativePushPayload: Decodable {
+struct NativePushPayload: Decodable {
     let title: String
     let body: String
     let url: String
     let tag: String?
-    let badgeCount: Int
+    let badgeCount: Int?
     let category: String?
 
     enum CodingKeys: String, CodingKey {
@@ -63,7 +63,9 @@ struct PushNotificationProcessor {
 
         content.title = payload.title
         content.body = payload.body
-        content.badge = NSNumber(value: payload.badgeCount)
+        if let badgeCount = payload.badgeCount {
+            content.badge = NSNumber(value: badgeCount)
+        }
         content.threadIdentifier = payload.tag ?? ""
         if let category = payload.category {
             content.categoryIdentifier = category
