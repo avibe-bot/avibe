@@ -111,7 +111,8 @@ jobs:
     needs: [release-backstop, resolve-desktop-release, desktop-packages]
     if: >-
       ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.resolve-desktop-release.outputs.enabled == 'true' &&
-          startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') }}
+          (startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
+           startsWith(github.event.inputs.tag || github.ref_name, 'v')) }}
     runs-on: windows-latest
     environment: windows-signing
     permissions:
@@ -513,9 +514,11 @@ jobs:
           (needs.build-assets.result == 'skipped' &&
            !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) &&
           (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
-           (needs.resolve-desktop-release.result == 'success' && needs.desktop-packages.result == 'success')) &&
+           (needs.resolve-desktop-release.result == 'success' &&
+            needs.resolve-desktop-release.outputs.enabled == 'true' &&
+            needs.desktop-packages.result == 'success')) &&
           (needs.resolve-desktop-release.outputs.enabled != 'true' || needs.desktop-packages.result == 'success') &&
-          (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
+          (needs.resolve-desktop-release.outputs.enabled != 'true' ||
            (needs.certum-windows-sign.result == 'success' &&
             (needs.windows-updater-finalize.result == 'success' || needs.windows-updater-finalize.result == 'skipped'))) }}
     runs-on: ubuntu-latest
