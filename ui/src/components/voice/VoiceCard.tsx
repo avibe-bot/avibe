@@ -117,10 +117,11 @@ export function VoiceCard({
       <div className="voice-card-halo" aria-hidden="true" />
       <div
         className={clsx(
-          'flex w-full flex-col gap-3 rounded-3xl border bg-surface p-4 shadow-elevation-2 transition',
+          'flex w-full flex-col gap-3 rounded-3xl border bg-surface p-4 transition',
           armed && 'border-destructive/40 opacity-60',
           interrupted && 'border-gold/45',
-          !armed && !interrupted && 'border-mint/35 shadow-glow-md-mint',
+          // Listening, the card is floating and live at once: both shadows.
+          !armed && !interrupted ? 'border-mint/35 shadow-elevation-2-live' : 'shadow-elevation-2',
         )}
       >
         <div className="flex items-center gap-2 text-xs">

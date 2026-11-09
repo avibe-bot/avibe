@@ -42,7 +42,7 @@ export function SkillDetailPanel({
   return (
     <div className="flex flex-col gap-3.5 self-start rounded-2xl border border-edge bg-surface p-5 shadow-elevation-0">
       <div className="flex items-start gap-3">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/40 bg-mint-soft text-mint-ink shadow-glow-sm-mint">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/40 bg-mint-soft text-mint-ink shadow-decor-sm-mint">
           <WandSparkles className="size-5" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col">

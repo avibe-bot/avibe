@@ -91,7 +91,7 @@ const shapeSheet = () => (
 
 const glowSheet = () => (
   <Sheet>
-    <Section title="光晕阶梯" note="居中、扩散为模糊的四分之一，颜色在两个主题下都是暗色霓虹">
+    <Section title="光晕阶梯" note="居中、扩散为模糊的四分之一，颜色是当前主题自己的强调色">
       {sized.map(([className, use]) => (
         <Specimen key={className} name={className} use={use} className="w-44">
           <div className={cn(glowTile, className)} />

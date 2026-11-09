@@ -97,7 +97,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
       {/* diagHero */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-edge bg-surface-2 px-6 py-5 shadow-elevation-0">
         <div className="flex min-w-0 items-center gap-3.5">
-          <div className="flex size-[42px] shrink-0 items-center justify-center rounded-full border border-mint/35 bg-mint/[0.08] shadow-glow-sm-mint">
+          <div className="flex size-[42px] shrink-0 items-center justify-center rounded-full border border-mint/35 bg-mint/[0.08] text-mint-ink shadow-decor-sm-mint">
             <Activity className="size-5 text-mint-ink" strokeWidth={2.25} />
           </div>
           <div className="flex min-w-0 flex-col gap-0.5">

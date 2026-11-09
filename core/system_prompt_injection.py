@@ -349,13 +349,15 @@ def project_catalog_page(
     )
 
 
-def _format_project_rows(projects: Iterable[Any]) -> tuple[str, str]:
-    rows = list(projects)
-    page, next_page = project_catalog_page(rows, 1)
-    more = ""
+def _format_project_catalog(projects: Iterable[Any]) -> str:
+    """Page 1 of the Projects table, or one line when no Project is enabled."""
+    page, next_page = project_catalog_page(list(projects), 1)
+    if not page:
+        return "There are no enabled Projects."
+    catalog = "| Project | Description |\n| --- | --- |\n" + "".join(_project_row_text(item) for item in page)
     if next_page is not None:
-        more = f"\nMore Projects are available. Run `vibe project list --page {next_page}` to view more.\n"
-    return "".join(_project_row_text(item) for item in page), more
+        catalog += f"\nMore Projects are available. Run `vibe project list --page {next_page}` to view more.\n"
+    return catalog.removesuffix("\n")
 
 
 def build_system_prompt_blocks(
@@ -433,8 +435,7 @@ def build_system_prompt_blocks(
                 render_prompt_block("harness-agents-prompt", bots_rows=bots_rows, enabled_agents_rows=agent_rows)
             )
         if bot is not None and projects is not None:
-            project_rows, more_notice = _format_project_rows(projects)
-            blocks.append(render_prompt_block("projects-prompt", project_rows=project_rows, more_notice=more_notice))
+            blocks.append(render_prompt_block("projects-prompt", project_catalog=_format_project_catalog(projects)))
     if include_context_guidance:
         blocks.append(render_prompt_block("project-context-prompt"))
     from core.mcp_hub.prompt import build_mcp_prompt_blocks

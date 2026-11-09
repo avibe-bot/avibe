@@ -1025,7 +1025,7 @@ test.describe('general settings geometry', () => {
 
     // A settings card is one concept across Settings: one step above the page,
     // on the surface fill, with its edge drawn by the fill rather than a line
-    // (ui/design: system/elevation/settings-general). General is not a different
+    // (ui/design: settings/general/default). General is not a different
     // kind of page, so the card matches its neighbours.
     const background = await page.evaluate(() => {
       const probe = document.createElement('div');

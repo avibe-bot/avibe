@@ -184,7 +184,7 @@ const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
           variant="brand"
           onClick={center.onClick}
           aria-label={center.label}
-          className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
+          className="size-12 -translate-y-1 rounded-full p-0"
         >
           <CenterIcon className="size-6" />
         </Button>
@@ -192,7 +192,7 @@ const NewSessionCenter: React.FC<{ center: CenterButton }> = ({ center }) => {
         <Button
           asChild
           variant="brand"
-          className="size-12 -translate-y-1 rounded-full p-0 shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]"
+          className="size-12 -translate-y-1 rounded-full p-0"
         >
           <Link to={center.to ?? '/'} aria-label={center.label}>
             <CenterIcon className="size-6" />

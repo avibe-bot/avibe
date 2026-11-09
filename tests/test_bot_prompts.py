@@ -154,14 +154,34 @@ def test_roster_prompt_matches_plan_drafts_and_teaches_one_reporting_mechanism()
     assert "read receipt" in prompt and "--no-reply" in prompt
 
 
-def test_bot_harness_prompt_matches_plan_draft_and_teaches_read_receipts():
+@pytest.mark.parametrize("source,heading", [
+    ("bot-main.md", "### The main Bot\n"),
+    ("bot-harness.md", "### Handing out work (every Bot, after the main Bot's section)\n"),
+])
+def test_bot_prompts_match_their_plan_drafts(source, heading):
     root = Path(__file__).resolve().parents[1]
-    prompt = (root / "core/prompts/bot-harness.md").read_text()
+    prompt = (root / "core/prompts" / source).read_text()
     plan = (root / "docs/plans/bots.md").read_text()
-    section = plan.split("### Handing out work (every Bot, after the main Bot's section)\n", 1)[1]
+    section = plan.split(heading, 1)[1]
     draft = section.split("```markdown\n", 1)[1].split("\n```", 1)[0] + "\n"
     assert prompt == draft
 
+
+@pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
+def test_every_bot_keeps_the_boundary_once_in_the_shared_section(bot):
+    """Owner decision 2026-11-09 (bots.md D9): no Bot does the work itself, and web lookups are finding out."""
+    blocks = _blocks(enabled_agents=_ROSTER, bot=bot)
+    shared = blocks["bot-harness-prompt"]
+    for line in (
+        "apart from that you do no work yourself.",
+        "anything that takes finding out or getting done goes to a Session",
+        "Searching the web and reading pages or code count as finding out.",
+    ):
+        assert shared.index(line) < shared.index("`vibe agent run` hands work")
+        assert "".join(text for module, text in blocks.items() if module.startswith("bot-")).count(line) == 1
+
+
+def test_bot_harness_prompt_teaches_read_receipts():
     built = _blocks(enabled_agents=_ROSTER, bot=_CSO)["bot-harness-prompt"]
     assert "read receipt with its last reply" in built
     assert "handles your message without writing back" in built

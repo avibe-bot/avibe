@@ -121,6 +121,12 @@ rules out of the kit stylesheet.
    `--card-wash` stays for the onboarding provider cards. Deliberately unchanged: the Agents
    "Run" button keeps its mint tint; chat bubbles; the new-Agent dialog's `border-2` choice tiles;
    the Model Hub drawer's directional shadow; the onboarding stylesheet.
-3. Glow theming: dot and microphone glows follow the theme; Light brand decoration and unread cards
-   as same-hue soft shadows; the new-session button's drop shadow.
+3. Glow theming (shipped): every glow role but `cta` mixes its hue from the theme's accent (Dark
+   unchanged), and dots are 6px at 60% in Light. Brand decoration (icon tiles, eyebrow badges,
+   success seals) draws `shadow-decor-*`: the glow in Dark, `--glow-soft` in Light. A brand mark (the
+   logo image, the Apps launcher) draws `shadow-mark-*`: the glow in Dark, nothing in Light. An unread
+   card draws `shadow-unread`; a listening voice card draws `shadow-elevation-2-live`; the phone tab
+   bar's new-session button keeps only the brand button's glow. Where no approved frame drew a case,
+   the text above decides: the mint eyebrow, the success seals, and the Doctor tile take the soft
+   shadow like every other decoration, and the press ring (a live microphone) takes the theme's mint.
 4. One small PR per chosen fix (1 and 3 share their call sites and land together).

@@ -233,7 +233,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
       {/* Header. A phone's tab page has none: the brand header and the tab bar say
           where you are, and Refresh rides at the end of the toolbar below. */}
       <div className="hidden flex-wrap items-center gap-4 md:flex">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-md-mint">
           <Inbox className="size-5" />
         </div>
         {/* No eyebrow: it only repeated the title. */}
