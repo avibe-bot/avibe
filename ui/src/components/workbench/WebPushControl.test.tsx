@@ -4,10 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { WebPushControl } from './WebPushControl';
 
-const { api, push } = vi.hoisted(() => ({
+const { api, native, push } = vi.hoisted(() => ({
   api: {
     getWebPushVapidPublicKey: vi.fn(),
     sendWebPushTest: vi.fn(),
+  },
+  native: {
+    hasNativeCapability: vi.fn(),
+    nativePushStatus: vi.fn(),
   },
   push: {
     disableWebPush: vi.fn(),
@@ -30,13 +34,11 @@ vi.mock('@/context/InstanceAuthorizationContext', () => ({
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/lib/webPush', () => push);
-vi.mock('@/lib/native', () => ({
-  hasNativeCapability: vi.fn(() => false),
-  nativePushStatus: vi.fn(),
-}));
+vi.mock('@/lib/native', () => native);
 
 beforeEach(() => {
   vi.stubGlobal('Notification', { permission: 'granted' });
+  native.hasNativeCapability.mockReturnValue(false);
   push.reconcileWebPush.mockResolvedValue({ support, status: 'disabled' });
   push.enableWebPush.mockResolvedValue(undefined);
   push.disableWebPush.mockResolvedValue(true);
@@ -61,14 +63,16 @@ describe('WebPushControl', () => {
     expect(push.reconcileWebPush).toHaveBeenCalledWith(api);
   });
 
-  it('keeps a disabled subscription available for explicit enable', async () => {
+  it('requests native push once from explicit enable', async () => {
+    native.hasNativeCapability.mockReturnValue(true);
     render(<WebPushControl />);
 
     const enable = await screen.findByText('workbench.inbox.notifications.enable');
     push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
     fireEvent.click(enable);
 
-    await waitFor(() => expect(push.enableWebPush).toHaveBeenCalledWith(api));
+    await waitFor(() => expect(push.enableWebPush).toHaveBeenCalledOnce());
+    expect(push.enableWebPush).toHaveBeenCalledWith(api);
     await screen.findByText('workbench.inbox.notifications.enabled');
   });
 

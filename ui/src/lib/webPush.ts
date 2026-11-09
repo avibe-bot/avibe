@@ -383,6 +383,10 @@ async function reconcileWebPushOnce(
         return { support, status: 'disabled' };
       }
       if (nativeState.state !== 'on') {
+        const rememberedEndpoints = await getRememberedWebPushEndpoints();
+        if (rememberedEndpoints.length === 0) {
+          return { support, status: 'disabled' };
+        }
         await enableNativeWebPush(api, publicKey, nativeState, {
           pendingRegistrationStore,
         });

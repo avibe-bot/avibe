@@ -272,6 +272,49 @@ describe('web push recovery', () => {
     );
   });
 
+  it('subscribes once when the user explicitly enables native push', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') return { state: 'off' as const };
+      if (method === 'push.subscribe') {
+        return {
+          endpoint: 'https://avibe.bot/api/push/apns/native-new',
+          keys: { p256dh: 'new-key', auth: 'new-auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: {
+        getItem: () => null,
+        setItem: vi.fn(),
+        removeItem: vi.fn(),
+      },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
+    } as unknown as ApiContextType;
+
+    await expect(enableWebPush(api)).resolves.toEqual({
+      endpoint: 'https://avibe.bot/api/push/apns/native-new',
+      keys: { p256dh: 'new-key', auth: 'new-auth' },
+    });
+
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      'push.status',
+      'push.subscribe',
+    ]);
+    expect(api.subscribeWebPush).toHaveBeenCalledOnce();
+  });
+
   it('reconciles a native endpoint again after the instance disables it', async () => {
     let nativeEndpoint = 'https://avibe.bot/api/push/apns/native-old';
     const nativeSubscription = () => ({
@@ -393,7 +436,36 @@ describe('web push recovery', () => {
     expect(store.value).toBeNull();
   });
 
-  it('subscribes and posts when native status is off', async () => {
+  it('does not prompt for native permission when status is off without a remembered endpoint', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') return { state: 'off' as const };
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: { getItem: () => null },
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(),
+    } as unknown as ApiContextType;
+
+    await expect(
+      reconcileWebPush(api, pendingRegistrationStore()),
+    ).resolves.toMatchObject({ status: 'disabled' });
+
+    expect(call.mock.calls.map(([method]) => method)).toEqual(['push.status']);
+    expect(api.subscribeWebPush).not.toHaveBeenCalled();
+  });
+
+  it('subscribes and posts when native status is off with a remembered endpoint', async () => {
     const call = vi.fn(async (method: string) => {
       if (method === 'push.status') return { state: 'off' as const };
       if (method === 'push.subscribe') {
@@ -413,7 +485,12 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: { getItem: () => null, setItem: vi.fn() },
+      localStorage: {
+        getItem: () => JSON.stringify([
+          'https://avibe.bot/api/push/apns/native-old',
+        ]),
+        setItem: vi.fn(),
+      },
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
@@ -436,7 +513,7 @@ describe('web push recovery', () => {
       },
       'iPhone App',
       undefined,
-      [],
+      ['https://avibe.bot/api/push/apns/native-old'],
       undefined,
     );
     expect(store.value).toBeNull();
@@ -472,7 +549,12 @@ describe('web push recovery', () => {
         call,
         on: vi.fn(() => () => undefined),
       },
-      localStorage: { getItem: () => null, setItem: vi.fn() },
+      localStorage: {
+        getItem: () => JSON.stringify([
+          'https://avibe.bot/api/push/apns/native-old',
+        ]),
+        setItem: vi.fn(),
+      },
     });
     const api = {
       getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),

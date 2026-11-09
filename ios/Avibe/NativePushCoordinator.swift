@@ -280,7 +280,14 @@ final class NativePushCoordinator {
             return ["state": "unavailable"]
         }
         let authorizationStatus = await notificationAuthorizationStatus()
-        guard Self.authorizationAllowsAlerts(authorizationStatus) else {
+        switch authorizationStatus {
+        case .notDetermined:
+            return ["state": "off"]
+        case .denied:
+            return ["state": "unavailable"]
+        case .authorized, .provisional, .ephemeral:
+            break
+        @unknown default:
             return ["state": "unavailable"]
         }
         guard

@@ -77,16 +77,11 @@ describe('Settings › Notifications', () => {
     expect(switches().map(({ label }) => label)).toEqual(['workbench.notifications.title']);
   });
 
-  it('hides browser Web Push in the native shell', () => {
+  it('shows the native push control when the instance can be read', () => {
     authorization.capabilities.can_read_instance = true;
-    const browser = mount({ enabled: true, bots: true, sessions: true }, false);
-    expect(screen.getByTestId('web-push-control')).toBeTruthy();
-    browser.mockClear();
-    cleanup();
-
     native.shell = true;
     mount({ enabled: true, bots: true, sessions: true }, false);
-    expect(screen.queryByTestId('web-push-control')).toBeNull();
-    expect(screen.queryByText('settings.notifications.deviceTitle')).toBeNull();
+    expect(screen.getByTestId('web-push-control')).toBeTruthy();
+    expect(screen.getByText('settings.notifications.deviceTitle')).toBeTruthy();
   });
 });
