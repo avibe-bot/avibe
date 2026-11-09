@@ -110,7 +110,7 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
-    "@playwright/test": "^1.65.0",
+    "@playwright/test": "1.64.1",
     "@tailwindcss/postcss": "^4.3.4",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.8",
@@ -123,7 +123,7 @@
     "emojibase-data": "^18.0.0",
     "eslint": "^10.14.0",
     "eslint-plugin-react-hooks": "7.1.1",
-    "eslint-plugin-react-refresh": "0.5.5",
+    "eslint-plugin-react-refresh": "0.4.26",
     "fake-indexeddb": "^6.2.7",
     "js-yaml": "^5.5.0",
     "jsdom": "^29.1.1",
