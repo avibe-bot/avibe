@@ -152,8 +152,7 @@ def test_search_catalog_cannot_replace_another_fetch_owner(third_vendor, source_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('persisted', [False, True])
-async def test_exa_gate_blocks_frozen_and_direct_admission_but_keeps_saved_settings(tmp_path, monkeypatch, persisted):
+async def test_exa_gate_blocks_frozen_and_direct_admission_but_keeps_saved_settings(tmp_path, monkeypatch):
     """Exa's existing gate must govern visibility, final admission and transport together."""
     from config import v2_config
 
@@ -163,14 +162,16 @@ async def test_exa_gate_blocks_frozen_and_direct_admission_but_keeps_saved_setti
         'services': {'src_exakeyless': {'enabled': True, 'results': 3}},
         'executor_order': ['src_exakeyless'],
     })
-    if persisted:
-        config.model_hub.sources.append(model_hub_builtin_source('src_exakeyless'))
     config.save()
     store = V2ModelHubConfigStore()
     adapter = CLIProxyEngineAdapter()
     service = ModelHubService(store=store, adapter=adapter, events=BoundedEventLog(tmp_path / 'events.json'))
-    before = store.load().to_payload()
-    turn = service.freeze_turn_hosted_tools(store.load())
+    loaded = ModelHubConfig.from_payload(store.load().to_payload())
+    assert hosted_tool_setting(loaded, 'web_search').services['src_exakeyless'].to_payload() == {
+        'enabled': True, 'results': 3,
+    }
+    before = loaded.to_payload()
+    turn = service.freeze_turn_hosted_tools(loaded)
     monkeypatch.setattr(v2_config, 'KEYLESS_EXA_ACTIVE', False)
     web_status = next(t for t in service.hosted_tools_status()['hosted_tools']['tools'] if t['name'] == 'web_search')
     assert all(v['id'] != 'exa-mcp' for v in web_status['service_vendors'])

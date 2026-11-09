@@ -106,10 +106,14 @@ async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | No
                 event.extend(b"\n")
                 line.clear()
             elif event:
-                messages = await asyncio.to_thread(_parse_messages, bytes(event))
+                completed_event = bytes(event)
+                messages = await asyncio.to_thread(_parse_messages, completed_event)
                 event.clear()
                 if _matching_message(messages, request_id) is not None:
-                    return b"".join(chunks), False
+                    # Do not reparse arbitrary bytes that followed the matching
+                    # event in this chunk; they may be an incomplete UTF-8
+                    # notification and would hide the valid response.
+                    return completed_event, False
         line.extend(parts[-1])
     return b"".join(chunks), False
 

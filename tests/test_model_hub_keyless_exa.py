@@ -390,3 +390,21 @@ async def test_mcp_sse_ascii_line_endings_can_cross_chunks_without_splitting_uni
     body, too_large = await _read_bounded(Content(), sse=True, request_id=7)
     assert not too_large
     assert _parse_messages(body) == (reply,)
+
+
+@pytest.mark.asyncio
+async def test_mcp_sse_matching_reply_ignores_invalid_utf8_tail() -> None:
+    """A later partial notification must not invalidate an earlier valid reply."""
+    from vibe.model_hub_runtime.keyless_mcp import _parse_messages, _read_bounded
+
+    reply = {"jsonrpc": "2.0", "id": 7, "result": {"text": "ok"}}
+    wire = b"event: message\r\ndata: " + json.dumps(reply).encode() + b"\r\n\r\nevent: notification\r\ndata: \xf0"
+
+    class Content:
+        async def iter_chunked(self, _size):
+            yield wire
+            raise AssertionError("read past the matching SSE reply")
+
+    body, too_large = await _read_bounded(Content(), sse=True, request_id=7)
+    assert not too_large
+    assert _parse_messages(body) == (reply,)
