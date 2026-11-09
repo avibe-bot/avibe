@@ -216,7 +216,7 @@ enum NativeBridgeConfiguration {
         },
         pushUnsubscribe: @escaping @MainActor (
             WebOrigin
-        ) async throws -> Bool = { _ in
+        ) async throws -> [String: Any] = { _ in
             throw NativePushError.unavailable
         },
         pushOpenedAck: @escaping @MainActor (
@@ -507,7 +507,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     ) async throws -> [String: Any]
     private let pushUnsubscribe: @MainActor (
         WebOrigin
-    ) async throws -> Bool
+    ) async throws -> [String: Any]
     private let pushOpenedAck: @MainActor (
         String,
         WebOrigin
@@ -531,7 +531,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         ) async throws -> [String: Any],
         pushUnsubscribe: @escaping @MainActor (
             WebOrigin
-        ) async throws -> Bool,
+        ) async throws -> [String: Any],
         pushOpenedAck: @escaping @MainActor (
             String,
             WebOrigin
@@ -685,8 +685,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     return
                 }
                 do {
-                    let revoked = try await self.pushUnsubscribe(instanceOrigin)
-                    self.reply(replyHandler, result: ["revoked": revoked])
+                    let result = try await self.pushUnsubscribe(instanceOrigin)
+                    self.reply(replyHandler, result: result)
                 } catch {
                     self.reply(
                         replyHandler,

@@ -14,9 +14,17 @@ export type NativePushSubscription = {
   endpoint: string;
   keys: { p256dh: string; auth: string };
 };
+export type NativePushRevokeState = 'active' | 'absent' | 'pending';
 export type NativePushStatus =
-  | { state: 'unavailable' | 'off' }
-  | ({ state: 'on' } & NativePushSubscription);
+  | {
+      state: 'unavailable' | 'off';
+      revokeState?: NativePushRevokeState;
+      endpoint?: string;
+    }
+  | ({
+      state: 'on';
+      revokeState?: NativePushRevokeState;
+    } & NativePushSubscription);
 
 export type NativeBridgeError = {
   code: string;
@@ -185,14 +193,26 @@ export async function nativeVoicePermission(): Promise<NativeVoicePermission | n
 export async function nativePushStatus(
   vapidPublicKey?: string,
 ): Promise<NativePushStatus | null> {
+  const outcome = await nativePushStatusOutcome(vapidPublicKey);
+  return outcome.status === 'ok' ? outcome.value : null;
+}
+
+export type NativePushStatusOutcome =
+  | { status: 'ok'; value: NativePushStatus }
+  | { status: 'failed' };
+
+export async function nativePushStatusOutcome(
+  vapidPublicKey?: string,
+): Promise<NativePushStatusOutcome> {
   try {
-    return await callNative<NativePushStatus>(
+    const value = await callNative<NativePushStatus>(
       'push',
       'push.status',
       vapidPublicKey ? { vapidPublicKey } : {},
     );
+    return value ? { status: 'ok', value } : { status: 'failed' };
   } catch {
-    return null;
+    return { status: 'failed' };
   }
 }
 
@@ -211,25 +231,36 @@ export async function nativePushSubscribe(
 }
 
 export async function nativePushUnsubscribe(): Promise<boolean> {
-  return (await nativePushUnsubscribeOutcome()).status === 'confirmed';
+  const status = (await nativePushUnsubscribeOutcome()).status;
+  return status === 'confirmed' || status === 'not_needed';
 }
 
 export type NativePushUnsubscribeOutcome =
   | { status: 'confirmed' }
   | { status: 'pending' }
+  | { status: 'not_needed' }
   | { status: 'failed' };
 
 /**
- * Keep the bridge payload as `{revoked: boolean}`, while preserving the
- * distinction between a relay-deferred revoke and a bridge failure for Web UI.
+ * New shells include `revoke`; `revoked` keeps older Web bundles compatible.
  */
 export async function nativePushUnsubscribeOutcome(): Promise<NativePushUnsubscribeOutcome> {
   try {
-    const result = await callNative<{ revoked: boolean }>(
+    const result = await callNative<{
+      revoked: boolean;
+      revoke?: 'confirmed' | 'pending' | 'not_needed';
+    }>(
       'push',
       'push.unsubscribe',
     );
     if (!result) return { status: 'failed' };
+    if (
+      result.revoke === 'confirmed'
+      || result.revoke === 'pending'
+      || result.revoke === 'not_needed'
+    ) {
+      return { status: result.revoke };
+    }
     return result.revoked ? { status: 'confirmed' } : { status: 'pending' };
   } catch {
     return { status: 'failed' };

@@ -370,7 +370,7 @@ final class WebViewFactory {
             }
             return try await coordinator.unsubscribe(
                 instanceOrigin: origin.serialized
-            )
+            ).jsonObject
         },
         pushOpenedAck: { [weak self] id, origin in
             self?.pushOpenedAck(id, origin) ?? false

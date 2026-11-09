@@ -215,6 +215,151 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertEqual(authorizedWithoutRegistration, "off")
     }
 
+    func testStatusExposesActivePendingAndAbsentRevokeStates() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let active = makeRecord(
+            kid: "cleanup-target",
+            state: .active,
+            pendingRevoke: false,
+            bindGeneration: 1
+        )
+        try store.saveRecord(active)
+        let coordinator = makeCoordinator(
+            store: store,
+            management: ManagementRecorder()
+        )
+
+        let activeStatus = try await coordinator.status(
+            vapidPublicKey: nil,
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(activeStatus["state"] as? String, "off")
+        XCTAssertEqual(activeStatus["revokeState"] as? String, "active")
+        XCTAssertEqual(
+            activeStatus["endpoint"] as? String,
+            "https://avibe.bot/api/push/apns/cleanup-target"
+        )
+
+        var pending = active
+        pending.state = .retiring
+        pending.pendingRevoke = true
+        try store.saveRecord(pending)
+        let pendingStatus = try await coordinator.status(
+            vapidPublicKey: nil,
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(pendingStatus["state"] as? String, "off")
+        XCTAssertEqual(pendingStatus["revokeState"] as? String, "pending")
+        XCTAssertEqual(
+            pendingStatus["endpoint"] as? String,
+            "https://avibe.bot/api/push/apns/cleanup-target"
+        )
+
+        try store.deleteRecord(kid: pending.kid)
+        let absentStatus = try await coordinator.status(
+            vapidPublicKey: nil,
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(absentStatus["state"] as? String, "off")
+        XCTAssertEqual(absentStatus["revokeState"] as? String, "absent")
+        XCTAssertNil(absentStatus["endpoint"])
+    }
+
+    func testRevokeOutcomeBridgePayloadRemainsLegacyCompatible() {
+        XCTAssertEqual(
+            NativePushRevokeOutcome.confirmed.jsonObject["revoked"] as? Bool,
+            true
+        )
+        XCTAssertEqual(
+            NativePushRevokeOutcome.confirmed.jsonObject["revoke"] as? String,
+            "confirmed"
+        )
+        XCTAssertEqual(
+            NativePushRevokeOutcome.pending.jsonObject["revoked"] as? Bool,
+            false
+        )
+        XCTAssertEqual(
+            NativePushRevokeOutcome.pending.jsonObject["revoke"] as? String,
+            "pending"
+        )
+        XCTAssertEqual(
+            NativePushRevokeOutcome.notNeeded.jsonObject["revoked"] as? Bool,
+            true
+        )
+        XCTAssertEqual(
+            NativePushRevokeOutcome.notNeeded.jsonObject["revoke"] as? String,
+            "not_needed"
+        )
+    }
+
+    func testStatusExposesPendingRevokeAcrossVapidRotation() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let pending = makeRecord(
+            kid: "old-vapid-pending-revoke",
+            state: .retiring,
+            pendingRevoke: true,
+            bindGeneration: 1,
+            vapidKeyHash: String(repeating: "b", count: 64)
+        )
+        try store.saveRecord(pending)
+        let coordinator = makeCoordinator(
+            store: store,
+            management: ManagementRecorder()
+        )
+
+        let status = try await coordinator.status(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        XCTAssertEqual(status["state"] as? String, "off")
+        XCTAssertEqual(status["revokeState"] as? String, "pending")
+        XCTAssertEqual(
+            status["endpoint"] as? String,
+            "https://avibe.bot/api/push/apns/old-vapid-pending-revoke"
+        )
+    }
+
+    func testStatusExposesActiveRevokeTargetAcrossVapidRotation() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let active = makeRecord(
+            kid: "old-vapid-active",
+            state: .active,
+            pendingRevoke: false,
+            bindGeneration: 1,
+            vapidKeyHash: String(repeating: "b", count: 64)
+        )
+        try store.saveRecord(active)
+        let coordinator = makeCoordinator(
+            store: store,
+            management: ManagementRecorder()
+        )
+
+        let status = try await coordinator.status(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        XCTAssertEqual(status["state"] as? String, "off")
+        XCTAssertEqual(status["revokeState"] as? String, "active")
+        XCTAssertEqual(
+            status["endpoint"] as? String,
+            "https://avibe.bot/api/push/apns/old-vapid-active"
+        )
+    }
+
     func testProviderPatchFailuresKeepTheCompleteTuplePending() async throws {
         for statusCode in [401, 502, 503] {
             let store = makeInstallationStore(
@@ -1183,7 +1328,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         let revoked = try await coordinator.unsubscribe(
             instanceOrigin: Self.instanceOrigin
         )
-        XCTAssertTrue(revoked)
+        XCTAssertEqual(revoked, .confirmed)
 
         XCTAssertEqual(
             recorder.requests.map(\.path),
@@ -1192,6 +1337,68 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNil(try store.loadRecord(kid: target.kid))
         XCTAssertNotNil(try store.loadRecord(kid: "a-other-account"))
         XCTAssertNotNil(try store.loadRecord(kid: "b-stale-generation"))
+    }
+
+    func testUnsubscribeRetriesThePersistedConcretePendingRevoke()
+        async throws
+    {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let target = makeRecord(
+            kid: "cleanup-target",
+            state: .active,
+            pendingRevoke: false,
+            bindGeneration: 1
+        )
+        try store.saveRecord(target)
+        let recorder = ManagementRecorder()
+        var attempts = 0
+        recorder.responseHandler = { request in
+            XCTAssertEqual(
+                request.path,
+                "/api/push/apns/registrations/cleanup-target"
+            )
+            attempts += 1
+            return attempts == 1
+                ? PushManagementResponse(
+                    statusCode: 503,
+                    body: ["error": ["code": "relay_unavailable"]]
+                )
+                : Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let firstOutcome = try await coordinator.unsubscribe(
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(firstOutcome, .pending)
+        let persisted = try XCTUnwrap(
+            try store.loadRecord(kid: target.kid)
+        )
+        XCTAssertEqual(persisted.state, .retiring)
+        XCTAssertTrue(persisted.pendingRevoke)
+        let pendingStatus = try await coordinator.status(
+            vapidPublicKey: nil,
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(pendingStatus["revokeState"] as? String, "pending")
+
+        let secondOutcome = try await coordinator.unsubscribe(
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(secondOutcome, .confirmed)
+        XCTAssertNil(try store.loadRecord(kid: target.kid))
+        let thirdOutcome = try await coordinator.unsubscribe(
+            instanceOrigin: Self.instanceOrigin
+        )
+        XCTAssertEqual(thirdOutcome, .notNeeded)
+        XCTAssertEqual(recorder.requests.count, 2)
     }
 
     func testLogoutRemovesNotificationsForTheFormerAccount() async throws {
@@ -1420,7 +1627,8 @@ final class NativePushCoordinatorTests: XCTestCase {
         state: PushKeyRecord.State,
         pendingRevoke: Bool,
         bindGeneration: Int64,
-        retirementDeadline: Date? = nil
+        retirementDeadline: Date? = nil,
+        vapidKeyHash: String = String(repeating: "a", count: 64)
     ) -> PushKeyRecord {
         PushKeyRecord(
             kid: kid,
@@ -1430,7 +1638,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             bindGeneration: bindGeneration,
             privateKey: Data(repeating: 13, count: 32),
             authSecret: Data(repeating: 14, count: 16),
-            vapidKeyHash: String(repeating: "a", count: 64),
+            vapidKeyHash: vapidKeyHash,
             state: state,
             pendingRevoke: pendingRevoke,
             replacementRegistrationIDs: [],

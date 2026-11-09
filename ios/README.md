@@ -226,9 +226,9 @@ The native bridge method surface is fixed:
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
 | `keyboardResizesViewport: 1` | No method | Declares that UIKit shrinks this WebView to the docked keyboard frame and returns it to its resting edge (the screen bottom for the primary, the safe-area bottom for a child) when the keyboard leaves |
-| `push: 1` | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" | "off" | "on", endpoint?, keys?}`; read-only and scoped to the current account, bind generation, instance origin, and VAPID key |
+| `push: 1` | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" | "off" | "on", revokeState: "active" | "absent" | "pending", endpoint?, keys?}`; read-only and scoped to the current account, bind generation, and instance origin. `state: "on"` and `keys` require a matching VAPID key; cleanup facts remain visible across VAPID rotation, and a pending revoke remains `off` with its concrete endpoint. |
 | `push: 1` | `push.subscribe({vapidPublicKey})` | `{endpoint, keys: {p256dh, auth}}`; the Web UI submits this subscription through the existing instance API |
-| `push: 1` | `push.unsubscribe()` | `{revoked: boolean}`; native confirms the concrete registration revoke or retains it for recovery |
+| `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 

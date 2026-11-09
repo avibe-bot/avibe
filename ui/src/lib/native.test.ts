@@ -7,6 +7,7 @@ import {
   isNativeShell,
   nativeAppInfo,
   nativeHapticImpact,
+  nativePushStatusOutcome,
   nativePushUnsubscribeOutcome,
   nativeShowAccount,
   nativeVoicePermission,
@@ -129,8 +130,11 @@ describe('native shell bridge', () => {
   });
 
   it.each([
-    ['confirmed', { revoked: true }, 'confirmed'],
-    ['deferred', { revoked: false }, 'pending'],
+    ['legacy confirmed', { revoked: true }, 'confirmed'],
+    ['legacy deferred', { revoked: false }, 'pending'],
+    ['confirmed', { revoked: true, revoke: 'confirmed' }, 'confirmed'],
+    ['deferred', { revoked: false, revoke: 'pending' }, 'pending'],
+    ['absent', { revoked: true, revoke: 'not_needed' }, 'not_needed'],
   ])(
     'keeps the %s native push revoke outcome distinct',
     async (_label, result, expected) => {
@@ -155,6 +159,29 @@ describe('native shell bridge', () => {
 
     await expect(nativePushUnsubscribeOutcome()).resolves.toEqual({
       status: 'failed',
+    });
+    await expect(nativePushStatusOutcome('AQIDBA')).resolves.toEqual({
+      status: 'failed',
+    });
+  });
+
+  it('preserves pending-revoke status facts from the native bridge', async () => {
+    installBridge({
+      capabilities: { push: 1 },
+      call: vi.fn(async () => ({
+        state: 'off',
+        revokeState: 'pending',
+        endpoint: 'https://avibe.bot/api/push/apns/pending',
+      })),
+    });
+
+    await expect(nativePushStatusOutcome('AQIDBA')).resolves.toEqual({
+      status: 'ok',
+      value: {
+        state: 'off',
+        revokeState: 'pending',
+        endpoint: 'https://avibe.bot/api/push/apns/pending',
+      },
     });
   });
 

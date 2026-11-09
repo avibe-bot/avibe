@@ -111,6 +111,19 @@ enum NativePushError: Error, Equatable {
     }
 }
 
+enum NativePushRevokeOutcome: String, Equatable {
+    case confirmed
+    case pending
+    case notNeeded = "not_needed"
+
+    var jsonObject: [String: Any] {
+        [
+            "revoked": self != .pending,
+            "revoke": rawValue,
+        ]
+    }
+}
+
 @MainActor
 final class NativePushCoordinator {
     typealias ManagementRequest = @MainActor (
@@ -277,49 +290,70 @@ final class NativePushCoordinator {
         instanceOrigin: String
     ) async throws -> [String: Any] {
         guard let account = accountProvider() else {
-            return ["state": "unavailable"]
+            return [
+                "state": "unavailable",
+                "revokeState": "absent",
+            ]
         }
         let authorizationStatus = await notificationAuthorizationStatus()
-        switch authorizationStatus {
-        case .notDetermined:
-            return ["state": "off"]
-        case .denied:
-            return ["state": "unavailable"]
-        case .authorized, .provisional, .ephemeral:
-            break
-        @unknown default:
-            return ["state": "unavailable"]
-        }
+        let inactiveState = Self.authorizationAllowsAlerts(authorizationStatus)
+            || authorizationStatus == .notDetermined
+            ? "off"
+            : "unavailable"
         guard
             let installation = try keychain.loadInstallation(),
             installation.accountID == account.id,
             installation.bindGeneration > 0
         else {
-            return ["state": "off"]
+            return [
+                "state": inactiveState,
+                "revokeState": "absent",
+            ]
+        }
+        let vapidKeyHash = vapidPublicKey.flatMap(Self.vapidHash)
+        let records = try keychain.listRecords().filter {
+            $0.accountID == account.id
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.accountGeneration == generationStore.generation
+                && $0.instanceOrigin == instanceOrigin
+        }
+        if let pending = records.first(where: {
+            $0.state == .retiring && $0.pendingRevoke
+        }) {
+            return [
+                "state": inactiveState,
+                "revokeState": "pending",
+                "endpoint": "\(Self.publicBaseURL)/api/push/apns/\(pending.kid)",
+            ]
+        }
+        guard let revokeTarget = records.first(where: {
+            $0.state == .active && !$0.pendingRevoke
+        }) else {
+            return [
+                "state": inactiveState,
+                "revokeState": "absent",
+            ]
         }
         guard
-            let vapidPublicKey,
-            let vapidKeyHash = Self.vapidHash(vapidPublicKey)
-        else {
-            return ["state": "off"]
-        }
-        guard
-            let record = try keychain.listRecords().first(where: {
+            let vapidKeyHash,
+            let active = records.first(where: {
                 $0.state == .active
                     && !$0.pendingRevoke
-                    && $0.accountID == account.id
-                    && $0.bindGeneration == installation.bindGeneration
-                    && $0.accountGeneration == generationStore.generation
-                    && $0.instanceOrigin == instanceOrigin
                     && $0.vapidKeyHash == vapidKeyHash
-            })
+            }),
+            Self.authorizationAllowsAlerts(authorizationStatus)
         else {
-            return ["state": "off"]
+            return [
+                "state": inactiveState,
+                "revokeState": "active",
+                "endpoint": "\(Self.publicBaseURL)/api/push/apns/\(revokeTarget.kid)",
+            ]
         }
         return [
             "state": "on",
-            "endpoint": "\(Self.publicBaseURL)/api/push/apns/\(record.kid)",
-            "keys": record.publicSubscription["keys"] ?? [:],
+            "revokeState": "active",
+            "endpoint": "\(Self.publicBaseURL)/api/push/apns/\(active.kid)",
+            "keys": active.publicSubscription["keys"] ?? [:],
         ]
     }
 
@@ -424,13 +458,17 @@ final class NativePushCoordinator {
         }
     }
 
-    func unsubscribe(instanceOrigin: String) async throws -> Bool {
+    func unsubscribe(
+        instanceOrigin: String
+    ) async throws -> NativePushRevokeOutcome {
         try await enqueueMutation {
             try await self.unsubscribeNow(instanceOrigin: instanceOrigin)
         }
     }
 
-    private func unsubscribeNow(instanceOrigin: String) async throws -> Bool {
+    private func unsubscribeNow(
+        instanceOrigin: String
+    ) async throws -> NativePushRevokeOutcome {
         guard let account = accountProvider() else {
             throw NativePushError.unavailable
         }
@@ -438,7 +476,7 @@ final class NativePushCoordinator {
             let installation = try keychain.loadInstallation(),
             installation.accountID == account.id
         else {
-            return false
+            return .notNeeded
         }
         guard
             let record = try keychain.listRecords().first(where: {
@@ -452,7 +490,7 @@ final class NativePushCoordinator {
                     && $0.instanceOrigin == instanceOrigin
             })
         else {
-            return false
+            return .notNeeded
         }
 
         let pendingRecord = PushKeyRecord(
@@ -476,13 +514,19 @@ final class NativePushCoordinator {
                 installation: installation,
                 body: nil
             )
-            guard (200..<300).contains(response.statusCode) else {
+            guard
+                (200..<300).contains(response.statusCode)
+                    || (
+                        response.statusCode == 404
+                            && Self.errorCode(response) == "registration_not_found"
+                    )
+            else {
                 throw Self.managementError(response)
             }
             try keychain.deleteRecord(kid: pendingRecord.kid)
-            return true
+            return .confirmed
         } catch {
-            return false
+            return .pending
         }
     }
 
