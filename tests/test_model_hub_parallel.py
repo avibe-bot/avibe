@@ -49,10 +49,11 @@ async def _close_clients(adapter):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('held_open', [False, True])
+@pytest.mark.parametrize('line_ending', [None, '\r\n', '\n', '\r'], ids=['json', 'sse-crlf', 'sse-lf', 'sse-cr'])
 @pytest.mark.parametrize('failed', ['success', 'tool', 'rpc'])
-async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypatch, failed, held_open):
+async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypatch, failed, line_ending):
     """MH-SEARCH-SERVICES-001: saved opt-in uses the registered service and preserves consent."""
+    held_open = line_ending is not None
     calls = []
     closed_before_eof = asyncio.Event()
 
@@ -89,7 +90,9 @@ async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypat
             await stream.prepare(request)
             notice = {'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'}
             for message in (notice, reply):
-                await stream.write(('event: message\r\ndata: ' + json.dumps(message, ensure_ascii=False) + '\r\n\r\n').encode())
+                await stream.write((line_ending.join([
+                    'event: message', 'data: ' + json.dumps(message, ensure_ascii=False), '', '',
+                ])).encode())
             # Hold the SSE response open after its matching result/error: the
             # shared client must finish without waiting for EOF.
             for _ in range(800):

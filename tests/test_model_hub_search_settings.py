@@ -106,7 +106,6 @@ def test_released_and_keyless_search_settings_read_without_a_migration_write(fix
 def test_keyless_candidate_and_catalog_are_active_by_default(tmp_path):
     """KEX-3: the default read includes the built-in candidate and catalog row."""
     config = _config()
-    assert hosted_tools.KEYLESS_EXA_ACTIVE is True
     service, _, _ = _disk_service(tmp_path, config)
     visible = _web(service)
     assert any(row["source_id"] == KEYLESS_EXA_SOURCE_ID and row["model_id"] == KEYLESS_EXA_SERVICE_ID

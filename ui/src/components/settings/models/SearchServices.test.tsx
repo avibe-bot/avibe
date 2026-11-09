@@ -433,7 +433,7 @@ describe('search service add dialog', () => {
 // A second keyless built-in is catalog data only: the read supplies its identity,
 // endpoint and default, and the UI carries no vendor-specific branch for it.
 const optInKeyless = (base: HostedSearchServiceVendor): HostedSearchServiceVendor => ({
-  ...base, id: 'acme-mcp', name: 'Acme (free)', source_ids: ['src_acmekeyless'], endpoint: 'mcp.acme.example',
+  ...base, id: 'acme-mcp', name: 'Acme (free)', source_ids: ['src_acmekeyless'], endpoint: 'https://mcp.acme.example/mcp',
   facts: { ...base.facts, default_enabled: false },
 });
 
@@ -512,4 +512,45 @@ it('keeps a legacy read resolving keyless Exa without the new catalog facts', ()
   expect(keylessEndpoint(vendor, 'src_exakeyless')).toBe('mcp.exa.ai');
   expect(serviceDefaultEnabled(vendor)).toBe(true);
   expect(serviceDefaultEnabled(optInKeyless(vendor))).toBe(false);
+});
+
+// A persisted Source may share a catalog keyless id. The panel must keep the general
+// credential, repair and removal controls for it; only the exact synthetic row is keyless.
+describe('keyless identity is the synthetic row, not a source id', () => {
+  const withCatalog = (): HostedWebSearchToolStatus => ({
+    ...KEYLESS_ACTIVE_SEARCH,
+    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, optInKeyless(KEYLESS_ACTIVE_SEARCH.service_vendors!.find((row) => row.id === 'exa-mcp')!)],
+  });
+  const persisted = (id: string, vendor: string): Source => ({
+    ...SEARCH_SOURCES[0], id, vendor, display_name: 'My search key', credential_ref: 'cred_real', masked_credential: 'sk-…4321',
+    state: { status: 'needs_action', detail_key: 'models.source.needs_action.credential_revoked' },
+  });
+
+  it.each([
+    ['a catalog id (src_acmekeyless)', 'src_acmekeyless', 'tavily'],
+    ['the legacy Exa id', 'src_exakeyless', 'tavily'],
+    ['a catalog id under the catalog vendor', 'src_acmekeyless', 'acme-mcp'],
+  ])('keeps credential, repair and removal controls for a persisted Source with %s', (_name, id, vendor) => {
+    detail(persisted(id, vendor), withCatalog());
+    expect(screen.getByRole('button', { name: 'Replace key' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+    expect(screen.getByText('sk-…4321')).toBeTruthy();
+    expect(screen.queryByText('No key or setup required')).toBeNull();
+    expect(screen.queryByText('mcp.acme.example')).toBeNull();
+    expect(screen.getByRole('heading', { name: 'My search key' })).toBeTruthy();
+    expect(document.body.textContent).toMatch(/revoked|Reconnect|Re-?auth|key/i);
+  });
+
+  it('keeps the general detail when a read lacks the catalog and a persisted Source holds the legacy Exa id', () => {
+    detail(persisted('src_exakeyless', 'tavily'), ACTIVE_SEARCH);
+    expect(screen.getByRole('button', { name: 'Replace key' })).toBeTruthy();
+    expect(screen.queryByText('mcp.exa.ai')).toBeNull();
+  });
+
+  it('still treats the exact synthetic row as keyless', () => {
+    const tool = withCatalog();
+    detail(builtinSearchSource('src_acmekeyless', tool)!, tool);
+    expect(screen.queryByRole('button', { name: 'Replace key' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+  });
 });

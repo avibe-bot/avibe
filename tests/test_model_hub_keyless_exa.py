@@ -367,3 +367,26 @@ def test_keyless_cooldown_keeps_longest_concurrent_deadline() -> None:
     second_result = map_response(SERVICE, second_response, sent=True, results=3, say=lambda key, **_: key)
     assert cooldowns.settle(source, "exa/mcp", second_generation, second_result, second_response, NOW)
     assert cooldowns.until(source, "exa/mcp", NOW) == NOW + timedelta(seconds=120)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", [b"\r\n", b"\r", b"\n"])
+async def test_mcp_sse_ascii_line_endings_can_cross_chunks_without_splitting_unicode(ending):
+    """MCP replies complete at the blank line, including a split CRLF, not EOF."""
+    from vibe.model_hub_runtime.keyless_mcp import _parse_messages, _read_bounded
+
+    reply = {"jsonrpc": "2.0", "id": 7, "result": {"text": "alpha\u0085beta\u2028gamma\u2029delta"}}
+    wire = ending.join([b"event: message", b"data: " + json.dumps(reply, ensure_ascii=False).encode(), b"", b""])
+    first = wire.index(ending) + 1
+
+    class Content:
+        async def iter_chunked(self, _size):
+            # Split the first and final line endings; CRLF must not become a
+            # spurious blank event when its LF arrives in the next chunk.
+            for chunk in (wire[:first], wire[first:-1], wire[-1:]):
+                yield chunk
+            raise AssertionError("read past the matching SSE reply")
+
+    body, too_large = await _read_bounded(Content(), sse=True, request_id=7)
+    assert not too_large
+    assert _parse_messages(body) == (reply,)

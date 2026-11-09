@@ -3226,7 +3226,8 @@ def is_keyless_search_source(source: "ModelHubSourceConfig") -> bool:
 def model_hub_builtin_search_sources() -> list["ModelHubSourceConfig"]:
     from vibe.model_hub_runtime.api_key_vendors import builtin_search_entries
 
-    return [model_hub_builtin_source(entry.source_id) for entry in builtin_search_entries()]
+    return [model_hub_builtin_source(entry.source_id) for entry in builtin_search_entries()
+            if entry.source_id != KEYLESS_EXA_SOURCE_ID or KEYLESS_EXA_ACTIVE]
 
 
 def is_builtin_search_source_id(value: object) -> bool:

@@ -5,6 +5,7 @@ A third JSON entry must work through the actual V2 loader, chain and transport.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 
@@ -89,6 +90,10 @@ async def test_json_only_keyless_vendor_roundtrip_dispatch_and_session_reuse(thi
     # read from the third JSON entry by the real adapter.
     adapter._keyless_clients['third/search'] = KeylessMcpClient(third_vendor['search'], endpoint=endpoint)
     service = ModelHubService(store=store, adapter=adapter, events=BoundedEventLog(tmp_path / 'events.json'))
+    # Fill Exa's budget without starting work. A different catalog host must
+    # still be able to search; the old shared limiter would wait and time out.
+    for _ in range(3):
+        await service._keyless_exa_call_semaphore.acquire()
     sid = 'src_thirdkeyless'
     try:
         loaded = ModelHubConfig.from_payload(store.load().to_payload())
@@ -106,8 +111,9 @@ async def test_json_only_keyless_vendor_roundtrip_dispatch_and_session_reuse(thi
         loaded = ModelHubConfig.from_payload(store.load().to_payload())
         assert hosted_tool_setting(loaded, 'web_search').services[sid].to_payload() == {'enabled': True, 'results': 2}
         for _ in range(2):
-            result = await service.run_hosted_tool('web_search', {'arguments': {'query': 'catalog only'}},
-                                                  turn=service.freeze_turn_hosted_tools(loaded))
+            result = await asyncio.wait_for(service.run_hosted_tool(
+                'web_search', {'arguments': {'query': 'catalog only'}},
+                turn=service.freeze_turn_hosted_tools(loaded)), timeout=2)
             assert result['record']['sources'] == [
                 {'url': 'https://example.org/one', 'title': 'One', 'snippet': 'Matched phrase'},
                 {'url': 'https://example.org/two'},
@@ -126,6 +132,53 @@ async def test_json_only_keyless_vendor_roundtrip_dispatch_and_session_reuse(thi
         from config.v2_config import model_hub_search_service
         assert model_hub_search_service(replace(model_hub_builtin_source(sid), credential_ref='dummy')) is None
     finally:
+        for _ in range(3):
+            service._keyless_exa_call_semaphore.release()
         for client in adapter._keyless_clients.values():
             await client.close()
         await runner.cleanup()
+
+
+@pytest.mark.parametrize('source_id', ['src_localfetch', 'src_jinakeyless'])
+def test_search_catalog_cannot_replace_another_fetch_owner(third_vendor, source_id):
+    """Catalog-only expansion cannot silently steal a shipped fetch identity."""
+    path = api_key_vendors._catalog_path()
+    catalog = json.loads(path.read_text())
+    catalog[-1]['source_id'] = source_id
+    path.write_text(json.dumps(catalog))
+    api_key_vendors.api_key_vendor_catalog.cache_clear()
+    with pytest.raises(ValueError, match='conflicts with fetch catalog'):
+        api_key_vendors.api_key_vendor_catalog()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('persisted', [False, True])
+async def test_exa_gate_blocks_frozen_and_direct_admission_but_keeps_saved_settings(tmp_path, monkeypatch, persisted):
+    """Exa's existing gate must govern visibility, final admission and transport together."""
+    from config import v2_config
+
+    config = V2Config.default()
+    config.model_hub.enabled = True
+    config.model_hub.hosted_tools['web_search'] = apply_hosted_tool_put(config.model_hub, 'web_search', {
+        'services': {'src_exakeyless': {'enabled': True, 'results': 3}},
+        'executor_order': ['src_exakeyless'],
+    })
+    if persisted:
+        config.model_hub.sources.append(model_hub_builtin_source('src_exakeyless'))
+    config.save()
+    store = V2ModelHubConfigStore()
+    adapter = CLIProxyEngineAdapter()
+    service = ModelHubService(store=store, adapter=adapter, events=BoundedEventLog(tmp_path / 'events.json'))
+    before = store.load().to_payload()
+    turn = service.freeze_turn_hosted_tools(store.load())
+    monkeypatch.setattr(v2_config, 'KEYLESS_EXA_ACTIVE', False)
+    web_status = next(t for t in service.hosted_tools_status()['hosted_tools']['tools'] if t['name'] == 'web_search')
+    assert all(v['id'] != 'exa-mcp' for v in web_status['service_vendors'])
+    result = await service.run_hosted_tool('web_search', {'arguments': {'query': 'never sent'}}, turn=turn)
+    assert result['record']['attempts'] == [{
+        'source_id': 'src_exakeyless', 'label': 'Exa (free)', 'kind': 'service',
+        'outcome': 'skipped', 'skipped': 'unavailable',
+    }]
+    rejected = await adapter.search('src_exakeyless', 'exa-mcp', 'exa/mcp', None, {})
+    assert rejected.error == 'invalid_endpoint' and not adapter._keyless_clients
+    assert store.load().to_payload() == before

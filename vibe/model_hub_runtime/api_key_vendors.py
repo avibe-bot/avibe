@@ -195,6 +195,12 @@ def _validate_search_catalog(item: object, *, protocol: str, built_in: bool = Fa
         raise ValueError("api-key vendor search catalog service id is invalid")
     if item.get("auth") not in {"bearer", "x-api-key", "none"} or (item.get("auth") == "none" and not built_in) or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
+    if built_in:
+        seconds = item["limits"].get("attempt_seconds")
+        concurrent = item["limits"].get("max_concurrent")
+        if (type(seconds) not in {int, float} or not 0 < seconds <= 30
+                or type(concurrent) is not int or not 1 <= concurrent <= 3):
+            raise ValueError("api-key vendor keyless search limits are invalid")
     if "reported_cost" in item["result"]:
         reported_cost = item["result"]["reported_cost"]
         if (
@@ -302,6 +308,11 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
         if built_in:
             if not is_model_hub_source_id(source_id) or source_id in seen_source_ids:
                 raise ValueError("api-key vendor builtin identity is invalid")
+            from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identity
+
+            fetch_identity = builtin_tool_identity(source_id)
+            if fetch_identity is not None and fetch_identity["vendor"] != vendor_id:
+                raise ValueError("api-key vendor builtin identity conflicts with fetch catalog")
             seen_source_ids.add(source_id)
         elif source_id is not None:
             raise ValueError("api-key vendor builtin identity is invalid")

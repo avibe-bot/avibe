@@ -36,6 +36,25 @@ export const builtinVendorForSource = (tool: HostedWebSearchToolStatus | undefin
   return vendor?.facts.built_in ? vendor : undefined;
 };
 
+/**
+ * Whether a Source is the synthetic keyless row, not a persisted Source that happens to share its id.
+ * The id alone never decides: vendor, kind, protocol, supply channel and the absence of any
+ * credential or base URL must all match, so a real Source keeps its credential, repair and removal controls.
+ * A read without the catalog still recognizes keyless Exa by the same shape.
+ */
+export const isSyntheticKeylessSource = (source: Source, tool: HostedWebSearchToolStatus | undefined): boolean => {
+  const vendor = builtinVendorForSource(tool, source.id);
+  const vendorId = vendor?.id ?? (source.id === KEYLESS_EXA_SOURCE_ID ? KEYLESS_EXA_VENDOR_ID : undefined);
+  return vendorId !== undefined
+    && source.vendor === vendorId
+    && source.kind === 'api_key'
+    && source.protocol === 'search'
+    && source.supply_channel === 'hub'
+    && !source.credential_ref
+    && !source.masked_credential
+    && !source.base_url;
+};
+
 /** Catalog-owned keyless identities use the existing service settings panel; an old read without the catalog still knows Exa. */
 export const builtinSearchSource = (sourceId: string | null, tool?: HostedWebSearchToolStatus): Source | null => {
   if (sourceId === null) return null;
@@ -45,8 +64,17 @@ export const builtinSearchSource = (sourceId: string | null, tool?: HostedWebSea
 };
 
 /** Where a keyless service receives queries: the catalog's endpoint; an old read only ever had Exa's. */
-export const keylessEndpoint = (vendor: HostedSearchServiceVendor | undefined, sourceId: string): string | null =>
-  vendor?.endpoint ?? (sourceId === KEYLESS_EXA_SOURCE_ID || vendor?.id === KEYLESS_EXA_VENDOR_ID ? LEGACY_EXA_ENDPOINT : null);
+export const keylessEndpoint = (vendor: HostedSearchServiceVendor | undefined, sourceId: string): string | null => {
+  const endpoint = vendor?.endpoint;
+  if (endpoint) {
+    try {
+      return new URL(endpoint).host;
+    } catch {
+      return endpoint;
+    }
+  }
+  return sourceId === KEYLESS_EXA_SOURCE_ID || vendor?.id === KEYLESS_EXA_VENDOR_ID ? LEGACY_EXA_ENDPOINT : null;
+};
 
 /** Whether a service starts on before the user chooses; an old read falls back to its enrollment facts. */
 export const serviceDefaultEnabled = (vendor: HostedSearchServiceVendor): boolean =>

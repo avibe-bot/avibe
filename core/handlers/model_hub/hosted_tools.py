@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any, Callable, Final, Literal, Mapping, Optional
 
 from config.v2_config import (
-    KEYLESS_EXA_ACTIVE,
     KEYLESS_EXA_SOURCE_ID,
     WEB_FETCH_ACTIVE,
     model_hub_builtin_sources,
@@ -277,7 +276,8 @@ def _search_chain(
     disabled: list[ExecutorCandidate] = []
     ordered = _vibey_order(config)
     builtins = [source for source in model_hub_builtin_search_sources()
-                if model_hub_search_service(source)["default_in_chain"] or source.id in setting.services]
+                if (service := model_hub_search_service(source)) is not None
+                and (service["default_in_chain"] or source.id in setting.services)]
     ordered.extend(builtins)
     by_id = {source.id: source for source in ordered}
     first = [by_id[sid] for sid in (setting.service_order or ()) if sid in by_id and by_id[sid].protocol == "search"]
@@ -627,16 +627,17 @@ def _service_vendors(config: ModelHubConfig) -> list[dict[str, Any]]:
     from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 
     vendors: list[dict[str, Any]] = []
+    builtins = model_hub_builtin_search_sources()
     for vendor in api_key_vendor_catalog():
         service = vendor.search
-        if service is None or (vendor.id == "exa-mcp" and not KEYLESS_EXA_ACTIVE):
+        if service is None or (vendor.built_in and not any(source.vendor == vendor.id for source in builtins)):
             continue
         source_ids = [
             source.id for source in config.sources
             if source.vendor == vendor.id and model_hub_search_service(source) is not None
         ]
         if vendor.built_in:
-            source_ids.extend(source.id for source in model_hub_builtin_search_sources() if source.vendor == vendor.id)
+            source_ids.extend(source.id for source in builtins if source.vendor == vendor.id and source.id not in source_ids)
         vendors.append({
             "id": vendor.id,
             "name": vendor.label,

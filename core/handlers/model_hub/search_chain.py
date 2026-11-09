@@ -28,7 +28,6 @@ from .resolver import parse_model_hub_timestamp
 from .retry import source_identity
 from .search_services import (
     ATTEMPT_SECONDS,
-    KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS,
     ZERO,
     map_response,
     search_request,
@@ -70,12 +69,14 @@ class SearchChain:
         advances any fence. Runs on a worker over the final-admission snapshot.
         """
         owner = self.owner
-        source = next((s for s in [*model_hub_builtin_search_sources(), *config.sources] if s.id == slot.source_id), None)
+        builtins = {s.id: s for s in model_hub_builtin_search_sources()}
+        source = builtins.get(slot.source_id) or next((s for s in config.sources if s.id == slot.source_id), None)
         if is_builtin_search_source_id(slot.source_id):
-            # Never shadow a persisted credential/endpoint or blocked state
-            # with the anonymous catalog identity, including at final admission.
+            # Availability cannot be bypassed by a persisted collision. When
+            # active, that collision must still retain its identity and state.
             persisted = next((s for s in config.sources if s.id == slot.source_id), None)
-            if persisted is not None:
+            source = builtins.get(slot.source_id)
+            if source is not None and persisted is not None:
                 source = persisted if is_keyless_search_source(persisted) else None
         fact = {"source_id": slot.source_id, "label": slot.label or slot.source_id, "kind": slot.kind, "outcome": "skipped"}
         unavailable = source is None or identity_digest(source) != slot.identity
@@ -227,12 +228,17 @@ class SearchChain:
     async def service_attempt(self, slot, source, catalog):
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        budget = KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS if is_keyless_search_source(source) else ATTEMPT_SECONDS
+        keyless = is_keyless_search_source(source)
+        budget = catalog["limits"]["attempt_seconds"] if keyless else ATTEMPT_SECONDS
         attempt_deadline = loop.time() + max(0.0, min(budget, self.deadline - loop.time()))
-        if is_keyless_search_source(source):
+        if keyless:
+            semaphore = self.owner._keyless_call_semaphores.get(catalog["service_id"])
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(catalog["limits"]["max_concurrent"])
+                self.owner._keyless_call_semaphores[catalog["service_id"]] = semaphore
             remaining = max(0.0, attempt_deadline - loop.time())
             try:
-                await asyncio.wait_for(self.owner._keyless_exa_call_semaphore.acquire(), timeout=remaining)
+                await asyncio.wait_for(semaphore.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
                 await log_service_failure(
                     tool=self.call.tool,
@@ -252,7 +258,7 @@ class SearchChain:
                     slot, source, catalog, attempt_deadline=attempt_deadline, started_at=started_at,
                 )
             finally:
-                self.owner._keyless_exa_call_semaphore.release()
+                semaphore.release()
         return await self._service_attempt_locked(
             slot, source, catalog, attempt_deadline=attempt_deadline, started_at=started_at,
         )

@@ -10,7 +10,7 @@ import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
-import { apiKeyVendorPreset } from '../settings/models/apiKeyVendors';
+import { apiKeyVendorPreset, ALL_API_KEY_VENDOR_PRESETS } from '../settings/models/apiKeyVendors';
 import { KEYLESS_EXA_SOURCE_ID } from '../settings/models/searchServices';
 import { serverText } from '../settings/models/serverCopy';
 import { hostedCompleted, type HostedActivity, type HostedActivityImage, type HostedToolName } from '../../lib/hostedActivity';
@@ -38,15 +38,21 @@ const presetLabel = (provider: string | undefined): string | null =>
  *  neither stays as it is, as for a row stored without a Source. The IM line reads the same rule. */
 const SERVICE_RATE_LIMITED_REASON = ['reason', 'service_rate_limited'].join('.');
 
+const BUILTIN_SEARCH_LABELS = new Map(
+  ALL_API_KEY_VENDOR_PRESETS
+    .filter((preset) => preset.built_in && preset.protocol === 'search' && preset.source_id)
+    .map((preset) => [preset.source_id!, preset.label]),
+);
+const BUILTIN_SEARCH_SOURCE_IDS = new Set(BUILTIN_SEARCH_LABELS.keys());
+
 const builtinKey = (sourceId: string | undefined): string | undefined => ({
   src_exakeyless: 'chat.agentActivity.hosted.keylessExa',
-  src_parallelkeyless: 'chat.agentActivity.hosted.keylessParallel',
   src_localfetch: 'chat.agentActivity.hosted.fetch.local',
   src_jinakeyless: 'chat.agentActivity.hosted.fetch.jina',
 })[sourceId ?? ''];
 const sourceLabel = (sourceId: string | undefined, label: string, t: TFunction): string => {
   const key = builtinKey(sourceId);
-  return key ? t(key, { defaultValue: label }) as string : label;
+  return key ? t(key, { defaultValue: label }) as string : BUILTIN_SEARCH_LABELS.get(sourceId ?? '') ?? label;
 };
 const switchLabel = (card: HostedActivity, name: string, t: TFunction): string => {
   const ids = [...new Set((card.attempts ?? []).filter((a) => a.label === name).map((a) => a.source_id))];
@@ -99,7 +105,7 @@ const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
   if (!cost || (cost.at_least && cost.usd === 0)) return null;
-  const figure = builtinKey(card.source_id) && cost.usd === 0 && !cost.at_least
+  const figure = (builtinKey(card.source_id) || BUILTIN_SEARCH_SOURCE_IDS.has(card.source_id ?? '')) && cost.usd === 0 && !cost.at_least
     ? t('chat.agentActivity.hosted.cost.free') as string
     : cost.basis === 'included'
     ? t('chat.agentActivity.hosted.cost.included') as string

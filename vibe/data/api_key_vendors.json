@@ -272,7 +272,9 @@
       "limits": {
         "results_min": 1,
         "results_max": 100,
-        "query_max_chars": null
+        "query_max_chars": null,
+        "attempt_seconds": 15,
+        "max_concurrent": 3
       },
       "price": {
         "unit": "search",
@@ -322,7 +324,9 @@
       "limits": {
         "results_min": 1,
         "results_max": 10,
-        "query_max_chars": null
+        "query_max_chars": null,
+        "attempt_seconds": 15,
+        "max_concurrent": 3
       },
       "price": {
         "unit": "search",

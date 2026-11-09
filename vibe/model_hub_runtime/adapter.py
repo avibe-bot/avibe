@@ -2289,7 +2289,8 @@ class CLIProxyEngineAdapter:
         if service is None or service.get("service_id") != service_id:
             return SearchResponse(None, {}, None, "invalid_endpoint")
         if entry.built_in:
-            if source_id != entry.source_id or credential_ref is not None:
+            active_ids = {source.id for source in model_hub_config.model_hub_builtin_search_sources()}
+            if source_id != entry.source_id or source_id not in active_ids or credential_ref is not None:
                 return SearchResponse(None, {}, None, "invalid_endpoint")
             return await self._keyless_client(service).search(request, on_sent=on_sent)
         catalog = {"vendor": vendor, **service}

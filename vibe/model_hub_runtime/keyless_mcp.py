@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -54,8 +55,7 @@ def _parse_messages(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
         candidates.append(stripped)
     else:
         data_lines: list[str] = []
-        for line in text.split("\n"):
-            line = line.removesuffix("\r")
+        for line in re.split(r"\r\n|\r|\n", text):
             if line.startswith("data:"):
                 value = line[5:].lstrip()
                 if value and value != "[DONE]":
@@ -81,8 +81,9 @@ async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | No
     total = 0
     # SSE responses may remain open after their RPC result. Parse only complete
     # events, preserving non-ASCII line separators inside JSON strings.
-    pending = bytearray()
-    scanned = 0
+    line = bytearray()
+    event = bytearray()
+    after_cr = False
     async for chunk in content.iter_chunked(64 * 1024):
         data = bytes(chunk)
         total += len(data)
@@ -91,21 +92,25 @@ async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | No
         chunks.append(data)
         if not sse or request_id is None:
             continue
-        pending.extend(data)
-        while True:
-            newline = pending.find(b"\n", scanned)
-            if newline < 0:
-                break
-            line_start = pending.rfind(b"\n", 0, newline) + 1
-            blank = pending[line_start:newline] in (b"", b"\r")
-            scanned = newline + 1
-            if blank:
-                event = bytes(pending[:scanned])
-                del pending[:scanned]
-                scanned = 0
-                messages = await asyncio.to_thread(_parse_messages, event)
+        # Normalize only the three SSE line endings. A CR at a chunk boundary
+        # already ends a line; swallow a subsequent LF rather than inventing a
+        # blank event. Unicode separators in JSON strings remain untouched.
+        if after_cr and data.startswith(b"\n"):
+            data = data[1:]
+        after_cr = data.endswith(b"\r")
+        parts = re.split(rb"\r\n|\r|\n", data)
+        for part in parts[:-1]:
+            line.extend(part)
+            if line:
+                event.extend(line)
+                event.extend(b"\n")
+                line.clear()
+            elif event:
+                messages = await asyncio.to_thread(_parse_messages, bytes(event))
+                event.clear()
                 if _matching_message(messages, request_id) is not None:
                     return b"".join(chunks), False
+        line.extend(parts[-1])
     return b"".join(chunks), False
 
 

@@ -19,7 +19,7 @@ import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
 import { modelCapabilities } from './hostedTools';
-import { searchServicesActive, serviceVendorForSource, webSearchTool, builtinVendorForSource, keylessEndpoint as catalogKeylessEndpoint, KEYLESS_EXA_SOURCE_ID } from './searchServices';
+import { searchServicesActive, serviceVendorForSource, webSearchTool, isSyntheticKeylessSource, keylessEndpoint as catalogKeylessEndpoint } from './searchServices';
 import { SearchServiceSettings, SearchVendorGlyph, ServiceMonthLine } from './SearchServiceParts';
 import { FetchServiceSettings } from './WebFetchOrder';
 import { webFetchTool, fetchVendorForSource } from './webFetch';
@@ -259,8 +259,8 @@ export const SourceDetailPanel: React.FC<{
   const fetchSettings = fetchTool && fetchVendorForSource(fetchTool, source.id) && onSaveFetch && onRetryFetch
     ? <ServiceMonthFetchSettings sourceId={source.id} tool={fetchTool} pending={busy || (hostedPending?.has('web_fetch') ?? false)} onSave={onSaveFetch} onRetry={onRetryFetch} onOpenUsage={onOpenUsage} /> : null;
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
-  // Keyless identity is the catalog's built-in vendor; only a read without the catalog still knows Exa by id.
-  const keylessBuiltin = builtinVendorForSource(searchTool, source.id) !== undefined || source.id === KEYLESS_EXA_SOURCE_ID;
+  // Keyless is the exact synthetic row of a catalog built-in vendor, never a source id alone; only a read without the catalog still knows Exa.
+  const keylessBuiltin = isSyntheticKeylessSource(source, searchTool);
   const keylessEndpoint = catalogKeylessEndpoint(serviceVendor, source.id);
   const serviceDetail = keylessBuiltin || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
   // Usage, like the Tools rows, waits for the read to list this Source as a search service.

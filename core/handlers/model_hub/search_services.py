@@ -28,7 +28,6 @@ from .hosted_executor import Failure, failed_record
 from .retry import retry_after_deadline, source_identity
 
 ATTEMPT_SECONDS = 30.0
-KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS = 15.0
 ZERO = HostedCost(basis="list", usd=0)
 BLOCKERS = {
     "service_key_invalid": "models.source.needs_action.credential_revoked",
