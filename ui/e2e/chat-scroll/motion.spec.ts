@@ -696,8 +696,9 @@ type Disclosed = {
   at: number;
   exact: boolean;
   /** WebKit samples an animation it has run before at the time of the read, and one started since the last frame
-   *  was drawn at that frame's time: the two agree only in a read taken within a millisecond of its frame's
-   *  time (`onTime`). Chromium samples every animation at its frame's time. */
+   *  was drawn at that frame's time: the two agree in a read taken within a millisecond of its frame's time, or
+   *  where nothing in the transcript started since the last frame read (`onTime`). Chromium samples every
+   *  animation at its frame's time. */
   onTime: boolean;
   /** Read at an animation frame (not at a change in between): that frame's time, else null. */
   frame: number | null;
@@ -783,6 +784,12 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
     ticking.startTime = document.timeline.currentTime;
     const clockAt = () => clock.getBoundingClientRect().top;
     const clockStart = Number(ticking.startTime);
+    // The transcript's animations a frame read has already seen: drawn since, so WebKit samples them like the clock.
+    const seen = new WeakSet<Animation>();
+    const ours = () => document.getAnimations().filter((animation) => {
+      const target = (animation.effect as KeyframeEffect | null)?.target;
+      return !!target && transcript.contains(target);
+    });
     // What the tapped item draws after what it opens, once there is something open to find it by.
     let trailEl: Element | null = null;
     const findTrail = () => {
@@ -801,7 +808,9 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         const after = clockAt();
         value.at = (before + after) / 2;
         value.exact = before === after;
-        value.onTime = value.exact && Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5;
+        const running = ours();
+        value.onTime = value.exact && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
+        if (frame !== null) running.forEach((animation) => seen.add(animation));
         if (value.exact || attempt === 7) {
           out.push(value);
           return;
