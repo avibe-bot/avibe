@@ -3803,6 +3803,7 @@
       "swipeRead": "Read",
       "viewAll": "Open full inbox",
       "refresh": "Refresh",
+      "filterLabel": "Show",
       "filterUnread": "Unread",
       "filterAll": "All",
       "empty": "Nothing in your inbox yet — agent replies will surface here.",
