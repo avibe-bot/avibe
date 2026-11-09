@@ -3212,6 +3212,30 @@ KEYLESS_EXA_SERVICE_ID = "exa/mcp"
 KEYLESS_EXA_DISPLAY_NAME = "Exa (free)"
 
 
+def is_keyless_search_source(source: "ModelHubSourceConfig") -> bool:
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entry
+
+    entry = builtin_search_entry(source.id)
+    return (
+        entry is not None and source.vendor == entry.id
+        and source.protocol == "search" and source.kind == "api_key"
+        and source.supply_channel == "hub" and source.credential_ref is None and source.base_url is None
+    )
+
+
+def model_hub_builtin_search_sources() -> list["ModelHubSourceConfig"]:
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entries
+
+    return [model_hub_builtin_source(entry.source_id) for entry in builtin_search_entries()
+            if entry.source_id != KEYLESS_EXA_SOURCE_ID or KEYLESS_EXA_ACTIVE]
+
+
+def is_builtin_search_source_id(value: object) -> bool:
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entry
+
+    return builtin_search_entry(value) is not None
+
+
 def is_keyless_exa_source(source: "ModelHubSourceConfig") -> bool:
     """Whether ``source`` is the credential-free synthetic Exa identity."""
 
@@ -3234,8 +3258,13 @@ def model_hub_keyless_exa_source() -> "ModelHubSourceConfig":
 def model_hub_builtin_source(source_id: str) -> "ModelHubSourceConfig | None":
     """Credential-free catalog identity, never a persisted Source or model supplier."""
     from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identity
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entry
 
-    entry = builtin_tool_identity(source_id)
+    search = builtin_search_entry(source_id)
+    entry = (
+        {"source_id": search.source_id, "vendor": search.id, "label": search.label}
+        if search is not None else builtin_tool_identity(source_id)
+    )
     if entry is None:
         return None
     return ModelHubSourceConfig(
@@ -3248,7 +3277,13 @@ def model_hub_builtin_source(source_id: str) -> "ModelHubSourceConfig | None":
 def model_hub_builtin_sources() -> list["ModelHubSourceConfig"]:
     from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identities
 
-    return [model_hub_builtin_source(entry["source_id"]) for entry in builtin_tool_identities()]
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entries
+
+    source_ids = dict.fromkeys(
+        [entry["source_id"] for entry in builtin_tool_identities()]
+        + [entry.source_id for entry in builtin_search_entries()]
+    )
+    return [model_hub_builtin_source(source_id) for source_id in source_ids]
 
 
 def is_keyless_exa_source_id(value: object) -> bool:
@@ -3258,15 +3293,18 @@ def is_keyless_exa_source_id(value: object) -> bool:
 
 
 def model_hub_search_service(source: ModelHubSourceConfig) -> Optional[dict[str, Any]]:
-    """Catalog capability, including the credential-free built-in Exa identity."""
+    """Catalog capability, including credential-free built-in search identities."""
 
     from vibe.model_hub_runtime.api_key_vendors import search_service
 
-    if is_keyless_exa_source(source):
-        return search_service(KEYLESS_EXA_VENDOR_ID, "search", None)
+    if is_keyless_search_source(source):
+        return search_service(source.vendor, "search", None)
     if source.kind != "api_key" or source.supply_channel != "hub" or not source.credential_ref:
         return None
-    return search_service(source.vendor, source.protocol, source.base_url)
+    service = search_service(source.vendor, source.protocol, source.base_url)
+    # An anonymous endpoint belongs only to its exact synthetic identity, never
+    # to a credential-bearing or retargeted persisted Source.
+    return service if service is not None and service["auth"] != "none" else None
 
 
 @dataclass(frozen=True)
@@ -3301,7 +3339,7 @@ class ModelHubSearchServiceSettings:
         saved = self.clamped(service)
         return {
             "results": saved.results if saved.results is not None else min(5, service["limits"]["results_max"]),
-            "enabled": saved.enabled if saved.enabled is not None else bool(service["tool_only"] or service.get("auto_enroll")),
+            "enabled": saved.enabled if saved.enabled is not None else bool(service.get("default_enabled", service["tool_only"] or service.get("auto_enroll"))),
         }
 
     def to_payload(self) -> dict[str, Any]:
@@ -3318,13 +3356,13 @@ def _search_service_settings_from_payload(
     for source_id, raw in payload.items():
         # Removed Sources have no settings. Keep an extant but retargeted/retired Source's choices:
         # forgetting an opt-out would silently re-enrol it if its search capability returns later.
-        if live is not None and source_id not in live and not is_keyless_exa_source_id(source_id):
+        if live is not None and source_id not in live and not is_builtin_search_source_id(source_id):
             continue
         service = (
             model_hub_search_service(live[source_id])
             if live is not None and source_id in live
-            else model_hub_search_service(model_hub_keyless_exa_source())
-            if is_keyless_exa_source_id(source_id)
+            else model_hub_search_service(model_hub_builtin_source(source_id))
+            if is_builtin_search_source_id(source_id)
             else None
         )
         saved = ModelHubSearchServiceSettings.from_payload(raw)
@@ -3413,7 +3451,7 @@ def _executor_order_kinds_from_payload(
         live = {source.id for source in sources} if sources is not None else None
         named = {key: value for key, value in payload.items()
                  if key in (order or ()) and (live is None or key in live or (
-                     model_hub_builtin_source(key) is not None if tool == "web_fetch" else is_keyless_exa_source_id(key)
+                     model_hub_builtin_source(key) is not None if tool == "web_fetch" else is_builtin_search_source_id(key)
                  ))}
         allowed = {"service", "local"} if tool == "web_fetch" else {"service", "model"}
         if all(isinstance(value, str) and value in allowed for value in named.values()):

@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import type { SourceCreated } from './modelsApi';
-import { searchServicesActive, serviceSettings } from './searchServices';
+import { keylessEndpoint, searchServicesActive, serviceDefaultEnabled, serviceSettings } from './searchServices';
 import { SearchServiceNotes, SearchServicePrice, SearchVendorFacts, SearchVendorGlyph } from './SearchServiceParts';
 import type { HostedWebFetchToolStatus, HostedWebSearchToolStatus, Source } from './types';
 
@@ -21,7 +21,8 @@ export const AddSearchServiceDialog: React.FC<{
   onAdded: (created: SourceCreated) => void;
   onOpenSource: (sourceId: string) => void;
   onViewOrder: () => void;
-}> = ({ tool, fetchTool, pending, sourceReads, onClose, onAdded, onOpenSource, onViewOrder }) => {
+  onEnableService?: (sourceId: string) => void;
+}> = ({ tool, fetchTool, pending, sourceReads, onClose, onAdded, onOpenSource, onViewOrder, onEnableService }) => {
   const { t } = useTranslation();
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const selected = tool.service_vendors?.find((vendor) => vendor.id === selectedId);
@@ -38,16 +39,20 @@ export const AddSearchServiceDialog: React.FC<{
           const vendorName = t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string;
           const builtIn = vendor.facts.built_in === true;
           const added = vendor.source_ids.length > 0;
+          const endpoint = keylessEndpoint(vendor, vendor.source_ids[0] ?? '');
           const enabled = vendor.source_ids.some((id) => serviceSettings(tool, vendor, id).enabled);
           const state = vendor.facts.tool_only ? 'added' : enabled ? 'inOrder' : 'addedUnused';
           return <section key={vendor.id} aria-label={vendorName} className="flex min-w-0 flex-col gap-3 rounded-xl border border-edge bg-surface p-4 shadow-elevation-0">
             <div className="flex items-center gap-3"><SearchVendorGlyph vendor={vendor.id} /><h3 className="min-w-0 flex-1 font-semibold text-foreground">{vendorName}</h3></div>
             {fetchTool && <span className="flex gap-2"><span className="model-hub-pill model-hub-accent-pill--cyan border">{t('settings.models.webFetch.searchBadge')}</span>{fetchTool.service_vendors.some((item) => item.id === vendor.id) && <span className="model-hub-pill model-hub-accent-pill--cyan border">{t('settings.models.webFetch.fetchBadge')}</span>}</span>}
             <SearchVendorFacts vendor={vendor} />
+            {builtIn && endpoint && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessQueryDestination', { endpoint })}</p>}
             <SearchServicePrice price={vendor.price} />
             {builtIn ? <>
               <span className="model-hub-pill model-hub-accent-pill--neutral self-start border">{t('settings.models.searchServices.builtIn')}</span>
-              <Button variant="outline" size="sm" disabled={pending} onClick={onViewOrder}>{t(fetchTool ? 'settings.models.webFetch.viewOrder' : 'settings.models.searchServices.viewOrder')}<ChevronRight aria-hidden /></Button>
+              {!serviceDefaultEnabled(vendor) && !tool.executor_candidates.some((row) => vendor.source_ids.includes(row.source_id))
+                ? <Button variant="outline" size="sm" disabled={pending} onClick={() => onEnableService?.(vendor.source_ids[0])}>{t('settings.models.searchServices.use')}</Button>
+                : <Button variant="outline" size="sm" disabled={pending} onClick={onViewOrder}>{t(fetchTool ? 'settings.models.webFetch.viewOrder' : 'settings.models.searchServices.viewOrder')}<ChevronRight aria-hidden /></Button>}
             </> : added ? <>
               <span className="model-hub-pill model-hub-accent-pill--neutral self-start border">{t(`settings.models.searchServices.${state}`)}</span>
               <Button variant="outline" size="sm" disabled={pending} onClick={() => onOpenSource(vendor.source_ids.find((id) => !serviceSettings(tool, vendor, id).enabled) ?? vendor.source_ids[0])}>{t('settings.models.searchServices.openDetail', { vendor: vendorName })}</Button>
@@ -65,7 +70,7 @@ export const AddSearchServiceDialog: React.FC<{
           </section>;
         })}
       </div>
-      <SearchServiceNotes vendor={tool.service_vendors?.find((vendor) => vendor.facts.built_in)} />
+      <SearchServiceNotes />
       <p className="model-hub-tool-note">{t('settings.models.searchServices.priceNote')}</p>
     </DialogContent>
   </Dialog>;

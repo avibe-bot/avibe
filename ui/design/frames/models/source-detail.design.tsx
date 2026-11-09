@@ -4,6 +4,7 @@ import { SourceDetailPanel } from '@/components/settings/models/SourceDetailPane
 import { SourceTestDialog } from '@/components/settings/models/SourceTestDialog';
 import type { TrackSourceMutation } from '@/components/settings/models/mutationSettlement';
 import { readyRegion } from '@/components/settings/models/regionRead';
+import { builtinSearchSource, webSearchTool } from '@/components/settings/models/searchServices';
 import type { Source } from '@/components/settings/models/types';
 
 import { frames } from '../../frame';
@@ -12,6 +13,10 @@ import { baseApi, chatgptPro, claudeMax, hostedTools, relayClaude, relayGpt, tav
 const pending: TrackSourceMutation = () => new Promise(() => {});
 const tools = readyRegion(hostedTools());
 const revokedTools = readyRegion(hostedTools({ tavilyRevoked: true }));
+const electedTools = hostedTools({ parallelElected: true });
+// The opt-in built-in has no Source row: the page resolves it from the read, as these frames do.
+const parallelOff = builtinSearchSource('src_parallelkeyless', webSearchTool(hostedTools()))!;
+const parallelOn = builtinSearchSource('src_parallelkeyless', webSearchTool(electedTools))!;
 const gatewayBackends = new Set(['claude', 'codex', 'opencode', 'vibey'] as const);
 const noPending = new Set<never>();
 
@@ -100,6 +105,24 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api: { ...baseApi, ...usageApi() } },
     render: detail(tavilyRevoked, true, revokedTools),
+  },
+  {
+    name: 'search-service-keyless-off',
+    title: '供应商详情 · 内置免费搜索服务 Parallel（未选用，开关关闭）',
+    width: 720,
+    height: 624,
+    status: 'shipped',
+    fixtures: { api: { ...baseApi, ...usageApi() } },
+    render: detail(parallelOff, true),
+  },
+  {
+    name: 'search-service-keyless-on',
+    title: '供应商详情 · 内置免费搜索服务 Parallel（已选用，开关打开）',
+    width: 720,
+    height: 624,
+    status: 'shipped',
+    fixtures: { api: { ...baseApi, ...usageApi() } },
+    render: detail(parallelOn, true, readyRegion(electedTools)),
   },
   {
     name: 'test',
