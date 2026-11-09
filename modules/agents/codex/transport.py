@@ -438,21 +438,51 @@ class CodexTransport:
         if not self.is_alive:
             raise ConnectionError("Codex app-server transport is not available")
         if method in {"thread/start", "thread/resume", "thread/fork"}:
-            read_params = {"includeLayers": False}
+            read_params = {"includeLayers": True}
             if params.get("cwd"):
                 read_params["cwd"] = params["cwd"]
             response = await self.send_request("config/read", read_params)
-            config = response.get("config") if isinstance(response, dict) else None
-            servers = config.get("mcp_servers", {}) if isinstance(config, dict) else None
-            if not isinstance(servers, dict):
-                raise RuntimeError("Codex config/read returned invalid mcp_servers")
+            if not isinstance(response, dict):
+                raise RuntimeError("Codex config/read returned invalid response")
+            configs = [response.get("config")]
+            layers = response.get("layers", [])
+            if not isinstance(layers, list):
+                raise RuntimeError("Codex config/read returned invalid layers")
+            configs.extend(layer.get("config") for layer in layers if isinstance(layer, dict))
+            servers: dict[str, object] = {}
+            for layer_config in configs:
+                if layer_config is None:
+                    continue
+                if not isinstance(layer_config, dict):
+                    raise RuntimeError("Codex config/read returned invalid config")
+                layer_servers = layer_config.get("mcp_servers", {})
+                if "mcp_servers" in layer_config and layer_servers is None:
+                    raise RuntimeError("Codex config/read returned invalid mcp_servers")
+                if not isinstance(layer_servers, dict):
+                    raise RuntimeError("Codex config/read returned invalid mcp_servers")
+                servers.update({name: value for name, value in layer_servers.items() if isinstance(name, str)})
             params = dict(params)
             config = dict(params.get("config") or {})
             if servers:
                 overrides = dict(config.get("mcp_servers") or {})
                 for name in servers:
                     if isinstance(name, str):
-                        overrides[name] = {**overrides.get(name, {}), "enabled": False}
+                        discovered = servers[name]
+                        base = (
+                            {
+                                key: discovered[key]
+                                for key in ("command", "args", "url", "transport")
+                                if key in discovered
+                            }
+                            if isinstance(discovered, dict)
+                            else {}
+                        )
+                        existing = overrides.get(name, {})
+                        overrides[name] = {
+                            **base,
+                            **(existing if isinstance(existing, dict) else {}),
+                            "enabled": False,
+                        }
                 config["mcp_servers"] = overrides
             params["config"] = config
 
