@@ -156,9 +156,11 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     for (const { who, after } of steps) {
       for (let count = 0; count < after; count += 1) {
         const stamp = await frame();
-        out.push(read());
+        const value = read();
+        out.push(value);
         follow();
         sourceMoved(stamp);
+        if (value.box !== null) down.push(stamp);
       }
       const item = who === 'host' ? hostItem() : sourceItem();
       item.querySelector<HTMLElement>('button[aria-expanded]')!.click();
