@@ -28,6 +28,7 @@ TARGETS = {
     "x86_64-pc-windows-msvc": ("windows", "x86_64", ".exe"),
 }
 RC_TAG = re.compile(r"gh-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)rc(0|[1-9][0-9]*)")
+STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
 # The OS-signing layers a `.SIGNATURE` file names, by signing profile. A tag
 # build must record its target's release profile; a manual build records the
@@ -57,7 +58,7 @@ SEMVER = re.compile(
 
 
 def desktop_version_from_tag(tag: str) -> str:
-    if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+    if STABLE_TAG.fullmatch(tag):
         return tag[1:]
     match = RC_TAG.fullmatch(tag)
     if match is None:
@@ -264,9 +265,8 @@ def signature(target: str, profile: str | None = None) -> str:
 def release_signature(target: str, tag: str) -> str:
     """Return the current release policy for the target's channel."""
     system = TARGETS[target][0]
-    if system == "windows" and not tag.startswith("gh-v"):
-        # Stable releases retain the pre-Certum unsigned contract until a
-        # separately authorized stable migration.
+    if system == "windows" and not (tag.startswith("gh-v") or STABLE_TAG.fullmatch(tag)):
+        # Manual builds and non-release refs remain explicitly unsigned.
         return signature(target, "unsigned")
     return signature(target)
 

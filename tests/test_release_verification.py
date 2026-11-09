@@ -395,6 +395,58 @@ def _step(job: dict, name: str) -> dict:
     return step
 
 
+def _evaluate_release_ai_if(
+    expression: str,
+    *,
+    tag: str,
+    event: str = "push",
+    ref: str | None = None,
+    build_result: str = "success",
+    desktop_result: str = "success",
+    resolve_result: str = "success",
+    desktop_enabled: bool = True,
+    updater_enabled: bool = False,
+    certum_result: str = "success",
+    updater_result: str = "skipped",
+    backstop_result: str = "success",
+    cancelled: bool = False,
+) -> bool:
+    """Evaluate the small GitHub expression subset used by release_ai jobs."""
+    input_tag = tag if event == "workflow_dispatch" else ""
+    ref = ref or ("master" if event == "workflow_dispatch" else tag)
+    expression = expression.strip().removeprefix("${{").removesuffix("}}").strip()
+    replacements = {
+        "needs.release-backstop.result": "backstop_result",
+        "needs.build-assets.result": "build_result",
+        "needs.desktop-packages.result": "desktop_result",
+        "needs.resolve-desktop-release.result": "resolve_result",
+        "needs.resolve-desktop-release.outputs.enabled": "desktop_enabled",
+        "needs.resolve-desktop-release.outputs.updater_enabled": "updater_enabled",
+        "needs.certum-windows-sign.result": "certum_result",
+        "needs.windows-updater-finalize.result": "updater_result",
+        "github.event.inputs.tag": "input_tag",
+        "github.ref_name": "ref",
+    }
+    for source, target in replacements.items():
+        expression = expression.replace(source, target)
+    expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
+    expression = " ".join(expression.split())
+    return bool(eval(expression, {"__builtins__": {}}, {
+        "backstop_result": backstop_result,
+        "build_result": build_result,
+        "desktop_result": desktop_result,
+        "resolve_result": resolve_result,
+        "desktop_enabled": "true" if desktop_enabled else "false",
+        "updater_enabled": "true" if updater_enabled else "false",
+        "certum_result": certum_result,
+        "updater_result": updater_result,
+        "input_tag": input_tag,
+        "ref": ref,
+        "cancelled": lambda: cancelled,
+        "startsWith": lambda value, prefix: value.startswith(prefix),
+    }))
+
+
 def test_official_finalization_serializes_cross_version_decision_and_publication():
     workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
     job = workflow["jobs"]["finalize-github-release"]
@@ -679,6 +731,96 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     assert not list(temporary.iterdir())
 
 
+@pytest.mark.parametrize(
+    ("tag", "event", "ref", "expected"),
+    [
+        ("gh-v3.2.6rc1", "push", "gh-v3.2.6rc1", True),
+        ("v3.2.5", "push", "v3.2.5", True),
+        ("", "workflow_dispatch", "master", False),
+        ("", "push", "feature/certum-signing", False),
+    ],
+)
+def test_certum_job_condition_covers_rc_and_stable_only(tag, event, ref, expected):
+    condition = _job("release_ai.yml", "certum-windows-sign")["if"]
+    assert _evaluate_release_ai_if(
+        condition,
+        tag=tag,
+        event=event,
+        ref=ref,
+        desktop_enabled=True,
+    ) is expected
+
+
+def test_release_ai_dry_evaluation_table_for_rc_and_stable_tags():
+    """Show which release_ai jobs run after the stable signing migration."""
+    jobs = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
+    cases = [
+        (
+            "gh-v3.2.6rc1",
+            False,
+            {
+                "release-backstop",
+                "resolve-desktop-release",
+                "desktop-packages",
+                "certum-windows-sign",
+                "resolve-show-runtime-ref",
+                "show-runtime-bundles",
+                "build-assets",
+                "release",
+            },
+        ),
+        (
+            "v3.2.5",
+            True,
+            {
+                "release-backstop",
+                "resolve-desktop-release",
+                "desktop-packages",
+                "certum-windows-sign",
+                "windows-updater-finalize",
+                "release",
+            },
+        ),
+    ]
+    for tag, updater_enabled, expected in cases:
+        ran = {"release-backstop", "resolve-desktop-release"}
+        if _evaluate_release_ai_if(
+            jobs["desktop-packages"]["if"], tag=tag, desktop_enabled=True,
+        ):
+            ran.add("desktop-packages")
+        certum = _evaluate_release_ai_if(
+            jobs["certum-windows-sign"]["if"], tag=tag, desktop_enabled=True,
+        )
+        if certum:
+            ran.add("certum-windows-sign")
+        if _evaluate_release_ai_if(
+            jobs["windows-updater-finalize"]["if"],
+            tag=tag,
+            desktop_enabled=True,
+            updater_enabled=updater_enabled,
+            certum_result="success" if certum else "skipped",
+        ):
+            ran.add("windows-updater-finalize")
+        show_runtime = _evaluate_release_ai_if(
+            jobs["resolve-show-runtime-ref"]["if"], tag=tag, desktop_enabled=True,
+        )
+        if show_runtime:
+            ran.update({"resolve-show-runtime-ref", "show-runtime-bundles", "build-assets"})
+        build_result = "success" if show_runtime else "skipped"
+        updater_result = "success" if updater_enabled and certum else "skipped"
+        if _evaluate_release_ai_if(
+            jobs["release"]["if"],
+            tag=tag,
+            build_result=build_result,
+            desktop_result="success",
+            desktop_enabled=True,
+            certum_result="success" if certum else "skipped",
+            updater_result=updater_result,
+        ):
+            ran.add("release")
+        assert ran == expected, tag
+
+
 @pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
 @pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
 @pytest.mark.parametrize("desktop_result", ["success", "skipped", "failure", "cancelled"])
@@ -702,32 +844,27 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     ]
     # Evaluate the actual bounded job expression for both event kinds. This
     # catches skipped-needs propagation without replacing the condition itself.
-    expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
-    expression = expression.replace("needs.release-backstop.result", "backstop_result")
-    expression = expression.replace("needs.build-assets.result", "build_result")
-    expression = expression.replace("needs.desktop-packages.result", "desktop_result")
-    expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
-    expression = expression.replace("needs.resolve-desktop-release.outputs.enabled", "desktop_enabled")
-    expression = expression.replace("needs.certum-windows-sign.result", "certum_result")
-    expression = expression.replace("needs.windows-updater-finalize.result", "updater_result")
-    expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
-    expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
-    expression = " ".join(expression.split())
-    result = eval(expression, {"__builtins__": {}}, {
-        "backstop_result": "success", "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
-        "resolve_result": resolve_result, "desktop_enabled": "true" if desktop_enabled else "false",
-        "certum_result": (
-            "success" if tag.startswith("gh-v") and desktop_enabled and
-            desktop_result == "success" and resolve_result == "success" else "skipped"
-        ),
-        "updater_result": "skipped",
-        "ref": "master" if event == "workflow_dispatch" else tag,
-        "cancelled": lambda: cancelled,
-        "startsWith": lambda value, prefix: value.startswith(prefix),
-    })
+    certum_result = "success" if (
+        (tag.startswith("gh-v") or tag.startswith("v")) and desktop_enabled and
+        desktop_result == "success" and resolve_result == "success"
+    ) else "skipped"
+    result = _evaluate_release_ai_if(
+        jobs["release"]["if"],
+        tag=tag,
+        event=event,
+        build_result=build_result,
+        desktop_result=desktop_result,
+        resolve_result=resolve_result,
+        desktop_enabled=desktop_enabled,
+        certum_result=certum_result,
+        updater_result="skipped",
+        cancelled=cancelled,
+    )
     expected = not cancelled and resolve_result == "success" and (
         build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
-    ) and (not (tag.startswith("gh-v") or desktop_enabled) or desktop_result == "success")
+    ) and (not desktop_enabled or desktop_result == "success") and (
+        not desktop_enabled or certum_result == "success"
+    )
     if tag.startswith("gh-v") and not desktop_enabled:
         expected = False
     assert result == expected
