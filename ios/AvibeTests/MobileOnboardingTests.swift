@@ -395,7 +395,7 @@ final class MobileOnboardingTests: XCTestCase {
             """
             (() => {
               const viewport = document.querySelector("main");
-              const target = document.querySelector("button.shadow-mint-card-sm");
+              const target = document.querySelector("[data-mobile-code-actions] button");
               if (!viewport || !target) return false;
               const viewportRect = viewport.getBoundingClientRect();
               const targetRect = target.getBoundingClientRect();
