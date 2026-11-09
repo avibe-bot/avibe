@@ -175,10 +175,13 @@ instructions: pending ~/.avibe/AGENTS.md@3f9a2c; skills@81be07
 </environment>
 ```
 
-- It names changed files by path and catalogs by name (`skills`, `mcp`,
-  `agents`), never their contents. Each name carries a short revision of the
-  component's current content, so a second edit to an already pending
-  component changes the value and is announced again.
+- It names changed files by path and every other component by the catalog or
+  group it belongs to (`skills`, `mcp`, `agents`, `projects`, `tools`,
+  `settings`; `CATALOG_NAMES` in `modules/agents/vibey/prompt_snapshot.py`),
+  never their contents. A section that comes and goes with a catalog, such as
+  the Skills usage text, is named by that catalog. Each name carries a short
+  revision of the component's current content, so a second edit to an already
+  pending component changes the value and is announced again.
 - It omits changes proven to be this Session's own successful `write`/`edit`, only while the current content
   matches the exact written revision (its own edits are already in the conversation). This does not change the
   component's tier or restart its deadline; arbitrary shell edits are not attributed by guessing.
@@ -186,8 +189,10 @@ instructions: pending ~/.avibe/AGENTS.md@3f9a2c; skills@81be07
 - The field name is lowercase letters, as the block's parser requires.
 - A fixed sentence in the system prompt explains the field once: the listed
   parts changed after the instructions were loaded; read the current version
-  (the file itself, `vibe skill list`, `vibe mcp --list`, `vibe agent list`)
-  before relying on them.
+  before relying on them, naming the reader for each name (the file itself,
+  `vibe skill list`, `vibe mcp --list`, `vibe agent list` and `vibe bot list`,
+  `vibe project list`). Tools and settings have nothing to read and take effect
+  when the snapshot is applied.
 
 The same change removes `date` and `timezone` from the environment block:
 the `[Now: ...]` line that every input carries
