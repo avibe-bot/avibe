@@ -1,9 +1,8 @@
 """Snapshot test for ``vibe agent run --json`` output schema.
 
 The accept payload is one ``run`` object: what Avibe resolved for the caller
-(the Run id, its Session, scope, visibility and callback route). Anything the
-caller's own flags already decided stays out, and ``callback_notice`` appears
-only when the callback route is not what those flags imply.
+(the Run id, its Session, scope and visibility). ``no_reply`` exposes the reply
+policy when set; failure-only callback routes remain internal.
 
 This test pins the **keys** in the ``agent_run`` envelope. Values like
 run ids and session ids are non-deterministic so we check key presence /
@@ -231,7 +230,7 @@ def test_agent_run_explicit_async_flag_remains_compatible(tmp_path: Path, capsys
     assert payload["run"]["status"] == "queued"
 
 
-def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> None:
+def test_agent_run_async_accepts_but_ignores_callback_session_id(tmp_path: Path, capsys) -> None:
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -298,13 +297,14 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
             result = cli.cmd_agent_run(args)
 
     assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["run"]["callback_session_id"] == callback_session["id"]
-    assert payload["run"]["callback_session_id"] == callback_session["id"]
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert len(captured.err.splitlines()) == 1 and "deprecated" in captured.err
+    assert "callback_session_id" not in payload["run"]
     stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
-    assert stored["callback_session_id"] == callback_session["id"]
-    assert stored["callback_status"] == "pending"
+    assert stored["callback_session_id"] is None
+    assert stored["callback_status"] is None
 
 
 def test_agent_run_outside_an_agent_shell_needs_no_callback_policy(tmp_path: Path, capsys) -> None:
@@ -403,12 +403,13 @@ def test_agent_run_callback_returns_to_the_caller_from_env(tmp_path: Path, capsy
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["run"]["callback_session_id"] == caller_session["id"]
-    # run.callback_session_id already says the result returns here.
+    assert "callback_session_id" not in payload["run"]
+    # The old flag promises no final callback; only the internal failure route remains.
     assert "callback_notice" not in payload
     stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] == caller_session["id"]
+    assert stored["metadata"]["callback_mode"] == "failure"
     assert stored["source_kind"] == "agent"
     assert stored["source_actor"] == caller_session["id"]
     assert stored["parent_run_id"] == "run-parent"
@@ -712,7 +713,7 @@ def test_agent_run_async_self_target_callback_is_not_duplicated(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert "callback_session_id" not in payload["run"]
-    assert payload["callback_notice"]["code"] == "async_self_run_without_callback"
+    assert "callback_notice" not in payload
     stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] is None
@@ -798,7 +799,7 @@ def test_agent_run_sync_self_target_detach_callback_is_not_duplicated(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert "callback_session_id" not in payload["run"]
-    assert payload["callback_notice"]["code"] == "async_self_run_without_callback"
+    assert "callback_notice" not in payload
     assert payload["run"].get("callback_status") is None
     stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
@@ -872,7 +873,7 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
     payload = json.loads(captured.out)
     stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
-    assert stored["callback_session_id"] == callback_session["id"]
+    assert stored["callback_session_id"] is None
     assert stored["callback_status"] is None
 
 
@@ -1003,7 +1004,7 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
                 .where(agent_runs.c.id == payload["run"]["id"])
                 .limit(1)
             ).mappings().one()
-        assert row["callback_session_id"] == callback_session["id"]
+        assert row["callback_session_id"] is None
         assert row["callback_status"] is None
         assert core.scheduled_tasks.TaskExecutionStore().list_pending_callbacks() == []
 
@@ -1059,7 +1060,10 @@ def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) ->
             ["--agent", "worker", "--sync", "--callback-session-id", callback_session["id"], "--message", "hi"]
         )
 
+        # A detached synchronous Agent shell call still arms its failure notice.
         with (
+            patch.dict("os.environ", {"AVIBE_SESSION_ID": callback_session["id"]}),
+            patch("vibe.cli._supported_task_platforms", return_value={"slack", "avibe"}),
             patch("vibe.cli._agent_store", return_value=agent_store),
             patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
             patch("vibe.cli.paths.get_state_dir", return_value=state_home / "state"),
@@ -1089,7 +1093,7 @@ def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) ->
         assert row["callback_completed_at"] is None
 
 
-def test_agent_run_callback_conflict_does_not_reserve_session(tmp_path: Path, capsys) -> None:
+def test_agent_run_deprecated_callback_flags_do_not_conflict(tmp_path: Path, capsys) -> None:
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
     from storage.models import agent_sessions
@@ -1124,10 +1128,12 @@ def test_agent_run_callback_conflict_does_not_reserve_session(tmp_path: Path, ca
         with engine.connect() as conn:
             session_count = conn.execute(select(func.count()).select_from(agent_sessions)).scalar_one()
 
-    assert result == 1
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "conflicting_callback_policy"
-    assert session_count == 0
+    assert result == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "callback_session_id" not in payload["run"]
+    assert len(captured.err.splitlines()) == 1 and "deprecated" in captured.err
+    assert session_count == 1
 
 
 def _read_session_workdir(db_path: Path, session_id: str):

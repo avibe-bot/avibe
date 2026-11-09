@@ -5326,6 +5326,8 @@
       "source": "Source",
       "parentRun": "Parent run",
       "callback": "Callback",
+      "replyPolicy": "Reply policy",
+      "noReply": "No reply needed",
       "notifyOnFailure": "Notify on failure",
       "effort": "effort {{value}}",
       "waitingSince": "Waiting since",
@@ -5723,8 +5725,7 @@
         "running": "Running"
       },
       "return": {
-        "returnsHere": "Result returns here",
-        "reportsBack": "Reported back when done"
+        "returnsHere": "Result returns here"
       },
       "kind": {
         "backendActivity": "Background task",

@@ -426,6 +426,9 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
         str(delivery_alias.get("mode") or ""),
         str(delivery_alias.get("clear_source") or ""),
         str(bool(spec.get("suppress_delivery"))),
+        # A batch has one reply-policy hint. Never let an informational input
+        # suppress an ordinary request (or inherit its instruction to report).
+        str(spec.get("no_reply") is True),
     )
 
 

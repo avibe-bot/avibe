@@ -1834,8 +1834,8 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
   const runCommandLine = runCommandSnapshotLine(run);
-  // A run that asked for no callback still tells its sender when it did not complete: its route only
-  // notifies on failure, so it shows whether that notice went out, not a skipped callback.
+  // New runs notify only on failure, including no-reply messages. Keep historical
+  // final-callback state readable without presenting a successful result promise.
   const notifyOnFailure = run.metadata?.callback_mode === 'failure';
   const shownCallbackStatus =
     notifyOnFailure && run.callback_status !== 'sent' && run.callback_status !== 'failed' ? null : run.callback_status;
@@ -1921,11 +1921,15 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
           </Link>
         </DetailField>
       )}
+      {run.metadata?.no_reply === true && (
+        <DetailField label={t('harness.detail.replyPolicy')}>
+          <span className="text-[12px] text-foreground">{t('harness.detail.noReply')}</span>
+        </DetailField>
+      )}
       {run.callback_session_id && (
         <DetailField label={t(notifyOnFailure ? 'harness.detail.notifyOnFailure' : 'harness.detail.callback')}>
           <div className="flex min-w-0 flex-col gap-1">
-            {/* Where the result reports back to — the same four session states,
-                so "who gets told" is as openable as "who ran it". */}
+            {/* Historical callback or internal notice recipient; retain the same Session states. */}
             <DetailSession
               summary={run.callback_session ?? BLANK_SESSION_SUMMARY}
               sessionId={run.callback_session_id}

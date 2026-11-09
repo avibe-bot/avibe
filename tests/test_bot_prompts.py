@@ -141,6 +141,19 @@ def test_prompt_cli_examples_parse_against_the_real_cli(capsys):
         assert set(re.findall(r"--[a-z][a-z-]*", fragment)) <= run_flags, fragment
 
 
+def test_roster_prompt_matches_plan_drafts_and_teaches_one_reporting_mechanism():
+    root = Path(__file__).resolve().parents[1]
+    plan = (root / "docs/plans/bots.md").read_text()
+    section = plan.split("### Bots and Agents (`harness-agents.md`, every Session)\n", 1)[1]
+    roster = section.split("```markdown\n", 1)[1].split("\n```", 1)[0]
+    mentions = section.split("### Mentions (replaces the current section)", 1)[1]
+    mentions = mentions.split("```markdown\n", 1)[1].split("\n```", 1)[0]
+    prompt = (root / "core/prompts/harness-agents.md").read_text()
+    assert prompt == roster + "\n\n" + mentions + "\n"
+    assert "--callback" not in prompt and "--no-callback" not in prompt
+    assert "read receipt" in prompt and "--no-reply" in prompt
+
+
 @pytest.mark.parametrize("source,heading", [
     ("bot-main.md", "### The main Bot\n"),
     ("bot-harness.md", "### Handing out work (every Bot, after the main Bot's section)\n"),
@@ -174,6 +187,7 @@ def test_bot_harness_prompt_teaches_read_receipts():
     assert "handles your message without writing back" in built
     assert "following up is yours when you were waiting on it" in built
     assert "goes idle without answering" not in built
+    assert "--no-reply" in built and "immediate notice" in built
 
 
 def test_bots_get_no_messaging_guidance_in_their_system_prompt():

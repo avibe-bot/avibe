@@ -414,14 +414,16 @@ def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
     assert exc.value.code == 0
     text = " ".join(capsys.readouterr().out.split())
     assert "or a fork. Runs are async." in text
-    assert "--callback Return the final reply to this Session" in text
-    assert "Only --callback returns the final reply; a run that fails still tells the caller." in text
-    assert "--no-callback No-op (the default)" in text
+    assert "--callback Deprecated no-op" in text
+    assert "Failed, canceled, or interrupted runs still notify the sender." in text
+    assert "--no-callback Deprecated no-op (the default)" in text
+    assert "--no-reply Existing Session/Bot: no delegation or read receipt" in text
+    assert "--no-reply rejects --sync and new/forked Sessions." in text
     assert "--session-id ID Join this Session's running turn, or start one if idle" in text
     assert "--queue With --session-id: wait for the running turn" in text
     assert "Fork this Session's context, backend, scope, and cwd" in text
     assert "Agent for a new Session (a fork: same backend only)" in text
-    assert "--model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after apply only to a new or forked Session." in text
+    assert "apply only to a new or forked Session." in text
     for jargon in ("P1", "P3", "native Turn", "steer"):
         assert jargon not in text
 

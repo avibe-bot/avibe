@@ -288,13 +288,14 @@ def test_agent_prompt_audit_examples_parse_against_the_real_cli() -> None:
             raise AssertionError(f"agent-prompt-audit teaches an unparseable command: {example!r}") from exc
 
 
-def test_no_guidance_says_a_run_returns_its_result_by_default() -> None:
-    """bots.md D4 (2026-11-03): no `vibe agent run` gets a callback unless `--callback` asks for one."""
+def test_guidance_teaches_receipts_and_no_reply_not_successful_callbacks() -> None:
+    """bots.md D4 (2026-11-09): explicit reports and receipts replace successful callbacks."""
     stale = (
         "return through callbacks",
         "callbacks return to this conversation by default",
         "to this conversation by default",
         "is sent back to this conversation",
+        "only with `--callback`",
         "callback policy",
         "callback 策略",
     )
@@ -309,4 +310,8 @@ def test_no_guidance_says_a_run_returns_its_result_by_default() -> None:
         body = " ".join(path.read_text().split()).lower()
         for text in stale:
             assert text.lower() not in body, f"{path.relative_to(ROOT)} still says {text!r}"
-    assert "only with `--callback`" in _read("core/prompts/harness-agents.md")
+    roster = _read("core/prompts/harness-agents.md")
+    assert "--callback" not in roster and "--no-callback" not in roster
+    for path in ("core/prompts/harness-agents.md", "skills/use-avibe-harness/SKILL.md"):
+        body = _read(path)
+        assert "read receipt" in body and "--no-reply" in body

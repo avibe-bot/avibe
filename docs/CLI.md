@@ -802,13 +802,13 @@ This command needs the running service; see
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --callback --agent release-reviewer --message 'Review the latest deployment result and send me the findings.'
+vibe agent run --agent release-reviewer --message 'Review the deployment result and report the findings here.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
 vibe agent run --bot cso --message 'Review the new login flow for security risks.'
 vibe agent run --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
-vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
+vibe agent run --bot cso --no-reply --message 'Record this deployment fact; no response is needed.'
 vibe agent run --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
 vibe agent run --close-after --agent release-reviewer --message 'Run a disposable batch review.'
 ```
@@ -853,23 +853,32 @@ and codex an unknown value is a warning, since their bundled catalogs can lag
 behind a new release. `vibe agent models <agent>` lists valid values.
 
 The command prints one `run` object: its `id`, `status`, `run_type`,
-`agent_name`, and the `session_id`, `scope_id`, `visibility`, and
-`callback_session_id` Avibe resolved for it. `--sync` replaces it with the
-finished run record. `callback_notice` appears only when a run on the caller's
-own Session gets no callback because the result already lands there.
+`agent_name`, and the resolved `session_id`, `scope_id`, and `visibility`.
+`no_reply` is included when set. `--sync` replaces this with the finished run
+record; historical callback fields remain readable in stored records.
 
-No run creates a callback unless it asks for one, whatever its target. Use
-`--callback` (from an Agent shell) or `--callback-session-id` when the final
-result text should return to a Session as a follow-up Agent message; otherwise
-read it later with `vibe runs show`. `--no-callback` is accepted and changes
-nothing. Whatever the callback, a run that ends failed, cancelled, or
-interrupted tells the caller Session that it did not complete, with the reason,
-and a run without a callback tells its target where to report back: the
-target's input carries a line naming the sender and the exact `vibe agent run`
-command. The callback is independent
-from ordinary delivery: if the target run also posts to its IM scope, the caller
-Session still receives the result. Process messages such as system notes, tool
-calls, and intermediate assistant updates are not included.
+Successful final callbacks are retired. The target's input tells it how to
+report to the sender with `vibe agent run`, except when the sender is a Session
+that the receiver itself dispatched. If the target handles the message without
+writing back, Avibe sends the sender one read receipt once the target is idle
+with no pending work. It includes the last reply with its formatting, up to
+30,000 characters, then points to `vibe data query` for the full transcript.
+An armed Watch, pending Task, or open delegate defers the receipt; a receipt is
+not an explicit progress or completion report. Failed, cancelled, or interrupted
+runs still send an immediate notice to their caller Session.
+
+Use `--no-reply` with an existing `--session-id` or `--bot` for informational work:
+the receiver sees `[No reply needed.]`, and that message neither opens nor
+answers/rearms a delegation and emits no read receipt. It does not disable
+failure notices or affect an already-open reverse delegation. Combining it with
+`--sync` or a new/forked Session is a usage error.
+
+`--callback`, `--callback-session-id`, and `--no-callback` are accepted no-ops,
+with one deprecation line on stderr and unchanged JSON stdout. Old pending
+callbacks are honored once. Internal failure delivery and Vault approval
+auto-resume are unchanged. Older same-epoch binaries can ignore `no_reply`;
+one extra report hint or receipt during rollback is an accepted compatibility
+cost. Use `vibe runs show` to read any Run's stored result.
 
 Use `--close-after` for a new or forked Session when the Agent runtime should be
 released after the Run settles while the Session, transcript, and Run record stay

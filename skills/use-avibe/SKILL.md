@@ -2,7 +2,7 @@
 name: use-avibe
 slug: use-avibe
 description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state. Also use it to report an Avibe bug, send product feedback, or file a feature request from the current conversation.
-version: 0.9.4
+version: 0.9.5
 ---
 
 # Use Avibe

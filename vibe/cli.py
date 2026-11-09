@@ -2139,14 +2139,14 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Inside an Agent shell, new Sessions use the caller's scope and directory.
-        Only --callback returns the final reply; a run that fails still tells the caller.
+        Failed, canceled, or interrupted runs still notify the sender.
+        --no-reply rejects --sync and new/forked Sessions.
         --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
           apply only to a new or forked Session.
 
         Examples:
-          vibe agent run --agent reviewer --message 'Review the latest deployment result.'
-          vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
+          vibe agent run --session-id sesk8m4q2p7x --queue --message 'Update docs next.'
+          vibe agent run --bot reviewer --no-reply --message 'Record this fact.'
         """
     )
 
@@ -6157,6 +6157,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     project = (getattr(args, "project", None) or "").strip()
     visibility = (getattr(args, "visibility", None) or "").strip()
     close_after = bool(getattr(args, "close_after", False))
+    no_reply = bool(getattr(args, "no_reply", False))
     if _agent_run_is_async(args) and getattr(args, "wait_timeout", None) is not None:
         raise TaskCliError(
             "use --sync with --wait-timeout",
@@ -6164,18 +6165,11 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Agent runs are async by default. Pass --sync when the CLI should wait, or remove --wait-timeout.",
             help_command=help_command,
         )
-    if bool(getattr(args, "callback", False)) and bool(getattr(args, "no_callback", False)):
+    if no_reply and (not session_id or fork_session or fork_self or bool(getattr(args, "sync_run", False))):
         raise TaskCliError(
-            "use either --callback or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback to have the final reply return to this Session, or leave both out for no callback.",
-            help_command=help_command,
-        )
-    if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
-        raise TaskCliError(
-            "use either --callback-session-id or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback-session-id to have the final reply return to that Session, or leave both out for no callback.",
+            "--no-reply requires an existing --session-id or --bot run and cannot be used with --sync",
+            code="invalid_no_reply_policy",
+            hint="Use --no-reply only when messaging an existing Session or Bot asynchronously.",
             help_command=help_command,
         )
     if sum(bool(value) for value in (same_scope, bool(scope_id), bool(project))) > 1:
@@ -6788,47 +6782,22 @@ def _agent_run_is_async(args) -> bool:
     return not bool(getattr(args, "sync_run", False))
 
 
-def _resolve_callback_route(
-    args,
+def _resolve_failure_notice_route(
     caller_context,
     *,
     target_session_id: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str], Optional[dict]]:
-    """Where a Run's outcome goes: ``(session id, callback mode, notice)`` (``docs/plans/bots.md`` D4).
+) -> Optional[str]:
+    """Resolve the internal failure-notice route for a new Agent Run.
 
-    No run gets a callback unless it asks for one, whatever its target: ``--callback`` returns the final reply
-    to the caller Session, ``--callback-session-id`` to the Session it names. Without a callback the caller
-    Session is still told when the run does not complete, so a failure always reaches the sender: mode
-    ``failure``. A run on the caller's own Session gets neither, because its result already lands there.
-    ``--no-callback`` is accepted and changes nothing.
+    Successful user-facing callbacks are retired. The historical callback
+    flags remain parser-compatible no-ops; a delegated run still sends its caller an
+    immediate notice when it fails, is canceled, or is interrupted. Legacy pending
+    callback rows are drained by the scheduler using their stored route.
     """
-    from core.scheduled_tasks import AGENT_RUN_CALLBACK_FAILURE_ONLY
-
-    explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
-    if explicit_callback:
-        return explicit_callback, None, None
     caller_session_id = caller_context.session_id if caller_context is not None else None
-    on_caller = bool(target_session_id and caller_session_id and target_session_id == caller_session_id)
-    if bool(getattr(args, "callback", False)):
-        if not caller_session_id:
-            raise TaskCliError(
-                "--callback needs a caller Session",
-                code="callback_without_caller",
-                hint="Run it from an Avibe Agent shell, or pass --callback-session-id <session-id>.",
-                help_command="vibe agent run --help",
-            )
-        if on_caller:
-            return None, None, {
-                "code": "async_self_run_without_callback",
-                "message": (
-                    "Started Agent Run on the caller Session without a callback. "
-                    "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
-                ),
-            }
-        return caller_session_id, None, None
-    if caller_session_id and not on_caller:
-        return caller_session_id, AGENT_RUN_CALLBACK_FAILURE_ONLY, None
-    return None, None, None
+    if caller_session_id and target_session_id != caller_session_id:
+        return caller_session_id
+    return None
 
 
 def _reserve_cli_session(
@@ -7210,9 +7179,9 @@ _BOT_RUN_CONFLICTS = (
 def _resolve_bot_run_target(args) -> None:
     """``--bot <handle>``: a message into the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
 
-    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. Like
-    every run it asks for no callback unless ``--callback`` says so (``_resolve_callback_route``). The Session and
-    directory are prepared here when missing, then the run continues as a queued ``--session-id`` run.
+    A Bot keeps one conversation on its own model, so flags that pick or shape a Session do not apply.
+    Its Session and directory are prepared here when missing, then the run continues as a queued
+    ``--session-id`` run, with the same failure notice and read-receipt policy as any other target.
     """
     from core.bots import MAIN_BOT_HANDLE, BotError, BotService
 
@@ -7392,6 +7361,13 @@ def cmd_agent_run(args):
     from core.control_requests import ADMISSION_SECONDS, failure, new_request
     from vibe import internal_client
 
+    legacy_callback_flags = tuple(
+        flag for flag, enabled in (
+            ("--callback", bool(getattr(args, "callback", False))),
+            ("--callback-session-id", bool((getattr(args, "callback_session_id", None) or "").strip())),
+            ("--no-callback", bool(getattr(args, "no_callback", False))),
+        ) if enabled
+    )
     arguments = dict(vars(args))
     if arguments.get("message_file") is not None:
         # /dev/stdin and /dev/fd/N name this process's descriptors, not the
@@ -7419,6 +7395,11 @@ def cmd_agent_run(args):
         response = failure(
             "execution_unknown", "Agent Run may have been enqueued; its result could not be confirmed",
             execution="execution_unknown",
+        )
+    if response["exit_code"] == 0 and legacy_callback_flags:
+        print(
+            "warning: deprecated Agent Run callback flags are ignored; use explicit reports and read receipts",
+            file=sys.stderr,
         )
     stream = sys.stdout if response["exit_code"] == 0 else sys.stderr
     print(_json_text(response["payload"], stream=stream), file=stream)
@@ -7526,20 +7507,14 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             # may only restate it -- so admitting the caller to the Session
             # answers both halves of the turn it is about to queue.
             _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
-        callback_session_id, callback_mode, callback_notice = _resolve_callback_route(
-            args,
-            caller_context,
-            target_session_id=session_id,
-        )
+        callback_session_id = _resolve_failure_notice_route(caller_context, target_session_id=session_id)
         if callback_session_id:
             try:
                 _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
             except TaskCliError:
-                if callback_mode != AGENT_RUN_CALLBACK_FAILURE_ONLY:
-                    raise
                 # The failure notice is a guarantee Avibe adds, not a route the caller asked for: a caller
                 # Session it cannot post to leaves the run without that notice instead of refusing the run.
-                callback_session_id, callback_mode = None, None
+                callback_session_id = None
         close_after = bool(getattr(args, "close_after", False))
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
@@ -7619,8 +7594,12 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
         )
         if close_after:
             provenance_metadata[AGENT_RUN_CLOSE_AFTER_METADATA_KEY] = True
-        if callback_mode:
-            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = callback_mode
+        if bool(getattr(args, "no_reply", False)):
+            from core.scheduled_tasks import AGENT_RUN_NO_REPLY_METADATA_KEY
+
+            provenance_metadata[AGENT_RUN_NO_REPLY_METADATA_KEY] = True
+        if callback_session_id:
+            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = AGENT_RUN_CALLBACK_FAILURE_ONLY
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
@@ -7647,10 +7626,8 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
         reserved_session_id = None
-        # One ``run`` object. Everything the caller's own flags already decided --
-        # session policy, delivery intent, fork source, close-after, sync/async --
-        # stays out; what Avibe resolved for it (the Session, its scope and
-        # visibility, the callback route) stays in.
+        # One run object: resolved identity and placement, plus an explicit no-reply policy.
+        # The failure-only callback route stays internal.
         payload = {
             "run": _present_fields(
                 {
@@ -7661,13 +7638,10 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
                     "session_id": session_id,
                     "scope_id": _scope_id_payload_from_session(session_id),
                     "visibility": target.visibility if session_id else visibility,
-                    # Only a callback is reported here; a failure-only route is not one (bots.md D4).
-                    "callback_session_id": None if callback_mode else callback_session_id,
+                    **({"no_reply": True} if bool(getattr(args, "no_reply", False)) else {}),
                 }
             ),
         }
-        if callback_notice:
-            payload["callback_notice"] = callback_notice
         return _cli_payload("agent_run", **payload, **override_fields), callback_session_id
     except Exception:
         if reserved_session_id:
@@ -18823,9 +18797,14 @@ def build_parser():
     agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
     agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
-    agent_run_parser.add_argument("--callback", action="store_true", help="Return the final reply to this Session")
-    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Return it to this Session instead")
-    agent_run_parser.add_argument("--no-callback", action="store_true", help="No-op (the default)")
+    agent_run_parser.add_argument("--callback", action="store_true", help="Deprecated no-op")
+    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Deprecated no-op")
+    agent_run_parser.add_argument("--no-callback", action="store_true", help="Deprecated no-op (the default)")
+    agent_run_parser.add_argument(
+        "--no-reply",
+        action="store_true",
+        help="Existing Session/Bot: no delegation or read receipt",
+    )
     agent_run_parser.add_argument(
         "--close-after",
         action="store_true",

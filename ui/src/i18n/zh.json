@@ -5326,6 +5326,8 @@
       "source": "来源",
       "parentRun": "父 Run",
       "callback": "回传",
+      "replyPolicy": "回复方式",
+      "noReply": "无需回复",
       "notifyOnFailure": "失败时通知",
       "effort": "推理 {{value}}",
       "waitingSince": "开始等待",
@@ -5723,8 +5725,7 @@
         "running": "运行中"
       },
       "return": {
-        "returnsHere": "结果会回到这里",
-        "reportsBack": "完成后由对方汇报"
+        "returnsHere": "结果会回到这里"
       },
       "kind": {
         "backendActivity": "后台任务",
