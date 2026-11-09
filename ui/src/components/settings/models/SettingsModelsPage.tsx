@@ -361,7 +361,7 @@ const DirectHome: React.FC<{
   return (
     <div className="model-hub-direct">
       <div className="model-hub-direct-grid grid">
-        <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
+        <section className="model-hub-direct-card overflow-hidden border border-edge bg-surface shadow-elevation-0">
           <div className="model-hub-direct-head flex items-center gap-3 border-b border-border px-5 py-3">
             <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
           </div>
@@ -387,7 +387,7 @@ const DirectHome: React.FC<{
             })}
           </div>
         </section>
-        <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
+        <section className="model-hub-direct-card overflow-hidden border border-edge bg-surface shadow-elevation-0">
           <div className="model-hub-direct-head flex items-center border-b border-border px-5 py-3"><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.benefits.title')}</h2></div>
           <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex items-start gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span className="model-hub-direct-benefit-copy"><span className="model-hub-direct-benefit-title-row flex items-center gap-1.5"><span className="text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span></span><span className="model-hub-direct-benefit-detail">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
         </section>
@@ -1645,7 +1645,7 @@ export const SettingsModelsPage: React.FC = () => {
                             align="start"
                             sideOffset={8}
                             collisionPadding={12}
-                            className="flex w-[300px] max-w-[calc(100vw-24px)] flex-col gap-0.5 rounded-[10px] border-border-strong bg-surface p-1.5 text-foreground !shadow-[var(--model-hub-menu-shadow)]"
+                            className="flex w-[300px] max-w-[calc(100vw-24px)] flex-col gap-0.5 rounded-[10px] p-1.5 text-foreground"
                             onOpenAutoFocus={(event) => {
                               event.preventDefault();
                               window.requestAnimationFrame(() => {
@@ -1738,7 +1738,7 @@ export const SettingsModelsPage: React.FC = () => {
         <DialogContent
           mobileSheetHeight="tall"
           closeLabel={t('settings.models.sourceDetail.close') as string}
-          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
+          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             sourceDetailHeadingRef.current?.focus();

@@ -866,6 +866,14 @@ def test_vibey_open_tail_candidates_include_unfinished_agent_run_and_skip_histor
 
     assert run_session in found
     assert history_only not in found
+def _canonical_tool_steps(conn, response_ids: tuple[str, ...]) -> list[dict]:
+    """Read marked Vibey calls from their response projection, not physical traces."""
+    from storage import tool_activity_service
+
+    assert conn.execute(select(agent_events.c.id).where(
+        agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call",
+    )).first() is None
+    return tool_activity_service.response_steps(conn, session_id=SESSION, response_ids=response_ids)
 
 
 @pytest.mark.parametrize("platform", ["avibe", "telegram"])
@@ -1777,12 +1785,20 @@ async def test_interrupted_native_search_emits_immediately_and_only_web_projects
         await asyncio.wait_for(running, timeout=10)
     [after] = cards()
     assert after["retried"] is True
+    [partial_response] = [
+        row for row in await harness.context_rows()
+        if row.kind == "response" and any(
+            isinstance(block, HostedToolBlock) and block.id == "ws_cut"
+            for block in row.message.content
+        )
+    ]
     with engine.connect() as conn:
-        traces = conn.execute(select(agent_events.c.content_json, agent_events.c.content_text).where(
-            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call",
-        )).all()
-    [(raw, line)] = [(raw, line) for raw, line in traces if json.loads(raw).get("hosted")]
-    stored = json.loads(raw)["hosted"]
+        [step] = [
+            row for row in _canonical_tool_steps(conn, (partial_response.row_id,))
+            if row["content"].get("hosted")
+        ]
+    stored = step["content"]["hosted"]
+    line = step["text"]
     assert stored["interruption"] == "overloaded" and "retried" not in stored
     assert line == ("🔎 Web search · Model response interrupted: upstream overloaded" if language == "en"
                     else "🔎 网页搜索 · 模型回复中断：上游服务过载")
@@ -4495,22 +4511,21 @@ async def test_native_search_card_survives_the_delivery_policy(
         assert not responses[0].message.hosted_summary.counts
     assert final.message.hosted_summary.counts == {"web_search_requests": 1}
 
+    response_ids = tuple(row.row_id for row in responses)
     with engine.connect() as conn:
-        traces = conn.execute(select(agent_events).where(
-            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call"
-        ).order_by(agent_events.c.created_at, agent_events.c.id)).mappings().all()
+        steps = _canonical_tool_steps(conn, response_ids)
         groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
         details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
-    assert len(traces) == (2 if deferred else 1)  # no pending search card
-    event = traces[-1]
+    assert len(steps) == (2 if deferred else 1)  # no pending search card
+    event = next(row for row in reversed(steps) if row["content"].get("hosted"))
     expected = {
         "version": 1, "call_id": USE["id"], "tool": "web_search", "mode": "native", "status": "completed",
         "subject": USE["input"]["query"], "action": "search", "provider": served["provider"],
         "source_id": served["source"], "source_name": "Search source", "model": served["model"],
         "sources": sources, "images": [], "response_id": final.row_id,
     }
-    assert json.loads(event["content_json"])["hosted"] == expected
-    assert json.loads(event["metadata_json"])["precedes_message_id"] == final.row_id
+    assert event["content"]["hosted"] == expected
+    assert event["metadata"]["precedes_message_id"] == final.row_id
     projected_id = f"tool:{final.row_id}:{USE['id']}"
     [owner] = [detail for detail in details if any(row["id"] == projected_id for row in detail["rows"])]
     assert (owner["anchor_message_id"], owner["anchor_position"]) == (final.row_id, "before")
@@ -4527,7 +4542,7 @@ async def test_native_search_card_survives_the_delivery_policy(
     if background:
         assert not live and not harness.controller.im_client.sent
     else:
-        assert lines == [event["content_text"]]  # the same ordinary hosted line, including on IM
+        assert lines == [event["text"]]  # the same ordinary hosted line, including on IM
 
 
 @pytest.mark.parametrize("client_finished", [False, True])
@@ -4846,6 +4861,14 @@ async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_r
         assert executed[0].headers["x-avibe-turn-id"] == _turn(first.context)
         assert executed[0].headers["authorization"] == "Bearer hub-token"
 
+        [fetch_response] = [
+            row for row in await harness.context_rows()
+            if row.kind == "response" and any(
+                isinstance(block, ToolCallBlock) and block.id == "toolu_fetch"
+                for block in row.message.content
+            )
+        ]
+
         # Reconstruct from durable rows, with web_fetch disabled for live execution.
         harness.new_agent()
         harness.controller.hub_hosted_tools = {}
@@ -4867,17 +4890,14 @@ async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_r
         assert answer.get("is_error", False) is blocked
         assert "tool call interrupted" not in json.dumps(request)
 
-    # The dispatcher/mirror create exactly one hosted trace, read unchanged by
+    # The dispatcher/mirror create exactly one canonical hosted step, read unchanged by
     # the activity API. Page records never register images or produce uploads.
     with engine.connect() as conn:
-        traces = conn.execute(select(agent_events).where(
-            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call"
-        )).mappings().all()
+        [trace] = _canonical_tool_steps(conn, (fetch_response.row_id,))
         groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
         details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
         assert conn.execute(select(media_objects.c.token).where(media_objects.c.session_id == SESSION)).first() is None
-    [trace] = [row for row in traces if json.loads(row["content_json"]).get("hosted")]
-    card = json.loads(trace["content_json"])["hosted"]
+    card = trace["content"]["hosted"]
     assert card["tool"] == "web_fetch" and card["status"] == record.status
     assert card["sources"] == card["images"] == []
     assert card["fetch"] == envelope["record"]
@@ -4889,7 +4909,7 @@ async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_r
     live = [payload["content"]["hosted"] for name, payload in published
             if name == "message.new" and (payload.get("content") or {}).get("hosted")]
     assert live == ([card] if platform == "avibe" else [])
-    assert harness.controller.im_client.sent.count(trace["content_text"]) == 1
+    assert harness.controller.im_client.sent.count(trace["text"]) == 1
     assert not harness.controller.im_client.uploads
     assert len(harness.rows("result")) == 2 and not harness.rows("error")
 
@@ -6162,7 +6182,7 @@ async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session,
         await _until(lambda: suite.jobs.status(job_id).state != "running", "the job never ended")
 
 
-async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(
+async def test_startup_recovery_leaves_settled_job_pruning_until_after_readiness(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
     import core.agent_core.tools.jobs as jobs_module
@@ -6210,6 +6230,10 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(
     # Startup settles c's open call from its job's output (T2) before any file goes.
     [c_result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"][-1:]
     assert c_result.message.tool_call_id == "call_c" and "out" in c_result.message.content[0].text
+    present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
+    # Recovery settles T2 before readiness but leaves J5 bookkeeping off the critical path.
+    assert present == {name: True for name in jobs}
+    await harness.agent._prune_settled_jobs()
     present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
     # J5: a job is removed only once its call has a durable result and no Watch still manages it.
     assert present == {"a": False, "b": True, "c": False, "d": True, "e": True}
@@ -6274,15 +6298,16 @@ async def test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer
     await harness.agent.handle_message(harness.request("what shipped?"))
 
     search = "🔎 Web search “responses api \\*domain\\* filters” · native (test-provider) · 1 source · ≈ $0.01"
+    [response] = [
+        row for row in await harness.context_rows()
+        if row.kind == "response" and any(
+            isinstance(block, HostedToolBlock) and block.id == "srvtoolu_1"
+            for block in row.message.content
+        )
+    ]
     with engine.connect() as conn:
-        lines = [
-            row["content_text"]
-            for row in conn.execute(
-                select(agent_events)
-                .where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
-                .order_by(agent_events.c.created_at, agent_events.c.id)
-            ).mappings()
-        ]
+        [step] = _canonical_tool_steps(conn, (response.row_id,))
+    lines = [step["text"]]
     # One line per hosted call, escaped for the destination; the response's cost is
     # shown once, on its last call. The process log opens with the first of them.
     assert lines == [search]
@@ -6417,11 +6442,16 @@ async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_an
 
     await harness.agent.handle_message(harness.request("what shipped?"))
 
+    [response] = [
+        row for row in await harness.context_rows()
+        if row.kind == "response" and any(
+            isinstance(block, HostedToolBlock) and block.id == "srvtoolu_1"
+            for block in row.message.content
+        )
+    ]
     with engine.connect() as conn:
-        [event] = conn.execute(
-            select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
-        ).mappings().all()
-    card = json.loads(event["content_json"])["hosted"]
+        [event] = _canonical_tool_steps(conn, (response.row_id,))
+    card = event["content"]["hosted"]
     assert (card["call_id"], card["mode"], card["subject"], card["cost"]) == (
         "srvtoolu_1", "native", "responses api *domain* filters", {"basis": "list", "usd": 0.01, "calls": 1}
     )
@@ -6465,14 +6495,19 @@ async def test_a_fallback_names_a_source_that_existed_before_the_service_started
         harness.controller.hub_hosted_tools = {"web_search": {"native": "unsupported", "replay": "unsupported", "refused": True}}
         await harness.agent.handle_message(harness.request("what is new in avibe 3.2.1?"))
 
+    [response] = [
+        row for row in await harness.context_rows()
+        if row.kind == "response" and any(
+            isinstance(block, ToolCallBlock) and block.id == "toolu_1"
+            for block in row.message.content
+        )
+    ]
     with engine.connect() as conn:
-        [event] = conn.execute(
-            select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
-        ).mappings().all()
-    card = json.loads(event["content_json"])["hosted"]
+        [event] = _canonical_tool_steps(conn, (response.row_id,))
+    card = event["content"]["hosted"]
     assert card["fallback_from"] == {"source_id": refusing, "source_name": "Fake OpenAI A"}
     assert card["source_name"] == "Fake OpenAI B"
-    assert "Fake OpenAI A" in event["content_text"] and refusing not in event["content_text"].replace("\\", "")
+    assert "Fake OpenAI A" in event["text"] and refusing not in event["text"].replace("\\", "")
 
 
 async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine, session, tmp_path, published) -> None:

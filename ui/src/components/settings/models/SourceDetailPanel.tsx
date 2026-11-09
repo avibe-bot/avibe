@@ -913,7 +913,7 @@ export const SourceDetailPanel: React.FC<{
       </div>}
       {!serviceDetail && <>
       <section className="model-hub-source-toolbar flex shrink-0 flex-col gap-2 border-b border-border px-5 py-2.5 sm:flex-row sm:items-center">
-        <span className="flex shrink-0 items-center gap-2"><h3 className="text-[13px] font-bold text-foreground">{t('settings.models.sourceDetail.modelsHeading')}</h3><span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{models.length}</span></span>
+        <span className="flex shrink-0 items-center gap-2"><h3 className="text-[13px] font-bold text-foreground">{t('settings.models.sourceDetail.modelsHeading')}</h3><span className="model-hub-pill model-hub-fill-0a border border-edge text-muted">{models.length}</span></span>
         <div className="relative min-w-0 flex-1 sm:ml-auto sm:max-w-[200px]">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" aria-hidden="true" />
           <Input value={query} onChange={(event) => setQuery(event.target.value)} aria-label={t('settings.models.sourceDetail.search') as string} placeholder={t('settings.models.sourceDetail.search') as string} className="model-hub-source-search h-8 pl-8 text-[11.5px]" />
@@ -1022,7 +1022,7 @@ export const SourceDetailPanel: React.FC<{
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
           <DialogPrimitive.Content
-            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none"
+            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-edge bg-popover outline-none"
             onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
             onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
           >

@@ -829,7 +829,7 @@ export const OpencodeProviderConfig: React.FC<{
           </div>
 
           {!runtime.enabled && (
-            <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-2.5 text-[12px] text-muted">
+            <div className="rounded-lg border border-edge bg-surface-2/60 px-3 py-2.5 text-[12px] text-muted shadow-elevation-0">
               {t('settings.backends.opencodeDisabledBanner')}
             </div>
           )}
@@ -1154,7 +1154,7 @@ export const OpencodeProviderConfig: React.FC<{
 
               {/* Initial loading skeleton. */}
               {providersLoading && !providers && (
-                <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted">
+                <div className="rounded-lg border border-edge bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted shadow-elevation-0">
                   <RefreshCw className="mx-auto mb-2 size-4 animate-spin text-cyan-ink" />
                   {t('settings.backends.opencodeProvidersLoading')}
                 </div>
@@ -1162,7 +1162,7 @@ export const OpencodeProviderConfig: React.FC<{
 
               {/* Empty state — server reports no providers at all. */}
               {!providersLoading && providers && providers.length === 0 && !providersError && (
-                <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted">
+                <div className="rounded-lg border border-edge bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted shadow-elevation-0">
                   {t('settings.backends.opencodeProvidersEmpty')}
                 </div>
               )}
@@ -1172,7 +1172,7 @@ export const OpencodeProviderConfig: React.FC<{
                 providers &&
                 providers.length > 0 &&
                 visibleProviders.length === 0 && (
-                  <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted">
+                  <div className="rounded-lg border border-edge bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted shadow-elevation-0">
                     {t('settings.backends.opencodeProvidersFilterEmpty')}
                   </div>
                 )}
@@ -1189,7 +1189,7 @@ export const OpencodeProviderConfig: React.FC<{
                         key={provider.id}
                         className={clsx(
                           'flex flex-col rounded-lg border bg-surface transition-colors',
-                          expanded ? 'border-mint/40 shadow-glow-md-mint' : 'border-border hover:border-border-strong',
+                          expanded ? 'border-mint/40' : 'border-edge shadow-elevation-0',
                           expanded && 'md:col-span-2'
                         )}
                       >
@@ -1324,7 +1324,7 @@ export const OpencodeProviderConfig: React.FC<{
                               </div>
 
                               <div className="flex flex-col gap-3">
-                                <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface px-3 py-3">
+                                <div className="flex flex-col gap-3 rounded-lg border border-edge bg-surface px-3 py-3 shadow-elevation-0">
                                   <div className="flex flex-wrap items-center justify-between gap-2">
                                     <Label
                                       htmlFor={`opencode-model-${provider.id}`}
@@ -1408,7 +1408,7 @@ export const OpencodeProviderConfig: React.FC<{
                                   <Label className="text-[11px] font-medium uppercase text-muted">
                                     {t('settings.backends.opencodeProviderModels')}
                                   </Label>
-                                  <div className="max-h-56 overflow-y-auto rounded-md border border-border bg-surface px-3 py-2">
+                                  <div className="max-h-56 overflow-y-auto rounded-md border border-edge bg-surface px-3 py-2 shadow-elevation-0">
                                     {provider.models.length === 0 ? (
                                       <p className="text-[12px] text-muted">
                                         {t('settings.backends.opencodeProviderModelsEmpty')}
@@ -1470,7 +1470,7 @@ export const OpencodeProviderConfig: React.FC<{
                 </div>
               )}
 
-              <div className="flex items-start gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2.5">
+              <div className="flex items-start gap-2 rounded-lg border border-edge bg-surface-2/60 px-3 py-2.5 shadow-elevation-0">
                 <Info className="mt-0.5 size-3.5 shrink-0 text-muted" />
                 <p className="text-[12px] leading-relaxed text-muted">
                   {t('settings.backends.opencodeProvidersInfo')}

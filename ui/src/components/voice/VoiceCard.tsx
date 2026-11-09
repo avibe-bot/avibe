@@ -117,7 +117,7 @@ export function VoiceCard({
       <div className="voice-card-halo" aria-hidden="true" />
       <div
         className={clsx(
-          'flex w-full flex-col gap-3 rounded-3xl border bg-surface p-4 shadow-xl transition',
+          'flex w-full flex-col gap-3 rounded-3xl border bg-surface p-4 shadow-elevation-2 transition',
           armed && 'border-destructive/40 opacity-60',
           interrupted && 'border-gold/45',
           !armed && !interrupted && 'border-mint/35 shadow-glow-md-mint',
@@ -253,7 +253,7 @@ export function VoiceCancelTarget({ armed, hint }: { armed: boolean; hint?: Reac
         <span
           className={clsx(
             'grid size-14 place-items-center rounded-full border transition',
-            armed ? 'scale-110 border-destructive bg-destructive text-primary-foreground shadow-xl' : 'border-border-strong bg-surface text-muted',
+            armed ? 'scale-110 border-destructive bg-destructive text-primary-foreground shadow-elevation-2' : 'border-edge bg-field text-muted',
           )}
         >
           <X className="size-6" />

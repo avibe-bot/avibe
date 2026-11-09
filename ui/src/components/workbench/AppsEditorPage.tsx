@@ -112,7 +112,7 @@ const EditorSurface: React.FC<{
   return (
     <div
       data-theme="dark"
-      className={clsx('flex min-h-0 flex-1 overflow-hidden bg-surface', !fullBleed && 'rounded-xl border border-border')}
+      className={clsx('flex min-h-0 flex-1 overflow-hidden bg-surface', !fullBleed && 'rounded-xl border border-edge shadow-elevation-0')}
     >
       <Suspense fallback={<PaneLoading />}>
         <EditorApp

@@ -120,6 +120,12 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --motion-duration-fast: 160ms;
   --motion-duration-base: 240ms;
   --motion-duration-slow: 360ms;
+  /* A disclosure in the transcript (M3): opening (what opens is revealed top to bottom while the rows
+     below make room), closing (it folds back and cross-fades into what stands for it closed), and what
+     comes in after a fold where nothing cross-fades (the running card's compact view). */
+  --motion-disclose-open-duration: 440ms;
+  --motion-disclose-close-duration: 350ms;
+  --motion-disclose-summary-duration: 90ms;
   /* Between rows entering together; at most five rows are staggered. */
   --motion-stagger: 24ms;
 
@@ -221,6 +227,26 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
   --color-input: var(--input);
+
+  /* Elevation and edges (ui/design: system/elevation/scale, system/elevation/edges;
+     docs/plans/elevation-system.md). A shadow says only how high a surface sits:
+     0 a resting card's edge, 1 raised, 2 floating, 3 overlay, 3-up a sheet rising
+     from the bottom edge. A resting card, field, or soft button carries no opaque
+     border: `border-edge` and `border-field-edge` are transparent until the system
+     asks for more contrast, and its edge is the fill plus `shadow-elevation-0`.
+     Every value is a runtime variable re-anchored per palette, like `--card-wash`. */
+  --color-edge: var(--edge-border);
+  --color-field: var(--field);
+  --color-field-hover: var(--field-hover);
+  --color-field-edge: var(--field-border);
+  --shadow-elevation-0: var(--elevation-0);
+  --shadow-elevation-1: var(--elevation-1);
+  --shadow-elevation-2: var(--elevation-2);
+  --shadow-elevation-3: var(--elevation-3);
+  --shadow-elevation-3-up: var(--elevation-3-up);
+  /* The composer's own edge, at rest and when focused or working (`composer-edge`). */
+  --shadow-composer: var(--composer-shadow);
+  --shadow-composer-focus: var(--composer-shadow-focus);
   --color-ring: var(--ring);
   /* Each accent is four tokens: --X is the brand fill and the base every wash
      mixes from, --X-foreground is the label printed on that fill, --X-soft is
@@ -293,17 +319,6 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --radius-xl: 16px;
   --radius-2xl: 20px;
   --radius-3xl: 24px;
-
-  /* Card wash shadows (ui/design: system/shape/radius-shadows). The colour is `--card-wash` rather
-     than a literal because this block is `@theme inline`: Tailwind substitutes
-     each entry's value into the generated utility, so a light-theme override of
-     the token itself would compile to nothing and the wash would keep the dark
-     neon on a white page. Every other entry here is the same shape for the same
-     reason -- `--color-mint: var(--mint)` and friends -- so theming happens in
-     the runtime variable, never in the token. */
-  --shadow-mint-card-sm: 0 8px 32px -8px var(--card-wash);
-  --shadow-mint-card: 0 24px 48px -12px var(--card-wash);
-  --shadow-mint-card-lg: 0 32px 64px -12px var(--card-wash);
 
   /* The accent glow scale (ui/design: system/shape/glows): `dot` is a status
      dot, `xs` a control track, `sm` an icon tile and the Doctor pulse, `md` a
@@ -387,15 +402,6 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --shadow-glow-cta-violet: 0 0 var(--brand-glow-blur) -4px rgba(124, 91, 255, 0.6);
   --shadow-glow-cta-gold: 0 0 var(--brand-glow-blur) -4px rgba(255, 200, 87, 0.6);
 
-  /* The approved Workbench sidebar draws its selected nav row with a halo at the
-     sized scale's own `sm` geometry and alpha -- 16/-4 at 0.44 -- but the design
-     table gives it #10B98170 in Light beside #5BFFA070 in Dark, so the hue has to
-     follow the palette. A written-out RGB cannot: the sized rungs stay on the dark
-     neon precisely because their channels are spelled out. Mixing the live accent
-     is what `wire` already does for the same reason, which is why this is a role
-     named for its use rather than a fifth rung on the scale. */
-  --shadow-glow-nav-mint: 0 0 16px -4px color-mix(in srgb, var(--mint) 44%, transparent);
-
   /* The selected Bot's avatar (`.bot-avatar-selected`): its edge lit, with a halo
      that has to read in both themes. Dark draws the sized scale's own `md`
      (24/-6 at 0.44 of #5BFFA0); over white that neon barely registers, so Light
@@ -419,7 +425,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --surface-3: #06060e;
   --card: #11111c;
   --card-foreground: #f5f1e8;
-  --popover: #11111c;
+  /* Floating and overlay fill: one step above --card, so the surface rather than
+     a black smear separates a menu from the card under it (ui/design:
+     system/elevation/scale). */
+  --popover: #161622;
   --popover-foreground: #f5f1e8;
 
   /* On a dark surface a vivid accent is already legible, so ink tracks fill
@@ -478,14 +487,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --sidebar-background: #0e0e18;
   --nav-selected-bg: #5bffa029;
   --nav-selected-border: #5bffa059;
-  --nav-hover-bg: #1a1a26;
   /* The well behind the brand mark, and the hairline around the decorative theme
-     preview artwork in General Settings. --desktop-overlay-shadow is the shared
-     shadow colour for surfaces that float above the shell (the settings/connection
-     dialogs); it is a colour token, not a geometry one. */
+     preview artwork in General Settings. */
   --logo-well-background: #ffffff04;
   --illustration-card-border: #ffffff1c;
-  --desktop-overlay-shadow: #00000088;
 
   --mint: #5bffa0;
   --route-manual: #8bb4ff;
@@ -534,10 +539,34 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --selected-glow-blur: 24px;
   --selected-glow-spread: -6px;
   --selected-glow-alpha: 44%;
-  /* Colour of the card wash shadows (`--shadow-mint-card*`): each theme's own
-     brand mint at 0.078, which is why it is the one part of those shadows that
-     moves between themes. */
+  /* The onboarding provider cards' wash (onboarding-providers.css): each theme's
+     own brand mint at 0.078. */
   --card-wash: rgba(91, 255, 160, 0.078);
+
+  /* Elevation and edges (see the @theme entries). Dark separates layers by
+     surface lightness: a white hairline and a top highlight, light from above,
+     with black shadows that only read below a floating layer. */
+  --edge-border: transparent;
+  --field-border: transparent;
+  --field: rgba(255, 255, 255, 0.05);
+  --field-hover: rgba(255, 255, 255, 0.075);
+  --elevation-0: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --elevation-1: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.45);
+  --elevation-2: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 6px -2px rgba(0, 0, 0, 0.5), 0 12px 32px -8px rgba(0, 0, 0, 0.6);
+  --elevation-3: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 4px 12px -4px rgba(0, 0, 0, 0.5), 0 24px 64px -12px rgba(0, 0, 0, 0.7);
+  --elevation-3-up: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 -2px 8px -4px rgba(0, 0, 0, 0.4), 0 -16px 40px -12px rgba(0, 0, 0, 0.6);
+  /* The composer (`composer-edge`): its own edge at rest, mint when focused or
+     while an Agent works. */
+  --composer-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 1px rgba(255, 255, 255, 0.09), 0 10px 28px -12px rgba(0, 0, 0, 0.7);
+  --composer-shadow-focus: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 1px color-mix(in srgb, var(--mint) 45%, transparent), 0 10px 28px -12px rgba(0, 0, 0, 0.7);
+  /* Light that is live (a status dot) keeps its glow in the theme's own accent;
+     these are its blur and strength. Brand decoration keeps its glow here; in
+     Light it becomes `--glow-soft`, a soft shadow of its own hue, and an unread
+     card takes `--unread-shadow`. Dark draws neither. */
+  --dot-glow-blur: 8px;
+  --dot-glow-alpha: 90%;
+  --glow-soft: 0 6px 16px -8px color-mix(in srgb, currentColor 45%, transparent);
+  --unread-shadow: 0 0 #0000;
 
   /* The onboarding enable switch, drawn per theme by the reference: a lit border
      on the on-state in dark, none in light; a dark thumb on the lit track in dark,
@@ -631,11 +660,10 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
-    /* The light brand mint at 50%. It composites to ~1.5:1 on every light surface,
-       under the 3:1 non-text floor, and stays there by the same owner decision
-       as the fills above: the ring is a hint drawn beside a focused control,
-       and the brand value is not traded away to raise its ratio. */
-    --ring: rgba(16, 185, 129, 0.5);
+    /* The light brand mint, opaque. A field has no border at rest, so the ring
+       is its focus edge; at full alpha it reads 2.2-2.5:1 on the light surfaces
+       without moving off the brand value (owner, 2026-11-08). */
+    --ring: #10b981;
 
     /* Each --X-ink carries the same brand value as its fill: an accent is never
        moved off its design value to buy contrast. As small text on a light
@@ -653,10 +681,8 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
     --sidebar-background: #fcfcfe;
     --nav-selected-bg: #10b98114;
     --nav-selected-border: #10b98160;
-    --nav-hover-bg: #f5f5f6;
     --logo-well-background: #eef1f780;
     --illustration-card-border: #08081212;
-    --desktop-overlay-shadow: #0a0a1424;
 
     --mint: #10b981;
     --route-manual: #245bcd;
@@ -715,6 +741,23 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
     /* Light keeps the dark wash's geometry and 0.078 and swaps only the hue
        to the light brand mint. */
     --card-wash: rgba(16, 185, 129, 0.078);
+
+    /* Elevation and edges (see the @theme entries). Light shadows take the
+       brand's deep teal, rgb(10 52 44), instead of grey, under an ink ring. */
+    --edge-border: transparent;
+    --field-border: transparent;
+    --field: rgba(8, 8, 18, 0.045);
+    --field-hover: rgba(8, 8, 18, 0.07);
+    --elevation-0: 0 0 0 1px rgba(8, 8, 18, 0.04), 0 1px 2px rgba(10, 52, 44, 0.05), 0 4px 14px -6px rgba(10, 52, 44, 0.08);
+    --elevation-1: 0 0 0 1px rgba(8, 8, 18, 0.04), 0 1px 3px rgba(10, 52, 44, 0.08);
+    --elevation-2: 0 0 0 1px rgba(8, 8, 18, 0.07), 0 2px 6px -2px rgba(10, 52, 44, 0.08), 0 12px 32px -8px rgba(10, 52, 44, 0.16);
+    --elevation-3: 0 0 0 1px rgba(8, 8, 18, 0.07), 0 4px 12px -4px rgba(10, 52, 44, 0.1), 0 28px 64px -16px rgba(10, 52, 44, 0.24);
+    --elevation-3-up: 0 -1px 0 rgba(8, 8, 18, 0.07), 0 -12px 32px -12px rgba(10, 52, 44, 0.16);
+    --composer-shadow: 0 0 0 1px rgba(8, 8, 18, 0.04), 0 1px 2px rgba(10, 52, 44, 0.05), 0 10px 28px -12px rgba(10, 52, 44, 0.18);
+    --composer-shadow-focus: 0 0 0 1px color-mix(in srgb, var(--mint) 50%, transparent), 0 1px 2px rgba(10, 52, 44, 0.05), 0 10px 28px -12px color-mix(in srgb, var(--mint) 35%, transparent);
+    --dot-glow-blur: 6px;
+    --dot-glow-alpha: 60%;
+    --unread-shadow: 0 10px 26px -12px color-mix(in srgb, var(--mint) 45%, transparent);
     --switch-onboarding-track-off: #d7dce5;
     --switch-onboarding-border-off: #00000000;
     --switch-onboarding-track-on: #10b981;
@@ -778,7 +821,7 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --border-strong: rgba(8, 8, 18, 0.14);
   --input: rgba(8, 8, 18, 0.12);
   /* Mirrors the @media light block above; see the note there. */
-  --ring: rgba(16, 185, 129, 0.5);
+  --ring: #10b981;
 
   /* Bot avatar wells; mirrors the @media light block above. */
   --bot-mascot-shadow: drop-shadow(0 0.5px 0.5px rgba(8, 8, 18, 0.45)) drop-shadow(0 1px 2px rgba(8, 8, 18, 0.3));
@@ -791,10 +834,8 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --sidebar-background: #fcfcfe;
   --nav-selected-bg: #10b98114;
   --nav-selected-border: #10b98160;
-  --nav-hover-bg: #f5f5f6;
   --logo-well-background: #eef1f780;
   --illustration-card-border: #08081212;
-  --desktop-overlay-shadow: #0a0a1424;
 
   --mint: #10b981;
   --route-manual: #245bcd;
@@ -854,6 +895,23 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
      to the light brand mint. */
   --card-wash: rgba(16, 185, 129, 0.078);
 
+  /* Elevation and edges (see the @theme entries). Light shadows take the
+     brand's deep teal, rgb(10 52 44), instead of grey, under an ink ring. */
+  --edge-border: transparent;
+  --field-border: transparent;
+  --field: rgba(8, 8, 18, 0.045);
+  --field-hover: rgba(8, 8, 18, 0.07);
+  --elevation-0: 0 0 0 1px rgba(8, 8, 18, 0.04), 0 1px 2px rgba(10, 52, 44, 0.05), 0 4px 14px -6px rgba(10, 52, 44, 0.08);
+  --elevation-1: 0 0 0 1px rgba(8, 8, 18, 0.04), 0 1px 3px rgba(10, 52, 44, 0.08);
+  --elevation-2: 0 0 0 1px rgba(8, 8, 18, 0.07), 0 2px 6px -2px rgba(10, 52, 44, 0.08), 0 12px 32px -8px rgba(10, 52, 44, 0.16);
+  --elevation-3: 0 0 0 1px rgba(8, 8, 18, 0.07), 0 4px 12px -4px rgba(10, 52, 44, 0.1), 0 28px 64px -16px rgba(10, 52, 44, 0.24);
+  --elevation-3-up: 0 -1px 0 rgba(8, 8, 18, 0.07), 0 -12px 32px -12px rgba(10, 52, 44, 0.16);
+  --composer-shadow: 0 0 0 1px rgba(8, 8, 18, 0.04), 0 1px 2px rgba(10, 52, 44, 0.05), 0 10px 28px -12px rgba(10, 52, 44, 0.18);
+  --composer-shadow-focus: 0 0 0 1px color-mix(in srgb, var(--mint) 50%, transparent), 0 1px 2px rgba(10, 52, 44, 0.05), 0 10px 28px -12px color-mix(in srgb, var(--mint) 35%, transparent);
+  --dot-glow-blur: 6px;
+  --dot-glow-alpha: 60%;
+  --unread-shadow: 0 10px 26px -12px color-mix(in srgb, var(--mint) 45%, transparent);
+
   /* Wider CTA glow than dark: the same neon spreads far less over a white card,
      so 16px read as almost nothing here (owner decision 2026-08-14). */
   --brand-glow-blur: 20px;
@@ -875,6 +933,18 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --switch-onboarding-border-on: #00000000;
   --switch-onboarding-thumb-off: #ffffff;
   --switch-onboarding-thumb-on: #ffffff;
+}
+
+/* The system asks for more contrast: a field's and a card's edge come back as
+   lines (ui/design: system/elevation/edges). Forced-colours mode needs nothing:
+   the borders stay in place, transparent, and it paints them. Doubled selectors
+   outrank each palette block above. */
+@media (prefers-contrast: more) {
+  :root:root,
+  [data-theme][data-theme] {
+    --edge-border: color-mix(in srgb, var(--foreground) 30%, transparent);
+    --field-border: color-mix(in srgb, var(--foreground) 55%, transparent);
+  }
 }
 
 html,
@@ -1053,42 +1123,23 @@ pre,
 @keyframes motion-nav-return { from { transform: translateX(calc(-1 * var(--motion-drift))); } }
 @keyframes motion-fade-in { from { opacity: 0; } }
 @keyframes motion-fade-out { to { opacity: 0; } }
-/* What a disclosure in the transcript closes (src/lib/motion.ts useDisclosure;
-   docs/plans/web-ui-motion.md M3) leaves the way it came, while it still holds
-   its layout: it fades and shrinks to `--motion-scale-enter-sm` toward its
-   top-left corner on `instant`, exit (as what the turn at work hands over
-   does), then the layout lets go of it. An item it laid out (a Harness group's
-   member, with the rail it draws: `-children`) fades as a whole while what it
-   holds shrinks, so the box the scroller measures never moves. Chrome that
-   closes with it (a group head's collapse pill: `-fade`) fades out with it, on
-   the same time and curve. Reduced motion: it only fades. */
-.motion-disclose-out,
-.motion-disclose-out-children,
-.motion-disclose-out-children > *,
-.motion-disclose-out-fade {
+/* A disclosure in the transcript (docs/plans/web-ui-motion.md M3; src/lib/transcriptMotion.ts, the
+   script draws it; src/lib/motion.ts useDisclosure, its timing): what closes keeps its layout and takes no
+   input while it folds back (`leaving`), and chrome that goes with it (a group head's collapse pill) fades
+   out over the fold, exit. Where no summary copy cross-fades in (the running card's compact view), what
+   stands for it closed comes in after the fold: it fades in and grows from `--motion-scale-enter-sm` at
+   its top-left corner, enter. Reduced motion: it only fades. */
+.motion-disclose-leaving { pointer-events: none; }
+.motion-disclose-chrome-out {
   pointer-events: none;
-  animation-duration: var(--motion-duration-instant);
-  animation-timing-function: var(--motion-ease-exit);
-  animation-fill-mode: forwards;
+  animation: motion-fade-out var(--motion-disclose-close-duration) var(--motion-ease-exit) forwards;
 }
-.motion-disclose-out { transform-origin: top left; animation-name: motion-disclose-out; }
-.motion-disclose-out-children,
-.motion-disclose-out-fade { animation-name: motion-fade-out; }
-.motion-disclose-out-children > * { transform-origin: top left; animation-name: motion-shrink-out; }
-@keyframes motion-disclose-out { to { opacity: 0; scale: var(--motion-scale-enter-sm); } }
-@keyframes motion-shrink-out { to { scale: var(--motion-scale-enter-sm); } }
-/* Then what stands for it closed (a chip's pill, a group's folded card, the
-   running card's compact view) comes in where it lands: it fades in and grows
-   from `--motion-scale-enter-sm` at its top-left corner on `instant`, enter,
-   so nothing appears whole in one frame. */
 .motion-summary-in {
   transform-origin: top left;
-  animation: motion-summary-in var(--motion-duration-instant) var(--motion-ease-enter) backwards;
+  animation: motion-summary-in var(--motion-disclose-summary-duration) var(--motion-ease-enter) backwards;
 }
 @keyframes motion-summary-in { from { opacity: 0; scale: var(--motion-scale-enter-sm); } }
 @media (prefers-reduced-motion: reduce) {
-  .motion-disclose-out { animation-name: motion-fade-out; }
-  .motion-disclose-out-children > * { animation-name: none; }
   .motion-summary-in { animation-name: motion-fade-in; }
 }
 
@@ -1663,6 +1714,58 @@ pre,
   @keyframes skeleton-reveal {
     from { opacity: 0; }
     to { opacity: 1; }
+  }
+}
+
+/* The composer's edge (ui/design: system/elevation/edges, system/elevation/chat,
+   system/elevation/phone-chat-running). At rest a gradient hairline (mint, cyan,
+   violet) drawn as its border over a soft edge; focused, a mint ring outside it;
+   while an Agent works (`data-working`), a light sweeps the hairline, one turn in
+   2.8 s, and holds still under reduced motion. The fill is the composer's
+   surface, painted inside the border so the hairline shows around it. The shadow
+   is the caller's: `shadow-composer`, and `shadow-composer-focus` while focused
+   or working. */
+@property --composer-sweep {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@utility composer-edge {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--surface-2), var(--surface-2)) padding-box,
+    linear-gradient(
+        120deg,
+        color-mix(in srgb, var(--mint) 60%, transparent),
+        color-mix(in srgb, var(--cyan) 45%, transparent) 50%,
+        color-mix(in srgb, var(--violet) 45%, transparent)
+      )
+      border-box;
+  &[data-working] {
+    background:
+      linear-gradient(var(--surface-2), var(--surface-2)) padding-box,
+      conic-gradient(
+          from var(--composer-sweep),
+          transparent 0deg,
+          color-mix(in srgb, var(--mint) 85%, transparent) 60deg,
+          color-mix(in srgb, var(--cyan) 70%, transparent) 110deg,
+          transparent 170deg,
+          transparent 360deg
+        )
+        border-box,
+      linear-gradient(color-mix(in srgb, var(--mint) 25%, transparent), color-mix(in srgb, var(--mint) 25%, transparent)) border-box;
+    animation: composer-sweep 2.8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    &[data-working] {
+      animation: none;
+      --composer-sweep: 200deg;
+    }
+  }
+}
+@keyframes composer-sweep {
+  to {
+    --composer-sweep: 360deg;
   }
 }
 

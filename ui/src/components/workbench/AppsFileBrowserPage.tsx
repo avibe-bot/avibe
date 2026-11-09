@@ -1553,7 +1553,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         }
         dropOverlay={fileDragOver && (
           <div className="pointer-events-none absolute inset-1.5 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-cyan bg-cyan-soft/70">
-            <span className="rounded-md bg-surface px-3 py-1.5 text-[12.5px] font-medium text-foreground shadow-sm">
+            <span className="rounded-md bg-surface px-3 py-1.5 text-[12.5px] font-medium text-foreground shadow-elevation-1">
               {t('apps.fileBrowser.dropHint')}
             </span>
           </div>

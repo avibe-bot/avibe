@@ -284,7 +284,7 @@ export const TerminalTabs: React.FC<{
             <span
               className={clsx(
                 'flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium',
-                persistentReady ? 'border-mint/30 bg-mint/[0.08] text-mint-ink' : 'border-border bg-surface text-muted',
+                persistentReady ? 'border-mint/30 bg-mint/[0.08] text-mint-ink' : 'border-edge text-muted bg-field',
               )}
             >
               <span className={clsx('size-1.5 rounded-full', dotClass)} />

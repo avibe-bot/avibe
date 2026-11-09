@@ -51,7 +51,7 @@ export const ModeSelection: React.FC<ModeSelectionProps> = ({ data, onNext, onBa
               className={clsx(
                 'flex items-start gap-4 p-6 rounded-xl border-2 text-left transition-all',
                 isSelected
-                  ? 'border-accent bg-accent/5 shadow-md'
+                  ? 'border-accent bg-accent/5'
                   : 'border-border bg-panel',
                 isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-accent/50'
               )}

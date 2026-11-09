@@ -163,8 +163,8 @@ export const SettingsShortcutsPage: React.FC = () => {
             'flex h-9 w-full items-center justify-between gap-3 rounded-lg border bg-surface-2 px-3 text-left transition-colors md:w-[190px]',
             'focus:outline-none focus:ring-2 focus:ring-mint/40',
             active
-              ? 'border-mint/60 text-mint-ink shadow-glow-xs-mint'
-              : 'border-border-strong text-foreground hover:border-mint/35',
+              ? 'border-mint/60 text-mint-ink'
+              : 'border-edge text-foreground hover:border-mint/35 bg-field hover:bg-field-hover',
           )}
         >
           <Keyboard className="size-3.5 shrink-0 text-muted" />
@@ -211,8 +211,8 @@ export const SettingsShortcutsPage: React.FC = () => {
             'flex h-9 w-full items-center justify-between gap-3 rounded-lg border bg-surface-2 px-3 text-left transition-colors md:w-[190px]',
             'focus:outline-none focus:ring-2 focus:ring-mint/40',
             active
-              ? 'border-mint/60 text-mint-ink shadow-glow-xs-mint'
-              : 'border-border-strong text-foreground hover:border-mint/35',
+              ? 'border-mint/60 text-mint-ink'
+              : 'border-edge text-foreground hover:border-mint/35 bg-field hover:bg-field-hover',
           )}
         >
           <Keyboard className="size-3.5 shrink-0 text-muted" />
@@ -338,7 +338,7 @@ export const SettingsShortcutsPage: React.FC = () => {
                   void pet.apply(() => pet.actions!.setVoiceMode(event.target.value as 'hold' | 'toggle'));
                 }}
                 wrapperClassName="w-[190px] max-w-full"
-                className="h-9 rounded-lg border-border-strong bg-surface-2 px-3 text-[12px]"
+                className="h-9 rounded-lg px-3 text-[12px]"
               >
                 <option value="hold">{t('settings.shortcuts.desktopMiniMode.hold')}</option>
                 <option value="toggle">{t('settings.shortcuts.desktopMiniMode.toggle')}</option>

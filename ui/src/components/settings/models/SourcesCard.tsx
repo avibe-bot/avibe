@@ -44,7 +44,7 @@ export const SourcesCard: React.FC<{
   // sources so users never have to coordinate a second scroll area here; beside
   // the routes it sticks near the top so its wires stay readable.
   return (
-    <section className="model-hub-upstream-card relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="model-hub-upstream-card relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-edge bg-surface shadow-elevation-0">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>

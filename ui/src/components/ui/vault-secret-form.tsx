@@ -1079,7 +1079,7 @@ export const VaultSecretForm: React.FC<{
               }}
               className={cn(
                 'flex flex-col gap-1.5 rounded-[10px] border p-3 text-left transition-colors',
-                selected ? 'border-[1.5px] border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
+                selected ? 'border-[1.5px] border-mint bg-mint-soft' : 'border-edge bg-field hover:bg-field-hover',
               )}
             >
               <span className="flex items-center gap-2">
@@ -1100,7 +1100,7 @@ export const VaultSecretForm: React.FC<{
   // keys already always approve, so it isn't shown for them.
   const signApprovalToggle =
     isKeypair && protection === 'standard' ? (
-      <div className="flex items-start gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
+      <div className="flex items-start gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="text-[13px] font-semibold text-foreground">{t('vaults.dialog.alwaysAskSign')}</span>
           <span className="text-[11.5px] leading-snug text-muted">{t('vaults.dialog.alwaysAskSignHelp')}</span>
@@ -1132,7 +1132,7 @@ export const VaultSecretForm: React.FC<{
       )}
       {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock warnDraftDiscard vault={protectedVault} />}
       {protection === 'standard' && checkingAvault && (
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+        <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
           <Loader2 className="size-4 animate-spin" />
           {t('vaults.dialog.checkingAvault')}
         </div>
@@ -1191,7 +1191,7 @@ export const VaultSecretForm: React.FC<{
   if (isEdit && editSecret) {
     return (
       <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
-        <div className="flex items-center gap-3 rounded-xl border border-border bg-surface-2 p-3.5">
+        <div className="flex items-center gap-3 rounded-xl border border-edge bg-surface-2 p-3.5 shadow-elevation-0">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/10 text-muted">
             <Lock className="size-4" />
           </span>
@@ -1255,7 +1255,7 @@ export const VaultSecretForm: React.FC<{
             <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{t('vaults.dialog.nameUpper')}</span>
             <span className="whitespace-normal break-all font-mono text-[15px] font-semibold text-foreground">{secretName}</span>
           </div>
-          <Badge variant="secondary" className="bg-surface">{t('vaults.request.notSetYet')}</Badge>
+          <Badge variant="secondary">{t('vaults.request.notSetYet')}</Badge>
         </div>
 
         {!isKeypair && (
@@ -1358,7 +1358,7 @@ export const VaultSecretForm: React.FC<{
       {!isKeypair && staticFields}
 
       {isKeypair && protection === 'standard' && (
-        <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
+        <div className="flex flex-col gap-2.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
           <span className="text-xs text-muted">{t('vaults.dialog.signingKeyHelp')}</span>
           <div className="grid grid-cols-2 gap-2">
             {(['generate', 'import'] as const).map((src) => (
@@ -1459,7 +1459,7 @@ export const VaultSecretForm: React.FC<{
           back (protocol v2 §7.2). Shown once the vault is unlocked; the gating panel below handles
           the locked case. No import option — generate is the single path. */}
       {isKeypair && protection === 'protected' && protectedCreateReady && (
-        <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
+        <div className="flex flex-col gap-2.5 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
           <span className="text-xs text-muted">{t('vaults.dialog.signingKeyProtectedHelp')}</span>
           <Button
             type="button"

@@ -1,5 +1,4 @@
 """Transient native search cut-offs change one Turn's route, never capability evidence."""
-import json
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -19,7 +18,7 @@ from modules.agents.vibey.agent import VibeyAgent, _Run
 from modules.agents.vibey.native_search_recovery import should_switch, turn_recovery_facts
 from tests.agent_core.fakes import assistant
 from tests.test_vibey_agent import (  # noqa: F401 -- shared real-store/Delivery harness and fixtures
-    SESSION, _Harness, _NATIVE_SEARCH, continuation_policy, engine, published, session,
+    SESSION, _Harness, _NATIVE_SEARCH, _canonical_tool_steps, continuation_policy, engine, published, session,
 )
 
 
@@ -133,6 +132,7 @@ async def test_actual_continuations_switch_keep_proxy_for_later_hops_and_reset_n
 ):
     """Real loop, persisted response metadata, fresh hops, gateway function and committed card/IM line."""
     continuation_policy(initial_delay_s=0)
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
     clock = [0.0]
     monkeypatch.setattr("modules.agents.vibey.agent.time", SimpleNamespace(monotonic=lambda: clock[0]))
     if budget == "cap":
@@ -160,6 +160,7 @@ async def test_actual_continuations_switch_keep_proxy_for_later_hops_and_reset_n
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, platform, scripts, language=language, gateway_client=client)
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
         harness.controller.hub_hosted_tools = {"web_search": _NATIVE_SEARCH}
         harness.controller.model_hub_runtime.has_proxied_hosted_candidate = lambda *_: True
         request = harness.request("search")
@@ -181,19 +182,22 @@ async def test_actual_continuations_switch_keep_proxy_for_later_hops_and_reset_n
     assert len(proxy_requests) == 1
     assert proxy_requests[0].url.path.endswith("/hosted-tools/web_search")
     assert all(entry.kind != "replay_refusal" for entry in await harness.context_rows())
-    from sqlalchemy import select
-    from storage.models import agent_events
+    response_ids = tuple(row.row_id for row in await harness.context_rows() if row.kind == "response")
     with engine.connect() as conn:
-        events = list(conn.execute(
-            select(agent_events.c.content_json, agent_events.c.content_text).where(agent_events.c.event_type == "tool_call")
-        ))
-    cards = [json.loads(row.content_json)["hosted"] for row in events]
+        events = _canonical_tool_steps(conn, response_ids)
+    cards = [row["content"]["hosted"] for row in events if row["content"].get("hosted")]
     proxy = next(card for card in cards if card["mode"] == "proxy")
     assert proxy["status"] == "completed"
     assert proxy["route_switch"] == "native_interrupted" and "fallback_from" not in proxy
     expected = ("Native search was interrupted; switched to Exa (free)." if language == "en"
                 else "自带搜索中断，已改用 Exa（免费）。")
-    assert any(expected in row.content_text for row in events)
+    line = next(row["text"] for row in events if expected in row["text"])
+    if platform == "telegram":
+        assert harness.controller.im_client.sent.count(line) == 1
+    else:
+        live = [payload["content"]["hosted"] for name, payload in published
+                if name == "message.new" and (payload.get("content") or {}).get("hosted")]
+        assert [card for card in live if card["call_id"] == proxy["call_id"]] == [proxy]
 
 
 @pytest.mark.parametrize("proxy_available", [False, True])

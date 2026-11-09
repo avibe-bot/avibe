@@ -41,7 +41,7 @@ export function VaultFieldList({ children, onAdd, addDisabled }: {
 }) {
   const { t } = useTranslation();
   return (
-    <div className="@container/fields overflow-hidden rounded-xl border border-border bg-card">
+    <div className="@container/fields overflow-hidden rounded-xl border border-edge bg-card shadow-elevation-0">
       <div className="divide-y divide-border">{children}</div>
       <button
         type="button"

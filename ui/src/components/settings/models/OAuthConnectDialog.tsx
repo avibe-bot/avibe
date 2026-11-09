@@ -69,7 +69,7 @@ type ConnectPhase = 'choose' | 'flow';
 
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
-  <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2/40 px-4 py-3">
+  <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2/40 px-4 py-3 shadow-elevation-0">
     <span className="text-[13px] font-medium text-foreground">
       <span className="font-mono text-muted">{n} · </span>
       {label}
@@ -768,7 +768,7 @@ export const OAuthConnectDialog: React.FC<{
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-add-sub-overlay fixed inset-0 z-50" />
           <DialogPrimitive.Content
-            className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-border-strong bg-surface p-0 shadow-xl outline-none"
+            className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-edge bg-popover p-0 shadow-elevation-3 outline-none"
             onOpenAutoFocus={(event) => {
               event.preventDefault();
               window.requestAnimationFrame(() => optionRefs.current[channel]?.focus());
@@ -829,7 +829,7 @@ export const OAuthConnectDialog: React.FC<{
                       'model-hub-add-sub-option flex items-start gap-3 text-left transition-colors',
                       selected
                         ? 'border-mint/35 bg-mint/[0.06]'
-                        : 'model-hub-add-sub-option--idle border-border hover:border-border-strong',
+                        : 'model-hub-add-sub-option--idle border-edge shadow-elevation-0',
                       disabled && 'cursor-not-allowed opacity-55 hover:border-border',
                     )}
                   >

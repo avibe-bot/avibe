@@ -174,9 +174,10 @@ own. A Session has none of these; a Bot has all three.
   say, how to choose the model, how to bring a Session to the front, and how
   to follow up. The `use-avibe-harness` Skill (about 4k tokens) stays out of
   the Bot prompt, and a Bot loads it only to set a Task or Watch. The section
-  says a dispatched Session reports back, that Avibe tells the Bot when one
-  goes idle without answering (D14), and that following up is the Bot's; it
-  never asks for `--callback`.
+  says a dispatched Session reports back, that Avibe sends the Bot a read receipt
+  with its last reply when one handles the message without writing back (D14),
+  and that following up is the Bot's when it was waiting on it; it never asks
+  for `--callback`.
 
 ### D5. Web surfaces
 
@@ -572,10 +573,14 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   A can receive a notice if B then stays quiet. Avoiding that would require the
   reply attribution this rule intentionally excludes.
 - When B is idle and no pending input, open delegate, armed Watch, or pending
-  Task will wake B, Avibe sends A one short Harness notice naming B's title and
-  Session id, a last-reply excerpt (up to 300 characters), and a follow-up command.
-  A visible Session asking its user a question is idle too: its question is useful
-  information for the dispatcher. Bots use their permanent Sessions under the same rule.
+  Task will wake B, Avibe sends A one short Harness read receipt: its header says
+  `read receipt from @<bot:handle>` for a Bot or `read receipt from #<id> "<title>"`
+  for an ordinary Session, and its body says B handled the message without writing
+  back, includes the last-reply excerpt (up to 300 characters), and gives a
+  follow-up command only if A was waiting on it. This pure notice costs its sender
+  one short wake-up, usually answered silently. A visible Session asking its user
+  a question is idle too: its question is useful information for the dispatcher.
+  Bots use their permanent Sessions under the same rule.
 - A newer accepted message from A re-arms the pair. Explicit return messages,
   accepted callbacks, and failure notices suppress a redundant report. Pending
   outgoing messages count before their recipient accepts them, and any pending
@@ -707,18 +712,19 @@ Your memory holds what the user entrusts to you: what they ask you to remember, 
 
 ### Handing out work (every Bot, after the main Bot's section)
 
-Put a fresh Session in a Project with `--cwd` until `vibe agent run --project`
-exists; then this example switches. The reporting sentence is the owner's
+Put a fresh Session in the Project where the work lives with `--project`; use
+`--cwd` for a matter folder without a Project. The reporting sentence is the owner's
 follow-through wording (2026-11-08): it holds because a dispatched Session is
-told how to report, and Avibe tells the dispatcher when one goes idle without
-answering or its run does not complete (D4, D14). It does not ask for
+told how to report, and Avibe sends the dispatcher a read receipt with its last
+reply when one handles a message without writing back; a run that does not
+complete is still reported (D4, D14). It does not ask for
 `--callback`.
 
 ```markdown
 ## Handing out work
-`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --cwd <dir>`, in the directory where the work lives). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
-The Sessions you dispatch report back to you; if one goes idle without answering, Avibe tells you, and following up is yours. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
+The Sessions you dispatch report back to you; if one handles your message without writing back, Avibe sends you a read receipt with its last reply, and following up is yours when you were waiting on it. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```
 
 ### The memory Bot

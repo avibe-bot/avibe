@@ -47,7 +47,7 @@ const ManageModelsButton: React.FC<{
     <Button
       variant="outline"
       size="xs"
-      className={cn('rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm', className)}
+      className={cn('rounded-md px-2.5 text-[11px] font-semibold', className)}
       onClick={onClick}
       disabled={disabled}
     >
@@ -93,7 +93,7 @@ const ModelRow: React.FC<{
     <div
       data-route-backend={agent.backend}
       data-route-model={modelId}
-      className="model-hub-model-row relative flex h-[52px] w-full min-w-0 items-center gap-2.5 rounded-md border border-border px-3 text-left"
+      className="model-hub-model-row relative flex h-[52px] w-full min-w-0 items-center gap-2.5 rounded-md border border-edge px-3 text-left shadow-elevation-0"
     >
       <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
       <span className="pointer-events-none flex min-w-0 flex-1 flex-col justify-center gap-0.5 pr-1">
@@ -252,7 +252,7 @@ const AgentModelCard: React.FC<{
     ? t('settings.models.gateway.fail.switchToDirect') as string
     : subtitle;
   return (
-    <section className="overflow-hidden rounded-lg border border-border bg-background" data-agent-backend={agent.backend}>
+    <section className="overflow-hidden rounded-lg border border-edge bg-surface shadow-elevation-0" data-agent-backend={agent.backend}>
       <div
         tabIndex={-1}
         data-agent-group-head={agent.backend}
@@ -268,7 +268,7 @@ const AgentModelCard: React.FC<{
               open={modeMenuOpen}
               onOpenChange={setModeMenuOpen}
               sheetTitle={t('settings.models.gateway.modeMenu.title') as string}
-              className="model-hub-mode-menu w-[324px] rounded-[10px] border-border-strong bg-card p-1.5 !shadow-[var(--model-hub-menu-shadow)]"
+              className="model-hub-mode-menu w-[324px] rounded-[10px] p-1.5"
               trigger={(
                 <button
                   type="button"
@@ -327,7 +327,7 @@ const AgentModelCard: React.FC<{
           {agent.mode === 'hub' ? (
             <div className="model-hub-agent-head-actions">
               <ManageModelsButton className="model-hub-agent-head-action" disabled={pending} onClick={() => onOpenModels(agent)} />
-              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
+              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
             </div>
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToGateway')}</Button>}
         </div>

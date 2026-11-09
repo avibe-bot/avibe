@@ -16,12 +16,12 @@ import {
 // hint; everything else the neutral surface. Non-live nodes are dimmed by the
 // caller via ``faded``.
 function shellClass(node: AgentGraphNode, selected: boolean): string {
-  if (selected) return 'border-mint/70 bg-mint-soft shadow-glow-md-mint';
+  if (selected) return 'border-mint/70 bg-mint-soft';
   const tone = statusMeta(node.status).tone;
   if (tone === 'destructive') return 'border-destructive/40 bg-destructive/[0.05]';
   if (node.status === 'active') return 'border-mint/40 bg-surface';
   if (node.status === 'queued') return 'border-gold/40 bg-surface';
-  return 'border-border bg-surface';
+  return 'border-edge bg-surface shadow-elevation-0';
 }
 
 interface AgentGraphNodeCardProps {
@@ -76,7 +76,7 @@ export const AgentGraphNodeCard: React.FC<AgentGraphNodeCardProps> = ({
         {node.agent_backend && (
           <span
             className={clsx(
-              'shrink-0 rounded border border-border-strong bg-foreground/[0.04] px-1 py-0 font-mono text-[9px] font-bold',
+              'shrink-0 rounded border border-edge bg-foreground/[0.04] px-1 py-0 font-mono text-[9px] font-bold shadow-elevation-0',
               backendClass,
             )}
           >

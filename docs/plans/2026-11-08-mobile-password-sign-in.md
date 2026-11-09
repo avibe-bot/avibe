@@ -2,8 +2,10 @@
 
 Status: approved by the owner on 2026-11-08 at 12:46 Asia/Shanghai, with the
 four decisions below, and implemented as specified; `ios/README.md` (Password
-sign-in) records the shipped contract. The design frames are
-`mobile-app/password/*`.
+sign-in) records the shipped contract. On 2026-11-09 at 01:51 Asia/Shanghai
+the owner replaced decision 2 (identifier-first) with one form, after using
+TestFlight build 0.1.0 (3); the flow below describes the one form. The design
+frames are `mobile-app/password/*`.
 
 ## Background
 
@@ -41,13 +43,18 @@ the app, and a reset-by-email page on avibe.bot.
 ## Flow
 
 1. **Email step** (`password/email`). Send verification code stays primary.
-   "Sign in with password" is a link under it. Both validate the email first;
-   the invalid copy becomes "Enter a valid email address."
-2. **Password step** (`password/default` … `network`). The email shows complete
-   with Change email. A visually hidden, read-only `autocomplete="username"`
-   field carries it beside the `current-password` field, with a show/hide
-   toggle. Sign in calls `auth.signInWithPassword({email, password})`. The only
-   client check is a non-empty password.
+   "Sign in with password" is a link under it. It switches the step to
+   password mode at once and never asks for the email first. Send verification
+   code validates the email; the invalid copy becomes "Enter a valid email
+   address."
+2. **Password mode** (`password/switched-empty` … `network`). One form: the
+   same email field, now `autocomplete="username"` (typed text carried over,
+   focused when empty), above the `current-password` field with a show/hide
+   toggle, then Sign in and "Sign in with an email code", which returns to code
+   mode with the email kept. Return in the email field moves to the password;
+   Return in the password submits. Sign in checks the email
+   (`password/password-email-invalid`) and needs a non-empty password, then
+   calls `auth.signInWithPassword({email, password})`.
 3. **Result.** The result is the same as `auth.verifyOtp`. `signedIn` goes to
    the picker. `twoFactorRequired` goes to `two-factor/*`, whose existing
    contract is unchanged.
@@ -67,8 +74,9 @@ the app, and a reset-by-email page on avibe.bot.
    redirects to `/login?next=/app/account/security`. The person signs in there
    with email and chooses Set or change password.
 
-Change email, Back, and leaving the password step clear the password and its
-error. The email is kept.
+Returning to code mode (the link or Back) and leaving the step clear the
+password and its error. The email is kept, and editing it keeps the password.
+Forgot password and "Use an email code instead" check the email first.
 
 ## Bridge contract
 
@@ -128,8 +136,11 @@ this plan (decision 3).
 
 1. Entry: a "Sign in with password" link under Send verification code, rather
    than a segmented control or a second button.
-2. Identifier-first: the password page shows the email from the email step
-   with Change email, rather than a second editable email field.
+2. ~~Identifier-first: the password page shows the email from the email step
+   with Change email, rather than a second editable email field.~~ Replaced on
+   2026-11-09 at 01:51 Asia/Shanghai: "Sign in with password" switches the
+   email step to one form with the email and the password, without asking for
+   the email first.
 3. Forgot password: an email code now, and a new password on avibe.bot's
    Account security page in Safari. No new reset page and no new allowlist
    entry.
@@ -144,7 +155,7 @@ this plan (decision 3).
     error mapping above, `Retry-After`, `weak_password` pass-through, and the
     absence of the password from results, errors, and logs.
   - Bridge and page tests cover each `password/*` state. They also cover the
-    password clearing on Change email, Back, and leaving the step; the email
+    password clearing on returning to code mode and leaving the step; the email
     code fallback reusing `auth.requestOtp`; and the weak notice following a
     second factor.
 - Manual on a signed device:

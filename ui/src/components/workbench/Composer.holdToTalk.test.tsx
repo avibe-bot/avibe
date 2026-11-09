@@ -100,7 +100,7 @@ const view = (props: Props = {}) => (
 );
 
 const renderComposer = (props: Props = {}) => render(view(props));
-const box = () => document.querySelector<HTMLElement>('[data-hold-to-talk], .rounded-2xl.border-border-strong')!;
+const box = () => document.querySelector<HTMLElement>('[data-hold-to-talk], .composer-edge')!;
 const textarea = () => screen.getByRole('textbox') as HTMLTextAreaElement;
 
 const asrAvailable = async () => {

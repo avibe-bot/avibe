@@ -83,8 +83,35 @@ export function conversation(count: number): WorkbenchMessage[] {
   return Array.from({ length: count }, (_, index) => messageAt(index));
 }
 
-/** A settled execution-process group above every third reply. */
-export function activityGroups(messages: WorkbenchMessage[]): TurnActivityGroupWire[] {
+type ActivityRowWire = NonNullable<TurnActivityGroupWire['rows']>[number];
+
+/** The steps a settled turn took, as its group's rows load: narration, tool calls, and a long output. */
+export function activityRecords(group: TurnActivityGroupWire): ActivityRowWire[] {
+  const at = Date.parse(group.started_at ?? '2026-10-01T08:00:00Z');
+  const row = (index: number, kind: ActivityRowWire['kind'], text: string): ActivityRowWire => ({
+    id: `evt_${group.id}_${index}`,
+    kind,
+    text,
+    created_at: new Date(at + index * 3_000).toISOString(),
+  });
+  const tool = (index: number, name: string, args: Record<string, unknown>) => row(index, 'tool_call', `🔧 \`${name}\` \`${JSON.stringify(args)}\``);
+  return [
+    row(0, 'assistant', 'Read the failed step of the nightly build first.'),
+    tool(1, 'Bash', { command: 'gh run view 4231 --log-failed | tail -80', description: 'Read the failed step' }),
+    tool(2, 'Read', { file_path: '/Users/demo/avibe/ui/src/lib/parseList.ts' }),
+    tool(3, 'Grep', { pattern: 'parseList\\(', path: 'ui/src' }),
+    row(4, 'assistant', 'The `parseList` test failed:\n\n```\nFAIL  src/lib/parseList.test.ts > ignores a trailing comma\n  AssertionError: expected [ \'a\', \'b\', \'c\', \'\' ]\n  to deeply equal [ \'a\', \'b\', \'c\' ]\n```\n\nThe split keeps the empty item.'),
+    tool(5, 'Edit', { file_path: '/Users/demo/avibe/ui/src/lib/parseList.ts' }),
+    tool(6, 'Bash', { command: 'npx vitest run src/lib/parseList.test.ts', description: 'Run the one test' }),
+    row(7, 'assistant', 'It passes. Run the unit suite once more.'),
+    tool(8, 'Bash', { command: 'npx vitest run src/lib', description: 'Unit suite' }),
+    row(9, 'assistant', 'All 1841 tests pass.'),
+  ];
+}
+
+/** A settled execution-process group above every third reply; `records`: with the steps it took (else it
+ *  counts four and has none). */
+export function activityGroups(messages: WorkbenchMessage[], records = false): TurnActivityGroupWire[] {
   return messages
     .filter((message, index) => message.type === 'result' && index % 3 === 1)
     .map((message) => ({
@@ -93,7 +120,7 @@ export function activityGroups(messages: WorkbenchMessage[]): TurnActivityGroupW
       anchor_position: 'before',
       open: false,
       status: 'done',
-      steps: 4,
+      steps: records ? 10 : 4,
       duration_ms: 42_000,
       started_at: message.created_at,
       rows: [],

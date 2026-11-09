@@ -247,8 +247,7 @@
     },
     "password": {
       "entry": "使用密码登录",
-      "title": "输入密码。",
-      "signingInAs": "登录账号",
+      "codeEntry": "使用验证码登录",
       "label": "密码",
       "forgot": "忘记密码？",
       "show": "显示密码",
@@ -5958,6 +5957,7 @@
       "toolsHiddenLive": "工具调用已隐藏 · 进行中",
       "params": "参数",
       "viewJson": "JSON",
+      "loading": "正在加载执行过程…",
       "jsonLoading": "加载中…",
       "copy": "复制",
       "copied": "已复制",

@@ -67,7 +67,7 @@ export const AccountMenu: React.FC<{ openUpward?: boolean }> = ({ openUpward = f
         <div
           role="menu"
           className={clsx(
-            'absolute z-50 min-w-[14rem] rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-xl',
+            'absolute z-50 min-w-[14rem] rounded-lg border border-edge bg-popover py-1 text-popover-foreground shadow-elevation-2',
             openUpward ? 'bottom-full left-0 mb-2' : 'top-full right-0 mt-2'
           )}
         >

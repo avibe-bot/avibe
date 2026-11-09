@@ -655,56 +655,59 @@ def _persist_agent_message_attempt(
             # is left to the agent-id wiring later; the session already carries it.
             agent_name, backend = _agent_provenance_from_context(context, session_row)
             if is_tool_call:
-                turn_id, run_id = _trace_ids_from_context(context)
-                # Captured for the (gated) live activity publish after commit; the
-                # row itself is trace data in ``agent_events`` (never in ``messages``).
-                tool_event_row = agent_events_service.append(
-                    conn,
-                    scope_id=scope_id,
-                    session_id=row_session_id,
-                    platform=context.platform,
-                    event_type="tool_call",
-                    visibility="trace",
-                    # A trace row carries text and no sidecar, so its copy is
-                    # written here rather than finalized with spans.
-                    text=materialize_citations(text, citations) or text,
-                    content={
-                        "kind": canonical_type or "tool_call",
-                        **(
-                            {"hosted": _hosted_card(conn, context, hosted, scope_id=scope_id, session_id=row_session_id)}
-                            if hosted
-                            else {}
-                        ),
-                    },
-                    metadata={
-                        **(
-                            {PRESENTATION_METADATA_KEY: presentation.to_metadata()}
-                            if presentation is not None
-                            else {}
-                        ),
-                        "canonical_type": canonical_type or "tool_call",
-                        **({SOURCE_KEY: metadata[SOURCE_KEY]} if metadata and SOURCE_KEY in metadata else {}),
-                        # A native hosted call happened before the text of the response that
-                        # carried it, though it is emitted after that row commits.
-                        **(
-                            {"precedes_message_id": hosted["response_id"]}
-                            if hosted and isinstance(hosted.get("response_id"), str)
-                            else {}
-                        ),
-                    },
-                    agent_name=agent_name,
-                    backend=backend,
-                    turn_id=turn_id,
-                    run_id=run_id,
-                )
+                from storage.compatibility import permits_tool_trace_suppression
+
                 projected_id = linked_step(metadata)
+                projected_step = None
                 if projected_id and row_session_id:
                     projected = tool_activity_service.response_steps(
                         conn, session_id=row_session_id, response_ids=(metadata[SOURCE_KEY]["response_id"],),
                     )
-                    # The INSERT above remains the old reader's compatibility copy;
-                    # live readers receive the same canonical identity as reload.
-                    tool_event_row = next((step for step in projected if step["id"] == projected_id), tool_event_row)
+                    projected_step = next((step for step in projected if step["id"] == projected_id), None)
+                # Only a supported, committed call instance can replace this write.
+                # A different routed scope/platform still needs its physical trace.
+                omit_trace = (
+                    projected_step is not None
+                    and projected_step.get("scope_id") == scope_id
+                    and projected_step.get("platform") == context.platform
+                    and permits_tool_trace_suppression(conn)
+                )
+                tool_event_row = projected_step
+                if not omit_trace:
+                    turn_id, run_id = _trace_ids_from_context(context)
+                    trace = agent_events_service.append(
+                        conn,
+                        scope_id=scope_id,
+                        session_id=row_session_id,
+                        platform=context.platform,
+                        event_type="tool_call",
+                        visibility="trace",
+                        text=materialize_citations(text, citations) or text,
+                        content={
+                            "kind": canonical_type or "tool_call",
+                            **(
+                                {"hosted": _hosted_card(conn, context, hosted, scope_id=scope_id, session_id=row_session_id)}
+                                if hosted else {}
+                            ),
+                        },
+                        metadata={
+                            **(
+                                {PRESENTATION_METADATA_KEY: presentation.to_metadata()}
+                                if presentation is not None else {}
+                            ),
+                            "canonical_type": canonical_type or "tool_call",
+                            **({SOURCE_KEY: metadata[SOURCE_KEY]} if metadata and SOURCE_KEY in metadata else {}),
+                            **(
+                                {"precedes_message_id": hosted["response_id"]}
+                                if hosted and isinstance(hosted.get("response_id"), str) else {}
+                            ),
+                        },
+                        agent_name=agent_name,
+                        backend=backend,
+                        turn_id=turn_id,
+                        run_id=run_id,
+                    )
+                    tool_event_row = projected_step or trace
             else:
                 # Workbench Chat only: rewrite ``file://`` links in the persisted copy
                 # to same-origin media-proxy URLs so the browser renders agent images
@@ -847,8 +850,8 @@ def _persist_agent_message_attempt(
             # ``native_message_id`` arrives twice, and the promote path can decline
             # too, so a retried terminal output persists nothing. Replaying one
             # logical output must not lift a long-finished session back to the top of
-            # the list on nothing new. The tool-call branch always inserts, so this
-            # only ever excludes the deduplicated chat row.
+            # the list on nothing new. A tool step is either newly traced or
+            # verified against its committed canonical source before ranking.
             if row_session_id and (appended_row is not None or tool_event_row is not None):
                 activity_ranked = workbench_sessions_service.touch_session_agent_activity(
                     conn, row_session_id

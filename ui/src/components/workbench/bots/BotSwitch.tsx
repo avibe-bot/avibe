@@ -60,7 +60,7 @@ export function BotConversationTitle({ bot }: { bot: Bot }) {
           {othersUnread > 0 && (
             <span
               aria-label={t('bots.othersUnread', { count: othersUnread })}
-              className="absolute -right-2.5 -top-2 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-cyan px-0.5 font-mono text-3xs font-bold text-accent-foreground shadow-glow-xs-cyan"
+              className="absolute -right-2.5 -top-2 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-cyan px-0.5 font-mono text-3xs font-bold text-accent-foreground"
             >
               {countLabel(othersUnread)}
             </span>

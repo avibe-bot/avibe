@@ -130,7 +130,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
   return (
     <div
       className={clsx(
-        'flex flex-col gap-3 rounded-xl border border-border bg-foreground/[0.025] p-5',
+        'flex flex-col gap-3 rounded-xl border border-edge bg-foreground/[0.025] p-5 shadow-elevation-0',
       )}
     >
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -197,7 +197,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
           round-trip went through. The excerpt is server-side trimmed to
           240 chars, single-line. */}
       {lastResult?.ok && lastResult.excerpt && (
-        <div className="rounded-md border border-border bg-background px-3 py-2">
+        <div className="rounded-md border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <p className="font-mono text-[11px] uppercase tracking-wide text-muted">
             {t('settings.backends.testConnectionResponseLabel')}
           </p>

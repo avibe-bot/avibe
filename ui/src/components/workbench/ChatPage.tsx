@@ -4057,7 +4057,6 @@ const ActivityStrip: React.FC<{
       aria-live="polite"
       className={clsx(
         'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
-        !queuedOnly && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
@@ -4111,7 +4110,7 @@ const ActivityStrip: React.FC<{
               // (a downward flip would cover the composer). Disable Radix
               // collision flipping so the popover stays above even when zoomed.
               avoidCollisions={false}
-              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border-border-strong p-0 shadow-lg"
+              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg p-0"
             >
               <div className="flex max-h-[300px] flex-col gap-0.5 overflow-y-auto p-1">
                 {active.map((item) => (
@@ -6068,7 +6067,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
           size="icon"
           onClick={jumpToLatest}
           aria-label={t('chat.scrollToBottom')}
-          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full border-border-strong shadow-lg"
+          // Floating over the transcript, so opaque, at level 2 (ui/design: system/elevation/scale).
+          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full bg-popover shadow-elevation-2 hover:bg-popover active:bg-popover"
         >
           <ChevronDown className="size-4" />
         </Button>
@@ -6079,8 +6079,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
 
 /**
  * A Harness group in the transcript: its head, and while it is open its members on the rail and the bar
- * that closes it, each a transcript item of its own. Closed, the members leave in place while the head
- * still draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
+ * that closes it, each a transcript item of its own. Closed, the members fold back while the head still
+ * draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
  */
 function HarnessGroupItem({
   groupKey,
@@ -6095,7 +6095,7 @@ function HarnessGroupItem({
   onToggle: () => void;
   renderRow: (message: WorkbenchMessage, index: number) => React.ReactNode;
 }) {
-  const { present, closing, closed } = useDisclosure(open);
+  const { present, closing } = useDisclosure(open);
   return (
     <>
       <HarnessGroup
@@ -6103,7 +6103,6 @@ function HarnessGroupItem({
         members={members.map(({ message }) => message)}
         expanded={open}
         closing={closing}
-        closed={closed}
         onToggle={onToggle}
       />
       {present && members.map(({ message, index }) => (
@@ -6112,7 +6111,7 @@ function HarnessGroupItem({
           data-transcript-row=""
           {...{ [ITEM_KEY_ATTRIBUTE]: `harness-member:${message.id}`, [REVEAL_ATTRIBUTE]: '' }}
           aria-hidden={closing || undefined}
-          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-out-children')}
+          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-leaving')}
         >
           {renderRow(message, index)}
         </div>
@@ -6617,7 +6616,7 @@ export const MessageRow = memo(function MessageRow({
             <div
               {...{ [REVEAL_ATTRIBUTE]: '' }}
               aria-hidden={harnessBody.closing || undefined}
-              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-out')}
+              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-leaving')}
             >
               {bodyNode}
               {attachmentsNode}

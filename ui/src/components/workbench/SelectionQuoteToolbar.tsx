@@ -403,7 +403,7 @@ export const SelectionQuoteToolbar: React.FC<{
       role="toolbar"
       onTouchEnd={handleTouchEnd}
       style={{ position: 'fixed', top, left, maxWidth: 'calc(100vw - 16px)', transform: 'translateX(-50%)', zIndex: 60 }}
-      className="flex items-center overflow-x-auto rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
+      className="flex items-center overflow-x-auto rounded-lg border border-edge bg-popover shadow-elevation-2"
     >
       {/* Separators sit BEFORE each item after the first, so a hidden action
           never leaves a dangling divider at the edge of the bar. */}

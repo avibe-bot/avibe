@@ -166,7 +166,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
         </div>
       )}
 
-      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !fullBleed && 'rounded-xl border border-border')}>
+      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !fullBleed && 'rounded-xl border border-edge shadow-elevation-0')}>
         <div
           className={clsx(
             'flex items-center gap-2 border-b border-border bg-surface-2/60',
@@ -235,7 +235,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
           {hasSearch && (
             <label
               className={clsx(
-                'flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-1',
+                'flex items-center gap-1.5 rounded-lg border border-edge bg-surface px-2 py-1 shadow-elevation-0',
                 mobileRoute ? 'order-2 w-full' : 'shrink-0',
               )}
             >
@@ -293,7 +293,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   onClick={() => navigateFavoriteTo(favorite.path)}
                   className={clsx(
                     'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
-                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
+                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-edge text-muted bg-field',
                   )}
                 >
                   <Icon className="size-3.5 shrink-0" />
@@ -311,7 +311,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   onClick={() => navigateFavoriteTo(project.path)}
                   className={clsx(
                     'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
-                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
+                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-edge text-muted bg-field',
                   )}
                 >
                   <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan-ink' : 'text-cyan-ink/70')} />

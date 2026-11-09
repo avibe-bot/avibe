@@ -260,8 +260,8 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             className={clsx(
               'flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-medium transition',
               refreshing
-                ? 'cursor-wait border-border bg-foreground/[0.02] text-muted'
-                : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
+                ? 'cursor-wait border-edge text-muted bg-field hover:bg-field-hover'
+                : 'border-edge text-foreground bg-field hover:bg-field-hover',
             )}
           >
             <RefreshCw className={clsx('size-3.5', refreshing && 'animate-spin')} />
@@ -290,7 +290,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">
-        <div className="inline-flex w-full items-center gap-1 rounded-lg border border-border-strong bg-surface-2 p-0.5 sm:w-auto">
+        <div className="inline-flex w-full items-center gap-1 rounded-lg border border-edge bg-surface-2 p-0.5 sm:w-auto shadow-elevation-0">
           {([
             { key: 'unread', label: t('workbench.inbox.filterUnread') },
             { key: 'all', label: t('workbench.inbox.filterAll') },
@@ -302,7 +302,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               className={clsx(
                 'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition sm:flex-none',
                 filter === key
-                  ? 'bg-mint/[0.10] text-mint-ink shadow-glow-xs-mint'
+                  ? 'bg-mint/[0.10] text-mint-ink'
                   : 'text-muted hover:text-foreground',
               )}
             >
@@ -316,7 +316,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
             <PopoverTrigger asChild>
               <button
                 type="button"
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[12px] font-semibold text-foreground transition hover:bg-foreground/[0.04]"
+                className="flex shrink-0 items-center gap-1.5 rounded-md border border-edge px-3 py-1.5 text-[12px] font-semibold text-foreground transition bg-field hover:bg-field-hover"
               >
                 <NotificationIcon className={clsx('size-3.5', notification === 'off' && 'text-muted')} />
                 {t('workbench.notifications.button', { mode: t(`workbench.notifications.mode.${notification}`) })}
@@ -335,7 +335,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               className={clsx(
                 'flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-semibold transition',
                 totalUnread === 0
-                  ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
+                  ? 'cursor-not-allowed border-edge text-muted bg-field hover:bg-field-hover'
                   : 'border-mint/30 bg-mint/[0.06] text-mint-ink hover:bg-mint/[0.12]',
               )}
             >
@@ -415,7 +415,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
                             <button
                               type="button"
                               onClick={() => void Promise.all(sectionUnreadIds.map((id) => markRead(id)))}
-                              className="inline-flex items-center gap-1 rounded-md border border-border-strong px-2 py-0.5 text-[11px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+                              className="inline-flex items-center gap-1 rounded-md border border-edge px-2 py-0.5 text-[11px] font-medium text-foreground transition bg-field hover:bg-field-hover"
                             >
                               <CheckCheck className="size-3" />
                               {t('workbench.inbox.sections.markRead')}
@@ -440,7 +440,7 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
               type="button"
               data-flip-id="more"
               onClick={() => void loadMore(filter === 'unread' ? 'unread' : 'any')}
-              className="flex items-center justify-center gap-1.5 self-center rounded-md border border-border-strong px-4 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+              className="flex items-center justify-center gap-1.5 self-center rounded-md border border-edge px-4 py-2 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
             >
               {t('workbench.inbox.loadMore')}
             </button>
