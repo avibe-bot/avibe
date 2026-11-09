@@ -3803,6 +3803,7 @@
       "swipeRead": "已读",
       "viewAll": "查看完整收件箱",
       "refresh": "刷新",
+      "filterLabel": "显示",
       "filterUnread": "未读",
       "filterAll": "全部",
       "empty": "收件箱还是空的 — Agent 回复会出现在这里。",

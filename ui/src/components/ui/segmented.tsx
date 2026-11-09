@@ -1,4 +1,7 @@
 import clsx from 'clsx';
+import type { ComponentType } from 'react';
+
+import { segmentedItemClass, segmentedTrackClass, type SegmentedTone } from './segmented-classes';
 
 /**
  * Generic segmented-radio control. Promoted here from
@@ -20,17 +23,11 @@ import clsx from 'clsx';
 export type SegmentedRadioOption<T extends string> = {
   id: T;
   label: string;
+  /** An optional leading icon, drawn at the label's size. */
+  icon?: ComponentType<{ className?: string }>;
 };
 
-/** Active-option color. Mint is the default; Show Pages tints by visibility. */
-export type SegmentedTone = 'mint' | 'gold' | 'cyan' | 'muted';
-
-const ACTIVE_TONES: Record<SegmentedTone, string> = {
-  mint: 'border border-mint/30 bg-mint-soft font-bold text-mint-ink',
-  gold: 'border border-gold/40 bg-gold/10 font-bold text-gold-ink',
-  cyan: 'border border-cyan/40 bg-cyan-soft font-bold text-cyan-ink',
-  muted: 'border border-edge bg-foreground/[0.06] font-bold text-foreground shadow-elevation-0',
-};
+export type { SegmentedTone } from './segmented-classes';
 
 export interface SegmentedRadioProps<T extends string> {
   value: T;
@@ -56,15 +53,11 @@ export function SegmentedRadio<T extends string>({
       role="radiogroup"
       aria-label={ariaLabel}
       aria-disabled={disabled || undefined}
-      className={clsx(
-        // A filled track, no outline (ui/design: system/elevation/edges).
-        'flex h-9 items-stretch gap-0.5 rounded-md border border-edge bg-field p-0.5',
-        className,
-        disabled && 'opacity-60',
-      )}
+      className={clsx(segmentedTrackClass, className, disabled && 'opacity-60')}
     >
       {options.map((opt) => {
         const active = value === opt.id;
+        const Icon = opt.icon;
         return (
           <button
             key={opt.id}
@@ -73,14 +66,9 @@ export function SegmentedRadio<T extends string>({
             aria-checked={active}
             disabled={disabled}
             onClick={() => onChange(opt.id)}
-            className={clsx(
-              'press flex-1 whitespace-nowrap rounded-[4px] px-3 text-[12px]',
-              active
-                ? ACTIVE_TONES[tone]
-                : 'font-medium text-muted hover:text-foreground active:bg-foreground/[0.04] active:text-foreground',
-              disabled && 'cursor-not-allowed',
-            )}
+            className={clsx(segmentedItemClass(active, tone), disabled && 'cursor-not-allowed')}
           >
+            {Icon && <Icon className="size-3 shrink-0" />}
             {opt.label}
           </button>
         );

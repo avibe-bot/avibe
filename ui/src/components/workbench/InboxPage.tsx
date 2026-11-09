@@ -25,6 +25,7 @@ import { Skeleton } from '../ui/skeleton';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
 import { FlipList } from '../ui/flip-list';
 import { Presence } from '../ui/presence';
+import { SegmentedRadio } from '../ui/segmented';
 import {
   readInboxFilter,
   writeInboxFilter,
@@ -290,27 +291,16 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">
-        <div className="inline-flex w-full items-center gap-1 rounded-lg border border-edge bg-surface-2 p-0.5 sm:w-auto shadow-elevation-0">
-          {([
-            { key: 'unread', label: t('workbench.inbox.filterUnread') },
-            { key: 'all', label: t('workbench.inbox.filterAll') },
-          ] as { key: FilterMode; label: string }[]).map(({ key, label }) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setFilter(key)}
-              className={clsx(
-                'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition sm:flex-none',
-                filter === key
-                  ? 'bg-mint/[0.10] text-mint-ink'
-                  : 'text-muted hover:text-foreground',
-              )}
-            >
-              <Filter className="size-3" />
-              {label}
-            </button>
-          ))}
-        </div>
+        <SegmentedRadio
+          value={filter}
+          onChange={setFilter}
+          ariaLabel={t('workbench.inbox.filterLabel')}
+          className="w-full sm:w-auto"
+          options={[
+            { id: 'unread', label: t('workbench.inbox.filterUnread'), icon: Filter },
+            { id: 'all', label: t('workbench.inbox.filterAll'), icon: Filter },
+          ]}
+        />
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
           <Popover open={notificationsOpen} onOpenChange={setNotificationsOpen}>
             <PopoverTrigger asChild>

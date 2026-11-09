@@ -5,6 +5,7 @@ import { FileText, Stethoscope } from 'lucide-react';
 import clsx from 'clsx';
 
 import { DoctorPanel } from '@/components/steps/DoctorPanel';
+import { segmentedItemClass, segmentedTrackClass } from '@/components/ui/segmented-classes';
 import { LocalStoreDiagnostics } from './LocalStoreDiagnostics';
 import { SettingsPageShell } from './SettingsPageShell';
 
@@ -16,10 +17,8 @@ export const DiagnosticsSectionTabs: React.FC = () => {
   ];
 
   return (
-    <nav
-      aria-label={t('settings.diagnosticsNavigationLabel')}
-      className="inline-flex w-fit rounded-lg border border-edge bg-foreground/[0.03] p-1 shadow-elevation-0"
-    >
+    // Links, not a radio, but the one segmented look (other fix #5).
+    <nav aria-label={t('settings.diagnosticsNavigationLabel')} className={clsx(segmentedTrackClass, 'w-fit')}>
       {tabs.map((tab) => {
         const Icon = tab.icon;
         return (
@@ -27,10 +26,7 @@ export const DiagnosticsSectionTabs: React.FC = () => {
             key={tab.to}
             to={tab.to}
             end={tab.end}
-            className={({ isActive }) => clsx(
-              'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors',
-              isActive ? 'bg-surface text-foreground shadow-elevation-1' : 'text-muted hover:text-foreground',
-            )}
+            className={({ isActive }) => segmentedItemClass(isActive)}
           >
             <Icon className="size-3.5" />
             {tab.label}
