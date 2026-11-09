@@ -398,7 +398,11 @@ async def test_mcp_sse_matching_reply_ignores_invalid_utf8_tail() -> None:
     from vibe.model_hub_runtime.keyless_mcp import _parse_messages, _read_bounded
 
     reply = {"jsonrpc": "2.0", "id": 7, "result": {"text": "ok"}}
-    wire = b"event: message\r\ndata: " + json.dumps(reply).encode() + b"\r\n\r\nevent: notification\r\ndata: \xf0"
+    wire = (
+        b"event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\r\n\r\n"
+        b"event: message\r\ndata: " + json.dumps(reply).encode()
+        + b"\r\n\r\nevent: notification\r\ndata: \xf0"
+    )
 
     class Content:
         async def iter_chunked(self, _size):
@@ -407,4 +411,6 @@ async def test_mcp_sse_matching_reply_ignores_invalid_utf8_tail() -> None:
 
     body, too_large = await _read_bounded(Content(), sse=True, request_id=7)
     assert not too_large
-    assert _parse_messages(body) == (reply,)
+    messages = _parse_messages(body)
+    assert messages[0]["method"] == "notifications/tools/list_changed"
+    assert messages[1] == reply

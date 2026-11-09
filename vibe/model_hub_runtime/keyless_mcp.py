@@ -83,6 +83,7 @@ async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | No
     # events, preserving non-ASCII line separators inside JSON strings.
     line = bytearray()
     event = bytearray()
+    consumed = bytearray()
     after_cr = False
     async for chunk in content.iter_chunked(64 * 1024):
         data = bytes(chunk)
@@ -112,8 +113,12 @@ async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | No
                 if _matching_message(messages, request_id) is not None:
                     # Do not reparse arbitrary bytes that followed the matching
                     # event in this chunk; they may be an incomplete UTF-8
-                    # notification and would hide the valid response.
-                    return completed_event, False
+                    # notification and would hide the valid response. Keep
+                    # notifications already consumed before it so _request can
+                    # invalidate cached tool schemas.
+                    return bytes(consumed + completed_event), False
+                consumed.extend(completed_event)
+                consumed.extend(b"\n\n")
         line.extend(parts[-1])
     return b"".join(chunks), False
 
