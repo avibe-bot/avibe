@@ -162,9 +162,10 @@ def check_locks(root: Path, timeout: float = 60) -> None:
 
 def check_schemas(root: Path) -> None:
     from jsonschema import validators
-    from jsonschema.exceptions import SchemaError
+    from jsonschema.exceptions import SchemaError, ValidationError
 
-    paths = [name for name in tracked_files(root) if name.endswith(".schema.json")]
+    tracked = set(tracked_files(root))
+    paths = sorted(name for name in tracked if name.endswith(".schema.json"))
     if not paths:
         raise GuardError("no tracked *.schema.json files found")
     errors = []
@@ -177,7 +178,12 @@ def check_schemas(root: Path) -> None:
             if validator is None:
                 raise GuardError(f"{name}: unsupported $schema dialect {schema['$schema']!r}")
             validator.check_schema(schema)
-        except (GuardError, SchemaError) as exc:
+            # A schema and its data can each pass separate PRs yet disagree in
+            # the combined tree. Validate tracked same-name companion data too.
+            companion = name.removesuffix(".schema.json") + ".json"
+            if companion in tracked:
+                validator(schema).validate(read_json(root / companion))
+        except (GuardError, SchemaError, ValidationError) as exc:
             errors.append(f"{name}: {exc}")
     if errors:
         raise GuardError("\n\n".join(errors))

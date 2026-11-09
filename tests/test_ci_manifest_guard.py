@@ -198,6 +198,27 @@ def test_schema_validation_rejects_malformed_tracked_schemas(repo: Path, bad_sch
     assert guard.main(["--root", str(repo), "--schemas-only"]) == 1
 
 
+def test_combined_schema_and_companion_data_must_agree(repo: Path) -> None:
+    """Separate data/schema edits can be valid JSON but incompatible together."""
+    schema = put(repo, "contracts/example.schema.json", json.dumps({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object", "required": ["version"],
+        "properties": {"version": {"type": "integer"}},
+    }))
+    data = put(repo, "contracts/example.json", '{"version": 1}')
+    run(repo, "git", "add", ".")
+    guard.check_schemas(repo)
+    data.write_text('{"version": "wrong"}')
+    with pytest.raises(guard.GuardError, match="not of type"):
+        guard.check_schemas(repo)
+    data.write_text('{"version": 1}')
+    definition = json.loads(schema.read_text())
+    definition["required"].append("new_required_field")
+    schema.write_text(json.dumps(definition))
+    with pytest.raises(guard.GuardError, match="required property"):
+        guard.check_schemas(repo)
+
+
 def test_untracked_scratch_schema_is_not_part_of_the_contract(repo: Path) -> None:
     put(
         repo, "contracts/real.schema.json", '{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}'
