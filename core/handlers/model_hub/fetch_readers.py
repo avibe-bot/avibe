@@ -26,7 +26,7 @@ def fetch_candidates(config: ModelHubConfig) -> tuple:
     first = [by_id[sid] for sid in service_order if sid in by_id and by_id[sid].protocol == "search"]
     sources = first + [s for s in config.sources if s.protocol == "search" and s not in first]
     sources += [s for s in _vibey_order(config) if s.protocol != "search"]
-    builtins = model_hub_builtin_sources()
+    builtins = [source for source in model_hub_builtin_sources() if fetch_service(source) is not None]
     sources = [s for s in builtins if fetch_service(s)["kind"] == "local"] + sources
     sources += [s for s in builtins if fetch_service(s)["kind"] != "local"]
     automatic = {}

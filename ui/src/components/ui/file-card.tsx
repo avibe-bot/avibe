@@ -107,7 +107,7 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
   const previewable = renderKind !== null && !inlineAudio;
 
   return (
-    <span className="my-1 inline-flex min-w-[240px] max-w-full flex-col gap-2 rounded-[10px] border border-border bg-surface-2 px-3 py-2.5 align-middle no-underline">
+    <span className="my-1 inline-flex min-w-[240px] max-w-full flex-col gap-2 rounded-[10px] border border-edge bg-surface-2 px-3 py-2.5 align-middle no-underline shadow-elevation-0">
       <span className="flex min-w-0 items-center gap-3">
         <span className={cn('grid size-10 shrink-0 place-items-center rounded-lg', tile)}>
           <Icon className="size-5" />

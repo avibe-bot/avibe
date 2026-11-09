@@ -169,10 +169,14 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
     onKeyDown,
   };
 
-  const commonClass = clsx(
+  // Hover, focus and drag paint the edge with the selected nav row's border, so
+  // the two mint lines in the sidebar are one colour in both themes. The resting
+  // colour is applied only when not highlighted: two border-colour utilities on one
+  // element resolve by stylesheet order, not by the order written here.
+  const edgeClass = (resting: string) => clsx(
     'w-2 cursor-col-resize touch-none border-r outline-none transition-colors',
-    'hover:border-mint/30 focus-visible:border-mint/30',
-    highlighted && 'border-mint/30',
+    'hover:border-(--nav-selected-border) focus-visible:border-(--nav-selected-border)',
+    highlighted ? 'border-(--nav-selected-border)' : resting,
   );
 
   if (!nativeChrome) {
@@ -191,7 +195,7 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
         // breakpoint — a tablet in landscape, a convertible laptop. Pointer capture
         // does not win the browser's touch-action negotiation, so with the default
         // the native pan claims the finger and cancels the drag part-way.
-        className={clsx(commonClass, 'absolute inset-y-0 -right-px z-10 border-transparent')}
+        className={clsx(edgeClass('border-transparent'), 'absolute inset-y-0 -right-px z-10')}
       />
     );
   }
@@ -211,8 +215,8 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
         tabIndex={0}
         data-sidebar-resizer="true"
         className={clsx(
-          commonClass,
-          'fixed left-[calc(var(--app-sidebar-w)-8px)] top-0 z-[31] h-[var(--shell-titlebar-inset)] border-border',
+          edgeClass('border-border'),
+          'fixed left-[calc(var(--app-sidebar-w)-8px)] top-0 z-[31] h-[var(--shell-titlebar-inset)]',
         )}
       />
       <div
@@ -221,8 +225,8 @@ export const SidebarResizer = ({ nativeChrome = false, hidden = false, elevated 
         data-sidebar-resizer-content="true"
         tabIndex={-1}
         className={clsx(
-          commonClass,
-          'fixed bottom-0 left-[calc(var(--app-sidebar-w)-8px)] top-[var(--shell-titlebar-inset)] border-border',
+          edgeClass('border-border'),
+          'fixed bottom-0 left-[calc(var(--app-sidebar-w)-8px)] top-[var(--shell-titlebar-inset)]',
           elevated ? 'z-[31]' : 'z-[19]',
         )}
       />

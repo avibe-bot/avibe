@@ -675,7 +675,7 @@ class VibeyAgent(BaseAgent):
         }
 
     async def recover_runtime_state(self, session_id: Optional[str] = None) -> list[str]:
-        """One settlement pass outside a Turn: T2, T3 admission, then J5; return the unsettled Sessions.
+        """One settlement pass outside a Turn: T2 and T3 admission; return the unsettled Sessions.
 
         Candidates come from the rows: Sessions whose context can hold an open call, and
         Sessions with accepted inputs no run consumed. Each runs the same resume a Turn
@@ -683,10 +683,10 @@ class VibeyAgent(BaseAgent):
         settles it. So is a Session whose open call has a running job and an unsettled
         Turn: the Turn owner either continues that Turn, whose own resume waits for the
         job, or settles it after asking for this Session alone (``session_id``), which
-        hands the job over as before (``vibey-restart-auto-resume.md``). J5 pruning follows
-        a pass that settled everything. Never reports success over a failure;
-        ``VibeyRecovery`` owns the retries. The first pass of the process also starts the
-        media sweep.
+        hands the job over as before (``vibey-restart-auto-resume.md``). Settled-job
+        bookkeeping is scheduled separately after readiness; it is not recovery evidence.
+        Never reports success over a failure; ``VibeyRecovery`` owns the retries. The first
+        pass of the process also starts the media sweep.
         """
         if self._media_sweep is None:
             self._media_sweep = asyncio.create_task(self._sweep_media(), name="vibey-agent-media-sweep")
@@ -708,12 +708,8 @@ class VibeyAgent(BaseAgent):
                 except Exception:
                     logger.exception("Vibey could not settle Session %s outside a Turn", candidate)
                     unsettled.append(candidate)
-        prune_started_at = time.monotonic()
-        if not unsettled:
-            await self._prune_settled_jobs()
         logger.info(
-            "Startup phase=vibey_recovery_prune duration_ms=%d unsettled=%d",
-            round((time.monotonic() - prune_started_at) * 1000),
+            "Startup phase=vibey_recovery_prune duration_ms=0 unsettled=%d deferred=true",
             len(unsettled),
         )
         return unsettled
@@ -847,6 +843,10 @@ class VibeyAgent(BaseAgent):
         recovery = getattr(self.controller, "vibey_recovery", None)
         if recovery is not None:
             recovery.ensure()
+
+    def schedule_post_readiness_maintenance(self) -> None:
+        """Start settled-job bookkeeping after the controller has published readiness."""
+        self._prune_jobs_soon()
 
     def _prune_jobs_soon(self) -> None:
         """J5 while the service runs: runs create jobs, so a run's end prunes, at most hourly, off the Turn."""
@@ -1858,17 +1858,23 @@ class VibeyAgent(BaseAgent):
         scans the ordinary static Skill directories.
         """
         from core.managed_skills import managed_skill_project_base
-        from core.system_prompt_injection import bot_for_turn, build_system_prompt_blocks, get_enabled_agents_for_prompt
+        from core.system_prompt_injection import (
+            bot_for_turn,
+            build_system_prompt_blocks,
+            get_enabled_agents_for_prompt,
+            get_enabled_projects_for_prompt,
+        )
 
         context = request.context
         skill_catalog_sink: list[dict] = []
 
         def build() -> list[RenderedPromptBlock]:
             # Every lookup runs here, off the loop: the enabled-Agent list and the Bot read SQLite.
+            bot = bot_for_turn(
+                getattr(self.controller, "vibe_agent_store", None), agent_id=request.vibe_agent_id, cwd=cwd
+            )
             return build_system_prompt_blocks(
-                bot=bot_for_turn(
-                    getattr(self.controller, "vibe_agent_store", None), agent_id=request.vibe_agent_id, cwd=cwd
-                ),
+                bot=bot,
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 backend=BACKEND,
                 include_quick_replies=getattr(self.config, "reply_enhancements", True)
@@ -1876,6 +1882,7 @@ class VibeyAgent(BaseAgent):
                 context=context,
                 fallback_platform=context.platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),
+                projects=get_enabled_projects_for_prompt() if bot is not None else None,
                 skills_cwd=cwd or None,
                 skills_project_base=managed_skill_project_base(context),
                 skill_catalog_sink=skill_catalog_sink,

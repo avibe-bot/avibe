@@ -1020,18 +1020,26 @@ def resolve_skills(
     return sorted(winners.values(), key=lambda skill: skill.name)
 
 
-def catalog_page_of(items: Sequence[T], row: Callable[[T], str], page: int) -> tuple[Sequence[T], int | None]:
-    """One prompt catalog page: at most ``CATALOG_PAGE_SIZE`` rows and ``CATALOG_PAGE_MAX_BYTES``, never empty."""
+def catalog_page_of(
+    items: Sequence[T],
+    row: Callable[[T], str],
+    page: int,
+    *,
+    page_size: int = CATALOG_PAGE_SIZE,
+) -> tuple[Sequence[T], int | None]:
+    """One prompt catalog page bounded by rows and UTF-8 bytes, never empty."""
 
     if isinstance(page, bool) or page < 1:
         raise ValueError("page must be a positive integer")
+    if isinstance(page_size, bool) or page_size < 1:
+        raise ValueError("page_size must be a positive integer")
     pages: list[list[T]] = []
     current: list[T] = []
     current_bytes = 0
     for item in items:
         line = row(item)
         row_bytes = len(line.encode("utf-8")) + (1 if current else 0)
-        if current and (len(current) >= CATALOG_PAGE_SIZE or current_bytes + row_bytes > CATALOG_PAGE_MAX_BYTES):
+        if current and (len(current) >= page_size or current_bytes + row_bytes > CATALOG_PAGE_MAX_BYTES):
             pages.append(current)
             current = []
             current_bytes = 0

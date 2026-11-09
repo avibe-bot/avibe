@@ -199,7 +199,7 @@ export const SettingsServicePage: React.FC = () => {
               'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em]',
               isRunning
                 ? 'border-mint/30 bg-mint/[0.08] text-mint-ink'
-                : 'border-border bg-foreground/[0.04] text-muted'
+                : 'border-edge text-muted bg-field'
             )}
           >
             <span
@@ -347,7 +347,7 @@ export const SettingsServicePage: React.FC = () => {
       <SettingsPanel>
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div className="text-[13px] font-medium text-foreground">{t('settings.logFileLabel')}</div>
-          <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-foreground/[0.04] px-3 py-2">
+          <div className="inline-flex items-center gap-2 rounded-lg border border-edge bg-foreground/[0.04] px-3 py-2 shadow-elevation-0">
             <FileText className="size-3.5 text-muted" />
             <span className="font-mono text-[11px] text-foreground">~/.avibe/logs/vibe_remote.log</span>
           </div>

@@ -55,6 +55,9 @@ def _probe(action: str, home: Path) -> dict:
             return {**identity, "refused": True}
         return {**identity, "refused": False}
 
+    if action.startswith("projection-"):
+        return {**identity, **_projection_probe(action, home)}
+
     from config.v2_settings import ChannelSettings, SettingsState
     from storage import agent_events_service, messages_service
     from storage.background import SQLiteBackgroundTaskStore
@@ -165,7 +168,125 @@ def _probe(action: str, home: Path) -> dict:
     return identity
 
 
+def _projection_facts(steps, groups, details, sql, canonical) -> dict:
+    """Only the stable identity/order/outcome contract, not renderer copy/schema.
+
+    Additional presentation fields and formatting changes are compatible. Count,
+    ordering, call facts, Turn membership and SQL interpretation are not optional.
+    """
+    step_keys = ("id", "response_id", "call_id", "context_seq", "name", "arguments", "turn_id",
+                 "order_micros", "order_index", "status", "started_at", "ended_at", "duration_ms")
+    group_keys = ("id", "anchor_message_id", "anchor_position", "open", "status", "steps")
+    row_keys = ("id", "kind", "order_micros", "order_index", "status", "started_at", "ended_at", "duration_ms")
+    def facts(row, keys):
+        return {key: row.get(key) for key in keys}
+    return json.loads(json.dumps({
+        "steps": [facts(row, step_keys) for row in steps],
+        "groups": [facts(group, group_keys) for group in groups["groups"]],
+        "details": [{**facts(group, group_keys), "rows": [facts(row, row_keys) for row in group["rows"]]} for group in details],
+        "sql": sql, "canonical": canonical,
+    }))
+
+
+def _projection_probe(action: str, home: Path) -> dict:
+    """Actual candidate writes, then actual released Activity/SQL readers.
+
+    No source import is added by this helper: its reader runs in the wheel's -I
+    subprocess. The prospective capability is enabled only in the candidate's
+    isolated test process so --activate can prove a currently disabled build.
+    """
+    from sqlalchemy import select
+
+    from storage import agent_activity_service, tool_activity_service
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_events, messages
+    from storage.read_only_query import run_read_only_query
+    from vibe.authorization import AuthorizationContext
+
+    db = home / "state" / "vibe.sqlite"
+    fixture_path = home / "projection.json"
+    session = json.loads((home / "rows.json").read_text())["session"]
+    engine = create_sqlite_engine(db)
+    try:
+        if action == "projection-seed":
+            import asyncio
+            from unittest.mock import patch
+
+            from core.agent_core.messages import AssistantMessage, Origin, ToolCallBlock, ToolResultMessage, UserMessage, text
+            from core.message_mirror import persist_agent_message
+            from modules.im.base import MessageContext
+            from storage import messages_service
+            from storage.agent_transcript import SQLiteTranscriptStore
+
+            store = SQLiteTranscriptStore(engine)
+            async def seed():
+                with engine.begin() as conn:
+                    user = messages_service.append(conn, scope_id=None, session_id=session, platform="avibe",
+                                                   author="user", message_type="user", text="projection contract")
+                await store.consume_input(session, user["id"], UserMessage((text("projection contract"),)))
+                responses = []
+                # Same provider id in distinct responses must not alias its result.
+                for index in range(2):
+                    message = AssistantMessage((ToolCallBlock("reused/id", "read", {"path": f"/work/{index}.py"}),),
+                                               Origin("contract", "anthropic", "contract"), "tool_use")
+                    response = await store.append_response(session, message, final=False, metadata={
+                        "tool_projection": {"version": 1, "backend": "vibey", "platform": "avibe", "cwd": "/work"},
+                    })
+                    responses.append(response.row_id)
+                    await store.append_tool_result(session, ToolResultMessage("reused/id", "read", (text(f"result {index}"),),
+                                                                              is_error=bool(index)), details={})
+                return responses
+            responses = asyncio.run(seed())
+            with patch("core.message_mirror.get_cached_sqlite_engine", return_value=engine), \
+                    patch("core.message_mirror._activity_streaming_enabled", return_value=False), \
+                    patch("storage.compatibility.VERIFIED_PREDECESSOR_EPOCH", 2):
+                context = MessageContext(user_id="contract", channel_id="contract", platform="avibe",
+                                         platform_specific={"agent_session_id": session, "suppress_delivery": True})
+                with engine.connect() as conn:
+                    steps = tool_activity_service.response_steps(conn, session_id=session, response_ids=responses)
+                assert len(steps) == 2
+                for step in steps:
+                    errors = []
+                    persist_agent_message(context, "toolcall", step["text"], metadata=step["metadata"], error_sink=errors)
+                    assert not errors, errors
+            fixture_path.write_text(json.dumps({"responses": responses}))
+        fixture = json.loads(fixture_path.read_text())
+        with engine.connect() as conn:
+            # The preexisting non-Vibey compatibility trace survives unchanged.
+            assert conn.execute(select(agent_events.c.content_text).where(
+                agent_events.c.session_id == session, agent_events.c.event_type == "tool_call",
+            ).order_by(agent_events.c.id)).scalars().all() == ["new tool trace", "previous writer", "new tool trace"]
+            steps = tool_activity_service.response_steps(conn, session_id=session, response_ids=fixture["responses"])
+            steps.sort(key=lambda row: (row["order_micros"], row["order_index"], row["id"]))
+            assert len(steps) == 2 and [row["status"] for row in steps] == ["completed", "failed"]
+            groups = agent_activity_service.list_turn_groups(conn, session_id=session)
+            details = [agent_activity_service.get_turn_group(conn, session_id=session, group_id=group["id"])
+                       for group in groups["groups"]]
+            assert {row["id"] for group in details for row in group["rows"] if row["kind"] == "tool_call"}.issuperset(
+                row["id"] for row in steps)
+            canonical = [tuple(row) for row in conn.execute(select(messages.c.id, messages.c.content_json, messages.c.context_seq)
+                                                          .where(messages.c.id.in_(fixture["responses"])).order_by(messages.c.id))]
+        query = run_read_only_query(
+            "select id, name, arguments_json, status from tool_calls where source = 'canonical' order by order_micros, order_index, id",
+            db_path=db, page_request=None, user_context=AuthorizationContext(instance_role="owner"),
+        )
+        snapshot = _projection_facts(steps, groups, details, query.rows, canonical)
+        if action == "projection-seed":
+            fixture_path.write_text(json.dumps({**fixture, "snapshot": snapshot}))
+        else:
+            assert snapshot == fixture["snapshot"], "released reader lost or changed projected tool presentation"
+        return {"projection_contract": "passed", "projected_steps": len(steps), "physical_vibey_traces": 0}
+    finally:
+        engine.dispose()
+
+
 def _run(*args: str, **kwargs) -> str:
+    if args[:2] == ("gh", "api") or args[:3] == ("gh", "release", "download"):
+        # Lazy import: isolated --probe processes must import only the actual
+        # predecessor wheel, not this checkout's scripts or dependencies.
+        from scripts.release_asset_download import run_gh_read
+
+        return run_gh_read(*args[1:], **kwargs)
     result = subprocess.run(args, check=True, capture_output=True, text=True, **kwargs)
     return result.stdout
 
@@ -239,10 +360,20 @@ def verify_predecessor(python: Path, home: Path, *, expected_version: str) -> in
     run_probe(python, "seed", home)
     run_probe(python, "exercise", home)
     run_probe(Path(sys.executable), "seed", home, current=True)
+    projection = run_probe(Path(sys.executable), "projection-seed", home, current=True)
+    print(json.dumps({"candidate_projection": projection}), flush=True)
     db = home / "state" / "vibe.sqlite"
+    with closing(sqlite3.connect(db)) as conn:
+        epoch = json.loads(conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()[0])
+    if epoch not in identity["supported_epochs"]:
+        # Test the actual candidate revision, not just an artificial future stamp.
+        # This is the trace-only floor refusal, before backup/import/repair.
+        before, artifacts = _logical_db(db), _artifacts(home)
+        assert run_probe(python, "open", home)["refused"]
+        assert _logical_db(db) == before and _artifacts(home) == artifacts
+        print(json.dumps({"reader_contract": "not-applicable", "reason": "predecessor lacks this epoch", "epoch": epoch}), flush=True)
+        return None
     with closing(sqlite3.connect(db)) as conn, conn:
-        row = conn.execute("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").fetchone()
-        epoch = json.loads(row[0])
         conn.execute("UPDATE alembic_version SET version_num=?", (FUTURE_REVISION,))
         for table in TABLES:
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN reader_contract_optional TEXT')
@@ -255,13 +386,10 @@ def verify_predecessor(python: Path, home: Path, *, expected_version: str) -> in
                                 "('compatibility_epoch', 'json_import_completed_at', 'background_json_import_completed_at') "
                                 "ORDER BY key").fetchall()
     artifacts = _artifacts(home)
-    if epoch not in identity["supported_epochs"]:
-        before = _logical_db(db)
-        assert run_probe(python, "open", home)["refused"]
-        assert _logical_db(db) == before and _artifacts(home) == artifacts
-        print(json.dumps({"reader_contract": "not-applicable", "reason": "predecessor lacks this epoch", "epoch": epoch}), flush=True)
-        return None
     assert not run_probe(python, "open", home)["refused"]
+    before = _logical_db(db)
+    print(json.dumps({"previous_projection": run_probe(python, "projection-read", home)}), flush=True)
+    assert _logical_db(db) == before and _artifacts(home) == artifacts
     run_probe(python, "exercise", home)
     run_probe(Path(sys.executable), "verify", home, current=True)
     with closing(sqlite3.connect(db)) as conn:
@@ -303,9 +431,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default="avibe-bot/avibe")
     parser.add_argument("--release-tag", help="Target being published (excluded from predecessor selection)")
     parser.add_argument("--activate", action="store_true", help="Fill the release build's capability literal after verification")
-    parser.add_argument("--probe", choices=("identity", "seed", "open", "exercise", "verify"), help=argparse.SUPPRESS)
+    parser.add_argument("--require-refusal", action="store_true", help="Negative floor control: require unsupported-reader refusal, never activate")
+    parser.add_argument("--probe", choices=("identity", "seed", "open", "exercise", "verify", "projection-seed", "projection-read"), help=argparse.SUPPRESS)
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.require_refusal and args.activate:
+        parser.error("--require-refusal cannot activate a build")
     if args.probe:
         print(json.dumps(_probe(args.probe, args.home)))
         return 0
@@ -321,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"Published predecessor {tag} lacks a checksummed {name}")
     with tempfile.TemporaryDirectory(prefix="sqlite-predecessor-") as directory:
         home = Path(directory).resolve()
-        _run("gh", "release", "download", tag, "--repo", args.repo, "--pattern", name, "--dir", str(home))
+        _run("gh", "release", "download", tag, "--repo", args.repo, "--pattern", name, "--dir", str(home), "--clobber")
         wheel = home / name
         digest = "sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest()
         if digest != asset["digest"]:
@@ -334,6 +465,10 @@ def main(argv: list[str] | None = None) -> int:
         epoch = verify_predecessor(python, home, expected_version=version)
         if previous_release(args.repo, release_tag=args.release_tag)["tag_name"] != tag:
             raise RuntimeError("Published predecessor changed during verification; rerun against the actual predecessor")
+    if args.require_refusal:
+        if epoch is not None:
+            raise RuntimeError("The negative floor control unexpectedly admitted the candidate")
+        return 0
     if args.activate:
         activate_build(epoch)
     else:

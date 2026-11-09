@@ -967,6 +967,8 @@ const NON_KEY_LITERALS = [
   'avibe.workbench.windows.v1',
   'vibe.nativePush.pendingRegistration',
   'vibe.nativePush.disabledIntent',
+  'vibe.nativePush.intentState',
+  'vibe.nativePush.lifecycle',
   'vibe.webPush.deviceId',
   'vibe.webPush.endpoints',
 

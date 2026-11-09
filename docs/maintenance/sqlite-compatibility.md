@@ -62,10 +62,21 @@ literal `MIGRATION_COMPATIBILITY = "breaking"` and `COMPATIBILITY_EPOCH = N`;
 advance the marker inside that revision's transaction. The runtime's supported
 reader set is separate from parsing a known old epoch for forward upgrade.
 
-C-alt must first ship projection-aware readers, while retaining compatibility
-traces. Do not suppress traces based only on the presence of epoch 1: the epoch
-must identify a **released projection-aware reader floor**, approved with that
-lane. The bridge by itself does not claim any projection capability.
+C-alt's projection-aware reader shipped in `gh-v3.2.5rc19` with support for
+`{1, 2}` while retaining compatibility traces. Breaking revision `20261108_0083`
+activates epoch 2; it always takes the conservative upgrade snapshot on populated
+state, even in an activated build. The epoch/stamp commit together, without
+backfilling or deleting any history. Only exact supported committed Vibey calls
+may then omit their redundant trace, and only with an epoch-2 predecessor proof.
+Unmarked/unknown/non-Vibey and routed-scope fallback paths retain single-copy
+traces. See [the representation contract](../plans/vibey-tool-activity-projection.md#stage-2-epoch-gated-write-suppression).
+
+**The projection-aware rollback floor is RC19.** Select RC19 or a newer supported
+reader without restamping/downgrading. Trace-only older binaries refuse epoch-2
+state rather than silently dropping tool activity. An explicit verified restore
+for an unsupported older binary still discards all writes since the snapshot;
+stop all writers first. No automatic backfill/export or filesystem reclamation
+is part of this transition. Epoch 1 alone never authorizes suppression.
 
 ## Release boundary (owner decision, 2026-11-08)
 
@@ -118,8 +129,12 @@ runs it again immediately before packaging, and `--activate` fills just
 `storage.compatibility.VERIFIED_PREDECESSOR_EPOCH` with the verified epoch.
 `None` disables the capability; pre-protocol or unsupported predecessors leave
 it `None`, with an explicit **not-applicable**, never a passing rollback claim.
-The source literal is now `1` after the actual `gh-v3.2.5rc19` wheel passed at
-epoch 1 (SHA-256 `e19c6b0bcfcbbdb6716842653c25c5231cf5d7600fd69fda0a3cb4f4bf2630be`).
+The source literal is now `2` after actual RC19, RC20 and RC21 wheels passed at epoch 2,
+including trace-suppressed canonical tool presentation through Activity and SQL.
+The [representation contract](../plans/vibey-tool-activity-projection.md#released-reader-proof)
+records the wheel digests and RC18 refusal evidence. The no-copy decision still
+requires a proven additive same-epoch path; activation cannot skip the epoch-2
+transition's rollback snapshot.
 CI rechecks an activated literal against the actual published predecessor;
 the publisher independently fills or clears it before packaging.
 A failed applicable reader/writer test stops the build. The literal ships in the

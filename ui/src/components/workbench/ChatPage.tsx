@@ -93,7 +93,7 @@ import {
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
 import { prefersReducedMotion } from '../../lib/motion';
-import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
+import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, topInContent, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { BeforeCommit, HEAD_ATTRIBUTE, ITEM_FOR_ATTRIBUTE, ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, SIDE_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { useDisclosure } from '../../lib/motion';
 import { AgentRoutePicker } from './AgentRoutePicker';
@@ -3821,7 +3821,7 @@ export const QueueRow: React.FC<{
       className={clsx(
         pending && 'opacity-60',
         sentHere && 'motion-rise-in',
-        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-wash hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-wash focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         hasExpandedContent ? 'items-start' : 'items-center',
         // Wrapping is enabled only while the remainder is disclosed. A collapsed
         // row therefore cannot wrap at any width — the one thing that could make
@@ -4006,7 +4006,7 @@ const ActivityRow: React.FC<{
       onClick={() => onNavigate(item)}
       title={t('chat.activities.openHarness', { kind: kindLabel })}
       aria-label={t('chat.activities.openHarness', { kind: kindLabel })}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-surface-2"
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-wash"
     >
       {body}
     </button>
@@ -4057,7 +4057,6 @@ const ActivityStrip: React.FC<{
       aria-live="polite"
       className={clsx(
         'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
-        !queuedOnly && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
@@ -4098,7 +4097,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 aria-label={t('chat.activities.toggle')}
-                className="block w-fit max-w-[min(420px,100%)] rounded-full outline-none focus-visible:ring-2 focus-visible:ring-mint/40"
+                className="block w-fit max-w-[min(420px,100%)] rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {pill}
               </button>
@@ -4111,7 +4110,7 @@ const ActivityStrip: React.FC<{
               // (a downward flip would cover the composer). Disable Radix
               // collision flipping so the popover stays above even when zoomed.
               avoidCollisions={false}
-              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border-border-strong p-0 shadow-lg"
+              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg p-0"
             >
               <div className="flex max-h-[300px] flex-col gap-0.5 overflow-y-auto p-1">
                 {active.map((item) => (
@@ -4126,7 +4125,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 onClick={() => navigateTo('/harness')}
-                className="flex shrink-0 items-center justify-center gap-1 border-t border-border/60 px-2 py-2 text-[12px] font-medium text-cyan-ink transition-colors hover:bg-surface-2"
+                className="flex shrink-0 items-center justify-center gap-1 border-t border-border/60 px-2 py-2 text-[12px] font-medium text-cyan-ink transition-colors hover:bg-wash"
               >
                 {t('chat.activities.manageInHarness')}
                 <ArrowRight className="size-3.5" aria-hidden="true" />
@@ -4717,7 +4716,7 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
       <button
         type="button"
         onClick={() => setEditing(true)}
-        className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground transition-colors hover:bg-foreground/[0.05]"
+        className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground transition-colors hover:bg-wash"
       >
         <span className="truncate">{title || t('chat.untitled')}</span>
       </button>
@@ -5248,6 +5247,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       Array.from(content.children) as HTMLElement[],
       { top: viewport.top, bottom: viewport.bottom },
       content.getBoundingClientRect().top,
+      content,
     );
   }, []);
 
@@ -5336,12 +5336,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const anchor = anchorRef.current;
       const content = contentRef.current;
       // The anchored row may have re-mounted elsewhere (a Harness row an older
-      // page made a group member); follow the message, not the element.
+      // page made a group member); follow the message, not the element, and
+      // hold the new one from here, its place in its own terms (lib/layoutBox).
       const target = anchor && content ? resolveScrollAnchor(anchor, content) : null;
       if (!anchor || !target || !content) return;
+      anchorRef.current = target;
       // Both positions are inside the content, so only content that moved above
       // the anchor counts — never the reader's own scrolling since it was taken.
-      const currentTop = target.el.getBoundingClientRect().top - content.getBoundingClientRect().top;
+      // Where the layout puts it, not where it is drawn: a row a disclosure above it still pushes down moves
+      // on screen without anything above it changing size (lib/layoutBox).
+      const currentTop = topInContent(target.el, content.getBoundingClientRect().top, content);
       const delta = currentTop - target.top;
       if (Math.abs(delta) < 0.5) return;
       const before = el.scrollTop;
@@ -5355,20 +5359,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
       // (the position clamped) is dropped rather than retried on every commit.
       if (Math.abs(delta - applied) >= 1) {
         captureAnchor();
-      } else if (target.el === anchor.el) {
-        anchorRef.current = {
-          ...anchor,
-          top: anchor.top + applied,
-          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
-        };
       } else {
-        // Followed the message to its new element: hold that one from here.
         anchorRef.current = {
-          el: target.el,
+          ...target,
           top: target.top + applied,
-          rowId: anchor.rowId,
-          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
-          key: target.el.dataset.transcriptKey,
+          rowTop: target.rowTop === undefined ? undefined : target.rowTop + applied,
         };
       }
     }
@@ -5658,14 +5653,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const element = target instanceof Element ? target : target.parentElement;
       const control = element?.closest('[aria-expanded]');
       if (!control || !content.contains(control)) return;
-      const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
+      const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top, content);
       if (!anchor) return;
       setFollowingTail(false);
       anchorRef.current = anchor;
       return;
     }
     restoreScrollPosition();
-    const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
+    const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top, content);
     if (anchor) anchorRef.current = anchor;
   };
   // A touch that left the tail but never moved the transcript (a tap, or a drag
@@ -5789,7 +5784,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // Prepending and trimming can leave the total height unchanged. Restore after
   // every DOM commit, before paint or a queued scroll can capture a different
   // row. This also covers the loading slot being inserted or removed.
-  useLayoutEffect(restoreScrollPosition);
+  //
+  // While the reader follows the tail, the pin comes first: the conversation's
+  // glide (below) is measured to where the pin puts the rows. While they read,
+  // the hold on their anchor comes after the motion has taken on what it shows
+  // as movement in this commit (a disclosure's rows below sliding as its steps
+  // land: lib/layoutBox), so it makes up only the rest and never writes a
+  // position the motion is already drawing its way to.
+  useLayoutEffect(() => {
+    if (pinnedRef.current) restoreScrollPosition();
+  });
 
   // What came in live enters (a sent message from the composer's edge, a reply
   // in place), the conversation gliding up to meet it. Not while a deep link
@@ -5797,6 +5801,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const { afterCommit } = motion;
   useLayoutEffect(() => {
     afterCommit(isLiveMessage, Boolean(jumpTarget) || skeleton || rowHandover !== undefined);
+  });
+
+  useLayoutEffect(() => {
+    if (!pinnedRef.current) restoreScrollPosition();
   });
 
   // One upward gesture asks for one page, but a page that landed above the
@@ -6068,7 +6076,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
           size="icon"
           onClick={jumpToLatest}
           aria-label={t('chat.scrollToBottom')}
-          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full border-border-strong shadow-lg"
+          // Floating over the transcript, so opaque, at level 2 (ui/design: system/elevation/scale).
+          className="motion-pop-in absolute bottom-3 left-1/2 size-9 -translate-x-1/2 rounded-full bg-popover shadow-elevation-2 hover:bg-popover active:bg-popover"
         >
           <ChevronDown className="size-4" />
         </Button>
@@ -6079,8 +6088,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
 
 /**
  * A Harness group in the transcript: its head, and while it is open its members on the rail and the bar
- * that closes it, each a transcript item of its own. Closed, the members leave in place while the head
- * still draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
+ * that closes it, each a transcript item of its own. Closed, the members fold back while the head still
+ * draws as open, then the layout lets go of them in one commit (lib/motion useDisclosure).
  */
 function HarnessGroupItem({
   groupKey,
@@ -6095,7 +6104,7 @@ function HarnessGroupItem({
   onToggle: () => void;
   renderRow: (message: WorkbenchMessage, index: number) => React.ReactNode;
 }) {
-  const { present, closing, closed } = useDisclosure(open);
+  const { present, closing } = useDisclosure(open);
   return (
     <>
       <HarnessGroup
@@ -6103,7 +6112,6 @@ function HarnessGroupItem({
         members={members.map(({ message }) => message)}
         expanded={open}
         closing={closing}
-        closed={closed}
         onToggle={onToggle}
       />
       {present && members.map(({ message, index }) => (
@@ -6112,7 +6120,7 @@ function HarnessGroupItem({
           data-transcript-row=""
           {...{ [ITEM_KEY_ATTRIBUTE]: `harness-member:${message.id}`, [REVEAL_ATTRIBUTE]: '' }}
           aria-hidden={closing || undefined}
-          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-out-children')}
+          className={clsx(HARNESS_GROUP_RAIL, 'flex flex-col gap-3', closing && 'motion-disclose-leaving')}
         >
           {renderRow(message, index)}
         </div>
@@ -6617,7 +6625,7 @@ export const MessageRow = memo(function MessageRow({
             <div
               {...{ [REVEAL_ATTRIBUTE]: '' }}
               aria-hidden={harnessBody.closing || undefined}
-              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-out')}
+              className={clsx('w-fit max-w-full rounded-2xl rounded-tl-md border border-cyan/25 bg-cyan/[0.08] px-3.5 py-2.5 text-[13px] leading-relaxed', harnessBody.closing && 'motion-disclose-leaving')}
             >
               {bodyNode}
               {attachmentsNode}

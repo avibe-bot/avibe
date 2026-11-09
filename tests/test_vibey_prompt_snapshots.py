@@ -7,13 +7,15 @@ adapter tests separately cover the wiring into real requests and fork reservatio
 
 from dataclasses import replace
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from core.agent_core.tools.base import ToolSpec
-from modules.agents.vibey.prompt import environment_delta, displayed_environment, render_environment
+from core.prompt_registry import PROMPT_MODULES, RenderedPromptBlock
+from modules.agents.vibey.prompt import INSTRUCTIONS_RULE, environment_delta, displayed_environment, render_environment
 from modules.agents.vibey.prompt_snapshot import (
-    Component, Prefix, SnapshotStore, State, component_tier, decide,
+    Component, Prefix, SnapshotStore, State, candidate_prefix, component_tier, decide,
 )
 
 
@@ -32,6 +34,7 @@ def choose(previous, candidate, **overrides):
     (Component("file:global", "new", "/home/.avibe/AGENTS.md", True), 1),
     (Component("file:project", "new", "/project/AGENTS.md"), 2),
     (Component("harness-agents-prompt", "new"), 2),
+    (Component("projects-prompt", "new"), 2),
     (Component("skills-catalog", "new"), 2),
     (Component("mcp-catalog", "new"), 2),
     (Component("hosted-tools", "new"), 2),
@@ -59,6 +62,39 @@ def test_catalog_data_is_bounded_but_a_rendered_template_upgrade_is_immediate():
     assert component_tier(before, changed_code) == 1
     # An unknown future component remains bounded until its owner registers a policy.
     assert component_tier(replace(before, id="future"), replace(changed_code, id="future")) == 2
+
+
+# How the instructions rule tells the model to read each name the pending notice can list.
+_READERS = {
+    "skills": "`vibe skill list` for skills",
+    "mcp": "`vibe mcp --list` for mcp",
+    "agents": "`vibe agent list` and `vibe bot list` for agents",
+    "projects": "`vibe project list` for projects",
+    "tools": "tools and settings need no reading",
+    "settings": "tools and settings need no reading",
+}
+# Modules only the native backends' prompts render; a Vibey prefix never holds them.
+_NATIVE_ONLY = {
+    "runtime-snapshot-open", "runtime-snapshot-close", "session-start-prompt", "forked-session-prompt",
+    "codex-skill-reuse", "codex-generated-images",
+}
+
+
+def test_every_name_the_pending_notice_can_list_has_a_reader_in_the_instructions_rule():
+    blocks = [RenderedPromptBlock(module.id, module.id) for module in PROMPT_MODULES if module.id not in _NATIVE_ONLY]
+    components = candidate_prefix(
+        "", (), SimpleNamespace(hosted_tools={}), blocks, (), builtin_agent=True, rg=True,
+    ).components
+    # Tier 1 replaces the prefix at once, so only a tier-2 or tier-3 change, or presence change, is ever pending.
+    listed = {
+        item.name for item in components
+        if max(component_tier(item, replace(item, content="changed")), component_tier(None, item)) > 1
+    }
+    assert listed == _READERS.keys()
+    assert all(_READERS[name] in INSTRUCTIONS_RULE for name in listed)
+    # Instruction files are listed by path.
+    assert Component("file:project", "x", "/project/AGENTS.md").name == "/project/AGENTS.md"
+    assert "the file for a path" in INSTRUCTIONS_RULE
 
 
 @pytest.mark.parametrize("id", ["quick-replies-prompt", "session-title-prompt", "vault-routing-prompt"])

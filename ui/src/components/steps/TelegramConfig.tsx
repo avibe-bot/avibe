@@ -285,7 +285,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                   {botCommands.map((item) => (
                     <div
                       key={item.command}
-                      className="rounded-lg border border-border bg-background px-3 py-2.5"
+                      className="rounded-lg border border-edge bg-surface px-3 py-2.5 shadow-elevation-0"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
@@ -294,7 +294,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                         </div>
                         <button
                           onClick={() => copyCommand(item.command)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-foreground/[0.04] px-2.5 py-1.5 text-[11px] font-medium text-foreground transition hover:border-border-strong"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-edge px-2.5 py-1.5 text-[11px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
                         >
                           {copiedCommand === item.command ? <Check size={12} className="text-mint-ink" /> : <Copy size={12} />}
                           <code className="font-mono">
@@ -328,7 +328,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
               <div className="space-y-3 border-t border-border px-5 py-4">
                 <p className="text-[13px] leading-[1.55] text-muted">{t('telegramConfig.step4Description')}</p>
 
-                <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2.5">
+                <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
                   <div>
                     <div className="text-[12px] font-semibold text-foreground">
                       {t('telegramConfig.requireMention')}
@@ -341,7 +341,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
                   />
                 </label>
 
-                <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border bg-background px-3 py-2.5">
+                <label className="flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
                   <div className="pr-4">
                     <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
                       <SplitSquareVertical size={14} className="text-cyan-ink" />
@@ -388,7 +388,7 @@ export const TelegramConfig: React.FC<TelegramConfigProps> = ({ data, onNext, on
               {t('telegramConfig.subtitle')}
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
+          <div className="flex items-center gap-2 rounded-full border border-edge px-3 py-1.5 bg-field">
             <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 4
             </span>

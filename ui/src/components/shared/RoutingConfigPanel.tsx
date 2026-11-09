@@ -118,7 +118,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               type="button"
               onClick={onBrowseDirectory}
               title={t('directoryBrowser.title')}
-              className="shrink-0 rounded-lg border border-border bg-surface-3/60 px-2 py-2 text-muted transition-colors hover:border-cyan/40 hover:bg-surface-2/70 hover:text-foreground"
+              className="shrink-0 rounded-lg border border-edge px-2 py-2 text-muted transition-colors hover:border-cyan/40 hover:text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
             >
               <FolderOpen size={14} />
             </button>
@@ -244,7 +244,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           {t('channelList.showMessageTypes')}
           <span className="group relative">
             <HelpCircle size={12} className="cursor-help text-muted/50" />
-            <span className="pointer-events-none absolute bottom-full left-0 z-10 mb-2 w-64 whitespace-normal rounded bg-text px-3 py-2 text-xs font-normal normal-case text-bg opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+            <span className="pointer-events-none absolute bottom-full left-0 z-10 mb-2 w-64 whitespace-normal rounded bg-text px-3 py-2 text-xs font-normal normal-case text-bg opacity-0 shadow-elevation-2 transition-opacity group-hover:opacity-100">
               {t('channelList.showMessageTypesHint')}
             </span>
           </span>
@@ -268,7 +268,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                   'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-medium transition-colors',
                   checked
                     ? 'border-mint/40 bg-mint/15 text-mint-ink'
-                    : 'border-border bg-foreground/[0.02] text-muted hover:border-border-strong hover:text-foreground'
+                    : 'border-edge text-muted hover:text-foreground bg-field'
                 )}
               >
                 <span

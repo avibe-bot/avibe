@@ -51,7 +51,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
     return (
       <div className="grid h-full w-full place-items-center bg-surface px-6 text-center">
         <div className="flex max-w-[320px] flex-col items-center gap-3">
-          <span className="grid size-12 place-items-center rounded-2xl border border-border bg-foreground/[0.03] text-muted">
+          <span className="grid size-12 place-items-center rounded-2xl border border-edge bg-foreground/[0.03] text-muted shadow-elevation-0">
             <MonitorX className="size-6" />
           </span>
           <div className="space-y-1">
@@ -65,7 +65,7 @@ export const ShowPageApp: React.FC<{ windowId: string; params?: Record<string, u
                 void unpin(sessionId);
                 close(windowId);
               }}
-              className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[12.5px] font-medium text-foreground transition hover:bg-foreground/[0.05]"
+              className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-edge px-3 py-1.5 text-[12.5px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
             >
               <PinOff className="size-3.5" />
               {t('apps.showPage.unpin')}

@@ -40,9 +40,9 @@ export function SkillDetailPanel({
   const versionDelta =
     check?.localVersion || check?.remoteVersion ? `${check?.localVersion ?? '?'} → ${check?.remoteVersion ?? '?'}` : undefined;
   return (
-    <div className="flex flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
+    <div className="flex flex-col gap-3.5 self-start rounded-2xl border border-edge bg-surface p-5 shadow-elevation-0">
       <div className="flex items-start gap-3">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/40 bg-mint-soft text-mint-ink shadow-glow-sm-mint">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-mint/40 bg-mint-soft text-mint-ink shadow-decor-sm-mint">
           <WandSparkles className="size-5" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
@@ -66,7 +66,7 @@ export function SkillDetailPanel({
         </Button>
       </div>
 
-      <div className="flex flex-col gap-1 rounded-[10px] border border-border bg-surface-3 px-3 py-2.5">
+      <div className="flex flex-col gap-1 rounded-[10px] border border-edge bg-surface-3 px-3 py-2.5 shadow-elevation-0">
         <Eyebrow>{t('skills.detail.source')}</Eyebrow>
         <div className="truncate font-mono text-[11px] text-foreground" title={skill.path}>
           {skill.path}

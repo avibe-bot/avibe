@@ -10,13 +10,13 @@ import json
 import sqlite3
 
 import pytest
-from tests.migration_helpers import downgrade_legacy_schema
+from tests.migration_helpers import downgrade_legacy_schema, latest_migration_revision
 
 from storage import migrations
 
 pytestmark = pytest.mark.no_sqlite_template
 
-HEAD_REVISION = "20261108_0082"
+HEAD_REVISION = latest_migration_revision()
 PREVIOUS_REVISION = "20261020_0071"
 V5 = {
     "version": 1,

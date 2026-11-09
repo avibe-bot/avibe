@@ -634,7 +634,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
             {authorizationUnavailable ? (
                 <div
                     role="status"
-                    className="fixed inset-x-3 bottom-3 z-[100] mx-auto flex max-w-xl items-center justify-between gap-3 border border-border bg-surface px-3 py-2 text-sm text-text shadow-lg"
+                    className="fixed inset-x-3 bottom-3 z-[100] mx-auto flex max-w-xl items-center justify-between gap-3 border border-edge bg-popover px-3 py-2 text-sm text-text shadow-elevation-2"
                 >
                     <span>{t('remoteAuthorization.unavailable.body')}</span>
                     <Button
@@ -695,7 +695,7 @@ const LibraryRoute = () => {
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (
-    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-border bg-surface">
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
       <Suspense fallback={<AppsRouteFallback />}>
         <LibraryAppBody initialTab={initialTab} />
       </Suspense>

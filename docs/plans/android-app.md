@@ -29,8 +29,8 @@ leave permissions, lifecycle, update installation, push, and deep native
 features in platform code, while adding a second runtime and build system.
 
 The first Android build uses the web composer. A native Android composer is a
-separate decision after real-device tests. iOS choosing a native composer is
-not evidence that Android needs one.
+separate decision after real-device tests. iOS dropped its native composer on
+2026-11-08 (iOS plan section 5); that is no evidence either way for Android.
 
 Evidence levels used below:
 
@@ -208,10 +208,11 @@ The APK alpha ships with the web composer. The device matrix measures:
 - state after a short app switch and after process recreation.
 
 If the matrix shows a product blocker that the shell cannot fix, Android may
-add a native Kotlin text view behind the existing `composer` capability. It
-must use the same marker grammar, references payload, draft ownership, bridge
-fixtures, and web fallbacks as iOS. The implementation and estimate are made
-from Android evidence; iOS Phase 0b does not automatically trigger it.
+add a native Kotlin text view behind the `composer` capability, which iOS
+reserves but does not implement: specify it in iOS plan section 4 first, keep
+the web composer's marker grammar, references payload, and draft ownership, and
+fall back to the web composer. The implementation and estimate are made from
+Android evidence.
 
 ## 7. APK distribution and updates
 

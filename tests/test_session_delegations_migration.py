@@ -14,7 +14,7 @@ from storage.migration_policy import classify_migration
 
 pytestmark = pytest.mark.no_sqlite_template
 PREVIOUS = "20261108_0076"
-HEAD = "20261108_0082"
+HEAD = "20261108_0079"
 
 
 def test_delegation_projection_upgrade_and_fixture_downgrade_preserve_released_data(tmp_path):
@@ -24,7 +24,7 @@ def test_delegation_projection_upgrade_and_fixture_downgrade_preserve_released_d
         conn.execute("INSERT INTO agent_runs(id, run_type, status, created_at, updated_at, metadata_json) "
                      "VALUES ('historical', 'agent_run', 'succeeded', 'old', 'old', '{}')")
         original = conn.execute("SELECT * FROM agent_runs WHERE id='historical'").fetchone()
-    migrations.run_migrations(path)
+    migrations.run_migrations(path, revision=HEAD)
     migration = migrations.alembic_dir() / "versions" / "20261108_0079_session_delegations.py"
     assert classify_migration(migration).permitted == "additive"
     with closing(sqlite3.connect(path)) as conn, conn:
@@ -43,7 +43,7 @@ def test_delegation_projection_upgrade_and_fixture_downgrade_preserve_released_d
         assert conn.execute("SELECT id FROM agent_runs").fetchall() == [("historical",)]
         assert conn.execute("SELECT name FROM sqlite_master WHERE name IN "
                             "('ix_agent_runs_session_status','ix_run_definitions_session_pending')").fetchall() == []
-    migrations.run_migrations(path)
+    migrations.run_migrations(path, revision=HEAD)
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute("SELECT * FROM session_delegations").fetchall() == []
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (HEAD,)

@@ -109,8 +109,10 @@ _PREVIOUS_CONTINUE_SESSION_RULE = (
     "only when the work should continue that same existing Session. Async callbacks return to this conversation by default.\n"
 )
 _CALLBACK_RULES = (
-    "- A run's final reply returns here only with `--callback` (`--callback-session-id <id>` sends it to that Session); "
-    "a run that does not complete always reports here.\n"
+    "- If a dispatched Session handles your message without writing back, Avibe sends a read receipt with its last reply "
+    "once it is idle with no pending work; a run that does not complete still reports immediately.\n"
+    "- Add `--no-reply` to an existing `--session-id` or `--bot` message that needs no answer or read receipt; "
+    "not with `--sync` or a new/forked Session.\n"
     "- `--sync` changes waiting behavior, not session identity: runs are async by default; "
     "synchronous runs wait for the result and are still recorded in `vibe runs`.\n"
 )
@@ -152,6 +154,9 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
             "handle": "main", "display_name": "", "role": "The user's main Bot.", "session_id": "ses_main",
             "builtin": True,
         }
+        options["projects"] = [
+            {"name": "Avibe", "description": "Build Avibe."},
+        ]
     return {"backend": backend, "agent_instructions": "Custom {unchanged} instructions", "options": options}
 
 

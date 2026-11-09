@@ -81,10 +81,9 @@ HARNESS_SOURCE_FIELDS = (
     "parent_run_id",
     "callback_session_id",
     "callback_mode",
+    "no_reply",
     "suppress_report_hint",
 )
-#: ``callback_mode`` of a run that asked for no callback: only a failure is reported (``core.scheduled_tasks``).
-_CALLBACK_FAILURE_ONLY = "failure"
 #: ``source_actor`` of a failure notice: ``<run>:notice:<status>`` (``core.scheduled_tasks``).
 _NOTICE_ACTOR_MARKER = ":notice:"
 
@@ -123,7 +122,10 @@ def harness_source(spec: Mapping[str, Any]) -> str:
         parts = ["webhook", definition, name]
     elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("delegation-idle:"):
         title = _token(spec.get("source_session_title")).replace('"', "'")
-        parts = ["Session", f'"{title}"' if title else "", f"#{session}", "went idle without reporting"]
+        if bot:
+            parts = ["read receipt", origin]
+        else:
+            parts = ["read receipt", origin, f'"{title}"' if title else ""]
     elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("vault:"):
         parts = ["Vault request", _token(actor[len("vault:") :])]
     elif trigger == "agent_run" and source_kind == "callback" and _NOTICE_ACTOR_MARKER in actor:
@@ -159,30 +161,27 @@ def is_voice_input(metadata: Any) -> bool:
 
 
 def harness_hint(spec: Mapping[str, Any], *, receiver: Any = None) -> str:
-    """Where an Agent run's result goes, for the line after its ``[Harness: ...]`` label.
+    """Where a dispatched Agent Run's result should be reported.
 
-    Progressive disclosure instead of system prompt guidance (``docs/plans/bots.md`` D4): a run with a
-    callback returns its final reply to that Session by itself; a run without one is reported by an explicit
-    message, so the input names the sender and the exact command. Empty for every other input.
+    Successful callbacks are retired. A delegated Session reports to its sender when
+    it needs a decision; ``--no-reply`` replaces that hint with an explicit receipt
+    suppression marker. The sender-Session prefix rule still suppresses the hint.
     """
     if _token(spec.get("task_trigger_kind")) != "agent_run":
         return ""
     source_kind = _token(spec.get("source_kind"))
     if source_kind not in {"agent", "cli"}:
         return ""
+    if spec.get("no_reply") is True:
+        return "No reply needed."
     receiver = _token(receiver)
-    callback = _token(spec.get("callback_session_id"))
-    if callback and str(spec.get("callback_mode") or "") != _CALLBACK_FAILURE_ONLY:
-        if callback == receiver:
-            return ""
-        return f"Callback: your final reply returns to {_address(callback)[0]} automatically."
     sender = _token(spec.get("source_actor")) if source_kind == "agent" else ""
     if not sender or sender == receiver:
         return ""
     if spec.get("suppress_report_hint") is True:
         return ""
     name, command = _address(sender)
-    return f"No callback. When the work is done or you need a decision, you can report to {name} with `{command}`."
+    return f"When the work is done or you need a decision, you can report to {name} with `{command}`."
 
 
 def harness_hints(spec: Mapping[str, Any]) -> tuple[str, ...]:

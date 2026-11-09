@@ -99,7 +99,7 @@ export const RecentSwitchesCard: React.FC<{
   };
 
   return (
-    <section className="rounded-xl border border-border bg-background">
+    <section className="rounded-xl border border-edge bg-surface shadow-elevation-0">
       <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-4 sm:px-5">
         <h2 className="text-[15px] font-semibold text-foreground">{t('settings.models.recent.title')}</h2>
         {canExpand && (

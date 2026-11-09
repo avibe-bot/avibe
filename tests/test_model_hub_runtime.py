@@ -2829,7 +2829,7 @@ def test_search_query_limits_use_only_documented_vendor_bounds() -> None:
     assert {
         entry.id: entry.search["limits"]["query_max_chars"]
         for entry in api_key_vendor_catalog() if entry.search is not None
-    } == {"deepseek": 128, "tavily": None, "exa": None, "exa-mcp": None}
+    } == {"deepseek": 128, "tavily": None, "exa": None, "exa-mcp": None, "parallel-mcp": None}
 
 
 def test_only_deepseek_search_auto_enrolls_model_sources() -> None:

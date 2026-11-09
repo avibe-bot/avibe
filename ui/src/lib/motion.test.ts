@@ -3,7 +3,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { timeToProgress, useDisclosure } from './motion';
+import { curveOf, timeToProgress, useDisclosure } from './motion';
 
 describe('timeToProgress', () => {
   it('finds when an accelerating exit has faded a copy to 30% and to 10%', () => {
@@ -22,15 +22,35 @@ describe('timeToProgress', () => {
   });
 });
 
+describe('curveOf', () => {
+  it('follows a cubic-bezier from 0 to 1, and agrees with timeToProgress', () => {
+    const move = 'cubic-bezier(0.32, 0.72, 0, 1)';
+    const curve = curveOf(move);
+    expect(curve(0)).toBe(0);
+    expect(curve(1)).toBe(1);
+    const samples = Array.from({ length: 21 }, (_, index) => curve(index / 20));
+    samples.forEach((value, index) => { if (index > 0) expect(value).toBeGreaterThanOrEqual(samples[index - 1]); });
+    // Decelerating: well past half way at half the time.
+    expect(curve(0.5)).toBeGreaterThan(0.8);
+    expect(curve(timeToProgress({ duration: 1, easing: move }, 0.6))).toBeCloseTo(0.6, 3);
+  });
+
+  it('counts any other easing as linear, clamped', () => {
+    expect(curveOf('linear')(0.3)).toBeCloseTo(0.3);
+    expect(curveOf('ease-out')(1.4)).toBe(1);
+    expect(curveOf('ease-out')(-0.2)).toBe(0);
+  });
+});
+
 describe('useDisclosure', () => {
   afterEach(() => {
-    document.documentElement.style.removeProperty('--motion-duration-instant');
+    document.documentElement.style.removeProperty('--motion-disclose-close-duration');
     vi.useRealTimers();
   });
 
-  it('keeps what closes for one `instant`, closing, then lets it go', () => {
+  it('keeps what closes for `--motion-disclose-close-duration`, closing, then lets it go', () => {
     vi.useFakeTimers();
-    document.documentElement.style.setProperty('--motion-duration-instant', '100ms');
+    document.documentElement.style.setProperty('--motion-disclose-close-duration', '100ms');
     const { result, rerender } = renderHook(({ open }) => useDisclosure(open), { initialProps: { open: true } });
     expect(result.current).toEqual({ present: true, closing: false, closed: false });
     rerender({ open: false });

@@ -18,7 +18,6 @@ const surfaces = [
   ['bg-secondary', '次要按钮'],
   ['bg-muted-soft', '弱化底色'],
   ['bg-[var(--sidebar-background)]', '侧栏'],
-  ['bg-[var(--nav-hover-bg)]', '导航悬停'],
   ['bg-[var(--nav-selected-bg)]', '导航选中'],
   ['bg-[var(--logo-well-background)]', '标志底座'],
 ] as const;

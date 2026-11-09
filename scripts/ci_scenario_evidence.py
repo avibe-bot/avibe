@@ -7,8 +7,10 @@ its release workflow selects it; release mode is stricter and requires every
 selected covered ``test`` case to have a passing JUnit record from that release
 run.
 
-PR usage: ``python scripts/ci_scenario_evidence.py <junit-dir>``, where each
-subdirectory is one job's ``junit-<job>-<index>`` artifact.
+PR usage: ``python scripts/ci_scenario_evidence.py <junit-dir> --mode PR``,
+with the classifier plan and producer results in ``NEEDS_JSON``. Each
+subdirectory is one job's ``junit-<job>-<index>`` artifact. MASTER_FULL requires
+all producers; MG_THIN deliberately skips the evidence job and attests no rows.
 
 Release usage: ``python scripts/ci_scenario_evidence.py --release <junit-dir>
 --workflow <workflow> --pytest-root <root> --pytest-command-index <index>``.
@@ -21,6 +23,8 @@ updater test runs from the separate ``release-automation`` checkout.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shlex
 import sys
@@ -42,7 +46,7 @@ UNIT_SHARD_ARGS = ("-m", "not integration", "--ignore=tests/e2e", "tests")
 # The launchers that run it: the serial runner, or its concurrent lanes on one runner.
 UNIT_SHARD_LAUNCHERS = ("scripts/ci_unit_tests.sh", "scripts/ci_unit_test_lanes.py")
 # The job this gate runs after on every event: its reports must all be there,
-# or a broken report would read as every case "not run".
+# or a broken report would read as every case "out of scope".
 UNIT_SHARD_JOB = "unit-test-shards"
 # Options that change what a pytest command selects, and those that take a value.
 _SELECTING = {"-m", "-k", "-p", "-c", "-o", "--noconftest", "--ignore", "--deselect", "--rootdir"}
@@ -355,21 +359,37 @@ def judge(
     lint_runs: dict[str, int],
     release_commands: list[tuple[str, ...]],
     select: Callable[[tuple[str, ...]], Iterable[str]],
+    *,
+    plan: dict,
 ) -> tuple[list[str], dict[str, list[str]]]:
     """The problems with ``evidence`` given what CI reported, and which cases were release-gated or not run.
 
-    A ``lint.yml`` job counts as reported only when every run of its matrix
-    left an artifact (``lint_runs``): a run that left none -- skipped by its
-    path or event filter, or gone before its upload -- says nothing about the
-    cases it would have run. The unit shards are the exception: this gate runs
-    whenever they do, so a missing shard report is itself a problem. ``select`` returns the node ids a command's
-    arguments select; it is only asked about commands that could account for a
-    case no report showed passing.
+    Every in-scope JUnit producer must leave exactly its declared matrix count.
+    Missing or extra reports fail; only a literal out-of-scope disposition can
+    account for a case not exercised by this PR. MASTER_FULL cannot use that
+    exception. MG_THIN reports no scenario execution at all. ``select`` returns
+    the node IDs selected by a command when no report shows a case passing.
     """
 
-    expected = lint_runs.get(UNIT_SHARD_JOB, 1)
-    if reports.artifacts.get(UNIT_SHARD_JOB, 0) < expected:
-        return [f"{UNIT_SHARD_JOB} left {reports.artifacts.get(UNIT_SHARD_JOB, 0)} of {expected} junit reports"], {}
+    from scripts.ci_scope import validate_plan
+
+    validate_plan(plan)
+    if plan["mode"] == "MG_THIN":
+        if reports.artifacts or reports.outcomes:
+            return ["MG_THIN cannot claim scenario execution evidence"], {}
+        return [], {"out of scope (MG_THIN)": list(evidence)}
+    problems = []
+    for job, expected in lint_runs.items():
+        actual = reports.artifacts.get(job, 0)
+        if plan["jobs"][job] == "run" and actual != expected:
+            problems.append(f"{job} left {actual} of {expected} junit reports")
+        elif plan["jobs"][job] == "skip" and actual:
+            problems.append(f"{job} left evidence despite being out of scope")
+    unknown = set(reports.artifacts) - set(lint_runs)
+    if unknown:
+        problems.append(f"Unknown evidence producers: {sorted(unknown)}")
+    if problems:
+        return problems, {}
     by_file = reports.by_file()
     pending: list[Evidence] = []
     for case in evidence.values():
@@ -382,7 +402,7 @@ def judge(
             continue
         case.skips = sorted({message or outcome for outcome, message in outcomes})
         pending.append(case)
-    accounted: dict[str, list[str]] = {"release-gated": [], "not run": []}
+    accounted: dict[str, list[str]] = {"release-gated": [], "out of scope": []}
     if not pending:
         return [], accounted
     selections: dict[tuple[str, ...], list[str]] = {}
@@ -395,7 +415,7 @@ def judge(
     unreported = [
         args
         for job, commands in lint_commands.items()
-        if reports.artifacts.get(job, 0) < lint_runs.get(job, 1)
+        if job in plan["jobs"] and plan["jobs"][job] == "skip"
         for args in commands
     ]
     problems: list[str] = []
@@ -404,7 +424,7 @@ def judge(
         if any(selects(args, case.citation) for args in release_commands):
             accounted["release-gated"].append(case.citation)
         elif any(selects(args, case.citation) for args in unreported):
-            accounted["not run"].append(case.citation)
+            accounted["out of scope"].append(case.citation)
         elif case.skips:
             problems.append(f"{rows}: {case.citation} was skipped everywhere it ran ({'; '.join(case.skips)})")
         else:
@@ -416,6 +436,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("junit_dir", help="JUnit directory to inspect")
     parser.add_argument("--release", action="store_true", help="enforce the release-run evidence contract")
+    parser.add_argument("--mode", choices=("PR", "MG_THIN", "MASTER_FULL"), help="explicit CI evidence scope")
     parser.add_argument("--workflow", type=Path, help="release workflow containing the pytest command")
     parser.add_argument("--pytest-root", type=Path, default=Path.cwd(), help="checkout root used by that pytest command")
     parser.add_argument("--pytest-command-index", type=int, default=0, help="parsed pytest command to verify")
@@ -449,12 +470,32 @@ def main(argv: list[str]) -> int:
         return 0
 
     from scripts import pytest_collection
+    from scripts.ci_scope import check_results, plan_from_needs
 
+    try:
+        needs = json.loads(os.environ.get("NEEDS_JSON", ""))
+        plan = plan_from_needs(needs, event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+                               ref=os.environ.get("GITHUB_REF", ""))
+        if args.mode != plan["mode"]:
+            raise ValueError("Scenario evidence mode must match the classified scope")
+        producers = tuple(job for job in needs if job != "changes")
+        problems = check_results(plan, needs, producers)
+        if problems:
+            raise ValueError("; ".join(problems))
+    except (ValueError, KeyError, TypeError) as exc:
+        print(f"::error::Invalid scenario evidence scope: {exc}")
+        return 1
     junit_dir = Path(args.junit_dir)
     reports = read_reports(junit_dir)
     lint_commands = pytest_commands(WORKFLOWS / LINT_WORKFLOW)
-    lint_runs = {job_id: matrix_size(job) for job_id, job in workflow_jobs(WORKFLOWS / LINT_WORKFLOW).items()}
+    lint_runs = {
+        job_id: matrix_size(job) for job_id, job in workflow_jobs(WORKFLOWS / LINT_WORKFLOW).items()
+        if "AVIBE_CI_JUNIT_DIR" in job.get("env", {})
+    }
     release_commands = [args for name in RELEASE_WORKFLOWS for commands in pytest_commands(WORKFLOWS / name).values() for args in commands]
+    if set(needs) != {"changes", *lint_runs}:
+        print("::error::Scenario evidence must wait for exactly every declared JUnit producer")
+        return 1
     evidence = covered_evidence()
     problems, accounted = judge(
         evidence,
@@ -463,6 +504,7 @@ def main(argv: list[str]) -> int:
         lint_runs,
         release_commands,
         lambda args: [entry["nodeid"] for entry in pytest_collection.collect(list(args))],
+        plan=plan,
     )
     print(f"Read reports from {len(reports.outcomes)} job(s): {', '.join(sorted(reports.outcomes)) or 'none'}.")
     print(f"{len(evidence)} case(s) evidence covered rows; {len(problems)} never ran.")

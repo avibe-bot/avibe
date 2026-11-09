@@ -149,7 +149,7 @@ describe('ActivityCard display shortcut', () => {
     const close = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
     const collapse = screen.getByRole('button', { name: 'chat.agentActivity.collapse' });
     expect(close.className).toContain('size-6');
-    for (const sharedClass of ['border-border', 'bg-foreground/[0.04]', 'text-foreground/80']) {
+    for (const sharedClass of ['border-edge', 'bg-field', 'text-foreground/80']) {
       expect(tools.className).toContain(sharedClass);
       expect(close.className).toContain(sharedClass);
     }
@@ -185,6 +185,8 @@ describe('ActivityChip completed duration', () => {
       />,
     );
 
-    expect(screen.getByText(/1d 14:33:11/)).toBeTruthy();
+    // Expanded, the inert copy of the pill that closing cross-fades into says it too; the reader sees one.
+    const shown = screen.getAllByText(/1d 14:33:11/).filter((el) => !el.closest('[data-transcript-summary]'));
+    expect(shown).toHaveLength(1);
   });
 });

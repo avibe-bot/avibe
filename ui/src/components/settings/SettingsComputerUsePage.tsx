@@ -68,7 +68,7 @@ const StepMarker: FC<{ index: number; state: ComputerUseGuideStepState }> = ({ i
       'grid size-6 shrink-0 place-items-center rounded-full border text-[11px] font-semibold',
       state === 'complete' && 'border-mint/40 bg-mint-soft text-mint-ink',
       state === 'current' && 'border-gold/60 bg-gold/[0.12] text-gold-ink',
-      state === 'pending' && 'border-border bg-surface text-muted',
+      state === 'pending' && 'border-edge text-muted bg-field',
     )}
   >
     {state === 'complete' ? <Check className="size-3.5" /> : index + 1}

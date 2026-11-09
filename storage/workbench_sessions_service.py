@@ -326,6 +326,40 @@ def list_sessions(
     return {"sessions": sessions, "next_before_id": next_cursor}
 
 
+def list_project_sessions_for_cli(
+    conn: Connection,
+    *,
+    scope_id: str,
+    status: str | None = "active",
+    limit: int = 10,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return recent Project Sessions for CLI inspection, including background work."""
+    context = require_instance_role(authorization_context, "viewer")
+    project_id = project_access_service.project_id_from_scope_id(scope_id)
+    if project_id is None or not project_access_service.can_read_project(conn, context, project_id):
+        return []
+    query = select(agent_sessions).where(
+        agent_sessions.c.scope_id == scope_id,
+        _not_bot_session(conn),
+    )
+    if status is not None and status != "all":
+        query = query.where(agent_sessions.c.status == status)
+    effective_limit = min(max(int(limit), 1), 200)
+    rows = conn.execute(
+        query.order_by(
+            agent_sessions.c.last_active_at.desc(),
+            agent_sessions.c.created_at.desc(),
+            agent_sessions.c.id.desc(),
+        ).limit(effective_limit)
+    ).mappings().all()
+    include_local_details = _include_local_details(context)
+    return [
+        _row_to_payload(dict(row), include_local_details=include_local_details)
+        for row in rows
+    ]
+
+
 def get_session(
     conn: Connection,
     session_id: str,

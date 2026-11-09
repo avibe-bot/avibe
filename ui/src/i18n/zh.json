@@ -247,8 +247,7 @@
     },
     "password": {
       "entry": "使用密码登录",
-      "title": "输入密码。",
-      "signingInAs": "登录账号",
+      "codeEntry": "使用验证码登录",
       "label": "密码",
       "forgot": "忘记密码？",
       "show": "显示密码",
@@ -2820,7 +2819,7 @@
         "orderNative": "模型不能自带搜索时，按此顺序执行，失败换下一个。",
         "orderAll": "所有模型都按此顺序执行，失败换下一个。",
         "orderAuto": "自动：搜索服务在前，模型代搜在后。",
-        "orderAutoKeyless": "自动：已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可上下调整。",
+        "orderAutoKeyless": "自动：已添加的搜索服务 → 已启用的官方 DeepSeek → 已启用的免费内置服务 → 模型代搜。可上下调整。",
         "orderCustom": "已手动调整顺序。",
         "kind": "搜索服务",
         "modelKind": "模型代搜",
@@ -2843,9 +2842,8 @@
         "builtInPrice": "内置 · 无需密钥或设置",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
         "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
-        "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可看到该连接的 IP。",
-        "keylessEndpoint": "mcp.exa.ai",
-        "keylessCustody": "已添加服务的密钥由网关保管；Exa（免费）无需密钥，也不会把密钥交给模型或 Agent。",
+        "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 {{endpoint}}，该服务可看到该连接的 IP。",
+        "keylessCustody": "已添加服务的密钥由网关保管；免费内置服务无需密钥，也不会把密钥交给模型或 Agent。",
         "queryDestination": "搜索词会发送给执行搜索的服务。",
         "queryVendor": "搜索词会发送给 {{vendor}}。",
         "placement": "新增搜索服务会排在模型代搜之前，已保存的顺序也一样；可在 工具 › 网页搜索 中调整顺序。",
@@ -3804,6 +3802,7 @@
       "swipeRead": "已读",
       "viewAll": "查看完整收件箱",
       "refresh": "刷新",
+      "filterLabel": "显示",
       "filterUnread": "未读",
       "filterAll": "全部",
       "empty": "收件箱还是空的 — Agent 回复会出现在这里。",
@@ -5119,6 +5118,11 @@
   "projectSettings": {
     "title": "项目设置",
     "description": "设置该项目的工作目录,以及在该项目下新建会话默认使用的 Agent。",
+    "descriptionField": {
+      "label": "项目描述",
+      "placeholder": "这里长期进行什么工作？",
+      "hint": "Bot 选择项目时会看到；文件系统路径不会暴露。"
+    },
     "workdir": {
       "label": "工作目录",
       "hint": "Agent 将在该工作目录下工作。",
@@ -5325,6 +5329,8 @@
       "source": "来源",
       "parentRun": "父 Run",
       "callback": "回传",
+      "replyPolicy": "回复方式",
+      "noReply": "无需回复",
       "notifyOnFailure": "失败时通知",
       "effort": "推理 {{value}}",
       "waitingSince": "开始等待",
@@ -5722,8 +5728,7 @@
         "running": "运行中"
       },
       "return": {
-        "returnsHere": "结果会回到这里",
-        "reportsBack": "完成后由对方汇报"
+        "returnsHere": "结果会回到这里"
       },
       "kind": {
         "backendActivity": "后台任务",
@@ -5737,6 +5742,7 @@
     },
     "agentActivity": {
       "hosted": {
+        "keylessParallel": "Parallel (free)",
         "keylessExa": "Exa（免费）",
         "rateLimitSwitch": "{{sources}}限流，已改用 {{provider}}。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。",
         "fetchErrorCode": {
@@ -5954,6 +5960,7 @@
       "toolsHiddenLive": "工具调用已隐藏 · 进行中",
       "params": "参数",
       "viewJson": "JSON",
+      "loading": "正在加载执行过程…",
       "jsonLoading": "加载中…",
       "copy": "复制",
       "copied": "已复制",

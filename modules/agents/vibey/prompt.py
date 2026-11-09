@@ -63,8 +63,10 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
 TOOL_ORDER = ("read", "bash", "powershell", "edit", "write")
 INSTRUCTIONS_RULE = (
     "The environment's session field is this Session's authoritative id; its instructions field lists parts that "
-    "changed since the cached instructions were loaded: read the current file, `vibe skill list`, `vibe mcp --list`, "
-    "or `vibe agent list` before relying on a listed part."
+    "changed since the cached instructions were loaded, as name@revision. Before relying on a listed part, read its "
+    "current state: the file for a path, `vibe skill list` for skills, `vibe mcp --list` for mcp, `vibe agent list` "
+    "and `vibe bot list` for agents, or `vibe project list` for projects; tools and settings need no reading and "
+    "update when the instructions reload."
 )
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
 #: Avibe's: the loop runs a response's neighbouring read and bash calls at the same time (C-3 loop-control.md section 2).

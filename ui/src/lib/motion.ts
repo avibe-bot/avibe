@@ -43,20 +43,20 @@ export function motionTiming(duration: MotionDuration, ease: MotionEase): Motion
 
 /**
  * A disclosure's content (a chip's panel, a Harness row's body, an opened group's members, the running
- * card's full view) while it is open, and for one `instant` after it closes: closing, it leaves in place
- * (`motion-disclose-out` in src/index.css) while it still holds its layout, so nothing below moves up into
- * it, and only then lets go of the layout in one commit (docs/plans/web-ui-motion.md M3). `closed`: it
- * has just left that way, so what stands for it closed (a pill, a folded card) comes in
- * (`motion-summary-in`) rather than appearing whole; it stays true until it opens again. Where the token
- * is missing (no stylesheet), it goes at once.
+ * card's full view) while it is open, and for `--motion-disclose-close-duration` after it closes: closing,
+ * it folds back while it still holds its layout and takes no input (`motion-disclose-leaving`; the fold is
+ * lib/transcriptMotion's), and only then lets go of the layout in one commit (docs/plans/web-ui-motion.md
+ * M3). `closed`: it has just left that way, so what stands for it closed where nothing cross-fades into it
+ * (the running card's compact view) comes in (`motion-summary-in`); it stays true until it opens again.
+ * Where the token is missing (no stylesheet), it goes at once.
  */
 export function useDisclosure(open: boolean): { present: boolean; closing: boolean; closed: boolean } {
   const [phase, setPhase] = useState<'open' | 'closing' | 'closed' | 'rest'>(open ? 'open' : 'rest');
   if (open && phase !== 'open') setPhase('open');
-  if (!open && phase === 'open') setPhase(readMotionMs('--motion-duration-instant') > 0 ? 'closing' : 'rest');
+  if (!open && phase === 'open') setPhase(readMotionMs('--motion-disclose-close-duration') > 0 ? 'closing' : 'rest');
   useEffect(() => {
     if (phase !== 'closing') return undefined;
-    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-duration-instant'));
+    const timer = window.setTimeout(() => setPhase('closed'), readMotionMs('--motion-disclose-close-duration'));
     return () => window.clearTimeout(timer);
   }, [phase]);
   return { present: phase === 'open' || phase === 'closing', closing: phase === 'closing', closed: phase === 'closed' };
@@ -80,6 +80,31 @@ export function timeToProgress(timing: MotionTiming, progress: number): number {
     else hi = mid;
   }
   return timing.duration * at(hi, x1, x2);
+}
+
+/**
+ * The eased progress `easing` gives `x` of the way through (both 0–1): exact for a `cubic-bezier()` curve;
+ * any other easing counts as linear. For motion drawn from several curves at once (keyframes sampled from
+ * their sum), so each part keeps its own curve.
+ */
+export function curveOf(easing: string): (x: number) => number {
+  const curve = /^cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)$/.exec(easing.trim());
+  if (!curve) return (x) => Math.min(1, Math.max(0, x));
+  const [x1, y1, x2, y2] = curve.slice(1).map(Number);
+  const at = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3;
+  return (x) => {
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    // The curve's own parameter where its time reaches `x`, then its progress there.
+    let lo = 0;
+    let hi = 1;
+    for (let step = 0; step < 32; step += 1) {
+      const mid = (lo + hi) / 2;
+      if (at(mid, x1, x2) < x) lo = mid;
+      else hi = mid;
+    }
+    return at((lo + hi) / 2, y1, y2);
+  };
 }
 
 /**

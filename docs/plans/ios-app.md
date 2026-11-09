@@ -5,6 +5,8 @@
 > [the Android plan](android-app.md)); other iOS decisions are open
 > (section 17). Handed off to a dedicated owner of the iOS track (section 18).
 > Plan and spike only; nothing here is built yet.
+> Phase 0b, a native composer, was dropped by the owner on 2026-11-08
+> (section 5).
 > **Owner**: cyhhao
 > **Date**: 2026-11-02
 
@@ -12,14 +14,15 @@
 
 Build a **thin native iOS shell in Swift/SwiftUI**. The transcript and every
 other page stay the user's own Avibe Web UI in a `WKWebView`, loaded from the
-instance's tunnel host the way the desktop app wraps it. The **composer becomes
-a native view** above the keyboard. Native code owns what a Home Screen web app
-cannot do well: text entry, a microphone grant that does not re-ask, APNs push,
+instance's tunnel host the way the desktop app wraps it, **the composer
+included**. Native code owns what a Home Screen web app cannot do well: keyboard
+layout, a microphone grant that does not re-ask, APNs push,
 haptics, sign-in through the system browser, an instance picker, and later App
 Intents, widgets, Share, and HealthKit. All of it sits behind **one versioned
 bridge contract**, `window.avibeNative`. Thin Swift and Kotlin shells implement
 the same contract in parallel, while the Web UI calls it from one module.
-Their native composers and release dates remain independent; see
+Each platform decides from its own device evidence whether it needs native text
+entry, and their release dates remain independent; see
 [the Android plan](android-app.md).
 
 - **Text input**: the owner's main pain in the Home Screen app is typing. An
@@ -31,15 +34,16 @@ Their native composers and release dates remain independent; see
   away. The shell fixes the reload. Phase 0a PR 1 leaves WebKit keyboard
   behavior unchanged; PR 2 adds `isNativeShell()` and coordinates any native
   keyboard layout change with disabling the Web correction in the same change.
-  A native `UITextView` composer removes the remaining WebKit editing path
-  (Phase 0b), and 0a's measurements decide whether 0b is still worth its cost.
+  The composer stays web: a native `UITextView` composer (Phase 0b) was
+  dropped on 2026-11-08, because the web composer inside the shell no longer
+  needs it (section 5).
 - **Microphone**: the shell answers WebKit's media-capture permission request
   itself (`WKUIDelegate`, iOS 15+), so WebKit never shows its own prompt; iOS
   shows its system microphone dialog once per install. A sealed spike confirmed
   the mechanism, and the production dictation pipeline runs unchanged in a
   `WKWebView` (section 9).
-- **Technology**: plain Swift, not Tauri 2 mobile or Capacitor. The native
-  composer, keyboard control, and app extensions all need direct ownership of
+- **Technology**: plain Swift, not Tauri 2 mobile or Capacitor. Keyboard
+  control, the accessory bar, and app extensions all need direct ownership of
   the web view and its Xcode project. Nothing in `desktop/` is reusable on iOS
   (section 6).
 - **Connection**: the app talks to the instance tunnel directly, and avibe.bot
@@ -49,9 +53,10 @@ Their native composers and release dates remain independent; see
   dispatch rule stays as it is today (section 8).
 - **First version**: Phase 0a is the browser-equivalent shell followed by the
   native bridge, Web UI shell marker, and coordinated keyboard decision (about
-  2 weeks, TestFlight internal). Phase 0b adds the native composer (about 2.5
-  more weeks). The Phase 0 exit checklist on a real iPhone (section 15) gates
-  both. Push and system sign-in follow in Phase 1.
+  2 weeks, TestFlight internal), with the web composer. Phase 0b, a native
+  composer, was dropped (section 5). The Phase 0 exit checklist on a real
+  iPhone (section 15) gates Phase 0a. Push and system sign-in follow in
+  Phase 1.
 
 Evidence levels used below: **verified** means observed in the 2026-11-02 spike
 or read in this workspace's code; **cited** means Apple, WebKit, Google, or
@@ -92,12 +97,12 @@ same Home Screen app. The microphone prompt is WebKit policy. The input problems
 sit at least partly in WebKit's `contenteditable` handling, which every
 `WKWebView` app shares (section 5).
 
-## 3. Shape: web transcript, native composer
+## 3. Shape: web Workbench, native shell
 
 | Concern | Stays web | Goes native |
 | --- | --- | --- |
 | Transcript, Inbox, Settings, Apps, Show Pages, every other page | Everything | - |
-| Composer | `@` / `#` pickers, Agent and model menu, attachment previews and upload, draft persistence, voice pipeline | Text entry, send and stop, hold-to-talk button with haptics, attachments button, keyboard layout (section 5) |
+| Composer | Everything: text entry, send and stop, `@` / `#` pickers, Agent and model menu, attachments, draft persistence, hold-to-talk, voice pipeline | Keyboard layout and the hidden accessory bar (section 5) |
 | Voice capture and dictation | `getUserMedia`, AudioWorklet, WAV segments, realtime socket (unchanged) | Answer the media-capture permission; `NSMicrophoneUsageDescription` |
 | Notifications | Inbox, categories, preferences UI | APNs registration, Notification Service Extension, tap routing |
 | Sign-in | Existing instance OIDC and consent after selection | Bundled avibe.bot email OTP or password and current-device account lifecycle |
@@ -107,10 +112,8 @@ sit at least partly in WebKit's `contenteditable` handling, which every
 A native client would duplicate a Web UI that ships several times a week. The
 desktop app already proves the wrapper model: `desktop/README.md` describes a
 shell that loads the loopback Workbench and adds native capabilities through
-`window.__AVIBE_DESKTOP_*` flags (`ui/src/lib/desktopShell.ts`). The composer is
-the one surface where the platform's own text system is worth more than shared
-code, because WebKit's `contenteditable` IME handling is where the input
-problems live.
+`window.__AVIBE_DESKTOP_*` flags (`ui/src/lib/desktopShell.ts`). The composer
+was the one candidate for a native surface; it stays web (section 5).
 
 ## 4. Bridge contract: `window.avibeNative` v1
 
@@ -137,7 +140,7 @@ interface AvibeNative {
 | `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
-| `composer` | `composer.attach({surface, sessionId, draft, placeholder, busy, disabled, actions})`, `composer.update({...})`, `composer.detach()`, `composer.insertMention({trigger, value, data})`, `composer.setText({text})`, `composer.focus()`, `composer.voicePreview({text})`, `composer.voiceCommit({text})`, `composer.voiceRestore()` | `composer.change({text, references})`, `composer.submit({text, references, files})`, `composer.stop`, `composer.trigger({trigger, query, active})`, `composer.voice({phase})`, `composer.files({files})`, `composer.action({id})`, `composer.layout({height})` |
+| `composer` | **Not planned** (reserved; not implemented). The native composer (Phase 0b) was dropped on 2026-11-08 (section 5); its methods and events are in this file's git history. | - |
 | [`push`](ios-push-relay-contract.md) | `push.status({vapidPublicKey?: string})` → `{state: "unavailable" \| "off" \| "on", revokeState: "active" \| "absent" \| "pending", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey, forceResubscribe?: boolean})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` → `{revoked: boolean, revoke: "confirmed" \| "pending" \| "not_needed"}` | `push.opened({url})` |
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
@@ -175,7 +178,8 @@ Rules:
 - **Discovery**: a document-start script defines `window.avibeNative` before any
   page script runs, in the main frame of an instance origin only. The Web UI
   checks `capabilities[name] >= minor` before each use. A missing capability
-  means the web fallback (for example, the web composer).
+  means the web fallback (for example, the browser keyboard correction when
+  `keyboardResizesViewport` is absent).
 - **Compatibility**: shells ship slowly and instances update weekly, so a new
   Web UI must work with the previous contract major, and a shell must answer
   unknown methods with `{code: 'unsupported'}`. Minor versions only add.
@@ -241,14 +245,14 @@ compares a plain `textarea`, a bare `contenteditable`, bare Lexical, and
 | Symptom | Device result | Consequence |
 | --- | --- | --- |
 | Pinyin candidates sometimes missing | Not reproduced; candidates and composition are normal in every input, `MentionEditor` included | Recheck on the checklist; no dedicated fix |
-| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 pins every shell WebView to `keyboardLayoutGuide`; a Workbench document requests outer-scroll suppression for its own WebView through `viewport.setOuterScrollLocked`, while every other document keeps WebKit scrolling. The native composer removes Lexical from the path. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
+| Keyboard pushing the composer | Keyboard open and close are normal in every input. On the first candidate pick in an empty editor, Lexical calls `window.scrollBy` and moves the page; a plain `textarea` does not | PR 1 keeps WebKit and the current Web correction unchanged. PR 2 pins every shell WebView to `keyboardLayoutGuide`; a Workbench document requests outer-scroll suppression for its own WebView through `viewport.setOuterScrollLocked`, while every other document keeps WebKit scrolling. #3311, #3337, and #3368 keep the composer above the keyboard and the layout in place after it closes. The web-only fix avibe-bot/avibe#3166 had no device evidence and was closed. |
 | Typing stops after quick Paste (letters go straight in, Pinyin no longer composes) | iOS system behavior: the same in a plain `textarea` | Probably the same in `UITextView`; verify once, no app-side handling |
 | Typeless blank | Intermittent, not reproduced. Lead: the Home Screen web app reloads the whole page after a few seconds away | A shell app keeps its page across brief app switches; recheck on the checklist |
-| Accessory bar | WebKit; a page cannot remove it | Shell flag or the native composer |
+| Accessory bar | WebKit; a page cannot remove it | The shell hides it in instance WebViews (#3376) |
 
-The Web UI keeps its current composer on mobile web; it does not switch to a
-`textarea`. Phase 0a runs the exit checklist on the web composer inside the
-shell to measure what remains (section 15).
+The Web UI keeps its current composer on mobile web and in the shell; it does
+not switch to a `textarea`. Phase 0a runs the exit checklist on it inside the
+shell (section 15).
 
 ### Shell and Web coordination (Phase 0a PR 2)
 
@@ -281,59 +285,34 @@ shell to measure what remains (section 15).
   agreement's private-API rule (section 13); the owner accepted that risk on
   2026-11-08 after using the TestFlight build, since internal testing is not
   reviewed and the change is a few lines to remove. The bundled sign-in page
-  keeps WebKit's default accessory. The native composer would make it
-  unnecessary for chat.
+  keeps WebKit's default accessory.
 
-### Native composer (Phase 0b)
+### Native composer (Phase 0b): dropped
 
-| Native | Web, driven over the bridge |
-| --- | --- |
-| `UITextView` with UIKit's text input system: marked text for IME composition, paste, third-party keyboards; growing height; placeholder | Transcript and everything above the composer |
-| Send and Stop button; Return behavior | `@` / `#` pickers: native emits `composer.trigger` with the query, the web renders its existing list at the bottom of the web view, the selection comes back as `composer.insertMention` |
-| Hold-to-talk button with haptics; voice previews shown in the text view | Voice pipeline: native sends `composer.voice` start/stop/cancel, the web runs the verified pipeline and streams `composer.voicePreview` / `voiceCommit` |
-| Attachments button: photo picker, document picker, camera | Attachment previews, upload, and retry: native hands files over as tokens and the web reads bytes with `files.read`, so no session cookie leaves the web view |
-| Agent/model button that emits `composer.action` | The existing Agent/model menu, opened by the web |
-| Layout: pinned to `keyboardLayoutGuide`; reports its height with `composer.layout` | The page reserves that height at the bottom |
+**Owner decision, 2026-11-08: the native `UITextView` composer is not built.**
+What it was meant to fix is fixed in the web composer inside the shell, and a
+native composer would mean maintaining two composer implementations:
 
-**Mention chips round-trip** through the marker grammar the web already uses
-in `nodeToMarkerText`: `@<bot:handle>`, `@<agent:name>`, and `#<session_id>`,
-plus the references list. Native stores each mention as an attributed range
-carrying `{trigger, value, data}`, draws it as a chip (an `NSTextAttachment`
-view), deletes it atomically, and serializes to the same
-`{text, references}` that `MentionEditor` emits. One JSON fixture of marker
-texts and references is tested on both sides.
+- the keyboard's form accessory bar is hidden in instance WebViews (#3376);
+- the keyboard no longer pushes the composer off screen or leaves the layout
+  raised after it closes (#3311, #3337, #3368).
 
-**Composition rule**: while `markedTextRange` is non-nil, native never changes
-`text` or `selectedRange`, never inserts a chip, and defers draft saves and
-re-rendering until composition ends. Paste uses the system paste; pasted
-images go to the attachment path instead of the text.
-
-**Drafts** stay web-owned. Native emits a debounced `composer.change`, and the
-web persists it as today (`onDraftChange`). On attach the web passes the saved
-draft; markers in a saved draft restore as plain text, the same rule
-`MentionEditor` documents for v1. Native also keeps the latest text in memory,
-so a web content process reload does not lose it.
-
-**Turning the web composer off**: when `composer` is available, `Composer`
-renders a spacer sized by `composer.layout` instead of its input row, and calls
-`attach`, `update`, and `detach` as routes mount and unmount. Pages without a
-composer hide the native one. An older shell without the capability keeps the
-web composer.
-
-**Extra effort**: about 2 weeks native and 1 week web (native mode in
-`Composer`, picker anchoring, file hand-off, the shared fixture), in parallel,
-plus about 0.5 week of checklist iteration on devices. That is roughly 2.5
-weeks of calendar time added to Phase 0.
+**Reconsider only** if a real-device input-method problem appears that the web
+composer inside the shell cannot work around. Record the evidence first
+(device, iOS version, input method, and the steps to reproduce it) and reopen
+with it. The dropped design (the native and web split, the mention-chip
+round-trip, the composition rule, drafts, and the `composer` bridge surface) is
+in git history: `git show d319eed18:docs/plans/ios-app.md`, section 5.
 
 ## 6. Technology: Swift shell vs Tauri 2 mobile
 
 | Criterion | Swift/SwiftUI + `WKWebView` | Tauri 2 mobile |
 | --- | --- | --- |
 | Web view delegates (media capture, navigation, keyboard, accessory bar) | Owned directly | wry owns the `WKWebView` and its delegates; wry's UI delegate grants media capture when no handler is set (`wry_web_view_ui_delegate.rs`). A plugin receives the web view in `load(webview:)` ([Tauri](https://v2.tauri.app/develop/plugins/develop-mobile/)), but replacing wry's delegates breaks wry. |
-| Native composer overlay | A sibling view in our own hierarchy, pinned to `keyboardLayoutGuide` | Inserted from a plugin into a hierarchy Tauri builds; possible but fragile |
+| Native overlay views (the case was the native composer, now dropped; section 5) | A sibling view in our own hierarchy, pinned to `keyboardLayoutGuide` | Inserted from a plugin into a hierarchy Tauri builds; possible but fragile |
 | App extension targets (Notification Service Extension for push decryption, widgets, App Intents, Share) | Ordinary Xcode targets | Extra targets added to the generated Xcode project and kept across regeneration; the official notification plugin is local-only, and remote push needs a community plugin ([example](https://github.com/yanqianglu/tauri-plugin-mobile-push)) |
 | Remote-origin IPC | Origin check per message | `remote.urls` capability patterns; Tauri warns it cannot tell an iframe from the window on Android ([Tauri](https://v2.tauri.app/security/capabilities/)) |
-| Android from one project | No: a second, thin Kotlin shell on the same bridge contract | Yes for the Rust core, but every feature that matters (composer, push, intents, health) is per-platform Swift or Kotlin anyway |
+| Android from one project | No: a second, thin Kotlin shell on the same bridge contract | Yes for the Rust core, but every feature that matters (push, intents, health) is per-platform Swift or Kotlin anyway |
 | Toolchain cost | Xcode only | Rust iOS targets, Xcode, Android NDK, Node; slower builds |
 | Reuse of `desktop/` | None needed | None in practice: `desktop/src-tauri` is loopback runtime bootstrap, updater, pet, computer use, macOS window chrome, SSE notifications |
 
@@ -695,9 +674,7 @@ and open decisions.
   capability checks and typed wrappers, plus `isNativeShell()` next to
   `isDesktopShell()`. The user agent also gains an `AvibeiOS/<version>` suffix
   for server-side logs.
-- **Composer**: a native mode in `Composer` (section 5), an anchor for the
-  mention pickers at the bottom of the web view, a reserved bottom inset, and a
-  shared marker fixture with Swift.
+- **Composer**: no native mode; the web composer runs in the shell (section 5).
 - **Keyboard**: PR 2 creates primary and child WebViews through one factory,
   pins both to `keyboardLayoutGuide`, and publishes
   `keyboardResizesViewport: 1`. `useIosKeyboardInset` is disabled only when
@@ -784,8 +761,8 @@ Push to APNs (section 8).
   updates change the UI, never the purpose (DPLA 3.3.1(B)).
 - The bridge's method set is compiled into the binary, so web content cannot
   add native capability (2.5.2). It answers only trusted instance origins.
-- There is native value beyond the site: the composer, a microphone that does
-  not re-ask, encrypted push, App Intents, widgets, Share, and haptics (4.2).
+- There is native value beyond the site: a microphone that does not re-ask,
+  encrypted push, App Intents, widgets, Share, and haptics (4.2).
   Submit to the App Store only after Phase 2.
 - Show Pages are the user's own Agent output on the instance origin, not a
   catalog of mini apps. They can still reach the bridge through the
@@ -916,20 +893,15 @@ Effort assumes one Agent lane per track, with owner review between phases.
 | Build | Xcode project, signing, and `xcodebuild` or fastlane upload to TestFlight | 0.5 week, parallel |
 | Web UI | PR 2: native-shell capability integration and PWA branch decisions. Mobile onboarding slice: approved A / Cloud letter pages, complete email display, accessible single-input OTP, provider cooldown/error states, owned/shared/offline picker, empty/install recovery, and local account/switch/logout surfaces. | 3 days, parallel |
 
-Exit: run the section 15 checklist on the web composer, to measure which input
-problems a shell alone fixes. The microphone items must pass. The results
-decide whether 0b starts (section 16).
+Exit: the section 15 checklist on a real iPhone, with the web composer in the
+shell. The microphone items must pass. The input items are recorded; one the
+web composer cannot work around is the evidence that would reopen a native
+composer (section 5). Until Phase 1, users who want notifications keep the Home
+Screen web app as well.
 
-### Phase 0b: native composer, about 2.5 weeks
+### Phase 0b: native composer (dropped 2026-11-08)
 
-| Track | Work | Effort |
-| --- | --- | --- |
-| Native | `UITextView` composer, chips, send and stop, hold-to-talk with haptics, attachments, `composer` and `files` capabilities | 2 weeks |
-| Web UI | `Composer` native mode, picker anchoring, file hand-off, shared marker fixture | 1 week, parallel |
-| Devices | Checklist iteration on iPhones and keyboards | 0.5 week |
-
-Exit: the full section 15 checklist passes. Until Phase 1, users who want
-notifications keep the Home Screen web app as well.
+Not built. Section 5 gives the reasons and the condition for reconsidering.
 
 ### Phase 1: daily driver, about 2-3 weeks calendar
 
@@ -963,8 +935,7 @@ notifications keep the Home Screen web app as well.
 
 Run on at least one current iPhone, with the system Chinese (Pinyin) keyboard,
 Typeless, and one other third-party keyboard (for example, WeChat Keyboard or
-Sogou). Phase 0a records results for the web composer, and Phase 0b must pass
-every item with the native composer.
+Sogou), with the web composer in the shell.
 
 | # | Check | Pass |
 | --- | --- | --- |
@@ -976,7 +947,7 @@ every item with the native composer.
 | 6 | Microphone | The iOS dialog appears once per install; no further prompt after idle periods, background and foreground, or cold launches |
 | 7 | Hold to talk on the composer and on the center button | Haptic on press and release; dictation reaches the real avibe.bot realtime socket and lands in the composer |
 | 8 | Recording indicator | Shown while capturing (App Review 2.5.14) |
-| 9 | `@` / `#` pickers and chips (Phase 0b) | Chips insert, delete atomically, and send the same markers as the web composer |
+| 9 | `@` / `#` pickers and chips | Chips insert, delete atomically, and send the same markers as in Safari |
 | 10 | Sign-in | Email code, password, and GitHub complete inside the shell; the session survives a cold launch |
 | 11 | Protected Vault passkey | Works, or the Safari fallback is confirmed |
 
@@ -995,15 +966,13 @@ every item with the native composer.
   the HTML request.
 - **iPhone behavior is unverified.** It is cited, or inferred from shared
   WebKit code, and has not been observed on a device (section 15).
-- **The case for the native composer is narrower than first thought.** The
-  device lab found IME candidates normal and quick Paste to be iOS behavior
-  (section 5). Phase 0b's value rests on keyboard tracking, the accessory bar
-  without a private API, removing Lexical's page nudge, and native
-  hold-to-talk. Phase 0a's checklist results should confirm it before 0b
-  starts.
+- **Native composer dropped (2026-11-08).** Only a real-device input-method
+  problem that the web composer inside the shell cannot work around reopens it,
+  with that evidence (section 5).
 - **The accessory-bar technique uses a private class** (DPLA 3.3.1(A)). The
   shell uses it in instance WebViews (owner decision, 2026-11-08); before an
-  App Store submission, decide whether to keep it or ship the native composer.
+  App Store submission, decide whether to keep it or return to WebKit's
+  default bar.
 - **Protected Vault passkeys inside the shell** (section 7).
 - **Agent-authored Show Pages share the bridge and the silent microphone
   grant** (sections 7 and 13). A separate Show Page origin is the structural
@@ -1017,8 +986,8 @@ every item with the native composer.
 
 1. **Approved 2026-11-04.** The shape and technology: a Swift shell, the web
    transcript, a native composer, and one `avibeNative` contract, with code in
-   `ios/` of this repository (and `android/` later). Whether and when the
-   native composer is built is still decision 4.
+   `ios/` of this repository (and `android/` later). The native composer was
+   later dropped (decision 4).
 2. **Settled 2026-11-04:** the owner's existing Individual membership, the
    same team as the desktop app and avault, and the identifier scheme in
    section 13 (`bot.avibe.ios`). Still open: the app name, and the minimum iOS
@@ -1027,10 +996,11 @@ every item with the native composer.
 3. Build machine: GitHub Actions macOS runners with signing secrets, as for the
    desktop app, are proposed. On an Individual membership this is also how the
    iOS owner ships without holding the signing key (section 13).
-4. Phase 0 scope: put Phase 0a (shell, bridge, and coordinated keyboard
-   behavior) on TestFlight
-   internal as soon as it is ready and decide 0b (native composer) from its
-   checklist results, or commit to 0b now. Push follows in Phase 1 either way.
+4. **Settled 2026-11-08:** Phase 0b, the native composer, is dropped; Phase 0a
+   (shell, bridge, and coordinated keyboard behavior) ships with the web
+   composer (section 5). Reconsider only with real-device evidence of an
+   input-method problem that the web composer inside the shell cannot work
+   around. Push follows in Phase 1.
 5. Approve the APNs relay on avibe.bot as a new backend path (product and
    security review), and provide the APNs `.p8` key.
 6. Approve the instance login handoff endpoints (security review).
@@ -1068,7 +1038,7 @@ Tracking issue: avibe-bot/avibe#3222.
   PRs follow the repository rules in `AGENTS.md`.
 - **First milestone**: Phase 0a (section 14), ending with the section 15
   checklist on a real iPhone. The microphone items must pass. The input items
-  are measured and decide 0b.
+  are recorded on the web composer in the shell (section 5).
 - **Prerequisites from cyhhao**: the one-time Account Holder setup in
   section 13, and decisions 2 to 4 before the first TestFlight build. The other
   decisions are needed before Phase 1 or before App Store submission.

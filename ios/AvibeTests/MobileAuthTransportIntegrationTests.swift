@@ -257,12 +257,21 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
     }
 
     func testHangingReadinessLoadTimesOut() async throws {
-        let requestArrived = expectation(description: "config request arrived")
+        // A readiness load that reaches the control plane and gets no answer
+        // ends as `network` when the readiness deadline passes. On a loaded
+        // simulator the WebContent and GPU processes can take longer to launch
+        // than that deadline (3 to 12 s in CI), so an attempt can expire
+        // before its request is sent. Such an attempt proves nothing; the next
+        // one reuses the processes launched meanwhile, within the fixture budget.
+        let readinessMilliseconds = 3_000
+        let state = HTTPFixtureState()
         let releaseResponse = DispatchSemaphore(value: 0)
         let server = try LocalHTTPServer { request in
             if request.path == "/api/config/auth" {
-                requestArrived.fulfill()
+                state.record(request)
+                // Hold the answer; each released handler releases the next.
                 releaseResponse.wait()
+                releaseResponse.signal()
                 return .json("{}")
             }
             return .status(404)
@@ -276,20 +285,33 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             controlPlaneURL: baseURL,
             websiteDataStore: .nonPersistent(),
             deadlines: MobileAuthTransportDeadlines(
-                readinessMilliseconds: 3_000,
+                readinessMilliseconds: readinessMilliseconds,
                 requestMilliseconds: 500,
                 logoutMilliseconds: 500
             )
         )
 
-        let request = Task {
-            try await transport.requestOTP(email: "alex@example.com")
-        }
-        await fulfillment(
-            of: [requestArrived],
-            timeout: Self.fixtureEventTimeout
+        let clock = ContinuousClock()
+        let budget = clock.now.advanced(by: .seconds(Self.fixtureEventTimeout))
+        var attempts = 0
+        repeat {
+            attempts += 1
+            let started = clock.now
+            let request = Task {
+                try await transport.requestOTP(email: "alex@example.com")
+            }
+            await assertNetworkError(from: request)
+            // Only the readiness deadline ends a load the server never answers.
+            XCTAssertGreaterThanOrEqual(
+                clock.now - started,
+                .milliseconds(readinessMilliseconds),
+                "attempt \(attempts)"
+            )
+        } while state.requests().isEmpty && clock.now < budget
+        XCTAssertFalse(
+            state.requests().isEmpty,
+            "No readiness request reached the control plane in \(attempts) attempts."
         )
-        await assertNetworkError(from: request)
     }
 
     func testPushManagementPreservesInt64ResponseTokensAcrossTransport() async throws {

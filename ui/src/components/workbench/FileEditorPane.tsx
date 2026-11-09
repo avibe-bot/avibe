@@ -452,7 +452,7 @@ export const FileEditorPane: React.FC<{
           buffer, so the preview tracks unsaved edits. */}
       {previewable && !loading && text !== null && (
         <div className="flex items-center justify-end border-b border-border bg-surface-2/40 px-2 py-1">
-          <div className="inline-flex overflow-hidden rounded-md border border-border">
+          <div className="inline-flex overflow-hidden rounded-md border border-edge shadow-elevation-0">
             {([
               { key: 'source' as const, Icon: Code2, label: t('apps.editor.source') },
               { key: 'preview' as const, Icon: Eye, label: t('apps.editor.preview') },
@@ -464,7 +464,7 @@ export const FileEditorPane: React.FC<{
                 aria-pressed={mode === key}
                 className={clsx(
                   'flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium transition',
-                  mode === key ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.05] hover:text-foreground',
+                  mode === key ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-wash hover:text-foreground',
                 )}
               >
                 <Icon className="size-3" /> {label}

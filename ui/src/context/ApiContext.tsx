@@ -831,13 +831,14 @@ export type ApiContextType = {
     limit?: number;
     cache?: boolean;
   }) => Promise<WorkbenchProjectsBootstrap>;
-  createProject: (payload: { folder_path: string; display_name?: string }) => Promise<WorkbenchProject>;
+  createProject: (payload: { folder_path: string; display_name?: string; description?: string }) => Promise<WorkbenchProject>;
   // Default-Agent fields accept null to CLEAR the project default (back to the
   // global default); omit a field to leave it untouched.
   updateProject: (
     projectId: string,
     payload: {
       display_name?: string;
+      description?: string | null;
       folder_path?: string;
       agent_backend?: string | null;
       agent_id?: string | null;
@@ -1106,6 +1107,7 @@ export type WorkbenchProject = {
   id: string;
   scope_id: string;
   display_name: string;
+  description?: string;
   folder_path: string;
   created_at: string;
   last_active_at: string | null;
@@ -1609,7 +1611,7 @@ export type SessionActivityState = {
   label?: string | null;
   since?: string;
   schedule_type?: 'at' | 'cron' | null;
-  // A delegated run only: its final reply returns to this Session, or its target reports back.
+  // A historical final-callback route returns here; false is not a promise to report.
   returns_here?: boolean | null;
 };
 
@@ -1927,8 +1929,7 @@ export type HarnessRun = HarnessSessionSummary & {
   source_session_id: string | null;
   source_session: HarnessSessionSummary | null;
   parent_run_id: string | null;
-  // Callback (report-back) lineage — serialized by the backend run row but
-  // previously unrendered; the run detail surfaces these (Part B).
+  // Legacy final-callback and internal failure/Vault delivery lineage; retained for old rows.
   callback_session_id: string | null;
   callback_run_id: string | null;
   callback_status: string | null;

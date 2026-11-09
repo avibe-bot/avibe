@@ -398,18 +398,20 @@ describe('mobile onboarding', () => {
           });
           break;
         case 'password':
-        case 'passwordCode':
-          if (operation === 'password') {
-            mobile.signInWithPassword.mockRejectedValueOnce(error);
-          } else {
-            mobile.requestOtp.mockRejectedValueOnce(error);
-          }
+          mobile.signInWithPassword.mockRejectedValueOnce(error);
           fireEvent.change(await reachPassword(), { target: { value: 'correct-horse' } });
-          fireEvent.click(screen.getByRole('button', {
-            name: operation === 'password'
-              ? 'mobileApp.password.signIn'
-              : 'mobileApp.password.useCode',
-          }));
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+          break;
+        case 'passwordCode':
+          // "Use an email code instead" appears for the errors a code fixes.
+          mobile.signInWithPassword.mockRejectedValueOnce({
+            code: 'invalid_credentials',
+            message: 'wrong',
+          });
+          mobile.requestOtp.mockRejectedValueOnce(error);
+          fireEvent.change(await reachPassword(), { target: { value: 'correct-horse' } });
+          fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+          fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.password.useCode' }));
           break;
         case 'passkey':
           mobile.bootstrap.mockResolvedValueOnce(owed());
@@ -500,7 +502,9 @@ describe('mobile onboarding', () => {
           expect(
             (screen.getByLabelText('mobileApp.password.label') as HTMLInputElement).value,
           ).toBe('correct-horse');
-          expect(screen.getByText('alex@example.com')).toBeTruthy();
+          expect(
+            (screen.getByLabelText('mobileApp.email.label') as HTMLInputElement).value,
+          ).toBe('alex@example.com');
           break;
         case 'passkey':
           expect(screen.getByRole('button', { name: 'mobileApp.twoFactor.usePasskey' })).toBeTruthy();
@@ -1399,43 +1403,53 @@ describe('mobile onboarding', () => {
 });
 
 describe('mobile password sign-in', () => {
-  const codeWayControl = () => screen.getByRole('button', { name: 'mobileApp.password.useCode' });
-  // An error the email code fixes promotes its way in from a link to an outline button.
-  const codeWayIsButton = () => !codeWayControl().className.includes('underline');
+  const emailField = () => screen.getByLabelText('mobileApp.email.label') as HTMLInputElement;
+  const passwordField = () => screen.queryByLabelText('mobileApp.password.label') as HTMLInputElement | null;
+  const codeWayControl = () => screen.queryByRole('button', { name: 'mobileApp.password.useCode' });
 
-  it('AUTH-SETUP-158 signs in with the avibe.bot password and reaches the instances', async () => {
+  /** Opens the email step and types `email` in code mode. */
+  const reachEmail = async (email: string) => {
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    if (email) fireEvent.change(emailField(), { target: { value: email } });
+  };
+
+  it('AUTH-SETUP-158 signs in with the avibe.bot password and reaches the instances', async () => {
+    const user = userEvent.setup();
+    await reachEmail(' alex@example.com ');
     // The email step keeps the code as its primary action and offers the password under it.
     expect(screen.getByRole('button', { name: 'mobileApp.email.send' })).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
-      target: { value: ' alex@example.com ' },
-    });
+    const email = emailField();
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
 
-    const password = await screen.findByLabelText('mobileApp.password.label') as HTMLInputElement;
-    expect(screen.getByRole('heading', { name: 'mobileApp.password.title' })).toBeTruthy();
-    expect(screen.getByText('alex@example.com')).toBeTruthy();
-    // Identifier-first: the saved login matches the email through a hidden username field.
-    const username = document.querySelector<HTMLInputElement>('input[autocomplete="username"]');
-    expect(username?.value).toBe('alex@example.com');
-    expect(username?.readOnly).toBe(true);
-    expect(username?.getAttribute('aria-hidden')).toBe('true');
-    expect(username?.tabIndex).toBe(-1);
-    expect(username?.form).toBe(password.form);
+    // One form: the same email field, now the saved login's username, above the password.
+    const password = passwordField() as HTMLInputElement;
+    expect(emailField()).toBe(email);
+    // An email input drops the surrounding spaces from its value.
+    expect(email.value).toBe('alex@example.com');
+    expect(email.form).toBe(password.form);
+    expect(screen.getByRole('heading', { name: 'mobileApp.email.title' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'mobileApp.email.send' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'mobileApp.password.codeEntry' })).toBeTruthy();
+    expect(document.querySelectorAll('input[readonly], input[aria-hidden="true"]')).toHaveLength(0);
+    expect(document.activeElement).toBe(password);
+    expect(email.type).toBe('email');
+    expect(email.getAttribute('autocomplete')).toBe('username');
+    expect(email.getAttribute('name')).toBe('username');
+    expect(email.getAttribute('enterkeyhint')).toBe('next');
     expect(password.type).toBe('password');
+    expect(password.getAttribute('name')).toBe('password');
     expect(password.getAttribute('autocomplete')).toBe('current-password');
     expect(password.getAttribute('autocapitalize')).toBe('none');
     expect(password.getAttribute('spellcheck')).toBe('false');
     expect(password.getAttribute('enterkeyhint')).toBe('go');
     expect(password.getAttribute('aria-describedby')).toBe('mobile-login-password-feedback');
 
-    // The only client check is a non-empty password, and nothing submits on its own.
+    // The only client check before Sign in is a non-empty password; nothing submits on its own.
     const signIn = screen.getByRole('button', { name: 'mobileApp.password.signIn' }) as HTMLButtonElement;
     expect(signIn.disabled).toBe(true);
     fireEvent.submit(password);
-    fireEvent.change(password, { target: { value: 'correct horse' } });
-    await settle();
+    await user.type(password, 'correct horse');
     expect(signIn.disabled).toBe(false);
     expect(mobile.signInWithPassword).not.toHaveBeenCalled();
 
@@ -1448,8 +1462,8 @@ describe('mobile password sign-in', () => {
     fireEvent.click(toggle);
     expect(password.type).toBe('password');
 
-    // Return submits the form.
-    fireEvent.submit(password);
+    // Return in the password field submits.
+    await user.type(password, '{Enter}');
     fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
     expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
@@ -1458,21 +1472,102 @@ describe('mobile password sign-in', () => {
     expect(mobile.verifyOtp).not.toHaveBeenCalled();
   });
 
-  it('validates the email before either way in', async () => {
-    render(<MobileOnboarding />);
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
-    const email = screen.getByLabelText('mobileApp.email.label');
-    fireEvent.change(email, { target: { value: 'max@' } });
+  it('switches to password sign-in at once, whatever the email holds', async () => {
+    for (const [typed, focus] of [['', 'email'], ['max@', 'password'], ['alex@example.com', 'password']] as const) {
+      cleanup();
+      resetMobileMocks();
+      await reachEmail(typed);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
 
-    for (const way of ['mobileApp.password.entry', 'mobileApp.email.send']) {
-      fireEvent.click(screen.getByRole('button', { name: way }));
-      expect((await screen.findByRole('alert')).textContent, way).toBe('mobileApp.email.invalid');
-      expect(email.getAttribute('aria-invalid'), way).toBe('true');
-      expect(screen.queryByLabelText('mobileApp.password.label'), way).toBeNull();
-      fireEvent.change(email, { target: { value: 'max@' } });
+      expect(passwordField(), typed).not.toBeNull();
+      expect(emailField().value, typed).toBe(typed);
+      expect(screen.queryByRole('alert'), typed).toBeNull();
+      expect(emailField().getAttribute('aria-invalid'), typed).toBeNull();
+      // An empty email is where the person starts; a typed one moves them on to the password.
+      expect(document.activeElement, typed).toBe(focus === 'email' ? emailField() : passwordField());
     }
     expect(mobile.requestOtp).not.toHaveBeenCalled();
     expect(mobile.signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it('checks the email on Sign in and Forgot password, and sends nothing for an invalid one', async () => {
+    for (const typed of ['', 'max@']) {
+      cleanup();
+      resetMobileMocks();
+      await reachEmail(typed);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+      fireEvent.change(passwordField() as HTMLInputElement, { target: { value: 'correct-horse' } });
+
+      for (const action of ['mobileApp.password.signIn', 'mobileApp.password.forgot']) {
+        fireEvent.click(screen.getByRole('button', { name: action }));
+        const alert = await screen.findByRole('alert');
+        expect(alert.textContent, `${typed} ${action}`).toBe('mobileApp.email.invalid');
+        expect(alert.parentElement?.id).toBe('mobile-login-email-feedback');
+        expect(emailField().getAttribute('aria-invalid'), typed).toBe('true');
+        expect(passwordField()?.getAttribute('aria-invalid'), typed).toBeNull();
+        expect(passwordField()?.value, typed).toBe('correct-horse');
+        // Editing the email clears its error and keeps the password.
+        fireEvent.change(emailField(), { target: { value: `${typed}x` } });
+        expect(screen.queryByRole('alert'), typed).toBeNull();
+        expect(passwordField()?.value, typed).toBe('correct-horse');
+        fireEvent.change(emailField(), { target: { value: typed } });
+      }
+      expect(screen.queryByRole('heading', { name: 'mobileApp.password.forgotTitle' })).toBeNull();
+    }
+    // In code mode, Send verification code keeps the same check and copy.
+    cleanup();
+    resetMobileMocks();
+    await reachEmail('max@');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.email.invalid');
+    expect(mobile.requestOtp).not.toHaveBeenCalled();
+    expect(mobile.signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it('carries the email both ways and clears the password on returning to code mode', async () => {
+    await reachEmail('alex@example.com');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+    fireEvent.change(passwordField() as HTMLInputElement, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.show' }));
+    fireEvent.change(emailField(), { target: { value: 'sam@example.com' } });
+    expect(passwordField()?.value).toBe('correct-horse');
+
+    const returns = [
+      () => fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.codeEntry' })),
+      () => fireEvent.click(screen.getByRole('button', { name: 'common.back' })),
+    ];
+    for (const [index, back] of returns.entries()) {
+      back();
+      expect(passwordField(), `return ${index}`).toBeNull();
+      expect(screen.getByRole('button', { name: 'mobileApp.email.send' })).toBeTruthy();
+      expect(emailField().value, `return ${index}`).toBe('sam@example.com');
+      expect(emailField().getAttribute('autocomplete')).toBe('email');
+      expect(document.body.innerHTML).not.toContain('correct-horse');
+
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+      const password = passwordField() as HTMLInputElement;
+      expect(password.value, `return ${index}`).toBe('');
+      expect(password.type, `return ${index}`).toBe('password');
+      expect(emailField().value).toBe('sam@example.com');
+      fireEvent.change(password, { target: { value: 'correct-horse' } });
+    }
+  });
+
+  it('moves from the email to the password on Return, and signs in on Return there', async () => {
+    const user = userEvent.setup();
+    await reachEmail('');
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
+    expect(document.activeElement).toBe(emailField());
+
+    await user.type(emailField(), 'alex@example.com{Enter}');
+    expect(document.activeElement).toBe(passwordField());
+    expect(mobile.signInWithPassword).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    await user.type(passwordField() as HTMLInputElement, 'correct-horse{Enter}');
+    expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+    expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
+    expect(mobile.signInWithPassword).toHaveBeenCalledWith('alex@example.com', 'correct-horse');
   });
 
   it('keeps the email and password through each failure and shows its copy', async () => {
@@ -1504,9 +1599,11 @@ describe('mobile password sign-in', () => {
       expect(alert.parentElement?.id).toBe('mobile-login-password-feedback');
       expect(password.value, testCase.alert).toBe('correct-horse');
       expect(password.disabled, testCase.alert).toBe(false);
-      expect(screen.getByText('alex@example.com')).toBeTruthy();
+      expect(emailField().value).toBe('alex@example.com');
+      expect(emailField().getAttribute('aria-invalid')).toBeNull();
       expect(password.getAttribute('aria-invalid'), testCase.alert).toBe(testCase.marked ? 'true' : null);
-      expect(codeWayIsButton(), testCase.alert).toBe(testCase.codeFixes);
+      // The errors an email code fixes add a way to send one.
+      expect(Boolean(codeWayControl()), testCase.alert).toBe(testCase.codeFixes);
       const signIn = screen.getByRole('button', {
         name: testCase.wait > 0
           ? `mobileApp.password.retryIn:${testCase.wait}`
@@ -1552,9 +1649,12 @@ describe('mobile password sign-in', () => {
     const busy = screen.getByRole('button', { name: 'mobileApp.password.signingIn' });
     expect(busy.parentElement?.getAttribute('aria-busy')).toBe('true');
     expectScreenLocked();
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.changeEmail' }));
-    fireEvent.click(codeWayControl());
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.codeEntry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    fireEvent.change(emailField(), { target: { value: 'sam@example.com' } });
     fireEvent.submit(password);
+    expect(passwordField()).toBe(password);
+    expect(emailField().value).toBe('alex@example.com');
     expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
     expect(mobile.requestOtp).not.toHaveBeenCalled();
 
@@ -1562,10 +1662,9 @@ describe('mobile password sign-in', () => {
     expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
   });
 
-  it('clears the password and its error on Change email, Back, and leaving the step', async () => {
+  it('clears the password and its error on leaving the step', async () => {
     const leaves = [
-      { name: 'change email', leave: () => fireEvent.click(screen.getByRole('button', { name: 'mobileApp.code.changeEmail' })) },
-      { name: 'back', leave: () => fireEvent.click(screen.getByRole('button', { name: 'common.back' })) },
+      { name: 'code mode', leave: () => fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.codeEntry' })) },
       { name: 'forgot', leave: () => fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.forgot' })) },
     ];
     for (const { name, leave } of leaves) {
@@ -1579,23 +1678,25 @@ describe('mobile password sign-in', () => {
       await screen.findByRole('alert');
 
       leave();
+      expect(screen.queryByRole('alert'), name).toBeNull();
+      expect(document.body.innerHTML, name).not.toContain('correct-horse');
       if (name === 'forgot') {
         await screen.findByRole('heading', { name: 'mobileApp.password.forgotTitle' });
-        expect(screen.queryByRole('alert'), name).toBeNull();
+        // Back returns to password mode.
         fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
       } else {
-        // The email is kept.
-        const email = await screen.findByLabelText('mobileApp.email.label') as HTMLInputElement;
-        expect(email.value, name).toBe('alex@example.com');
-        expect(screen.queryByRole('alert'), name).toBeNull();
+        // Code mode, then Back leaves the step for Welcome.
+        fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+        expect(emailField().value, name).toBe('alex@example.com');
         fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
       }
 
-      const again = await screen.findByLabelText('mobileApp.password.label') as HTMLInputElement;
+      const again = passwordField() as HTMLInputElement;
       expect(again.value, name).toBe('');
       expect(again.type, name).toBe('password');
+      expect(emailField().value, name).toBe('alex@example.com');
       expect(screen.queryByRole('alert'), name).toBeNull();
-      expect(document.body.innerHTML, name).not.toContain('correct-horse');
     }
   });
 
@@ -1607,9 +1708,8 @@ describe('mobile password sign-in', () => {
     fireEvent.change(password, { target: { value: 'correct-horse' } });
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
     await screen.findByRole('alert');
-    expect(codeWayIsButton()).toBe(true);
 
-    fireEvent.click(codeWayControl());
+    fireEvent.click(codeWayControl() as HTMLElement);
     expect(mobile.requestOtp).toHaveBeenCalledWith('alex@example.com');
     expect(screen.getByRole('button', { name: 'mobileApp.email.sending' })).toBeTruthy();
     expectScreenLocked();
@@ -1624,6 +1724,20 @@ describe('mobile password sign-in', () => {
     expect(mobile.verifyOtp).toHaveBeenCalledWith('alex@example.com', '123456');
     expect(mobile.requestOtp).toHaveBeenCalledTimes(1);
     expect(mobile.signInWithPassword).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns Change email on the code step to code mode with the email kept', async () => {
+    mobile.signInWithPassword.mockRejectedValueOnce({ code: 'email_not_confirmed', message: 'confirm' });
+    const password = await reachPassword();
+    fireEvent.change(password, { target: { value: 'correct-horse' } });
+    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.signIn' }));
+    await screen.findByRole('alert');
+    fireEvent.click(codeWayControl() as HTMLElement);
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.code.changeEmail' }));
+
+    expect(screen.getByRole('button', { name: 'mobileApp.email.send' })).toBeTruthy();
+    expect(passwordField()).toBeNull();
+    expect(emailField().value).toBe('alex@example.com');
   });
 
   it('offers a code or Account security in Safari when the password is forgotten', async () => {

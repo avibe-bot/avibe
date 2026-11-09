@@ -346,29 +346,28 @@ def test_permissions_028_the_callers_own_session_is_an_effective_target(targets,
     assert state.counts() == before
 
 
-def test_permissions_028_a_callback_is_admitted_before_the_run_is_reserved(targets, run_cli):
-    """PERMISSIONS-028: the callback route is recorded on the row, so it is checked first."""
+@pytest.mark.parametrize("target", ["open", "standalone"])
+def test_permissions_028_deprecated_callback_flags_never_add_a_destination(targets, run_cli, target):
+    """PERMISSIONS-028: ignored callback flags add no route and cannot bypass target admission."""
 
     state = targets
     before = state.counts()
-
     code, payload = run_cli(
         [
-            "agent",
-            "run",
-            "--agent",
-            state.agent.name,
-            "--message",
-            "hi",
-            "--callback-session-id",
-            state.sessions["standalone"],
+            "agent", "run", "--session-id", state.sessions[target], "--message", "hi",
+            "--callback-session-id", state.sessions["standalone"],
         ],
         kind=state.kind,
     )
-    assert code == 1
-    assert payload["code"] == "session_not_found"
-    # Nothing reserved: the refusal landed before the new Session, not after it.
-    assert state.counts() == before
+    if target == "standalone":
+        assert code == 1
+        assert payload["code"] == "session_not_found"
+        assert state.counts() == before
+    else:
+        assert code == 0, payload
+        assert state.counts() == {**before, "runs": before["runs"] + 1}
+        with create_sqlite_engine().connect() as conn:
+            assert conn.execute(select(agent_runs.c.callback_session_id)).scalars().all() == [None]
 
 
 def test_permissions_028_a_forbidden_project_target_is_refused(targets, run_cli):

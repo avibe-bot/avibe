@@ -2139,15 +2139,14 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Inside an Agent shell a new Session takes the caller's scope and current directory.
-        Only --callback returns the final reply; a run that fails still tells the caller.
+        Failed, canceled, or interrupted runs still notify the sender.
+        --no-reply rejects --sync and new/forked Sessions.
         --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
           apply only to a new or forked Session.
 
         Examples:
-          vibe agent run --agent reviewer --message 'Review the latest deployment result.'
-          vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
-          vibe agent run --fork-self --message 'Explore the alternate fix from this context.'
+          vibe agent run --session-id sesk8m4q2p7x --queue --message 'Update docs next.'
+          vibe agent run --bot reviewer --no-reply --message 'Record this fact.'
         """
     )
 
@@ -3416,6 +3415,23 @@ def _legacy_scope_key_from_target(value: Optional[str]) -> str:
 
 
 def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Optional[str]) -> Optional[str]:
+    project_name = (getattr(args, "project", None) or "").strip()
+    if project_name:
+        from storage import projects_service
+
+        try:
+            with _projects_cli_engine(read_only=True).connect() as conn:
+                project = projects_service.resolve_project_target(conn, project_name)
+        except LookupError as exc:
+            raise TaskCliError(
+                str(exc),
+                code="project_not_found",
+                hint="List active Projects with `vibe project list`, or choose a different Project.",
+                help_command="vibe agent run --help",
+                details={"project": project_name},
+            ) from exc
+        args._resolved_project_workdir = project["workdir"]
+        return project["scope_id"]
     raw_scope_id = (getattr(args, "scope_id", None) or "").strip()
     if raw_scope_id:
         return _validate_existing_scope_id(raw_scope_id, help_command="vibe agent run --help").session_scope
@@ -6138,8 +6154,10 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     fork_self = bool(getattr(args, "fork_self", False))
     same_scope = bool(getattr(args, "same_scope", False))
     scope_id = (getattr(args, "scope_id", None) or "").strip()
+    project = (getattr(args, "project", None) or "").strip()
     visibility = (getattr(args, "visibility", None) or "").strip()
     close_after = bool(getattr(args, "close_after", False))
+    no_reply = bool(getattr(args, "no_reply", False))
     if _agent_run_is_async(args) and getattr(args, "wait_timeout", None) is not None:
         raise TaskCliError(
             "use --sync with --wait-timeout",
@@ -6147,25 +6165,18 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Agent runs are async by default. Pass --sync when the CLI should wait, or remove --wait-timeout.",
             help_command=help_command,
         )
-    if bool(getattr(args, "callback", False)) and bool(getattr(args, "no_callback", False)):
+    if no_reply and (not session_id or fork_session or fork_self or bool(getattr(args, "sync_run", False))):
         raise TaskCliError(
-            "use either --callback or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback to have the final reply return to this Session, or leave both out for no callback.",
+            "--no-reply requires an existing --session-id or --bot run and cannot be used with --sync",
+            code="invalid_no_reply_policy",
+            hint="Use --no-reply only when messaging an existing Session or Bot asynchronously.",
             help_command=help_command,
         )
-    if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
+    if sum(bool(value) for value in (same_scope, bool(scope_id), bool(project))) > 1:
         raise TaskCliError(
-            "use either --callback-session-id or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback-session-id to have the final reply return to that Session, or leave both out for no callback.",
-            help_command=help_command,
-        )
-    if same_scope and scope_id:
-        raise TaskCliError(
-            "use either --same-scope or --scope-id, not both",
+            "use only one of --same-scope, --scope-id, or --project",
             code="conflicting_scope_placement",
-            hint="Use --same-scope to reuse the caller/source scope, or --scope-id to place the new Session explicitly.",
+            hint="Use --project to place a new Session in a named Project, or use one of the lower-level scope options.",
             help_command=help_command,
         )
     if fork_self and fork_session:
@@ -6192,7 +6203,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="An existing Session keeps its model; change it in the Web UI's Session model picker. To run on another model now, start a new Session (--agent <name> --model ...) or fork this one (--fork-session <id> --model ...).",
             help_command=help_command,
         )
-    if session_id and (same_scope or scope_id):
+    if session_id and (same_scope or scope_id or project):
         raise TaskCliError(
             "scope placement flags only apply when creating a new Session",
             code="scope_with_existing_session",
@@ -6214,7 +6225,21 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             help_command=help_command,
         )
     if fork_session or fork_self:
+        if project:
+            raise TaskCliError(
+                "--project cannot be combined with a fork",
+                code="project_with_fork",
+                hint="Fork the source Session without --project, or start a new Session with --project to place it in that directory.",
+                help_command=help_command,
+            )
         return "fork"
+    if project and (getattr(args, "cwd", None) or "").strip():
+        raise TaskCliError(
+            "--cwd cannot be combined with --project",
+            code="project_with_cwd",
+            hint="The Project supplies the Session working directory; omit --cwd.",
+            help_command=help_command,
+        )
     if session_id:
         return "existing"
     return "none"
@@ -6496,6 +6521,9 @@ def _resolve_run_cwd(
     Session gets its own Show workspace from the reservation service.
     Existing and forked sessions keep their own cwd, so ``--cwd`` is an error.
     """
+    project_workdir = str(getattr(args, "_resolved_project_workdir", "") or "")
+    if project_workdir:
+        return project_workdir
     raw = (getattr(args, "cwd", None) or "").strip()
     if session_policy in {"existing", "fork"}:
         if raw:
@@ -6721,7 +6749,11 @@ def _stored_session_workdir(task, metadata: Optional[dict]) -> Optional[str]:
 
 
 def _has_modern_scope_target(args) -> bool:
-    return bool((getattr(args, "scope_id", None) or "").strip()) or bool(getattr(args, "same_scope", False))
+    return (
+        bool((getattr(args, "scope_id", None) or "").strip())
+        or bool(getattr(args, "same_scope", False))
+        or bool((getattr(args, "project", None) or "").strip())
+    )
 
 
 def _session_creation_metadata_from_caller(caller_context) -> dict:
@@ -6750,47 +6782,22 @@ def _agent_run_is_async(args) -> bool:
     return not bool(getattr(args, "sync_run", False))
 
 
-def _resolve_callback_route(
-    args,
+def _resolve_failure_notice_route(
     caller_context,
     *,
     target_session_id: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str], Optional[dict]]:
-    """Where a Run's outcome goes: ``(session id, callback mode, notice)`` (``docs/plans/bots.md`` D4).
+) -> Optional[str]:
+    """Resolve the internal failure-notice route for a new Agent Run.
 
-    No run gets a callback unless it asks for one, whatever its target: ``--callback`` returns the final reply
-    to the caller Session, ``--callback-session-id`` to the Session it names. Without a callback the caller
-    Session is still told when the run does not complete, so a failure always reaches the sender: mode
-    ``failure``. A run on the caller's own Session gets neither, because its result already lands there.
-    ``--no-callback`` is accepted and changes nothing.
+    Successful user-facing callbacks are retired. The historical callback
+    flags remain parser-compatible no-ops; a delegated run still sends its caller an
+    immediate notice when it fails, is canceled, or is interrupted. Legacy pending
+    callback rows are drained by the scheduler using their stored route.
     """
-    from core.scheduled_tasks import AGENT_RUN_CALLBACK_FAILURE_ONLY
-
-    explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
-    if explicit_callback:
-        return explicit_callback, None, None
     caller_session_id = caller_context.session_id if caller_context is not None else None
-    on_caller = bool(target_session_id and caller_session_id and target_session_id == caller_session_id)
-    if bool(getattr(args, "callback", False)):
-        if not caller_session_id:
-            raise TaskCliError(
-                "--callback needs a caller Session",
-                code="callback_without_caller",
-                hint="Run it from an Avibe Agent shell, or pass --callback-session-id <session-id>.",
-                help_command="vibe agent run --help",
-            )
-        if on_caller:
-            return None, None, {
-                "code": "async_self_run_without_callback",
-                "message": (
-                    "Started Agent Run on the caller Session without a callback. "
-                    "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
-                ),
-            }
-        return caller_session_id, None, None
-    if caller_session_id and not on_caller:
-        return caller_session_id, AGENT_RUN_CALLBACK_FAILURE_ONLY, None
-    return None, None, None
+    if caller_session_id and target_session_id != caller_session_id:
+        return caller_session_id
+    return None
 
 
 def _reserve_cli_session(
@@ -7164,6 +7171,7 @@ _BOT_RUN_CONFLICTS = (
     ("reasoning_effort", "--reasoning-effort"),
     ("same_scope", "--same-scope"),
     ("scope_id", "--scope-id"),
+    ("project", "--project"),
     ("visibility", "--visible"),
     ("cwd", "--cwd"),
     ("close_after", "--close-after"),
@@ -7171,9 +7179,9 @@ _BOT_RUN_CONFLICTS = (
 def _resolve_bot_run_target(args) -> None:
     """``--bot <handle>``: a message into the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
 
-    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. Like
-    every run it asks for no callback unless ``--callback`` says so (``_resolve_callback_route``). The Session and
-    directory are prepared here when missing, then the run continues as a queued ``--session-id`` run.
+    A Bot keeps one conversation on its own model, so flags that pick or shape a Session do not apply.
+    Its Session and directory are prepared here when missing, then the run continues as a queued
+    ``--session-id`` run, with the same failure notice and read-receipt policy as any other target.
     """
     from core.bots import MAIN_BOT_HANDLE, BotError, BotService
 
@@ -7210,11 +7218,156 @@ def _resolve_bot_run_target(args) -> None:
     args.queue = True
 
 
+def _projects_cli_engine(*, read_only: bool = False):
+    _ensure_cli_sqlite_state()
+    from storage.db import create_sqlite_engine
+
+    return create_sqlite_engine(paths.get_sqlite_state_path(), read_only=read_only)
+
+
+def _project_cli_payload(project: Mapping[str, Any], *, recent_sessions: Any = None) -> dict[str, Any]:
+    payload = {
+        "id": project.get("id"),
+        "name": project.get("display_name") or project.get("id"),
+        "path": project.get("folder_path") or "",
+        "description": project.get("description") or "",
+        "enabled": not bool(project.get("archived")),
+    }
+    if recent_sessions is not None:
+        payload["recent_sessions"] = recent_sessions
+    return payload
+
+
+def cmd_project_list(args):
+    from core.managed_skills import CATALOG_PAGE_SIZE
+    from core.system_prompt_injection import project_catalog_page
+    from storage import projects_service
+
+    try:
+        page_request = _page_request_from_args(args, help_command="vibe project list --help")
+        with _projects_cli_engine(read_only=True).connect() as conn:
+            projects = projects_service.list_projects(
+                conn, creation_order=True, authorization_context=None
+            )
+        page_size = page_request.limit or CATALOG_PAGE_SIZE
+        items, next_page = project_catalog_page(
+            projects,
+            page_request.page,
+            page_size=page_size,
+        )
+        payload = {
+            "projects": [_project_cli_payload(project) for project in items],
+            "pagination": {
+                "page": page_request.page,
+                "returned": len(items),
+                "has_more": next_page is not None,
+                "next_page": next_page,
+            },
+        }
+        if next_page is not None:
+            payload["next_page"] = next_page
+        _print_cli_payload("projects", **payload)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
+def cmd_project_show(args):
+    from storage import projects_service, workbench_sessions_service
+
+    try:
+        with _projects_cli_engine(read_only=True).connect() as conn:
+            target = projects_service.resolve_project_target(
+                conn, args.name, active_only=False, require_workdir=False
+            )
+            project = projects_service.get_project(conn, target["id"], authorization_context=None)
+            sessions = workbench_sessions_service.list_project_sessions_for_cli(
+                conn,
+                scope_id=project["scope_id"],
+                status="active",
+                limit=10,
+                authorization_context=None,
+            )
+        _print_cli_payload("project", project=_project_cli_payload(project, recent_sessions=sessions))
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
+def cmd_project_create(args):
+    from storage import projects_service
+
+    try:
+        name = " ".join(str(args.name or "").split())
+        if not name:
+            raise TaskCliError("project name is required", code="project_name_required")
+        raw_path = getattr(args, "path", None)
+        if raw_path:
+            folder = Path(raw_path).expanduser().resolve()
+            if not folder.is_dir():
+                raise TaskCliError(f"project path is not an existing directory: {folder}", code="project_path_not_found")
+        else:
+            root = Path(os.environ.get("AVIBE_PROJECTS_DIR") or (Path.home() / "Projects")).expanduser().resolve()
+            folder = root / name
+            folder.mkdir(parents=True, exist_ok=False)
+        description = getattr(args, "description", None)
+        with _projects_cli_engine().begin() as conn:
+            project = projects_service.create_project(
+                conn,
+                str(folder),
+                display_name=name,
+                description=description if description is not None else projects_service._UNSET,
+                authorization_context=None,
+            )
+        _print_cli_payload("project", project=_project_cli_payload(project))
+        return 0
+    except FileExistsError as exc:
+        _print_task_error(TaskCliError(f"project path already exists: {exc.filename}", code="project_path_exists"))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
+def cmd_project_update(args):
+    from storage import projects_service
+
+    try:
+        kwargs: dict[str, Any] = {}
+        if getattr(args, "new_name", None) is not None:
+            kwargs["display_name"] = args.new_name
+        if getattr(args, "path", None) is not None:
+            kwargs["folder_path"] = args.path
+        if hasattr(args, "description"):
+            kwargs["description"] = args.description
+        if not kwargs:
+            raise TaskCliError("at least one project field is required", code="project_update_empty")
+        with _projects_cli_engine().begin() as conn:
+            target = projects_service.resolve_project_target(
+                conn, args.name, active_only=False, require_workdir=False
+            )
+            project = projects_service.update_project(conn, target["id"], authorization_context=None, **kwargs)
+        _print_cli_payload("project", project=_project_cli_payload(project))
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
 def cmd_agent_run(args):
     """DB-free client; admission and enqueue belong to the warm controller."""
     from core.control_requests import ADMISSION_SECONDS, failure, new_request
     from vibe import internal_client
 
+    legacy_callback_flags = tuple(
+        flag for flag, enabled in (
+            ("--callback", bool(getattr(args, "callback", False))),
+            ("--callback-session-id", bool((getattr(args, "callback_session_id", None) or "").strip())),
+            ("--no-callback", bool(getattr(args, "no_callback", False))),
+        ) if enabled
+    )
     arguments = dict(vars(args))
     if arguments.get("message_file") is not None:
         # /dev/stdin and /dev/fd/N name this process's descriptors, not the
@@ -7242,6 +7395,11 @@ def cmd_agent_run(args):
         response = failure(
             "execution_unknown", "Agent Run may have been enqueued; its result could not be confirmed",
             execution="execution_unknown",
+        )
+    if response["exit_code"] == 0 and legacy_callback_flags:
+        print(
+            "warning: deprecated Agent Run callback flags are ignored; use explicit reports and read receipts",
+            file=sys.stderr,
         )
     stream = sys.stdout if response["exit_code"] == 0 else sys.stderr
     print(_json_text(response["payload"], stream=stream), file=stream)
@@ -7349,20 +7507,14 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             # may only restate it -- so admitting the caller to the Session
             # answers both halves of the turn it is about to queue.
             _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
-        callback_session_id, callback_mode, callback_notice = _resolve_callback_route(
-            args,
-            caller_context,
-            target_session_id=session_id,
-        )
+        callback_session_id = _resolve_failure_notice_route(caller_context, target_session_id=session_id)
         if callback_session_id:
             try:
                 _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
             except TaskCliError:
-                if callback_mode != AGENT_RUN_CALLBACK_FAILURE_ONLY:
-                    raise
                 # The failure notice is a guarantee Avibe adds, not a route the caller asked for: a caller
                 # Session it cannot post to leaves the run without that notice instead of refusing the run.
-                callback_session_id, callback_mode = None, None
+                callback_session_id = None
         close_after = bool(getattr(args, "close_after", False))
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
@@ -7442,8 +7594,12 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
         )
         if close_after:
             provenance_metadata[AGENT_RUN_CLOSE_AFTER_METADATA_KEY] = True
-        if callback_mode:
-            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = callback_mode
+        if bool(getattr(args, "no_reply", False)):
+            from core.scheduled_tasks import AGENT_RUN_NO_REPLY_METADATA_KEY
+
+            provenance_metadata[AGENT_RUN_NO_REPLY_METADATA_KEY] = True
+        if callback_session_id:
+            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = AGENT_RUN_CALLBACK_FAILURE_ONLY
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
@@ -7470,10 +7626,8 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
         reserved_session_id = None
-        # One ``run`` object. Everything the caller's own flags already decided --
-        # session policy, delivery intent, fork source, close-after, sync/async --
-        # stays out; what Avibe resolved for it (the Session, its scope and
-        # visibility, the callback route) stays in.
+        # One run object: resolved identity and placement, plus an explicit no-reply policy.
+        # The failure-only callback route stays internal.
         payload = {
             "run": _present_fields(
                 {
@@ -7484,13 +7638,10 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
                     "session_id": session_id,
                     "scope_id": _scope_id_payload_from_session(session_id),
                     "visibility": target.visibility if session_id else visibility,
-                    # Only a callback is reported here; a failure-only route is not one (bots.md D4).
-                    "callback_session_id": None if callback_mode else callback_session_id,
+                    **({"no_reply": True} if bool(getattr(args, "no_reply", False)) else {}),
                 }
             ),
         }
-        if callback_notice:
-            payload["callback_notice"] = callback_notice
         return _cli_payload("agent_run", **payload, **override_fields), callback_session_id
     except Exception:
         if reserved_session_id:
@@ -8458,52 +8609,6 @@ def _session_row(payload: dict, *, brief: bool) -> dict:
     return {key: value for key, value in payload.items() if key not in _SESSION_GET_OMIT}
 
 
-def _resolve_session_list_project(conn, value: str) -> str:
-    """Resolve a Project name (or id) for the session list's narrow filter.
-
-    The PROJECT lane owns the shared resolver. Until that contract lands on
-    master, use the existing visible-project projection with the same exact
-    name/id, whitespace, creation-order, and disabled-target semantics. Listing
-    Sessions does not require the Project to have a working directory.
-    """
-
-    from storage import projects_service
-
-    requested = " ".join(str(value or "").split())
-    if not requested:
-        raise TaskCliError(
-            "Project name is required",
-            code="invalid_project",
-            hint="Pass a Project name or id.",
-            help_command="vibe session list --help",
-        )
-    projects = projects_service.list_projects(conn, include_archived=True)
-    exact = [
-        project
-        for project in projects
-        if str(project.get("id") or "") == requested
-        or str(project.get("display_name") or "") == requested
-    ]
-    if not exact:
-        raise TaskCliError(
-            f"Project not found: {requested}",
-            code="project_not_found",
-            hint="Pass an existing Project name or id.",
-            help_command="vibe session list --help",
-            details={"project": requested},
-        )
-    project = min(exact, key=lambda item: (str(item["created_at"]), str(item["scope_id"])))
-    if project["archived"]:
-        raise TaskCliError(
-            f"Project is disabled: {requested}",
-            code="project_disabled",
-            hint="Enable the Project before listing its Sessions.",
-            help_command="vibe session list --help",
-            details={"project": requested},
-        )
-    return str(project["id"])
-
-
 def _validate_session_type(platform: str) -> None:
     from config.platform_registry import PLATFORM_REGISTRY
 
@@ -8547,7 +8652,17 @@ def cmd_session_list(args):
 
         engine = _open_session_engine(read_only=True)
         with engine.connect() as conn:
-            project_id = _resolve_session_list_project(conn, project_name) if project_name is not None else None
+            project_id = None
+            if project_name is not None:
+                from storage import projects_service
+
+                target = projects_service.resolve_project_target(
+                    conn,
+                    project_name,
+                    active_only=True,
+                    require_workdir=False,
+                )
+                project_id = target["id"]
             result = sessions_service.list_sessions_page(
                 conn,
                 platform=platform,
@@ -18510,6 +18625,35 @@ def build_parser():
         help="Print a machine-readable result with the output path and capture backend.",
     )
 
+    project_parser = subparsers.add_parser(
+        "project",
+        help="Manage Projects",
+        description="Create, inspect, and update local work Projects.",
+        error_help_command="vibe project --help",
+    )
+    project_subparsers = project_parser.add_subparsers(
+        dest="project_command",
+        metavar="{list,show,create,update}",
+    )
+    project_subparsers.required = True
+    project_list_parser = project_subparsers.add_parser("list", help="List active Projects")
+    project_list_parser.add_argument("--page", type=int, default=1, help="Catalog page (default: 1)")
+    project_list_parser.add_argument("--limit", type=int, default=25, help="Rows per catalog page (default: 25)")
+    _add_json_noop(project_list_parser)
+    project_show_parser = project_subparsers.add_parser("show", help="Show a Project and recent Sessions")
+    project_show_parser.add_argument("name", help="Project name or id")
+    _add_json_noop(project_show_parser)
+    project_create_parser = project_subparsers.add_parser("create", help="Create or register a Project")
+    project_create_parser.add_argument("name", help="Project name")
+    project_create_parser.add_argument("--path", help="Register an existing directory instead of creating ~/Projects/<name>")
+    project_create_parser.add_argument("--description", default=argparse.SUPPRESS, help="Short Project description")
+    _add_json_noop(project_create_parser)
+    project_update_parser = project_subparsers.add_parser("update", help="Update a Project")
+    project_update_parser.add_argument("name", help="Project name or id")
+    project_update_parser.add_argument("--name", dest="new_name", help="New Project name")
+    project_update_parser.add_argument("--path", help="New existing Project directory")
+    project_update_parser.add_argument("--description", default=argparse.SUPPRESS, help="Short Project description; empty clears it")
+    _add_json_noop(project_update_parser)
     agent_parser = subparsers.add_parser(
         "agent",
         help="Manage Avibe Agents",
@@ -18642,6 +18786,7 @@ def build_parser():
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the caller Session")
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place the new Session in the caller's scope")
     agent_run_parser.add_argument("--scope-id", metavar="ID", help="Place the new Session in this scopes.id")
+    agent_run_parser.add_argument("--project", metavar="NAME", help="New Session Project placement")
     agent_run_parser.add_argument(
         "--visible",
         dest="visibility",
@@ -18652,9 +18797,14 @@ def build_parser():
     agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
     agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
-    agent_run_parser.add_argument("--callback", action="store_true", help="Return the final reply to this Session")
-    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Return it to this Session instead")
-    agent_run_parser.add_argument("--no-callback", action="store_true", help="No-op (the default)")
+    agent_run_parser.add_argument("--callback", action="store_true", help="Deprecated no-op")
+    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Deprecated no-op")
+    agent_run_parser.add_argument("--no-callback", action="store_true", help="Deprecated no-op (the default)")
+    agent_run_parser.add_argument(
+        "--no-reply",
+        action="store_true",
+        help="Existing Session/Bot: no delegation or read receipt",
+    )
     agent_run_parser.add_argument(
         "--close-after",
         action="store_true",
@@ -20298,6 +20448,12 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    # Projects mirror the Web surface: catalog reads are Viewer work, while
+    # creating and editing the instance's Projects are Member work.
+    ("project", "list"): "viewer",
+    ("project", "show"): "viewer",
+    ("project", "create"): "member",
+    ("project", "update"): "member",
     # Agents: discovery, selection and running are use; the definition lifecycle
     # is management, admitted before any builtin synchronization or import.
     ("agent", "list"): "editor",
@@ -20650,6 +20806,17 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if args.remote_command == "stop":
             sys.exit(cmd_remote_stop(args))
         parser.error("remote command is invalid")
+    if args.command == "project":
+        commands = {
+            "list": cmd_project_list,
+            "show": cmd_project_show,
+            "create": cmd_project_create,
+            "update": cmd_project_update,
+        }
+        command = commands.get(args.project_command)
+        if command is None:
+            parser.error("project command is required")
+        sys.exit(command(args))
     if args.command == "agent":
         if args.agent_command == "list":
             sys.exit(cmd_agent_list(args))

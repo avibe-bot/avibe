@@ -29,10 +29,11 @@ import clsx from 'clsx';
 import { Markdown } from '../ui/markdown';
 import { HostedToolRow } from './HostedToolRow';
 import { Dialog, DialogContent } from '../ui/dialog';
+import { Skeleton, SkeletonShimmer } from '../ui/skeleton';
 import { copyTextToClipboard } from '../../lib/utils';
 import { bindCitations } from '../../lib/citations';
-import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
-import { useDisclosure } from '../../lib/motion';
+import { ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, SUMMARY_FRAME_ATTRIBUTE, SUMMARY_HEAD_ATTRIBUTE, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
+import { canAnimate, motionTiming, useDisclosure } from '../../lib/motion';
 import {
   filterActivityRows,
   formatActivityElapsedClock,
@@ -108,8 +109,8 @@ const ToolsEyePill: React.FC<{ shown: boolean; onToggle: () => void }> = ({ show
       className={clsx(
         'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors',
         shown
-          ? 'border-border bg-foreground/[0.04] text-foreground/80 hover:bg-foreground/[0.08]'
-          : 'border-border bg-transparent text-muted hover:bg-foreground/[0.05]',
+          ? 'border-edge text-foreground/80 hover:bg-foreground/[0.08] bg-field'
+          : 'border-edge text-muted hover:bg-foreground/[0.05] bg-field',
       )}
     >
       {shown ? <Eye className="size-3.5" aria-hidden="true" /> : <EyeOff className="size-3.5" aria-hidden="true" />}
@@ -147,7 +148,7 @@ const ToolJsonDialog: React.FC<{ open: boolean; onClose: () => void; parsed: Par
           <button
             type="button"
             onClick={copy}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors hover:bg-foreground/[0.06]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge px-2 py-1 text-[11px] font-medium text-foreground/80 transition-colors bg-field hover:bg-field-hover"
           >
             {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
             {copied ? t('chat.agentActivity.copied') : t('chat.agentActivity.copy')}
@@ -226,7 +227,7 @@ const ToolSummary: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
         {chips.map((chip) => (
           <span
             key={chip.key}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-foreground/[0.03] px-1.5 py-px text-[11px]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge bg-foreground/[0.03] px-1.5 py-px text-[11px] shadow-elevation-0"
           >
             <span className="font-mono text-muted">{chip.key}</span>
             <span className="max-w-[16ch] truncate text-foreground/80">{chip.value}</span>
@@ -254,7 +255,7 @@ const ToolDetail: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
   const [jsonOpen, setJsonOpen] = useState(false);
   const params = parsed.args ? toolParams(parsed.args) : null;
   return (
-    <div className="mx-1.5 mb-1 mt-0.5 rounded-md border border-border bg-foreground/[0.03]">
+    <div className="mx-1.5 mb-1 mt-0.5 rounded-md border border-edge bg-foreground/[0.03] shadow-elevation-0">
       <div className="flex items-center gap-2 border-b border-border px-2.5 py-1.5">
         <span className="flex-1 text-[11px] font-medium uppercase tracking-wide text-muted">
           {t('chat.agentActivity.params')}
@@ -262,7 +263,7 @@ const ToolDetail: React.FC<{ parsed: ParsedToolCall }> = ({ parsed }) => {
         <button
           type="button"
           onClick={() => setJsonOpen(true)}
-          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[11px] font-medium text-foreground/80 transition-colors hover:bg-foreground/[0.06]"
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-edge px-1.5 py-0.5 text-[11px] font-medium text-foreground/80 transition-colors bg-field hover:bg-field-hover"
         >
           <Braces className="size-3" aria-hidden="true" />
           {t('chat.agentActivity.viewJson')}
@@ -315,7 +316,7 @@ const ActivityToolRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         title={open ? t('chat.agentActivity.hideCall') : t('chat.agentActivity.showCall')}
-        className="group/act flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-foreground/[0.04]"
+        className="group/act flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-wash"
       >
         <Icon className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
         <span className="shrink-0 font-mono text-[11px] font-medium text-foreground">{parsed.name || '—'}</span>
@@ -513,7 +514,7 @@ export const ActivityCard: React.FC<{
               onClick={onDisableActivity}
               aria-label={t('chat.agentActivity.disable')}
               title={t('chat.agentActivity.disable')}
-              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-foreground/[0.04] text-foreground/80 transition-colors hover:bg-foreground/[0.08]"
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-edge text-foreground/80 transition-colors hover:bg-foreground/[0.08] bg-field"
             >
               <X className="size-3.5" aria-hidden="true" />
             </button>
@@ -530,7 +531,7 @@ export const ActivityCard: React.FC<{
           // What opening the card shows (lib/transcriptMotion reveals it), and leaves in place once closed.
           // Keyed apart from the compact view, so each opening is a view of its own to show.
           <div
-            className={clsx('relative', full.closing && 'motion-disclose-out')}
+            className={clsx('relative', full.closing && 'motion-disclose-leaving')}
             aria-hidden={full.closing || undefined}
             {...{ [REVEAL_ATTRIBUTE]: '' }}
           >
@@ -553,7 +554,7 @@ export const ActivityCard: React.FC<{
                   if (el) el.scrollTop = el.scrollHeight;
                   setFollowing(true);
                 }}
-                className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-mint/40 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-mint-ink shadow-sm backdrop-blur"
+                className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-mint/40 bg-background/90 px-2.5 py-1 text-[11px] font-medium text-mint-ink shadow-elevation-1 backdrop-blur"
               >
                 {t('chat.agentActivity.jumpToLatest')}
               </button>
@@ -582,6 +583,9 @@ export const ActivityCard: React.FC<{
     </div>
   );
 };
+
+/** The most skeleton rows a panel opens to while its steps load: about its 60vh cap on a phone. */
+const SKELETON_ROWS_MAX = 16;
 
 // ===== Collapsed chip (states C/D/E): a one-line summary that hugs the reply from
 // above; click to expand into a full panel (header + scrollable rows, capped ~60vh). =====
@@ -613,19 +617,53 @@ export const ActivityChip: React.FC<{
     label = `${t('chat.agentActivity.label')} · ${stepLabel(t, group.steps)}${duration ? ` · ${duration}` : ''}`;
   }
 
-  // Opened while its rows load, the spinner holds their place, and the rows fade
-  // in over it when they land (no second reveal of the panel).
+  // Opened while its rows load, the panel opens straight to their skeleton. When they land they fade in
+  // where it was, while it fades out under them from however far it had shown (it waits a moment before it
+  // shows, so a quick read never flashes it), then it goes: no frame of the panel is empty.
   const [phase, setPhase] = useState({ loading, expanded, landed: false });
+  const [skeletonGone, setSkeletonGone] = useState(false);
   // The panel while it is open, and for the moment it takes to leave once closed.
   const panel = useDisclosure(expanded);
   if (phase.loading !== loading || phase.expanded !== expanded) {
     setPhase({ loading, expanded, landed: expanded && phase.expanded && phase.loading && !loading });
+    setSkeletonGone(false);
   }
-  const body = loading ? (
-    <div className="flex items-center justify-center py-3 text-muted">
-      <Loader2 className="size-4 animate-spin" />
+  const handingOver = phase.landed && !loading && !skeletonGone;
+  const skeletonRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = skeletonRef.current;
+    if (!handingOver || !el) return undefined;
+    if (!canAnimate(el)) {
+      void Promise.resolve().then(() => setSkeletonGone(true));
+      return undefined;
+    }
+    const fade = el.animate([{ opacity: 1 }, { opacity: 0 }], { ...motionTiming('fast', 'exit'), fill: 'forwards' });
+    void fade.finished.then(() => setSkeletonGone(true), () => {});
+    return () => fade.cancel();
+  }, [handingOver]);
+  const skeleton = (loading || handingOver) && (
+    // The steps are counted before they are read: the panel opens straight to as many rows as there are
+    // (to its height cap), the rows take their place when they land, and whatever height is left over
+    // settles with the rows below on the same curve (lib/transcriptMotion), so the panel never grows twice.
+    // Handing over, it lies under the rows, out of the layout, and is no longer busy; it fades by this box,
+    // on top of its own reveal, so one that had not shown yet stays unseen.
+    <div
+      ref={skeletonRef}
+      aria-hidden={loading ? undefined : true}
+      className={clsx(!loading && 'pointer-events-none absolute inset-x-1.5 top-1.5 bottom-1.5 overflow-hidden')}
+    >
+      <SkeletonShimmer label={t('chat.agentActivity.loading')} aria-busy={loading ? 'true' : undefined} className="flex flex-col gap-0.5">
+        {Array.from({ length: Math.max(1, Math.min(group.steps, SKELETON_ROWS_MAX)) }, (_, index) => (
+          <div key={index} className="flex items-center gap-2 px-1.5 py-1 text-[11px]">
+            <Skeleton className="size-3.5 rounded" />
+            <Skeleton className="h-[1lh] w-12" />
+            <Skeleton className={clsx('h-[1lh]', index % 3 === 0 ? 'w-1/2' : index % 3 === 1 ? 'w-2/3' : 'w-2/5')} />
+          </div>
+        ))}
+      </SkeletonShimmer>
     </div>
-  ) : group.rows && group.rows.length > 0 ? (
+  );
+  const body = loading ? null : group.rows && group.rows.length > 0 ? (
     <ActivityRows rows={group.rows} showToolCalls={showToolCalls} variant="panel" />
   ) : error ? (
     // A transient detail-fetch failure — show a retry, not a misleading "no
@@ -636,7 +674,7 @@ export const ActivityChip: React.FC<{
         <button
           type="button"
           onClick={onRetry}
-          className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-cyan-ink transition-colors hover:bg-surface-2"
+          className="shrink-0 rounded-md border border-edge px-2 py-0.5 text-[11px] font-medium text-cyan-ink transition-colors bg-field hover:bg-field-hover active:bg-field-hover"
         >
           {t('chat.agentActivity.retry')}
         </button>
@@ -646,29 +684,46 @@ export const ActivityChip: React.FC<{
     <div className="px-1.5 py-2 text-[12px] text-muted">{t('chat.agentActivity.empty')}</div>
   );
 
+  // The pill: the chip closed. While the panel is open (and while it leaves) an inert copy of it waits,
+  // unseen, where the pill will be, so closing cross-fades into it and opening out of it. Only its frame (its
+  // fill, border and chevron) cross-fades; its icon and label are the panel head's, which move onto them and
+  // then hand over in one frame, so the two are never drawn over each other (lib/transcriptMotion).
+  const pillShape = 'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]';
+  const pillTone = group.status === 'failed'
+    ? 'border-destructive/30 bg-destructive/[0.06]'
+    : group.status === 'interrupted'
+      ? 'border-gold/30 bg-gold/[0.07]'
+      : 'border-mint/25 bg-mint/[0.07]';
+  const pillClassName = clsx(
+    pillShape,
+    pillTone,
+    'transition-colors',
+    group.status === 'failed' ? 'hover:bg-destructive/[0.1]' : group.status === 'interrupted' ? 'hover:bg-gold/[0.12]' : 'hover:bg-mint/[0.12]',
+  );
+  const pillContent = (copy = false) => {
+    const frame = copy ? { [SUMMARY_FRAME_ATTRIBUTE]: '' } : {};
+    return (
+      <>
+        {copy && <span {...frame} className={clsx('absolute -inset-px rounded-full border opacity-0', pillTone)} />}
+        <StatusIcon data-transcript-shared="icon" className={clsx('relative size-3.5 shrink-0', STATUS_TINT[group.status], copy && 'opacity-0')} aria-hidden="true" />
+        <span data-transcript-shared="label" className={clsx('relative min-w-0 truncate font-medium text-foreground/90', copy && 'opacity-0')}>{label}</span>
+        <ChevronDown {...frame} className={clsx('relative size-3.5 shrink-0 text-muted', copy && 'opacity-0')} aria-hidden="true" />
+      </>
+    );
+  };
+
   return (
     <div {...itemAttributes} className="flex w-full justify-start">
-      <div className="flex w-full max-w-[min(92%,860px)] flex-col gap-1">
+      <div className="relative flex w-full max-w-[min(92%,860px)] flex-col gap-1">
         {!panel.present ? (
           <button
             type="button"
             onClick={onToggle}
             aria-expanded={false}
             title={t('chat.agentActivity.expand')}
-            className={clsx(
-              'inline-flex w-fit max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
-              // Closed just now: the pill comes in where the panel left.
-              panel.closed && 'motion-summary-in',
-              group.status === 'failed'
-                ? 'border-destructive/30 bg-destructive/[0.06] hover:bg-destructive/[0.1]'
-                : group.status === 'interrupted'
-                  ? 'border-gold/30 bg-gold/[0.07] hover:bg-gold/[0.12]'
-                  : 'border-mint/25 bg-mint/[0.07] hover:bg-mint/[0.12]',
-            )}
+            className={pillClassName}
           >
-            <StatusIcon className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
-            <span className="min-w-0 truncate font-medium text-foreground/90">{label}</span>
-            <ChevronDown className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
+            {pillContent()}
           </button>
         ) : (
           // Expanded: a full panel card. Header bar carries the status/label (toggles
@@ -678,9 +733,9 @@ export const ActivityChip: React.FC<{
           <div
             {...{ [REVEAL_ATTRIBUTE]: '' }}
             aria-hidden={panel.closing || undefined}
-            className={clsx('w-full overflow-hidden rounded-xl rounded-tl-md border border-border bg-foreground/[0.02]', panel.closing && 'motion-disclose-out')}
+            className={clsx('w-full overflow-hidden rounded-xl rounded-tl-md border border-edge bg-foreground/[0.02] shadow-elevation-0', panel.closing && 'motion-disclose-leaving')}
           >
-            <div className={clsx('flex items-center gap-2 border-b px-3 py-2', statusChipClasses(group.status))}>
+            <div {...{ [SUMMARY_HEAD_ATTRIBUTE]: '' }} className={clsx('flex items-center gap-2 border-b px-3 py-2', statusChipClasses(group.status))}>
               <button
                 type="button"
                 onClick={onToggle}
@@ -688,16 +743,24 @@ export const ActivityChip: React.FC<{
                 title={t('chat.agentActivity.collapse')}
                 className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
               >
-                <StatusIcon className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
-                <span className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
+                <StatusIcon data-transcript-shared="icon" className={clsx('size-3.5 shrink-0', STATUS_TINT[group.status])} aria-hidden="true" />
+                <span data-transcript-shared="label" className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
               </button>
               <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
               <button type="button" onClick={onToggle} aria-label={t('chat.agentActivity.collapse')}>
                 <ChevronDown className="size-3.5 shrink-0 rotate-180 text-muted" aria-hidden="true" />
               </button>
             </div>
-            <div className={clsx('max-h-[60vh] overflow-y-auto px-1.5 py-1.5', phase.landed && !loading && 'motion-appear')}>{body}</div>
+            <div className="relative max-h-[60vh] overflow-y-auto px-1.5 py-1.5">
+              {skeleton}
+              {body && <div className={clsx('relative', phase.landed && 'motion-appear')}>{body}</div>}
+            </div>
           </div>
+        )}
+        {panel.present && (
+          <span aria-hidden="true" inert data-transcript-summary="" className={clsx(pillShape, 'pointer-events-none absolute left-0 top-0 z-[1] border-transparent')}>
+            {pillContent(true)}
+          </span>
         )}
       </div>
     </div>

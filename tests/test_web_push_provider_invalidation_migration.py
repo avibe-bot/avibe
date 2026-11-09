@@ -3,7 +3,7 @@
 import sqlite3
 
 import pytest
-from tests.migration_helpers import downgrade_legacy_schema
+from tests.migration_helpers import downgrade_legacy_schema, latest_migration_revision
 
 from storage import migrations, web_push_service
 from storage.db import create_sqlite_engine
@@ -69,7 +69,7 @@ def test_upgrade_keeps_legacy_disabled_failure_opted_out(tmp_path):
         web_push_service.mark_send_failure(conn, endpoint=enabled["endpoint"], disable=True)
     with sqlite3.connect(path) as conn:
         assert conn.execute("select version_num from alembic_version").fetchone() == (
-            "20261108_0082",
+            latest_migration_revision(),
         )
 
     downgrade_legacy_schema(migrations.alembic_config(path), "20260907_0061")

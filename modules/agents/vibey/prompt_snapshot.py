@@ -57,6 +57,7 @@ COMPONENT_TIERS = {
     "bot-main-prompt": 1,
     "bot-harness-prompt": 1,
     "harness-agents-prompt": 2,
+    "projects-prompt": 2,
     "skills-catalog": 2,
     "skills-more-notice": 2,
     "mcp-catalog": 2,
@@ -68,13 +69,27 @@ OPTIONAL_MODULES = frozenset({
     "skills-prompt", "skills-manual-prompt", "skills-catalog-heading", "skills-pagination-prompt",
     "mcp-capabilities-prompt", "mcp-pagination-prompt",
 })
+# The pending notice's names: every component it can list (tier 2 or 3, or an optional module coming or going) is a
+# path or one of these, and the instructions rule (``prompt.INSTRUCTIONS_RULE``) says how to read each one.
 CATALOG_NAMES = {
     "harness-agents-prompt": "agents",
+    "projects-prompt": "projects",
     "skills-catalog": "skills",
     "skills-more-notice": "skills",
+    "skills-prompt": "skills",
+    "skills-manual-prompt": "skills",
+    "skills-catalog-heading": "skills",
+    "skills-pagination-prompt": "skills",
+    # Present only while the Vault Skill is offered.
+    "vault-routing-prompt": "skills",
     "mcp-catalog": "mcp",
     "mcp-more-notice": "mcp",
-    "hosted-tools": "hosted-tools",
+    "mcp-capabilities-prompt": "mcp",
+    "mcp-pagination-prompt": "mcp",
+    "hosted-tools": "tools",
+    "tool-environment": "tools",
+    "quick-replies-prompt": "settings",
+    "session-title-prompt": "settings",
 }
 
 

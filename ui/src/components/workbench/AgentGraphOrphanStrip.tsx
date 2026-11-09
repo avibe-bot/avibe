@@ -112,7 +112,7 @@ const OrphanRow: React.FC<{ row: RunningAgent; onEnd: (r: RunningAgent) => Promi
   };
 
   return (
-    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-[11px]">
+    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-edge bg-surface px-3 py-2 text-[11px] shadow-elevation-0">
       <Badge variant="secondary" className="font-mono text-[9px] uppercase">
         <span className={clsx('size-1.5 rounded-full', meta.dotClass)} />
         {t(meta.stateKey)}

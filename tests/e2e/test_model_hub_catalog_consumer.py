@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -41,6 +42,14 @@ pytestmark = pytest.mark.e2e_model_hub
 IMAGE_URL = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+# The catalog is proven absent by each test's filesystem assertion. Codex CLI
+# 0.162.1 reported that missing file as "failed to load configuration", while
+# 0.167.0 reports "failed to resolve feature override precedence" with ENOENT.
+_MISSING_CATALOG_RPC_ERROR = re.compile(
+    r"(?:failed to load configuration|failed to resolve feature override precedence)"
+    r"(?:.*(?:No such file or directory|os error 2))?"
 )
 
 
@@ -179,7 +188,8 @@ def test_codex_reloads_catalog_after_initialize(codex_catalog_runtime):
         try:
             await transport.start()
             catalog_path.unlink()
-            with pytest.raises(CodexRPCError, match="failed to load configuration"):
+            assert not catalog_path.exists()
+            with pytest.raises(CodexRPCError, match=_MISSING_CATALOG_RPC_ERROR):
                 await transport.send_request(
                     "thread/start",
                     {"cwd": str(runtime.home), "ephemeral": True},
@@ -232,7 +242,7 @@ def test_codex_inherits_catalog_pin(codex_catalog_runtime, monkeypatch, inherit)
                 )
                 assert thread["thread"]["id"]
             else:
-                with pytest.raises(CodexRPCError, match="failed to load configuration"):
+                with pytest.raises(CodexRPCError, match=_MISSING_CATALOG_RPC_ERROR):
                     await transport.send_request(
                         "thread/start",
                         {"cwd": str(runtime.home), "ephemeral": True},

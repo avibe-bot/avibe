@@ -173,12 +173,12 @@ export const SessionActionMenu: React.FC<{
               }}
               className={clsx(
                 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-                'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 action.disabled
                   ? 'cursor-not-allowed text-muted hover:bg-transparent'
                   : action.danger
                     ? 'text-pink-ink hover:bg-pink/[0.08]'
-                    : 'text-foreground hover:bg-foreground/[0.04]',
+                    : 'text-foreground hover:bg-wash',
               )}
             >
               {action.pending ? (
@@ -202,7 +202,7 @@ export const SessionActionMenu: React.FC<{
                 id={reasonId}
                 role="tooltip"
                 className={clsx(
-                  'pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background shadow-md transition-opacity',
+                  'pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md bg-foreground px-2 py-1.5 text-[11px] leading-tight text-background shadow-elevation-2 transition-opacity',
                   disclosedReasonId === action.id
                     ? 'opacity-100'
                     : 'opacity-0 group-hover/action:opacity-100 group-focus-within/action:opacity-100',

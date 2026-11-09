@@ -395,7 +395,7 @@ final class MobileOnboardingTests: XCTestCase {
             """
             (() => {
               const viewport = document.querySelector("main");
-              const target = document.querySelector("button.shadow-mint-card-sm");
+              const target = document.querySelector("[data-mobile-code-actions] button");
               if (!viewport || !target) return false;
               const viewportRect = viewport.getBoundingClientRect();
               const targetRect = target.getBoundingClientRect();
@@ -604,14 +604,9 @@ final class MobileOnboardingTests: XCTestCase {
             """
         }
         XCTAssertTrue(emailReady)
-        let enteredEmail = try await replaceText(
-            "alex@example.com",
-            in: webView,
-            selector: "#mobile-login-email"
-        )
-        XCTAssertTrue(enteredEmail)
 
-        // "Sign in with password" is the email form's one secondary button.
+        // "Sign in with password" is the email form's one secondary button. It
+        // switches at once, before any email is typed.
         let openedPassword = try await webView.evaluateJavaScript(
             """
             (() => {
@@ -626,22 +621,33 @@ final class MobileOnboardingTests: XCTestCase {
             """
         ) as? Bool
         XCTAssertEqual(openedPassword, true)
+        // One form: the visible email field is the saved login's username.
         let passwordReady = try await waitForJavaScriptValue(in: webView) {
             """
             (() => {
+              const email = document.querySelector("#mobile-login-email");
               const password = document.querySelector("#mobile-login-password");
-              const username = document.querySelector("input[autocomplete=username]");
-              return password instanceof HTMLInputElement
+              return email instanceof HTMLInputElement
+                && password instanceof HTMLInputElement
+                && email.type === "email"
+                && email.autocomplete === "username"
+                && !email.readOnly
+                && email.value === ""
+                && document.activeElement === email
                 && password.type === "password"
                 && password.autocomplete === "current-password"
-                && username instanceof HTMLInputElement
-                && username.form === password.form
-                && username.readOnly
-                && username.value === "alex@example.com";
+                && email.form === password.form
+                && document.querySelectorAll("input[autocomplete=username]").length === 1;
             })()
             """
         }
         XCTAssertTrue(passwordReady)
+        let enteredEmail = try await replaceText(
+            "alex@example.com",
+            in: webView,
+            selector: "#mobile-login-email"
+        )
+        XCTAssertTrue(enteredEmail)
         let enteredPassword = try await replaceText(
             "correct horse battery",
             in: webView,

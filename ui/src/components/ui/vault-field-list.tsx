@@ -18,7 +18,7 @@ import { ResponsiveMenu } from './responsive-menu';
 /** Field names whose values are identifiers rather than secrets, so they start revealed. */
 const REVEALED_BY_DEFAULT = new Set(['username', 'email']);
 
-const MENU_ITEM = 'flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left transition-colors hover:bg-foreground/[0.04] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent';
+const MENU_ITEM = 'flex w-full flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left transition-colors hover:bg-wash disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent';
 
 export function VaultFieldsHeader({ count, note }: { count: number; note?: ReactNode }) {
   const { t } = useTranslation();
@@ -41,7 +41,7 @@ export function VaultFieldList({ children, onAdd, addDisabled }: {
 }) {
   const { t } = useTranslation();
   return (
-    <div className="@container/fields overflow-hidden rounded-xl border border-border bg-card">
+    <div className="@container/fields overflow-hidden rounded-xl border border-edge bg-card shadow-elevation-0">
       <div className="divide-y divide-border">{children}</div>
       <button
         type="button"

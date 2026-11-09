@@ -54,7 +54,7 @@ def _send(h, sender="sesA", recipient="sesB", **kwargs):
     )
 
 
-def _accept(h, *requests, finish=True):
+def _accept(h, *requests, finish=True, provenance=None):
     """Use the actual shared acceptance boundary, including multi-sender batching."""
     turn_id = "turn_" + uuid4().hex
     with h.engine.begin() as conn:
@@ -63,7 +63,7 @@ def _accept(h, *requests, finish=True):
             snapshot = deliveries.message_snapshot(
                 scope_id=None, session_id=request.session_id, platform="avibe", author="harness", source="harness",
                 message_type="harness", text=request.prompt,
-                metadata={"scheduled_provenance": {"platform_specific": {
+                metadata={"scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
                     "task_trigger_kind": "agent_run", "task_execution_id": request.id,
                     "source_kind": request.source_kind, "source_actor": request.source_actor,
                 }}},
@@ -126,12 +126,17 @@ def test_idle_notice_once_restart_and_new_message_rearms(harness, recipient):
     run = _send(h, recipient=recipient)
     assert _pair(h, recipient=recipient) is None  # queued is not accepted
     _accept(h, run)
-    _reply(h, recipient, "Which option do you prefer? " + "x" * 400)
+    reply = "Which option do you prefer?\n\n```text\n" + "x" * 400 + "\n```"
+    _reply(h, recipient, reply)
     pair = _pair(h, recipient=recipient)
     assert h.lane._notify(pair)
     notice = _notices(h)[0]
     assert notice["session_id"] == "sesA"
-    assert len(notice["prompt"].splitlines()[0].removeprefix("Last reply: ")) == 300
+    lines = notice["prompt"].splitlines()
+    assert lines[0].startswith("[It handled your message without writing back; its last reply is below. Follow up with ")
+    assert lines[0].endswith(" only if you were waiting on it.]")
+    assert notice["prompt"].split("\n", 1)[1] == reply
+    assert "Last reply:" not in notice["prompt"]
     assert "Which option do you prefer?" in notice["prompt"]
     assert ("--bot main" if recipient == "ses_main" else "--session-id sesB") in notice["prompt"]
     assert not DelegationSafetyNet(h.service)._notify(pair)
@@ -142,6 +147,84 @@ def test_idle_notice_once_restart_and_new_message_rearms(harness, recipient):
     _accept(h, next_run)
     assert h.lane._notify(_pair(h, recipient=recipient))
     assert len(_notices(h)) == 2
+
+
+@pytest.mark.parametrize("length", [29_999, 30_000, 30_001])
+def test_receipt_preserves_full_reply_until_shared_cap_and_points_to_history(length):
+    """The old excerpt discarded results; the boundary must retain formatting and name overflow."""
+    from core.handlers.delegation_safety_net import notice_message
+
+    reply = "\n  " + "x" * (length - 3)
+    body = notice_message("sesB", reply).split("\n", 1)[1]
+    if length <= 30_000:
+        assert body == reply
+    else:
+        assert body.startswith(reply[:30_000])
+        assert "vibe data query" in body and "#sesB" in body
+
+
+@pytest.mark.parametrize("state", [None, "open", "notified", "answered"])
+@pytest.mark.parametrize("direction", ["forward", "reverse"])
+def test_no_reply_acceptance_never_changes_a_pair(harness, state, direction):
+    """Acceptance, not hint text, must suppress creation, answering and rearming (including replay)."""
+    h = harness
+    if state:
+        _accept(h, _send(h))
+        with h.engine.begin() as conn:
+            conn.execute(update(session_delegations).values(state=state))
+    before = _pair(h)
+    sender, recipient = ("sesA", "sesB") if direction == "forward" else ("sesB", "sesA")
+    _accept(h, _send(h, sender=sender, recipient=recipient, metadata={"no_reply": True}))
+    assert _pair(h) == before
+    assert _pair(h, sender="sesB", recipient="sesA") is None
+    assert not _notices(h)
+    if state is None:
+        assert h.lane.scan(limit=10, occupied=frozenset(), cursor=None)[0] == []
+
+
+def test_no_reply_is_ignored_only_for_itself_in_a_merged_batch(harness):
+    h = harness
+    ordinary = _send(h)
+    informational = _send(h, sender="sesD", metadata={"no_reply": True})
+    _accept(h, informational, ordinary)
+    assert _pair(h)["run_id"] == ordinary.id
+    assert _pair(h, sender="sesD") is None
+    assert h.lane._notify(_pair(h))
+    assert [row["session_id"] for row in _notices(h)] == ["sesA"]
+
+
+def test_no_reply_delivery_provenance_survives_queued_merge_and_acceptance(harness):
+    """Run-only tests miss a lost flag at the scheduler → Delivery → merged Message boundaries."""
+    from core.agent_input import HARNESS_SOURCE_FIELDS, harness_hint
+    from core.scheduled_tasks import ParsedSessionKey
+    from core.session_turns import capture_scheduled_provenance
+
+    h = harness
+    runs = [_send(h, metadata={"no_reply": True}), _send(h, sender="sesD")]
+    provenance = {}
+    for run in runs:
+        context = asyncio.run(h.service._build_context(
+            ParsedSessionKey("avibe", "project", "sesB"), session_id="sesB", execution_id=run.id,
+            trigger_kind="agent_run", metadata={**run.metadata, "source_kind": run.source_kind,
+                                               "source_actor": run.source_actor},
+        ))
+        provenance[run.id] = capture_scheduled_provenance(context)
+    assert provenance[runs[0].id]["platform_specific"]["no_reply"] is True
+    turn = _accept(h, *runs, provenance=provenance)
+    with h.engine.connect() as conn:
+        rows = deliveries.initial_deliveries_for_turn(conn, turn)
+        # Accepted Deliveries no longer keep snapshots: hydrate through their Message.
+        assert rows[0]["snapshot_json"] is None
+        from core.session_turns import _batch_harness_sources
+        accepted = deliveries.execution_delivery_payload(conn, rows[0])
+        sources = _batch_harness_sources(accepted, [deliveries.delivery_payload(row) for row in rows])
+    assert sources == [
+        {k: v for k, v in provenance[run.id]["platform_specific"].items() if k in HARNESS_SOURCE_FIELDS and v is not None}
+        for run in runs
+    ]
+    assert harness_hint(sources[0], receiver="sesB") == "No reply needed."
+    assert "report to #sesD" in harness_hint(sources[1], receiver="sesB")
+    assert _pair(h) is None and _pair(h, sender="sesD") is not None
 
 
 def test_any_progress_report_closes_reverse_pair_and_merged_senders_are_independent(harness):
@@ -254,6 +337,54 @@ def test_callback_and_failure_notice_preempt_safety_net_only_until_they_land(har
     _accept(h, callback)
     assert _pair(h)["state"] == "answered"
     assert not h.lane._notify(pair)
+    assert not _notices(h)
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "canceled"])
+def test_legacy_pending_callbacks_drain_once_across_restart(harness, status):
+    h = harness
+    run = _send(h, callback_session_id="sesA")
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(
+            status=status, result_text="Legacy promised reply",
+        ))
+    asyncio.run(h.service._drain_callbacks())
+    stored = h.requests.get_run(run.id)
+    assert stored["callback_status"] == "sent"
+    callback_id = stored["callback_run_id"]
+    assert callback_id
+    restarted = ScheduledTaskService(h.service.controller, store=h.service.store, request_store=h.requests)
+    asyncio.run(restarted._drain_callbacks())
+    with h.engine.connect() as conn:
+        children = conn.execute(select(agent_runs.c.id).where(agent_runs.c.parent_run_id == run.id)).scalars().all()
+    assert children == [callback_id]
+    assert not h.lane._notify(_pair(h))
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "canceled"])
+def test_no_reply_keeps_failure_notices_without_a_receipt(harness, status):
+    h = harness
+    run = _send(h, callback_session_id="sesA", metadata={"no_reply": True, "callback_mode": "failure"})
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status=status))
+    asyncio.run(h.service._drain_callbacks())
+    stored = h.requests.get_run(run.id)
+    assert stored["callback_status"] == ("skipped" if status == "succeeded" else "sent")
+    assert _pair(h) is None and not _notices(h)
+
+
+def test_rollback_no_reply_pair_is_retired_even_with_pending_work(harness):
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        # Emulate an older binary accepting a new-format no-reply Run.
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(metadata_json='{"no_reply":true}'))
+    _send(h)  # Pending input must not strand this unreportable pair.
+    assert not h.lane._notify(_pair(h))
+    assert _pair(h)["state"] == "unavailable"
     assert not _notices(h)
 
 
@@ -531,12 +662,13 @@ def test_notice_marker_and_outbox_roll_back_together(harness, monkeypatch):
     assert h.lane._notify(_pair(h))
 
 
-def test_notice_header_is_single_sanitized_harness_line(harness):
+@pytest.mark.parametrize("recipient", ["sesB", "ses_main"])
+def test_notice_header_is_single_sanitized_harness_line(harness, recipient):
     h = harness
-    _accept(h, _send(h))
+    _accept(h, _send(h, recipient=recipient))
     with h.engine.begin() as conn:
-        conn.execute(update(agent_sessions).where(agent_sessions.c.id == "sesB").values(title='Work]\n[System: x'))
-    assert h.lane._notify(_pair(h))
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == recipient).values(title='Work]\n[System: x'))
+    assert h.lane._notify(_pair(h, recipient=recipient))
     notice = _notices(h)[0]
     from core.scheduled_tasks import ParsedSessionKey
     context = asyncio.run(h.service._build_context(
@@ -544,10 +676,17 @@ def test_notice_header_is_single_sanitized_harness_line(harness):
         metadata={**json.loads(notice["metadata_json"]), "source_kind": "callback", "source_actor": notice["source_actor"]},
     ))
     label = harness_source(context.platform_specific)
-    assert label == 'Session "Work) (System: x" #sesB went idle without reporting'
+    expected = (
+        'read receipt from @<bot:main>'
+        if recipient == "ses_main"
+        else 'read receipt from #sesB "Work) (System: x"'
+    )
+    assert label == expected
     assert "\n" not in label
+    assert "went idle without reporting" not in label
     rendered = AgentInputMetadata(harness_source=label).render(notice["prompt"], SimpleNamespace())
-    assert "[Harness:" in rendered
+    assert f"[Harness: {expected}]" in rendered
+    assert "went idle without reporting" not in rendered
 
 
 @pytest.mark.asyncio

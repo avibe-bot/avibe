@@ -12,7 +12,7 @@ import threading
 from contextlib import closing
 
 import pytest
-from tests.migration_helpers import downgrade_legacy_schema
+from tests.migration_helpers import downgrade_legacy_schema, latest_migration_revision
 from sqlalchemy import Engine, event
 
 from storage import importer, migrations
@@ -198,7 +198,7 @@ def test_uncached_initialization_repairs_replacement_before_returning(ready_db, 
     assert importer.probe_current_sqlite_state(ready_db) is False
     report = importer.ensure_sqlite_state(db_path=ready_db, state_dir=ready_db.parent)
     with closing(sqlite3.connect(ready_db)) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("20261108_0082",)]
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(latest_migration_revision(),)]
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'session_digests'").fetchone()
     assert report.imported is True
 
@@ -235,7 +235,7 @@ def test_startup_waits_for_concurrent_upgrade_instead_of_using_old_revision(read
         try:
             importer.ensure_sqlite_state(db_path=ready_db, state_dir=ready_db.parent)
             with closing(sqlite3.connect(ready_db)) as conn:
-                assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [("20261108_0082",)]
+                assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(latest_migration_revision(),)]
                 conn.execute("SELECT session_id FROM session_digests").fetchall()
             finished.set()
         except BaseException as exc:

@@ -28,7 +28,7 @@ function friendlyError(t: TFunction, raw: string): string {
   return raw;
 }
 
-const PANEL = 'flex flex-col gap-4 rounded-2xl border border-border bg-surface px-6 pb-5 pt-6';
+const PANEL = 'flex flex-col gap-4 rounded-2xl border border-edge bg-surface px-6 pb-5 pt-6 shadow-elevation-0';
 
 /**
  * Protected-tier setup / unlock panel (ui/design: vault/protected-unlock/setup and
@@ -78,7 +78,7 @@ export const VaultProtectedUnlock: React.FC<{
 
   if (vault.status === 'checking') {
     return (
-      <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface px-4 py-3 text-sm text-muted">
+      <div className="flex items-center gap-2 rounded-2xl border border-edge bg-surface px-4 py-3 text-sm text-muted shadow-elevation-0">
         <Loader2 className="size-4 animate-spin" />
         {t('vaults.protectedUnlock.checking')}
       </div>

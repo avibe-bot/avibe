@@ -310,7 +310,7 @@ redirect; other control-plane origins, such as a Debug override, still receive
 the link-and-code email. A sign-in link in the email opened Safari, which
 consumed the one-time code the app was waiting for.
 
-Readiness navigation has a native 10-second deadline. Fixed account scripts
+Readiness navigation has a native 30-second deadline. Fixed account scripts
 share one `AbortController` deadline mechanism: OTP/session operations use 15
 seconds and best-effort current-device DELETE uses 5 seconds. Both navigation
 actions and responses must remain on the configured control-plane origin.
@@ -382,7 +382,10 @@ no real account in automation.
 
 The hermetic WebKit transport tests run serially, wait for fixture events with
 budgets separate from the app's deadlines, and use numeric loopback origins for
-cross-origin redirect checks. When `ios-shell` XCTest fails, CI uploads
+cross-origin redirect checks. The hanging-readiness case uses a 3-second
+readiness deadline, which a cold WebContent or GPU process launch on a loaded
+simulator can exceed before the request is sent; it retries such an attempt
+within the fixture budget instead of counting it. When `ios-shell` XCTest fails, CI uploads
 `AvibeTests.xcresult` as `ios-shell-xcresult`.
 
 ### Two-step verification
@@ -445,14 +448,19 @@ with it instead of the email code (`docs/plans/2026-11-08-mobile-password-sign-i
 design frames `mobile-app/password/*`). The email code stays the primary path
 and the only way to create an account in the app.
 
-- The email step offers "Sign in with password" under Send verification code;
-  both validate the email first. The password step is identifier-first: it
-  shows the email with Change email and carries it in a visually hidden,
-  read-only `autocomplete="username"` field beside the
+- The email step offers "Sign in with password" under Send verification code.
+  It switches the same form to password mode at once, without asking for the
+  email first: the visible email field (now `autocomplete="username"`, typed
+  text carried over, focused when empty) sits above the
   `autocomplete="current-password"` field, so iCloud Keychain can match the
   saved avibe.bot login through the existing `webcredentials:avibe.bot`
-  association. The only client check is a non-empty password; nothing
-  auto-submits.
+  association. "Sign in with an email code" returns to code mode with the email
+  kept. Return in the email field moves to the password; Return in the
+  password field submits; nothing auto-submits. Sign in, Forgot password, and
+  "Use an email code instead" check the email first and show the page's own
+  copy (the form sets `novalidate`, so WebKit shows no validation bubble);
+  Sign in also needs a non-empty password. This one-form layout is the owner's
+  change of 2026-11-09, replacing the first identifier-first password step.
 - `auth.signInWithPassword({email, password})` returns the same session state
   as `auth.verifyOtp`, plus `weak_password: {reasons}` (`length`,
   `characters`, `pwned`) when Supabase accepted a password that no longer
@@ -473,10 +481,12 @@ and the only way to create an account in the app.
   returned, persisted, or logged, and errors carry fixed native messages
   rather than provider text. A bridge request's description, dump, and any
   log line built from it name parameters, never their values. The page keeps
-  the password only in the password step's field state, which unmounts on
-  success and whenever the step is left.
-- "Use an email code instead" and the forgot page's Send verification code
-  call `auth.requestOtp` for the same email and enter the code step. Forgot
+  the password only in the email step's field state: returning to code mode
+  clears it, and success or leaving the step unmounts it. Editing the email
+  keeps it.
+- "Use an email code instead" (shown for `invalid_credentials` and
+  `email_not_confirmed`) and the forgot page's Send verification code call
+  `auth.requestOtp` for the same email and enter the code step. Forgot
   password's Open in Safari opens `https://avibe.bot/app/account/security`,
   already on the `app.openExternal` allowlist; avibe.bot has no separate
   reset page.

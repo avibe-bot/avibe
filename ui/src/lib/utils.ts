@@ -1,5 +1,22 @@
 import { clsx, type ClassValue } from "clsx"
-import { twMerge } from "tailwind-merge"
+import { extendTailwindMerge } from "tailwind-merge"
+
+// The elevation and light-by-meaning shadows (index.css `--shadow-elevation-*`,
+// `--shadow-unread`, `--shadow-decor-*`, `--shadow-mark-*`) are box-shadow sizes,
+// so a caller's `shadow-none` or `shadow-elevation-3` replaces a primitive's
+// default instead of both landing in the class list.
+const ACCENT_SHADOWS = ["sm", "md"].flatMap((size) =>
+  ["mint", "cyan", "violet", "gold"].map((accent) => `decor-${size}-${accent}`))
+const twMerge = extendTailwindMerge({
+  extend: {
+    theme: {
+      shadow: [
+        "elevation-0", "elevation-1", "elevation-2", "elevation-2-live", "elevation-3", "elevation-3-up", "unread",
+        ...ACCENT_SHADOWS, "decor-lg-mint", "decor-xl-mint", "mark-sm-mint", "mark-md-mint", "mark-sm-cyan",
+      ],
+    },
+  },
+})
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))

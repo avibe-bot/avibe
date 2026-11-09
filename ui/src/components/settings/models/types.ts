@@ -1213,7 +1213,13 @@ export type HostedSearchServiceVendor = {
   price: HostedServiceListPrice;
   /** Catalog-verified description; null means unknown, not no free tier. */
   free_tier: string | null;
-  facts: { tool_only: boolean; auto_enroll: boolean; free_check: boolean; built_in?: boolean; requires_setup?: boolean };
+  facts: {
+    tool_only: boolean; auto_enroll: boolean; free_check: boolean; built_in?: boolean; requires_setup?: boolean;
+    /** Whether the service is on before the user chooses; always sent for built-ins. */
+    default_enabled?: boolean;
+  };
+  /** Host a keyless built-in sends queries to; always sent for built-ins. */
+  endpoint?: string;
   results_max: number;
   /** Includes opted-out Sources, so a disabled DeepSeek still reads as already added. */
   source_ids: string[];

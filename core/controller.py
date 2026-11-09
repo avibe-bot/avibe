@@ -1271,6 +1271,13 @@ class Controller:
         except Exception:
             logger.exception("Failed to log startup readiness phase")
         try:
+            vibey_agent = getattr(agent_service, "agents", {}).get("vibey")
+            schedule_maintenance = getattr(vibey_agent, "schedule_post_readiness_maintenance", None)
+            if callable(schedule_maintenance):
+                schedule_maintenance()
+        except Exception:
+            logger.exception("Failed to schedule Vibey post-readiness maintenance")
+        try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}", exc_info=True)

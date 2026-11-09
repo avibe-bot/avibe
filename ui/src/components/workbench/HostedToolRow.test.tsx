@@ -331,6 +331,18 @@ describe('search service cards', () => {
     expect(document.body.textContent).not.toMatch(/密钥|key/i);
   });
 
+  it('derives a built-in search service label and free cost from the catalog identity', () => {
+    renderGroup([{
+      version: 1, call_id: 'call_parallel', tool: 'web_search', mode: 'proxy', status: 'completed',
+      subject: 'catalog search', provider: 'parallel-mcp', source_id: 'src_parallelkeyless', source_name: 'Parallel', executor_kind: 'service',
+      sources: [{ url: 'https://parallel.example/result', title: 'Parallel result' }], images: [],
+      attempts: [{ source_id: 'src_parallelkeyless', label: 'Parallel', kind: 'service', outcome: 'completed', cost: { basis: 'list', usd: 0 } }],
+      cost: { basis: 'list', calls: 1, usd: 0 },
+    }], 'en');
+    const card = row('call_parallel');
+    within(card).getByText('Through Parallel');
+    within(card).getByText('Free');
+  });
   it.each(['en', 'zh'] as const)('MH-HOSTED-UI-008 (%s): names the service that ran, what it found and cost, and why it moved past a Source', (lng) => {
     const { service_completed: completed, service_switch: switched, service_estimate: estimated, service_blocked: blocked } = services;
     renderGroup([completed.payload, switched.payload, estimated.payload, blocked.payload], lng);

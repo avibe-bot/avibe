@@ -18,8 +18,8 @@ const SETTINGS_PAGE = 'nav[aria-label="Settings sections"] + section';
 const SETTINGS_CONTENT = 'nav[aria-label="Settings sections"] + section > div';
 // General now has two preference cards drawn the same way, so name the one the
 // geometry claims are about by the selector it owns.
-const APPEARANCE_CARD = 'section.bg-background:has([role="radiogroup"][aria-label="Appearance"])';
-const PLACEMENT_CARD = 'section.bg-background:has([role="radiogroup"][aria-label="Settings menu"])';
+const APPEARANCE_CARD = 'section.bg-surface:has([role="radiogroup"][aria-label="Appearance"])';
+const PLACEMENT_CARD = 'section.bg-surface:has([role="radiogroup"][aria-label="Settings menu"])';
 const MOBILE_NAV = 'nav.fixed.bottom-0';
 const ULTRA = { width: 1920, height: 1000 };
 // A phone too short for the home's group, which therefore scrolls. The composer,
@@ -1023,13 +1023,13 @@ test.describe('general settings geometry', () => {
     expect(cardStyle.pad).toBe('22px');
     expect(cardStyle.gap).toBe('20px');
 
-    // Every other settings page draws its cards as an outline on the page, and
-    // General is not a different kind of page. The source fills this card with
-    // surface-2; matching its neighbours is worth more than matching that fill,
-    // so the card carries the page background and keeps its border.
+    // A settings card is one concept across Settings: one step above the page,
+    // on the surface fill, with its edge drawn by the fill rather than a line
+    // (ui/design: settings/general/default). General is not a different
+    // kind of page, so the card matches its neighbours.
     const background = await page.evaluate(() => {
       const probe = document.createElement('div');
-      probe.style.backgroundColor = 'var(--background)';
+      probe.style.backgroundColor = 'var(--surface)';
       document.body.appendChild(probe);
       const value = getComputedStyle(probe).backgroundColor;
       probe.remove();

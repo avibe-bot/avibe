@@ -9,7 +9,11 @@
 // paints the cached window first), inbox=1 (the Inbox lists the chat with its
 // newest reply, so an uncached open draws the skeleton and that reply first),
 // sendDelay (ms the server takes to answer a sent message, 150), send=fail (it
-// refuses every send).
+// refuses every send), records=1 (an execution-process group's rows load with the
+// steps it took, else it has none), activityDelay (ms a group's rows take to load,
+// 0), recordsRepeat (a group's rows are its steps that many times over, so they
+// take long to render when they land, 1), msg (opens the chat at that message, as
+// a link to it does).
 import '../../design/shell/storage';
 
 import { createRoot } from 'react-dom/client';
@@ -21,9 +25,9 @@ import { setLocalSnapshotPrincipal } from '../../src/lib/localSnapshots';
 import { DesignShell } from '../../design/shell/DesignShell';
 import { apiResponses, demoProjects } from '../../design/shell/fixtures';
 import { designNetwork, installDesignNetwork } from '../../design/shell/network';
-import { chatFixtures, chatPhone } from '../../design/frames/chat/fixtures';
+import { chatFixtures, chatPhone, idleTurn, runningTurn } from '../../design/frames/chat/fixtures';
 
-import { LAB_SESSION_ID, activityGroups, conversation, messageAt } from './conversation';
+import { LAB_SESSION_ID, activityGroups, activityRecords, conversation, messageAt } from './conversation';
 import { installScrollRecorder, type ScrollLab } from './recorder';
 
 const params = new URLSearchParams(window.location.search);
@@ -36,13 +40,16 @@ const reader = params.get('reader');
 const inbox = params.get('inbox') === '1';
 const sendDelay = Number(params.get('sendDelay') ?? 150);
 const sendFails = params.get('send') === 'fail';
+const records = params.get('records') === '1';
+const activityDelay = Number(params.get('activityDelay') ?? 0);
+const recordsRepeat = Math.max(1, Number(params.get('recordsRepeat') ?? 1));
 
 const history = conversation(count).map((message) =>
   images ? message : { ...message, text: message.text.replace(/!\[[^\]]*\]\([^)]*\)/g, '(chart)') },
 );
 const PAGE = 50;
 const tail = history.slice(-PAGE);
-const initialGroups = activity ? activityGroups(history) : [];
+const initialGroups = activity ? activityGroups(history, records) : [];
 
 installDesignNetwork();
 
@@ -83,12 +90,26 @@ const bootstrap = responses[`${base}/bootstrap`] as Record<string, unknown>;
 responses[`${base}/bootstrap`] = { ...bootstrap, next_before_id: history.length > PAGE ? tail[0].id : null };
 designNetwork.setResponses(responses);
 
+// The turn as the server has it: what `/turn-state` and the bootstrap report always agree with the turn
+// events the lab sends (`turn`), as on a real server, so the page's own reconciliation (it reads
+// `/turn-state` on an interval while the stream is not known to be connected) confirms a running turn instead
+// of ending it.
+function setTurnState(running: boolean) {
+  const state = running ? runningTurn : idleTurn;
+  responses[`${base}/turn-state`] = state;
+  responses[`${base}/bootstrap`] = { ...(responses[`${base}/bootstrap`] as Record<string, unknown>), turn_state: state };
+}
+setTurnState(false);
+/** How often the page has asked for `/turn-state` (each reconciliation asks once). */
+let turnStateReads = 0;
+
 let loads = 0;
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 const designFetch = window.fetch;
 window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.href);
   if (url.pathname === `${base}/bootstrap` && boot > 0) await new Promise((resolve) => setTimeout(resolve, boot));
+  if (url.pathname === `${base}/turn-state`) turnStateReads += 1;
   if (url.pathname === `${base}/messages` && (init?.method ?? 'GET').toUpperCase() === 'POST') {
     // A sent message: the server's row for it, or a refusal.
     await new Promise((resolve) => setTimeout(resolve, sendDelay));
@@ -97,6 +118,13 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const row = { ...messageAt(history.length), author: 'user', type: 'user', source: 'user', author_id: 'local', id: `msg_sent_${history.length}`, text: sent.text ?? '', metadata: sent.metadata ?? {} } as WorkbenchMessage;
     history.push(row);
     return json(row);
+  }
+  // One settled group's rows, read when its chip opens.
+  if (url.pathname === `${base}/activity` && url.searchParams.has('group_id')) {
+    const group = [...initialGroups, ...settledGroups].find(({ id }) => id === url.searchParams.get('group_id'));
+    if (activityDelay > 0) await new Promise((resolve) => setTimeout(resolve, activityDelay));
+    const rows = records ? Array.from({ length: recordsRepeat }, (_, round) => activityRecords(group!).map((row) => ({ ...row, id: `${row.id}_${round}` }))).flat() : [];
+    return json(group ? { ...group, rows } : {});
   }
   // The settled execution-process groups, as the server has them now.
   if (url.pathname === `${base}/activity` && !url.searchParams.has('group_id')) {
@@ -145,8 +173,10 @@ declare global {
     __scrollLab: ScrollLab & {
       /** A row over the event stream: the next one of the conversation, or one by `author`. */
       push(text?: string, author?: 'user' | 'agent'): WorkbenchMessage;
-      /** A turn starting or ending over the event stream. */
+      /** A turn starting or ending over the event stream; `/turn-state` and the bootstrap report it from then on. */
       turn(phase: 'start' | 'end'): void;
+      /** How often the page has asked for `/turn-state` so far. */
+      turnStateReads(): number;
       /** A row the conversation already has, changed over the event stream (its text replaced). */
       update(id: string, text: string): WorkbenchMessage;
       /** Any row over the event stream: the next one of the conversation with `fields` over it. A live
@@ -217,7 +247,10 @@ window.__scrollLab = Object.assign(recorder, {
       rows: [],
     } as (typeof settledGroups)[number]);
   },
+  turnStateReads: () => turnStateReads,
   turn(phase: 'start' | 'end') {
+    // The server's state changes first, then it says so.
+    setTurnState(phase === 'start');
     for (const source of LabEventSource.live) {
       source.dispatchEvent(new MessageEvent(`turn.${phase}`, { data: JSON.stringify({ type: `turn.${phase}`, data: { session_id: LAB_SESSION_ID } }) }));
     }
@@ -239,7 +272,7 @@ if (params.get('record') === '1') recorder.start();
 const Phone = chatPhone;
 createRoot(document.getElementById('root')!).render(
   <div className="h-dvh">
-    <DesignShell fixtures={fixtures} route={`/chat/${LAB_SESSION_ID}`}>
+    <DesignShell fixtures={fixtures} route={`/chat/${LAB_SESSION_ID}${params.get('msg') ? `?msg=${params.get('msg')}` : ''}`}>
       <Phone />
     </DesignShell>
   </div>,

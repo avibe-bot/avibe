@@ -9451,6 +9451,7 @@ def projects_create():
     if not folder_path:
         return jsonify({"error": "folder_path is required"}), 400
     display_name = payload.get("display_name")
+    description = payload.get("description", projects_service._UNSET)
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
@@ -9458,6 +9459,7 @@ def projects_create():
                 conn,
                 folder_path,
                 display_name=display_name,
+                description=description,
                 authorization_context=getattr(g, "authorization_context", None),
             )
     except (FileNotFoundError, NotADirectoryError) as err:
@@ -9518,8 +9520,8 @@ def projects_update(project_id: str):
 
     payload = request.json or {}
     display_name = payload.get("display_name")
+    description = payload.get("description", projects_service._UNSET)
     folder_path = payload.get("folder_path")
-    # Default-Agent fields are only forwarded when present in the body, so an
     # omitted field is left untouched while a present ``null`` clears the default
     # (see ``projects_service.update_project`` and its ``_UNSET`` sentinel).
     agent_kwargs = {
@@ -9534,18 +9536,23 @@ def projects_update(project_id: str):
         )
         if field in payload
     }
-    if display_name is None and folder_path is None and not agent_kwargs:
+    if display_name is None and folder_path is None and description is projects_service._UNSET and not agent_kwargs:
         return jsonify({"error": "no updatable fields provided"}), 400
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            update_kwargs = {
+                "display_name": display_name,
+                "folder_path": folder_path,
+                "authorization_context": getattr(g, "authorization_context", None),
+                **agent_kwargs,
+            }
+            if description is not projects_service._UNSET:
+                update_kwargs["description"] = description
             project = projects_service.update_project(
                 conn,
                 project_id,
-                display_name=display_name,
-                folder_path=folder_path,
-                authorization_context=getattr(g, "authorization_context", None),
-                **agent_kwargs,
+                **update_kwargs,
             )
     except projects_service.StaleProjectAgentBindingError as err:
         return _project_agent_conflict_response(err)

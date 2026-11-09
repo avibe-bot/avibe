@@ -908,8 +908,8 @@ vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork
 - `--model`
 - `--reasoning-effort`
 - `--close-after`
-- `--callback`
-- `--callback-session-id`
+- `--no-reply`
+- `--callback`、`--callback-session-id`、`--no-callback`（已弃用，不改变行为）
 - `--sync`
 - `--message`
 - `--message-file`
@@ -918,10 +918,15 @@ vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork
 后台运行，适合 sub-agent 调用；`--visible` 让它面向用户，`--same-scope` 或
 `--scope-id` 决定它的位置。
 
-Run 默认异步：命令会队列化 run，立即输出一个带 `id` 和 `session_id` 的 `run`
-对象。只有加 `--callback`（回到调用方）或 `--callback-session-id` 时，最终结果才会回到
-某个 Session；没有完成的 run 总会告诉调用方 Session。只有终端需要等待完成时才使用
-`--sync`。
+Run 默认异步：命令会队列化 Run，立即输出一个带 `id` 和 `session_id` 的 `run`
+对象。输入会告诉接收方如何主动汇报；如果它处理消息后没有写回，且已空闲、没有待办工作，
+Avibe 会向发送方发一条带最后回复的已读回执。失败、取消或中断仍会立即通知调用方。
+只有终端需要等待完成时才使用 `--sync`。
+
+信息告知可在已有 `--session-id` 或 `--bot` 消息上加 `--no-reply`：它不创建委派或回执，
+不改变已有委派，并告诉接收方无需回复。它不能与 `--sync` 或新建/fork Session 一起使用。
+三个 callback 参数仍然接受，但不改变行为，stderr 输出一行弃用说明；旧的待发送
+callback 兑现一次。
 
 `--close-after` 适用于新建或 fork 的 Session。Run 结束后它会释放该 Agent
 runtime，同时保留 Session、transcript 和 Run 记录；不能和现有的

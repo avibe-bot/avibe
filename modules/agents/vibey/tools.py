@@ -53,6 +53,8 @@ from vibe.i18n import t as i18n_t
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
 #: Whether a job's tool call has a durable ``tool_result`` (the adapter's half of J5).
 CallSettled = Callable[[Mapping[str, Any]], bool]
+#: Keep one maintenance pass bounded even when old job directories accumulate.
+_JOB_PRUNE_BATCH = 64
 
 
 @dataclass(frozen=True)
@@ -116,7 +118,10 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     def prune(call_settled: CallSettled) -> list[str]:
         # J5: a job's files stay until its call has a durable result and no Watch still manages it.
         watches = ManagedWatchStore()
-        return host.prune(lambda meta: call_settled(meta) and watches.job_watch_settled(str(meta.get("job_id"))))
+        return host.prune(
+            lambda meta: call_settled(meta) and watches.job_watch_settled(str(meta.get("job_id"))),
+            max_jobs=_JOB_PRUNE_BATCH,
+        )
 
     return ToolSuite(
         jobs=host,

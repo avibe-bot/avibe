@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or digest signing without exposing secret values to the agent.
-version: 0.7.0
+version: 0.7.1
 ---
 
 # Use Avibe Vault
@@ -17,6 +17,7 @@ Core concepts:
 - Protected: for high-risk secrets, such as production databases or wallet/funds keys. Because protected secrets are end-to-end encrypted, use requires browser approval and passkey unlock.
 
 Rules:
+- Vault approval auto-resume and Vault's `--no-callback` are unchanged by the retirement of Agent Run callbacks. Agent Run `--no-reply` does not disable Vault continuations.
 - Refer to secrets only by secret name, record ref (`NAME.field`), tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`. Keypairs do not accept field refs.
 - Authorization is per secret: approving a protected secret unlocks **all its fields** for the grant's lifetime. The CLI cannot create, replace, or delete fields; the user does that in the browser.
