@@ -342,6 +342,7 @@ final class NativePushCoordinator {
             throw NativePushError.unavailable
         }
 
+        let vapidKeyHash = try Self.requireVapidHash(vapidPublicKey)
         let installation = try await ensureBound(to: account)
         try await reconcilePendingOperations(for: installation)
         try await requestPermission()
@@ -350,7 +351,20 @@ final class NativePushCoordinator {
             throw NativePushError.unavailable
         }
 
-        let vapidKeyHash = try Self.requireVapidHash(vapidPublicKey)
+        let recoveredRecords = try keychain.listRecords().filter {
+            $0.state == .active
+                && !$0.pendingRevoke
+                && $0.accountID == account.id
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.instanceOrigin == instanceOrigin
+                && $0.vapidKeyHash == vapidKeyHash
+        }
+        if recoveredRecords.count == 1,
+           let recoveredRecord = recoveredRecords.first
+        {
+            return recoveredRecord.publicSubscription
+        }
+
         let privateKey = P256.KeyAgreement.PrivateKey()
         let authSecret = try Self.randomBytes(count: 16)
         let kid = PushBase64URL.encode(try Self.randomBytes(count: 32))

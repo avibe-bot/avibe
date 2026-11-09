@@ -896,6 +896,131 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
     }
 
+    func testFirstSubscriptionCreatesOneActiveRegistration() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 15, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let subscription = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        let registrationRequests = recorder.requests.filter {
+            $0.method == "PUT"
+                && $0.path.contains("/registrations/")
+        }
+        XCTAssertEqual(registrationRequests.count, 1)
+        let record = try XCTUnwrap(try store.listRecords().first)
+        XCTAssertEqual(try store.listRecords().count, 1)
+        XCTAssertEqual(record.state, .active)
+        XCTAssertFalse(record.pendingRevoke)
+        XCTAssertEqual(
+            subscription["endpoint"] as? String,
+            record.publicSubscription["endpoint"] as? String
+        )
+    }
+
+    func testLostCreateResponseReturnsTheRecoveredRegistration()
+        async throws
+    {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 15, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        let recorder = ManagementRecorder()
+        var acceptedRegistrationPaths: Set<String> = []
+        recorder.responseHandler = { request in
+            guard request.path.contains("/registrations/") else {
+                return Self.successResponse
+            }
+            let wasInserted = acceptedRegistrationPaths.insert(
+                request.path
+            ).inserted
+            if wasInserted {
+                throw URLError(.networkConnectionLost)
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        do {
+            _ = try await coordinator.subscribe(
+                vapidPublicKey: Self.vapidPublicKey,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTFail("Expected the first registration response to be lost")
+        } catch {
+            XCTAssertEqual(
+                (error as? URLError)?.code,
+                .networkConnectionLost
+            )
+        }
+        let pending = try XCTUnwrap(try store.listRecords().first)
+        XCTAssertEqual(pending.state, .pending)
+
+        let subscription = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        let registrationRequests = recorder.requests.filter {
+            $0.method == "PUT"
+                && $0.path.contains("/registrations/")
+        }
+        XCTAssertEqual(registrationRequests.count, 2)
+        XCTAssertEqual(
+            Set(registrationRequests.map(\.path)),
+            acceptedRegistrationPaths
+        )
+        XCTAssertEqual(acceptedRegistrationPaths.count, 1)
+        XCTAssertEqual(
+            subscription["endpoint"] as? String,
+            pending.publicSubscription["endpoint"] as? String
+        )
+        let subscriptionKeys = try XCTUnwrap(
+            subscription["keys"] as? [String: Any]
+        )
+        let pendingKeys = try XCTUnwrap(
+            pending.publicSubscription["keys"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            subscriptionKeys["p256dh"] as? String,
+            pendingKeys["p256dh"] as? String
+        )
+        XCTAssertEqual(
+            subscriptionKeys["auth"] as? String,
+            pendingKeys["auth"] as? String
+        )
+        let recovered = try XCTUnwrap(
+            try store.loadRecord(kid: pending.kid)
+        )
+        XCTAssertEqual(try store.listRecords().count, 1)
+        XCTAssertEqual(recovered.state, .active)
+        XCTAssertFalse(recovered.pendingRevoke)
+    }
+
     func testReplacementKeyRetiresForTheMaximumAcceptedPushTTL() async throws {
         let currentTime = Date(timeIntervalSince1970: 1_794_096_000)
         let store = makeInstallationStore(
