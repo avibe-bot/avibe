@@ -41,6 +41,10 @@ updates:
     # This candidate changes refresh diagnostics beyond the existing lint ledger.
     # Keep 0.4.26 for now; later candidates still get an independent review.
     ignore:
+      # 31.0.0 excludes Node20 and its Undici dependency fails startup there.
+      # Preserve the supported toolchain; review later candidates independently.
+      - dependency-name: jsdom
+        versions: ["31.0.0"]
       - dependency-name: vitest
         versions: ["5.1.0"]
       - dependency-name: eslint-plugin-react-refresh
