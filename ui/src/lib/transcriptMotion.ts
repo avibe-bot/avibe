@@ -212,17 +212,23 @@ const shareAt = (share: Share, time: number) => {
   return x <= 0 ? share.from : x >= 1 ? share.to : share.from + (share.to - share.from) * share.curve(x);
 };
 const shareOver = (share: Share, time: number) => !share.hold && time >= share.start + share.duration;
-/** Now on the clock every Web Animation is drawn by: the document timeline's time (a frame's, between frames),
- *  but never further behind the time origin's own clock than a few frames, where a page that drew nothing
- *  for a while may leave it. Everything a disclosure starts is started at one such time, given explicitly, and every row's
- *  sum is sampled from it, so the curtain, the fades and each share run on one clock with what is already
- *  drawn. */
-/** How far behind its own clock the timeline is taken to have been left by a page that drew nothing. */
+/** Now on the clock every Web Animation is drawn by. Everything a disclosure starts is started at one such time,
+ *  given explicitly, and every row's sum is sampled from it, so the curtain, the fades and each share run on one
+ *  clock with what is already drawn.
+ *
+ *  While a disclosure moves, frames are drawn one after another and the timeline's time is the one the next
+ *  frame is drawn at, however long the task it is read in: on a busy page (a long commit) that frame can be due
+ *  from before the task began, and anything started later than its time would be drawn ahead of what it joins.
+ *  So what joins a motion starts at the timeline's time. A disclosure that starts from rest is the exception:
+ *  the timeline's time is that of the last frame drawn, which a page that drew nothing for a while leaves far
+ *  behind, so it starts at most a few frames before now (it joins nothing). */
 const STALE_TIMELINE_MS = 100;
 const clockNow = () => {
   const timeline = Number(document.timeline.currentTime ?? Number.NaN);
   const now = performance.now();
-  return Number.isFinite(timeline) ? Math.max(timeline, now - STALE_TIMELINE_MS) : now;
+  if (!Number.isFinite(timeline)) return now;
+  const moving = document.getAnimations().some((animation) => animation.id === DISCLOSE && animation.playState === 'running');
+  return moving ? timeline : Math.max(timeline, now - STALE_TIMELINE_MS);
 };
 /** Every share a row has, and the animation drawing their sum. */
 const sharesOf = new WeakMap<HTMLElement, Set<Share>>();
@@ -374,12 +380,14 @@ function atOneMoment<T>(clocks: Element[], read: () => T): T {
 }
 
 /** Where the layout puts `el` in the column (px from the column's top): without what a glide draws the column
- *  at, nor what a disclosure draws its item at (read at one moment with them). The layout's place, unlike where
- *  it is drawn, is the same whenever it is read, so places read apart can be compared. */
+ *  at, nor what a disclosure draws `el`, its item, or anything between them at (a Harness row's time moves with
+ *  the edge inside its row), all read at one moment. The layout's place, unlike where it is drawn, is the same
+ *  whenever it is read, so places read apart can be compared. */
 function layoutBox(column: HTMLElement, el: Element): { top: number; bottom: number } {
-  const item = itemOf(column, el) ?? el;
-  return atOneMoment([column, item], () => {
-    const origin = column.getBoundingClientRect().top + offsetOf(item);
+  const chain: Element[] = [];
+  for (let node: Element | null = el; node && node !== column; node = node.parentElement) chain.push(node);
+  return atOneMoment([column, ...chain], () => {
+    const origin = column.getBoundingClientRect().top + chain.reduce((sum, node) => sum + offsetOf(node), 0);
     const box = el.getBoundingClientRect();
     return { top: box.top - origin, bottom: box.bottom - origin };
   });
@@ -595,10 +603,11 @@ function dropWhenStill(entry: Disclosing, curtain: HTMLElement) {
 /** Plays `entry` from `from` the way `closing` says, over `duration`: the curtain and the rows to that way's
  *  edge, the cross-fade, and the shared parts. Reduced motion: only the fades, and nothing moves. */
 function play(entry: Disclosing, from: State, closing: boolean, duration: number, tokens: Tokens, reduced: boolean) {
+  // Read while what it turns from still runs (it joins that).
+  const start = clockNow();
   entry.animations.forEach((animation) => animation.cancel());
   removeCurtain(entry);
   const animations: Animation[] = [];
-  const start = clockNow();
   const add = (animation: Animation) => {
     animation.startTime = start;
     animations.push(tagged(animation));
@@ -732,13 +741,16 @@ function measureFold(column: HTMLElement, nodes: HTMLElement[], stays: Element |
   const { top } = span;
   const height = span.bottom - top;
   const below = (from: Element, to: Element) => layoutBox(column, to).top - layoutBox(column, from).top;
+  // The gap its container leaves before it, which the layout gives back with it where nothing takes its place.
+  const container = first.previousElementSibling && first.parentElement ? getComputedStyle(first.parentElement) : null;
+  const gapBefore = container && /flex|grid/.test(container.display) ? parseFloat(container.rowGap) || 0 : 0;
   const measured = stays ? summaries.get(stays) : undefined;
   const copy = stays?.querySelector<HTMLElement>(`[${SUMMARY_ATTRIBUTE}]`) ?? null;
   let keep: number;
   let rise: number;
   if (measured) {
     keep = Math.max(0, Math.min(height, measured.keep));
-    rise = measured.room != null && next && stays ? Math.max(0, below(stays, next) - measured.room) : height - keep;
+    rise = measured.room != null && next && stays ? Math.max(0, below(stays, next) - measured.room) : height - keep + (keep < 0.5 ? gapBefore : 0);
   } else if (copy && stays) {
     const summaryBottom = layoutBox(column, copy).bottom;
     keep = Math.max(0, Math.min(height, summaryBottom - top));
@@ -749,8 +761,7 @@ function measureFold(column: HTMLElement, nodes: HTMLElement[], stays: Element |
     // the gap its container leaves before it.
     const head = nodes.length === 1 && first.querySelector('[aria-expanded]') ? first.firstElementChild : null;
     keep = Math.max(0, Math.min(height, head ? layoutBox(column, head).bottom - top : 0));
-    const container = nodes.length === 1 && first.previousElementSibling && first.parentElement ? getComputedStyle(first.parentElement) : null;
-    rise = height - keep + (container && /flex|grid/.test(container.display) ? parseFloat(container.rowGap) || 0 : 0);
+    rise = height - keep + (nodes.length === 1 ? gapBefore : 0);
   }
   return { height, keep, rise, copy };
 }

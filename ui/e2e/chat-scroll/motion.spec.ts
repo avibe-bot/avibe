@@ -810,9 +810,10 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         value.exact = before === after;
         const running = ours();
         value.onTime = value.exact && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
-        if (frame !== null) running.forEach((animation) => seen.add(animation));
         if (value.exact || attempt === 7) {
           out.push(value);
+          // Seen once the frame's read is done (its retries run in the same frame, before anything is drawn).
+          if (frame !== null) running.forEach((animation) => seen.add(animation));
           return;
         }
       }
@@ -1150,6 +1151,31 @@ test('a Harness group a link opened folds back into its card when closed, rising
   expect(closing.at(-1)!.summary).toBe(1);
 });
 
+test('a Harness row at the end of the conversation folds its body back, and its time lands where the fold ends', async ({ page }) => {
+  // count=380 ends the conversation on a Harness row of its own: nothing follows it, so the fold is measured on
+  // its time, which moves with the edge.
+  await open(page, 'delay=0&count=380');
+  const id = await transcript(page).evaluate((scroller) => {
+    const items = [...scroller.firstElementChild!.firstElementChild!.children] as HTMLElement[];
+    return items.filter((el) => el.dataset.messageId).at(-1)!.dataset.messageId!;
+  });
+  await transcript(page).locator(`[data-message-id="${id}"] button[aria-expanded="false"]`).click();
+  await page.waitForTimeout(800);
+  const closing = await discloseAndWatch(page, `[data-message-id="${id}"] button[aria-expanded="true"]`);
+  expect(closing[0].trail).not.toBeNull();
+  expect(closing.every(({ next }) => next === null)).toBe(true);
+  // The time rises with the edge, once, and once the body is gone it is where the layout puts it: it never jumps
+  // down and glides back.
+  const seen = drawn(closing).map(({ trail }) => trail).filter((top): top is number => top !== null);
+  expect(seen[0] - seen.at(-1)!).toBeGreaterThan(20);
+  const steps = seen.slice(1).map((top, index) => top - seen[index]).filter((step) => Math.abs(step) > 0.5);
+  expect(steps.every((step) => step < 0)).toBe(true);
+  const gone = closing.findIndex(({ content }) => content === null);
+  expect(gone).toBeGreaterThan(0);
+  const after = drawn(closing.slice(gone)).map(({ trail }) => trail).filter((top): top is number => top !== null);
+  expect(Math.max(...after) - Math.min(...after)).toBeLessThanOrEqual(0.5);
+});
+
 test('a Harness row opened while reading up the conversation unfolds its body in place, and folds it back', async ({ page }) => {
   await open(page, 'delay=0&count=392');
   // A Harness row of its own (not in a group), above the fold.
@@ -1298,6 +1324,18 @@ test('a chip whose steps are still loading opens straight to their skeleton, and
   // read from the landing on).
   const landing = frames.findIndex(({ busy }, index) => index > 0 && !busy && frames[index - 1].busy);
   expect(Math.min(...frames.slice(landing - 1).map(({ body }) => body ?? 0))).toBeGreaterThanOrEqual(0.9);
+});
+
+test('steps that land in a long commit while the chip still opens keep the rows below with its edge', async ({ page }) => {
+  // The steps land 40 ms into the opening, and there are many of them: rendering them is a long task (over 100 ms
+  // here), and the frame due meanwhile is drawn right after the commit, at its own earlier time. What the landing
+  // adds to the rows below must be drawn on that frame's clock, like the opening it joins.
+  await open(page, 'delay=0&activity=1&records=1&recordsRepeat=60&activityDelay=40&count=392');
+  const frames = await discloseAndWatch(page, `${CHIP} button[aria-expanded="false"]`, { frames: 70 });
+  expect(frames.some(({ busy }) => busy)).toBe(true);
+  expect(frames.at(-1)!.busy).toBe(false);
+  expectInPlace(frames);
+  expect(rowPath(frames).turns).toBe(0);
 });
 
 test('the skeleton a loading chip opens to has a row for each step it counts', async ({ page }) => {

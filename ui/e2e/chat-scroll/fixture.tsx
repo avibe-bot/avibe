@@ -11,7 +11,9 @@
 // sendDelay (ms the server takes to answer a sent message, 150), send=fail (it
 // refuses every send), records=1 (an execution-process group's rows load with the
 // steps it took, else it has none), activityDelay (ms a group's rows take to load,
-// 0), msg (opens the chat at that message, as a link to it does).
+// 0), recordsRepeat (a group's rows are its steps that many times over, so they
+// take long to render when they land, 1), msg (opens the chat at that message, as
+// a link to it does).
 import '../../design/shell/storage';
 
 import { createRoot } from 'react-dom/client';
@@ -40,6 +42,7 @@ const sendDelay = Number(params.get('sendDelay') ?? 150);
 const sendFails = params.get('send') === 'fail';
 const records = params.get('records') === '1';
 const activityDelay = Number(params.get('activityDelay') ?? 0);
+const recordsRepeat = Math.max(1, Number(params.get('recordsRepeat') ?? 1));
 
 const history = conversation(count).map((message) =>
   images ? message : { ...message, text: message.text.replace(/!\[[^\]]*\]\([^)]*\)/g, '(chart)') },
@@ -106,7 +109,8 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.pathname === `${base}/activity` && url.searchParams.has('group_id')) {
     const group = [...initialGroups, ...settledGroups].find(({ id }) => id === url.searchParams.get('group_id'));
     if (activityDelay > 0) await new Promise((resolve) => setTimeout(resolve, activityDelay));
-    return json(group ? { ...group, rows: records ? activityRecords(group) : [] } : {});
+    const rows = records ? Array.from({ length: recordsRepeat }, (_, round) => activityRecords(group!).map((row) => ({ ...row, id: `${row.id}_${round}` }))).flat() : [];
+    return json(group ? { ...group, rows } : {});
   }
   // The settled execution-process groups, as the server has them now.
   if (url.pathname === `${base}/activity` && !url.searchParams.has('group_id')) {
