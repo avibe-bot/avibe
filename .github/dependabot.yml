@@ -44,7 +44,7 @@ updates:
       - dependency-name: vitest
         versions: ["5.1.0"]
       - dependency-name: eslint-plugin-react-refresh
-        versions: ["0.5.7"]
+        versions: ["0.5.6", "0.5.7"]
 
   - package-ecosystem: npm
     directory: /desktop
