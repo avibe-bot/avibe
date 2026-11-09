@@ -114,6 +114,7 @@ import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './li
 import { isSetupComplete } from './lib/setupState';
 import { isNativeShell, onNativePushOpened } from './lib/native';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
+import { WebPushReconciler } from './components/workbench/WebPushReconciler';
 import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
   readLastPwaPath,
@@ -926,7 +927,18 @@ const router = createBrowserRouter(
       )}
     />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
-      <Route element={<AuthGuard><BotsProvider><BotHoldProvider><AppShell /></BotHoldProvider></BotsProvider></AuthGuard>}>
+      <Route
+        element={(
+          <AuthGuard>
+            <WebPushReconciler />
+            <BotsProvider>
+              <BotHoldProvider>
+                <AppShell />
+              </BotHoldProvider>
+            </BotsProvider>
+          </AuthGuard>
+        )}
+      >
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>

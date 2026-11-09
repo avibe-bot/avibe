@@ -467,26 +467,6 @@ final class NativePushCoordinator {
             do {
                 var installation = try loadOrCreateInstallation()
                 let topic = Self.topic
-                if let provider = installation.provider,
-                   provider.deviceToken == deviceToken,
-                   provider.environment == environment,
-                   provider.topic == topic
-                {
-                    resumeTokenWaiters()
-                    guard
-                        installation.accountID != nil,
-                        installation.providerPatchPending
-                    else {
-                        return
-                    }
-                    _ = try? await enqueueMutation {
-                        guard !self.isFrozen else {
-                            return
-                        }
-                        try await self.reconcileProvider()
-                    }
-                    return
-                }
                 let nextGeneration = try Self.nextGeneration(
                     after: installation.providerGeneration
                 )

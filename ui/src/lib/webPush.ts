@@ -152,6 +152,17 @@ export function webPushSubscriptionUsesVapidKey(
   }
 }
 
+export type WebPushReconcileStatus =
+  | 'unsupported'
+  | 'needs_install'
+  | 'disabled'
+  | 'enabled';
+
+export type WebPushReconcileResult = {
+  support: WebPushSupportState;
+  status: WebPushReconcileStatus;
+};
+
 export type EnableWebPushOptions = {
   forceResubscribe?: boolean;
   recoverOnly?: boolean;
@@ -263,6 +274,140 @@ export async function disableWebPush(api: ApiContextType): Promise<boolean> {
     await subscription.unsubscribe();
   }
   return Boolean(endpoint);
+}
+
+let webPushReconciliation: Promise<WebPushReconcileResult> | null = null;
+
+async function reconcileWebPushOnce(api: ApiContextType): Promise<WebPushReconcileResult> {
+  const support = getWebPushSupportState();
+  if (hasNativeCapability('push')) {
+    try {
+      const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
+      const nativeState = await nativePushStatus(publicKey);
+      if (nativeState?.state !== 'on') {
+        return { support, status: 'disabled' };
+      }
+      const previousEndpoints = [
+        nativeState.endpoint,
+        ...await getRememberedWebPushEndpoints(),
+      ].filter((endpoint, index, endpoints) => endpoints.indexOf(endpoint) === index);
+      const nativeSubscription = {
+        endpoint: nativeState.endpoint,
+        keys: nativeState.keys,
+      };
+      const serverStatus = await api.getWebPushStatus({
+        endpoint: nativeState.endpoint,
+        subscription: nativeSubscription,
+        device_label: 'iPhone App',
+        previous_endpoints: previousEndpoints,
+      });
+      if (serverStatus.current_subscription_enabled) {
+        await rememberWebPushEndpoint(nativeState.endpoint);
+        return { support, status: 'enabled' };
+      }
+      if (serverStatus.current_subscription_repairable) {
+        try {
+          await enableWebPush(api, { forceResubscribe: true, recoverOnly: true });
+          const repaired = await nativePushStatus(publicKey);
+          if (repaired?.state === 'on') {
+            const repairedStatus = await api.getWebPushStatus({
+              endpoint: repaired.endpoint,
+              subscription: {
+                endpoint: repaired.endpoint,
+                keys: repaired.keys,
+              },
+              device_label: 'iPhone App',
+              previous_endpoints: previousEndpoints,
+            });
+            if (repairedStatus.current_subscription_enabled) {
+              await rememberWebPushEndpoint(repaired.endpoint);
+              return { support, status: 'enabled' };
+            }
+          }
+        } catch {
+          // Keep the next foreground or manual settings action recoverable.
+        }
+      }
+      return { support, status: 'disabled' };
+    } catch {
+      return { support, status: 'disabled' };
+    }
+  }
+
+  if (!support.supported) {
+    return {
+      support,
+      status: support.reason === 'ios_requires_standalone' ? 'needs_install' : 'unsupported',
+    };
+  }
+
+  try {
+    const existing = await getExistingWebPushSubscription();
+    const previousEndpoints = await getRememberedWebPushEndpoints();
+    const rememberedEndpoint = previousEndpoints[0];
+    const serverStatus = await api
+      .getWebPushStatus(
+        existing
+          ? {
+              endpoint: existing.endpoint,
+              subscription: existing.toJSON(),
+              device_id: await getWebPushDeviceId(),
+              previous_endpoints: previousEndpoints,
+            }
+          : rememberedEndpoint ? { endpoint: rememberedEndpoint } : undefined,
+      )
+      .catch(() => null);
+    const repairable = Boolean(serverStatus && (
+      serverStatus.current_subscription_repairable
+      || (!existing && Boolean(rememberedEndpoint) && serverStatus.current_subscription_enabled)
+      || (existing && serverStatus.current_subscription_enabled
+        && !webPushSubscriptionUsesVapidKey(existing, serverStatus.public_key))
+    ));
+    if (
+      repairable
+      && typeof Notification !== 'undefined'
+      && Notification.permission === 'granted'
+    ) {
+      try {
+        await enableWebPush(api, { forceResubscribe: Boolean(existing), recoverOnly: true });
+        const repaired = await getExistingWebPushSubscription();
+        if (repaired) {
+          const repairedStatus = await api.getWebPushStatus({
+            endpoint: repaired.endpoint,
+            subscription: repaired.toJSON(),
+            device_id: await getWebPushDeviceId(),
+            previous_endpoints: await getRememberedWebPushEndpoints(),
+          });
+          if (repairedStatus.current_subscription_enabled) {
+            await rememberWebPushEndpoint(repaired.endpoint);
+            return { support, status: 'enabled' };
+          }
+        }
+      } catch {
+        // Keep the control recoverable; the user can still retry manually.
+      }
+      return { support, status: 'disabled' };
+    }
+    if (existing && serverStatus?.current_subscription_enabled) {
+      await rememberWebPushEndpoint(existing.endpoint);
+    }
+    return {
+      support,
+      status: existing && serverStatus?.current_subscription_enabled ? 'enabled' : 'disabled',
+    };
+  } catch {
+    return { support, status: 'disabled' };
+  }
+}
+
+/** Reconcile the current native or browser subscription with the instance once at a time. */
+export function reconcileWebPush(api: ApiContextType): Promise<WebPushReconcileResult> {
+  if (!webPushReconciliation) {
+    webPushReconciliation = reconcileWebPushOnce(api).finally(() => {
+      webPushReconciliation = null;
+    });
+  }
+  return webPushReconciliation;
 }
 
 /**

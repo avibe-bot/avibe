@@ -40,6 +40,15 @@ enum AppRoute: Equatable {
     }
 }
 
+private struct PendingPushOpened {
+    let id: String
+    let accountID: String
+    let instanceOrigin: String
+    let url: String
+    let runtimeIdentity: Int
+    let createdAt: Date
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var route: AppRoute = .loading
@@ -57,7 +66,8 @@ final class AppModel: ObservableObject {
     ] = []
     private var hasCompletedBootstrap = false
     private var pendingPushTap: PushNotificationTap?
-    private var pendingPushOpenedURL: String?
+    private var pendingPushOpened: PendingPushOpened?
+    private var pendingPushOpenedExpiryTask: Task<Void, Never>?
 
     private lazy var sessionCoordinator = MobileSessionCoordinator(
         defaults: defaults,
@@ -182,6 +192,7 @@ final class AppModel: ObservableObject {
     }
 
     func showInstancePicker() {
+        clearPendingPushOpened()
         stopRuntime()
         route = .onboarding(.instances)
     }
@@ -220,6 +231,12 @@ final class AppModel: ObservableObject {
         guard sessionCoordinator.isCurrentRuntime(runtime) else {
             return
         }
+        if let pendingPushOpened,
+           pendingPushOpened.instanceOrigin
+                != WebOrigin(url: runtime.instance.url)?.serialized
+        {
+            clearPendingPushOpened()
+        }
         nativePushCoordinator.resumeAfterAccountActivation()
         stopRuntime()
         runtimeIdentity += 1
@@ -228,13 +245,48 @@ final class AppModel: ObservableObject {
 
     func didFinishRuntimeLoading() {
         guard
-            let pendingPushOpenedURL,
+            let pendingPushOpened,
             let runtimeController
         else {
             return
         }
-        self.pendingPushOpenedURL = nil
-        runtimeController.deliverPushOpened(path: pendingPushOpenedURL)
+        guard pendingPushOpened.createdAt.addingTimeInterval(120) > Date(),
+              pendingPushOpened.runtimeIdentity == runtimeIdentity,
+              sessionCoordinator.currentAccount?.id == pendingPushOpened.accountID,
+              sessionCoordinator.currentInstances.contains(where: {
+                  $0.available
+                      && WebOrigin(url: $0.url)?.serialized
+                          == pendingPushOpened.instanceOrigin
+              })
+        else {
+            clearPendingPushOpened()
+            return
+        }
+        runtimeController.deliverPushOpened(
+            id: pendingPushOpened.id,
+            path: pendingPushOpened.url
+        )
+    }
+
+    @discardableResult
+    func acknowledgePushOpened(id: String, origin: WebOrigin) -> Bool {
+        guard
+            let pendingPushOpened,
+            pendingPushOpened.id == id,
+            pendingPushOpened.instanceOrigin == origin.serialized,
+            pendingPushOpened.runtimeIdentity == runtimeIdentity,
+            pendingPushOpened.createdAt.addingTimeInterval(120) > Date(),
+            sessionCoordinator.currentAccount?.id == pendingPushOpened.accountID,
+            let runtime = route.runtime,
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
+        else {
+            if pendingPushOpened?.id == id {
+                clearPendingPushOpened()
+            }
+            return false
+        }
+        clearPendingPushOpened()
+        return true
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {
@@ -251,17 +303,46 @@ final class AppModel: ObservableObject {
             }),
             Self.isSafeInstancePath(tap.url)
         else {
-            pendingPushOpenedURL = nil
+            clearPendingPushOpened()
             showInstancePicker()
             return
         }
-        pendingPushOpenedURL = tap.url
+        let pending = PendingPushOpened(
+            id: UUID().uuidString,
+            accountID: tap.accountID,
+            instanceOrigin: tap.instanceOrigin,
+            url: tap.url,
+            runtimeIdentity: runtimeIdentity + 1,
+            createdAt: Date()
+        )
+        pendingPushOpened = pending
+        pendingPushOpenedExpiryTask?.cancel()
+        pendingPushOpenedExpiryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.expirePendingPushOpened(id: pending.id)
+        }
         do {
             _ = try sessionCoordinator.selectInstance(id: instance.id)
         } catch {
-            pendingPushOpenedURL = nil
+            clearPendingPushOpened()
             showInstancePicker()
         }
+    }
+
+    private func expirePendingPushOpened(id: String) {
+        guard pendingPushOpened?.id == id else {
+            return
+        }
+        clearPendingPushOpened()
+    }
+
+    private func clearPendingPushOpened() {
+        pendingPushOpenedExpiryTask?.cancel()
+        pendingPushOpenedExpiryTask = nil
+        pendingPushOpened = nil
     }
 
     private static func isSafeInstancePath(_ value: String) -> Bool {
@@ -284,6 +365,7 @@ final class AppModel: ObservableObject {
     private func prepareForAccountTransition() -> [
         WebsiteDataStoreReleaseBarrier
     ] {
+        clearPendingPushOpened()
         stopRuntime()
         switch route {
         case .browser:

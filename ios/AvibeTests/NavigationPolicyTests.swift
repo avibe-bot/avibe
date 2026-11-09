@@ -492,9 +492,15 @@ final class NavigationPolicyTests: XCTestCase {
     func testNativeBridgeQueuesPushOpenedUntilTheWebListenerSubscribes()
         async throws
     {
+        var acknowledgedID: String?
         let configuration = NativeBridgeConfiguration.make(
             instanceOrigin: instance,
-            setOuterScrollLocked: { _, _ in false }
+            setOuterScrollLocked: { _, _ in false },
+            pushOpenedAck: { id, origin in
+                XCTAssertEqual(origin, self.instance)
+                acknowledgedID = id
+                return true
+            }
         )
         let webView = WKWebView(
             frame: .zero,
@@ -509,7 +515,7 @@ final class NavigationPolicyTests: XCTestCase {
             <script>
               window.dispatchEvent(new CustomEvent(
                 "avibe:native:push.opened",
-                { detail: { url: "/chat/queued" } }
+                { detail: { id: "tap-1", url: "/chat/queued" } }
               ));
             </script>
             """,
@@ -531,6 +537,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(result as? String, "/chat/queued")
+        try await waitUntil { acknowledgedID == "tap-1" }
     }
 
     @MainActor

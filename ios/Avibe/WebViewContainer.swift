@@ -18,6 +18,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let websiteDataStore: WKWebsiteDataStore
     let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
+    let pushOpenedAck: (String, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let didCreateController: (WebViewController) -> Void
@@ -31,6 +32,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         websiteDataStore: WKWebsiteDataStore,
         pushCoordinator: NativePushCoordinator? = nil,
         showAccount: @escaping () -> Void,
+        pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         didCreateController: @escaping (WebViewController) -> Void,
@@ -43,6 +45,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.pushOpenedAck = pushOpenedAck
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
@@ -63,6 +66,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             websiteDataStore: websiteDataStore,
             pushCoordinator: pushCoordinator,
             showAccount: showAccount,
+            pushOpenedAck: pushOpenedAck,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,

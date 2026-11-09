@@ -329,6 +329,7 @@ final class WebViewFactory {
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
     private let pushCoordinator: NativePushCoordinator?
+    private let pushOpenedAck: (String, WebOrigin) -> Bool
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
     ] = [:]
@@ -370,6 +371,9 @@ final class WebViewFactory {
             return try await coordinator.unsubscribe(
                 instanceOrigin: origin.serialized
             )
+        },
+        pushOpenedAck: { [weak self] id, origin in
+            self?.pushOpenedAck(id, origin) ?? false
         }
     )
 
@@ -380,6 +384,7 @@ final class WebViewFactory {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         pushCoordinator: NativePushCoordinator? = nil
     ) {
         self.instanceOrigin = instanceOrigin
@@ -388,6 +393,7 @@ final class WebViewFactory {
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.pushOpenedAck = pushOpenedAck
         self.pushCoordinator = pushCoordinator
     }
 
@@ -540,6 +546,7 @@ final class WebViewController: UIViewController {
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
     private let pushCoordinator: NativePushCoordinator?
+    private let pushOpenedAck: (String, WebOrigin) -> Bool
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -585,6 +592,9 @@ final class WebViewController: UIViewController {
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
             },
+            pushOpenedAck: { [weak self] id, origin in
+                self?.pushOpenedAck(id, origin) ?? false
+            },
             pushCoordinator: pushCoordinator
         )
         retainedWebViewFactory = factory
@@ -607,6 +617,7 @@ final class WebViewController: UIViewController {
         pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
+        pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
@@ -622,6 +633,7 @@ final class WebViewController: UIViewController {
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
+        self.pushOpenedAck = pushOpenedAck
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
@@ -748,12 +760,18 @@ final class WebViewController: UIViewController {
         retainedWebView?.load(URLRequest(url: instanceOrigin.url))
     }
 
-    func deliverPushOpened(path: String) {
+    func deliverPushOpened(id: String, path: String) {
         guard
             let webView = retainedWebView,
             isPrimaryWebView(webView),
+            webView.url.flatMap({
+                WebOrigin(url: $0, requiresHTTPS: false)
+            }) == instanceOrigin,
             let data = try? JSONSerialization.data(
-                withJSONObject: [path],
+                withJSONObject: [
+                    "id": id,
+                    "url": path,
+                ],
                 options: [.sortedKeys]
             ),
             let encoded = String(data: data, encoding: .utf8)
@@ -763,7 +781,7 @@ final class WebViewController: UIViewController {
         webView.evaluateJavaScript(
             """
             window.dispatchEvent(new CustomEvent("avibe:native:push.opened", {
-              detail: { url: \(encoded.dropFirst().dropLast()) }
+              detail: \(encoded)
             }));
             """
         )

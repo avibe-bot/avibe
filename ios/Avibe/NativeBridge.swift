@@ -80,6 +80,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case pushStatus = "push.status"
     case pushSubscribe = "push.subscribe"
     case pushUnsubscribe = "push.unsubscribe"
+    case pushOpenedAck = "push.openedAck"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
 }
@@ -217,6 +218,12 @@ enum NativeBridgeConfiguration {
             WebOrigin
         ) async throws -> Bool = { _ in
             throw NativePushError.unavailable
+        },
+        pushOpenedAck: @escaping @MainActor (
+            String,
+            WebOrigin
+        ) -> Bool = { _, _ in
+            false
         }
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
@@ -232,7 +239,8 @@ enum NativeBridgeConfiguration {
             showAccount: showAccount,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
-            pushUnsubscribe: pushUnsubscribe
+            pushUnsubscribe: pushUnsubscribe,
+            pushOpenedAck: pushOpenedAck
         )
         controller.addScriptMessageHandler(
             handler,
@@ -342,14 +350,22 @@ enum NativeBridgeConfiguration {
 
           const pushOpenedType = "avibe:native:push.opened";
           const pushOpenedHandlers = new Set();
-          const pendingPushOpened = [];
+          const deliveredPushOpenedIds = new Set();
+          let pendingPushOpened = null;
+          const deliverPushOpened = (detail, handler) => {
+            const id = detail?.id;
+            if (typeof id !== "string" || id.length === 0 || deliveredPushOpenedIds.has(id)) return;
+            deliveredPushOpenedIds.add(id);
+            handler(detail);
+            void call("push.openedAck", { id }).catch(() => {});
+          };
           window.addEventListener(pushOpenedType, (nativeEvent) => {
             if (pushOpenedHandlers.size === 0) {
-              pendingPushOpened.push(nativeEvent.detail);
+              pendingPushOpened = nativeEvent.detail;
               return;
             }
             for (const handler of Array.from(pushOpenedHandlers)) {
-              handler(nativeEvent.detail);
+              deliverPushOpened(nativeEvent.detail, handler);
             }
           });
 
@@ -358,10 +374,11 @@ enum NativeBridgeConfiguration {
             const type = `avibe:native:${event}`;
             if (event === "push.opened") {
               pushOpenedHandlers.add(handler);
-              const pending = pendingPushOpened.splice(0);
-              for (const detail of pending) {
+              const pending = pendingPushOpened;
+              pendingPushOpened = null;
+              if (pending) {
                 queueMicrotask(() => {
-                  if (pushOpenedHandlers.has(handler)) handler(detail);
+                  if (pushOpenedHandlers.has(handler)) deliverPushOpened(pending, handler);
                 });
               }
               return () => pushOpenedHandlers.delete(handler);
@@ -491,6 +508,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let pushUnsubscribe: @MainActor (
         WebOrigin
     ) async throws -> Bool
+    private let pushOpenedAck: @MainActor (
+        String,
+        WebOrigin
+    ) -> Bool
 
     init(
         policy: NativeBridgePolicy,
@@ -510,7 +531,11 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         ) async throws -> [String: Any],
         pushUnsubscribe: @escaping @MainActor (
             WebOrigin
-        ) async throws -> Bool
+        ) async throws -> Bool,
+        pushOpenedAck: @escaping @MainActor (
+            String,
+            WebOrigin
+        ) -> Bool
     ) {
         self.policy = policy
         self.metadata = metadata
@@ -522,6 +547,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
+        self.pushOpenedAck = pushOpenedAck
     }
 
     func userContentController(
@@ -548,6 +574,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             if request.method == .pushStatus
                 || request.method == .pushSubscribe
                 || request.method == .pushUnsubscribe
+                || request.method == .pushOpenedAck
             {
                 handlePush(
                     request,
@@ -670,6 +697,25 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     )
                 }
             }
+        case .pushOpenedAck:
+            guard
+                request.params.count == 1,
+                let id = request.params["id"] as? String,
+                !id.isEmpty
+            else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "push.openedAck requires a non-empty id string."
+                    )
+                )
+                return
+            }
+            guard pushOpenedAck(id, instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: [:])
         default:
             reply(replyHandler, error: .unsupported)
         }
@@ -763,7 +809,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             reply(replyHandler, result: NSNull())
-        case .pushStatus, .pushSubscribe, .pushUnsubscribe:
+        case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck:
             reply(replyHandler, error: .unsupported)
         case .hapticsImpact:
             guard

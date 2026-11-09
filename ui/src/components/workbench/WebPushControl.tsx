@@ -10,12 +10,8 @@ import { Badge } from '../ui/badge';
 import {
   disableWebPush,
   enableWebPush,
-  getWebPushDeviceId,
-  getRememberedWebPushEndpoints,
   getExistingWebPushSubscription,
-  getWebPushSupportState,
-  rememberWebPushEndpoint,
-  webPushSubscriptionUsesVapidKey,
+  reconcileWebPush,
   type WebPushSupportState,
 } from '@/lib/webPush';
 import { hasNativeCapability, nativePushStatus } from '@/lib/native';
@@ -34,121 +30,9 @@ export const WebPushControl: React.FC = () => {
   const canRegister = capabilities.can_read_instance;
 
   const refresh = async () => {
-    const nextSupport = getWebPushSupportState();
-    setSupport(nextSupport);
-    if (hasNativeCapability('push')) {
-      try {
-        const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
-        const nativeState = await nativePushStatus(publicKey);
-        if (nativeState?.state !== 'on') {
-          setStatus('disabled');
-          return;
-        }
-        const previousEndpoints = [
-          nativeState.endpoint,
-          ...await getRememberedWebPushEndpoints(),
-        ].filter((endpoint, index, endpoints) => endpoints.indexOf(endpoint) === index);
-        const nativeSubscription = {
-          endpoint: nativeState.endpoint,
-          keys: nativeState.keys,
-        };
-        const serverStatus = await api.getWebPushStatus({
-          endpoint: nativeState.endpoint,
-          subscription: nativeSubscription,
-          device_label: 'iPhone App',
-          previous_endpoints: previousEndpoints,
-        });
-        if (serverStatus.current_subscription_enabled) {
-          await rememberWebPushEndpoint(nativeState.endpoint);
-          setStatus('enabled');
-          return;
-        }
-        if (serverStatus.current_subscription_repairable) {
-          try {
-            await enableWebPush(api, { forceResubscribe: true, recoverOnly: true });
-            const repaired = await nativePushStatus(publicKey);
-            if (repaired?.state === 'on') {
-              const repairedStatus = await api.getWebPushStatus({
-                endpoint: repaired.endpoint,
-                subscription: {
-                  endpoint: repaired.endpoint,
-                  keys: repaired.keys,
-                },
-                device_label: 'iPhone App',
-                previous_endpoints: previousEndpoints,
-              });
-              if (repairedStatus.current_subscription_enabled) {
-                await rememberWebPushEndpoint(repaired.endpoint);
-                setStatus('enabled');
-                return;
-              }
-            }
-          } catch {
-            // Keep the control recoverable; the user can still retry manually.
-          }
-        }
-        setStatus('disabled');
-      } catch {
-        setStatus('disabled');
-      }
-      return;
-    }
-    if (!nextSupport.supported) {
-      setStatus(nextSupport.reason === 'ios_requires_standalone' ? 'needs_install' : 'unsupported');
-      return;
-    }
-    const existing = await getExistingWebPushSubscription();
-    const previousEndpoints = await getRememberedWebPushEndpoints();
-    const rememberedEndpoint = previousEndpoints[0];
-    const serverStatus = await api
-      .getWebPushStatus(
-        existing
-          ? {
-              endpoint: existing.endpoint,
-              subscription: existing.toJSON(),
-              device_id: await getWebPushDeviceId(),
-              previous_endpoints: previousEndpoints,
-            }
-          : rememberedEndpoint ? { endpoint: rememberedEndpoint } : undefined,
-      )
-      .catch(() => null);
-    const repairable = Boolean(serverStatus && (
-      serverStatus.current_subscription_repairable
-      || (!existing && Boolean(rememberedEndpoint) && serverStatus.current_subscription_enabled)
-      || (existing && serverStatus.current_subscription_enabled
-        && !webPushSubscriptionUsesVapidKey(existing, serverStatus.public_key))
-    ));
-    if (
-      repairable
-      && typeof Notification !== 'undefined'
-      && Notification.permission === 'granted'
-    ) {
-      try {
-        await enableWebPush(api, { forceResubscribe: Boolean(existing), recoverOnly: true });
-        const repaired = await getExistingWebPushSubscription();
-        if (repaired) {
-          const repairedStatus = await api.getWebPushStatus({
-            endpoint: repaired.endpoint,
-            subscription: repaired.toJSON(),
-            device_id: await getWebPushDeviceId(),
-            previous_endpoints: await getRememberedWebPushEndpoints(),
-          });
-          if (repairedStatus.current_subscription_enabled) {
-            await rememberWebPushEndpoint(repaired.endpoint);
-            setStatus('enabled');
-            return;
-          }
-        }
-      } catch {
-        // Keep the control recoverable; the user can still retry manually.
-      }
-      setStatus('disabled');
-      return;
-    }
-    if (existing && serverStatus?.current_subscription_enabled) {
-      await rememberWebPushEndpoint(existing.endpoint);
-    }
-    setStatus(existing && serverStatus?.current_subscription_enabled ? 'enabled' : 'disabled');
+    const result = await reconcileWebPush(api);
+    setSupport(result.support);
+    setStatus(result.status);
   };
 
   useEffect(() => {

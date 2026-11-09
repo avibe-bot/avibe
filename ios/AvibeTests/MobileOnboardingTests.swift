@@ -762,6 +762,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "push.status",
                 "push.subscribe",
                 "push.unsubscribe",
+                "push.openedAck",
                 "viewport.setOuterScrollLocked",
                 "voice.permission",
             ]

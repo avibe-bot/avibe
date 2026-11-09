@@ -76,6 +76,7 @@ private struct BrowserScreen: View {
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
+                        pushOpenedAck: appModel.acknowledgePushOpened,
                         accountFallbackVisibilityChanged: {
                             showsAccountFallback = $0
                         },

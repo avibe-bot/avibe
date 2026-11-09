@@ -250,7 +250,8 @@ linked from `ios-app.md`:
 | Web -> native | `push.status({vapidPublicKey?: string})` | `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}` |
 | Web -> native | `push.subscribe({vapidPublicKey})` | `{endpoint: string, keys: {p256dh: string, auth: string}}` |
 | Web -> native | `push.unsubscribe()` | `{revoked: boolean}` |
-| Native -> Web | `push.opened({url})` | Same-origin path event after the target instance loads. |
+| Web -> native | `push.openedAck({id})` | `{}`; acknowledges one delivered tap ID from the trusted instance main frame. |
+| Native -> Web | `push.opened({id, url})` | Same-origin path event after the target instance loads; native may re-dispatch the same ID until acknowledged. |
 
 `push.status` never creates or replaces a registration. Native decodes and
 hashes a supplied `vapidPublicKey` exactly as `push.subscribe` does. It returns
@@ -910,9 +911,11 @@ the current account and its configured instance list.
 
 For a current account and available instance it selects the instance, waits for
 the primary WebView to load, normalizes `url` as a same-origin path, and emits
-`push.opened({url})`. The Web UI accepts only a path, query, and fragment for
-the selected origin. Absolute URLs, another scheme or origin, and control
-characters are rejected.
+`push.opened({id, url})`. Native retains one pending tap for a bounded lifetime
+and may re-dispatch it after later primary-document loads until the trusted Web
+listener acknowledges that ID with `push.openedAck({id})`. The Web UI accepts
+only a path, query, and fragment for the selected origin. Absolute URLs,
+another scheme or origin, and control characters are rejected.
 
 For an account mismatch or unavailable instance, the app opens the instance
 list and shows the existing recovery message. It never sends the URL to another

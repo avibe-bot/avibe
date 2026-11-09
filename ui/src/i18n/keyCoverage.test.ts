@@ -932,6 +932,7 @@ const NON_KEY_LITERALS = [
   'session.refresh',
   'session.selectInstance',
   'push.opened',
+  'push.openedAck',
   'push.status',
   'push.subscribe',
   'push.unsubscribe',

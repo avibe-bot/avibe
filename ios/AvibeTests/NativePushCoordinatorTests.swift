@@ -98,7 +98,9 @@ final class NativePushCoordinatorTests: XCTestCase {
         try await waitUntil { registrationCalls == 1 }
     }
 
-    func testEqualProviderTupleDoesNotAllocateGenerationOrPatch() async throws {
+    func testEqualProviderTupleAfterRelayInvalidationAllocatesHigherGenerationAndPatches()
+        async throws
+    {
         let token = Data(repeating: 31, count: 32)
         let store = makeInstallationStore(
             providerGeneration: 7,
@@ -110,18 +112,31 @@ final class NativePushCoordinatorTests: XCTestCase {
             ),
             providerPatchPending: false
         )
+        try store.saveRecord(
+            makeRecord(
+                kid: "active-registration",
+                state: .active,
+                pendingRevoke: false,
+                bindGeneration: 1
+            )
+        )
         let recorder = ManagementRecorder()
+        recorder.responseHandler = { request in
+            XCTAssertEqual(request.method, "PATCH")
+            return Self.successResponse
+        }
         let coordinator = makeCoordinator(
             store: store,
             management: recorder
         )
 
         coordinator.didRegister(deviceToken: token, environment: "sandbox")
-        try await Task.sleep(for: .milliseconds(50))
+        try await recorder.waitForRequestCount(1)
 
-        XCTAssertEqual(recorder.requests.count, 0)
-        XCTAssertEqual(store.installation?.providerGeneration, 7)
-        XCTAssertEqual(store.installation?.provider?.generation, 7)
+        XCTAssertEqual(recorder.requests.count, 1)
+        XCTAssertEqual(recorder.requests.first.flatMap(Self.generation), 8)
+        XCTAssertEqual(store.installation?.providerGeneration, 8)
+        XCTAssertEqual(store.installation?.provider?.generation, 8)
         XCTAssertFalse(store.installation?.providerPatchPending ?? true)
     }
 
