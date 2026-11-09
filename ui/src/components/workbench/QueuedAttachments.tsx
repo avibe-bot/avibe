@@ -44,7 +44,7 @@ const useAccessibleName = () => {
 // gap to each neighbour without overlapping it.
 const TARGET =
   'relative flex h-6 shrink-0 items-center rounded-[5px] text-muted transition-colors hover:text-foreground ' +
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/40 ' +
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ' +
   "after:absolute after:-inset-x-0.5 after:-inset-y-1.5 after:content-['']";
 
 const PILL = 'flex h-5 items-center gap-1 rounded-[5px] border px-1';

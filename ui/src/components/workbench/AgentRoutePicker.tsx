@@ -913,7 +913,7 @@ const EffortChip: React.FC<{
     onClick={onClick}
     className={clsx(
       'min-w-[3rem] flex-1 whitespace-nowrap rounded-[4px] border px-2 py-1.5 text-[12px] capitalize transition-colors',
-      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 disabled:cursor-not-allowed disabled:opacity-60',
+      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60',
       refused
         ? 'border-gold/40 bg-gold/10 font-bold text-gold-ink'
         : active
@@ -1028,7 +1028,7 @@ const FastToggle: React.FC<{
         onClick={onToggle}
         className={clsx(
           'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-colors',
-          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 disabled:cursor-not-allowed disabled:opacity-50',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
           active ? 'border-gold/30 bg-gold-soft text-gold-ink/80' : 'border-edge text-muted hover:text-foreground bg-field',
         )}
       >

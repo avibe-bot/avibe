@@ -635,7 +635,7 @@ export const RemoteAccess: React.FC = () => {
 
       {paired && !showPairingForm && (
         <details className="group border-b border-border">
-          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 transition-colors hover:bg-surface/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 transition-colors hover:bg-surface/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
             <div className="flex items-center gap-2">
               <Settings2 className="size-4 text-cyan-ink" />
               <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.controls')}</h3>

@@ -4097,7 +4097,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 aria-label={t('chat.activities.toggle')}
-                className="block w-fit max-w-[min(420px,100%)] rounded-full outline-none focus-visible:ring-2 focus-visible:ring-mint/40"
+                className="block w-fit max-w-[min(420px,100%)] rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {pill}
               </button>

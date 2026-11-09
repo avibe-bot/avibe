@@ -753,7 +753,7 @@ export const HarnessPage: React.FC = () => {
               resetPaging();
             }}
             aria-label={t('harness.runTypeFilter.label')}
-            className="h-9 rounded-md border border-field-edge bg-field px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring"
+            className="h-9 rounded-md border border-field-edge bg-field px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="default">{t('harness.runTypeFilter.default')}</option>
             <option value="all">{t('harness.runTypeFilter.all')}</option>
@@ -2214,7 +2214,7 @@ const FailureDetails: React.FC<{
           key={disclosureKey}
           className="group min-w-0 rounded-md border border-edge bg-surface-3 px-2 py-1.5 shadow-elevation-0"
         >
-          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
             <ChevronRight aria-hidden className="size-3 shrink-0 transition-transform group-open:rotate-90" />
             {t('harness.detail.technicalDetails')}
           </summary>
