@@ -111,9 +111,12 @@ def _paged(api: GitHubApi, path: str, *, query: dict[str, str]) -> list[dict[str
     while True:
         payload = api.get(path, query={**query, "page": page, "per_page": 100})
         if isinstance(payload, dict):
-            page_items = payload.get("jobs") or payload.get("workflow_runs")
-        else:
-            page_items = payload
+            if "jobs" in payload:
+                page_items = payload["jobs"]
+            elif "workflow_runs" in payload:
+                page_items = payload["workflow_runs"]
+            else:
+                page_items = None
         if not isinstance(page_items, list):
             raise ReleaseBackstopError("GitHub returned an invalid Actions response")
         for item in page_items:
@@ -190,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
     print(f"Exact full master backstop verified for {proof.source_sha} (run {proof.run_id}, event {proof.event}).")
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a", encoding="utf-8") as output:
+            output.write(f"source_sha={proof.source_sha}\n")
+            output.write(f"run_id={proof.run_id}\n")
     return 0
 
 

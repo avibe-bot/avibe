@@ -17,6 +17,9 @@ permissions:
 jobs:
   release-backstop:
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      run_id: ${{ steps.verify.outputs.run_id }}
     permissions:
       actions: read
       contents: read
@@ -29,6 +32,7 @@ jobs:
           # context SHA as the release source.
           ref: ${{ github.ref }}
       - name: Require exact full master backstop
+        id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -74,9 +78,9 @@ jobs:
             PRERELEASE="true"
           fi
 
-          SOURCE_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/$TAG" --jq '.sha')"
+          SOURCE_SHA="${{ needs.release-backstop.outputs.source_sha }}"
           if [ -z "$SOURCE_SHA" ]; then
-            echo "Could not resolve source commit for $TAG" >&2
+            echo "Backstop did not provide an exact source SHA" >&2
             exit 1
           fi
 
@@ -96,6 +100,7 @@ jobs:
 
   resolve-show-runtime-ref:
     needs: release-backstop
+    runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -190,7 +195,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.resolve-tag.outputs.tag }}
+          ref: ${{ needs.resolve-tag.outputs.source_sha }}
 
       - name: Checkout release automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -512,7 +517,7 @@ jobs:
       - resolve-tag
       - build
       - finalize-github-release
-    if: needs.resolve-tag.outputs.publish_legacy == 'true'
+    if: needs.release-backstop.result == 'success' && needs.resolve-tag.outputs.publish_legacy == 'true'
     runs-on: ubuntu-latest
     # PyPI trusted publishers issue project-scoped tokens for the exact OIDC
     # claim, including the GitHub environment. Keep the legacy shim on a

@@ -101,6 +101,13 @@ def test_prove_backstop_rejects_wrong_workflow_path() -> None:
         gate.prove_backstop(api, tag=TAG)
 
 
+def test_prove_backstop_rejects_empty_jobs_page_with_actionable_error() -> None:
+    api = FakeApi(runs=[_run()], jobs={})
+
+    with pytest.raises(gate.ReleaseBackstopError, match="wait for or re-run the full backstop"):
+        gate.prove_backstop(api, tag=TAG)
+
+
 def test_prove_backstop_rejects_missing_terminal_job() -> None:
     api = FakeApi(runs=[_run()], jobs={1: [{"name": "unit-tests", "status": "completed", "conclusion": "success"}]})
 

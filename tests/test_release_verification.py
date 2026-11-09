@@ -450,7 +450,7 @@ def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_p
     assert job["steps"].index(bridge) < job["steps"].index(consumer) < job["steps"].index(upload)
     checkout = _step(job, "Checkout release automation")
     assert checkout["with"]["ref"] == "${{ needs.resolve-tag.outputs.workflow_sha }}"
-    assert _step(job, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.tag }}"
+    assert _step(job, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.source_sha }}"
     resolve = _step(_job("publish.yml", "resolve-tag"), "Resolve tag")["run"]
     assert 'if [ "${{ github.event_name }}" = "push" ]; then' in resolve
     assert 'WORKFLOW_SHA="$SOURCE_SHA"' in resolve
@@ -691,18 +691,19 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
 ):
     workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
     jobs = workflow["jobs"]
-    preview_condition = "startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
+    preview_condition = "needs.release-backstop.result == 'success' && startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
     for name in ("resolve-show-runtime-ref",):
         assert jobs[name]["if"] == preview_condition
-    assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
-    assert jobs["build-assets"]["needs"] == ["resolve-desktop-release", "show-runtime-bundles"]
+    assert jobs["show-runtime-bundles"]["needs"] == ["release-backstop", "resolve-show-runtime-ref"]
+    assert jobs["build-assets"]["needs"] == ["release-backstop", "resolve-desktop-release", "show-runtime-bundles"]
     assert jobs["release"]["needs"] == [
-        "build-assets", "resolve-desktop-release", "desktop-packages",
+        "release-backstop", "build-assets", "resolve-desktop-release", "desktop-packages",
         "certum-windows-sign", "windows-updater-finalize",
     ]
     # Evaluate the actual bounded job expression for both event kinds. This
     # catches skipped-needs propagation without replacing the condition itself.
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
+    expression = expression.replace("needs.release-backstop.result", "backstop_result")
     expression = expression.replace("needs.build-assets.result", "build_result")
     expression = expression.replace("needs.desktop-packages.result", "desktop_result")
     expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
@@ -713,7 +714,7 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
-        "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
+        "backstop_result": "success", "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
         "resolve_result": resolve_result, "desktop_enabled": "true" if desktop_enabled else "false",
         "certum_result": (
             "success" if tag.startswith("gh-v") and desktop_enabled and
@@ -730,3 +731,25 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     if tag.startswith("gh-v") and not desktop_enabled:
         expected = False
     assert result == expected
+
+
+def test_release_condition_rejects_failed_backstop():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
+    expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
+    expression = expression.replace("needs.release-backstop.result", "backstop_result")
+    expression = expression.replace("needs.build-assets.result", "build_result")
+    expression = expression.replace("needs.desktop-packages.result", "desktop_result")
+    expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
+    expression = expression.replace("needs.resolve-desktop-release.outputs.enabled", "desktop_enabled")
+    expression = expression.replace("needs.certum-windows-sign.result", "certum_result")
+    expression = expression.replace("needs.windows-updater-finalize.result", "updater_result")
+    expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
+    expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
+    expression = " ".join(expression.split())
+    result = eval(expression, {"__builtins__": {}}, {
+        "backstop_result": "failure", "build_result": "success", "desktop_result": "success",
+        "resolve_result": "success", "desktop_enabled": "false", "certum_result": "skipped",
+        "updater_result": "skipped", "input_tag": "", "ref": "v4.2.0",
+        "cancelled": lambda: False, "startsWith": lambda value, prefix: value.startswith(prefix),
+    })
+    assert result is False
