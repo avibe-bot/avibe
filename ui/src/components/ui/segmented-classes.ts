@@ -19,5 +19,5 @@ export const segmentedItemClass = (active: boolean, tone: SegmentedTone = 'mint'
   'press inline-flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-[4px] px-3 text-[12px]',
   active
     ? ACTIVE_TONES[tone]
-    : 'font-medium text-muted hover:text-foreground active:bg-foreground/[0.04] active:text-foreground',
+    : 'font-medium text-muted hover:text-foreground active:bg-wash-press active:text-foreground',
 );

@@ -26,7 +26,7 @@ export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect
         'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
         selected
           ? 'border-mint/40 bg-mint-soft'
-          : 'border-edge bg-surface hover:bg-surface-2 shadow-elevation-0',
+          : 'border-edge bg-surface hover:bg-surface-wash shadow-elevation-0',
         inherited && 'opacity-[0.66]',
       )}
     >

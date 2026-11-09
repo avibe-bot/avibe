@@ -106,7 +106,7 @@ function InboxPeekRow({
       ? quiet
         ? 'bg-foreground/[0.04] hover:bg-foreground/[0.07] active:bg-foreground/[0.07]'
         : 'bg-mint/[0.06] hover:bg-mint/[0.10] active:bg-mint/[0.10]'
-      : 'hover:bg-foreground/[0.04] active:bg-foreground/[0.04]',
+      : 'hover:bg-wash active:bg-wash-press',
   );
   if (bot) {
     // A Bot's conversation reads as the Bot: its avatar and name instead of "project · title"
@@ -359,7 +359,7 @@ export const InboxHoverPopover: React.FC<{
                       type="button"
                       data-flip-id={`beyond:${section.category ?? 'all'}`}
                       onClick={() => openFullInbox('unread')}
-                      className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+                      className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-wash hover:text-foreground"
                     >
                       {t('workbench.inbox.moreUnreadInFull')}
                     </button>

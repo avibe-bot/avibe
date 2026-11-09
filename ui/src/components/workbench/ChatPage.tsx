@@ -3821,7 +3821,7 @@ export const QueueRow: React.FC<{
       className={clsx(
         pending && 'opacity-60',
         sentHere && 'motion-rise-in',
-        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-foreground/[0.04] hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-foreground/[0.04] focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-wash hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-wash focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         hasExpandedContent ? 'items-start' : 'items-center',
         // Wrapping is enabled only while the remainder is disclosed. A collapsed
         // row therefore cannot wrap at any width — the one thing that could make
@@ -4006,7 +4006,7 @@ const ActivityRow: React.FC<{
       onClick={() => onNavigate(item)}
       title={t('chat.activities.openHarness', { kind: kindLabel })}
       aria-label={t('chat.activities.openHarness', { kind: kindLabel })}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-surface-2"
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-wash"
     >
       {body}
     </button>
@@ -4125,7 +4125,7 @@ const ActivityStrip: React.FC<{
               <button
                 type="button"
                 onClick={() => navigateTo('/harness')}
-                className="flex shrink-0 items-center justify-center gap-1 border-t border-border/60 px-2 py-2 text-[12px] font-medium text-cyan-ink transition-colors hover:bg-surface-2"
+                className="flex shrink-0 items-center justify-center gap-1 border-t border-border/60 px-2 py-2 text-[12px] font-medium text-cyan-ink transition-colors hover:bg-wash"
               >
                 {t('chat.activities.manageInHarness')}
                 <ArrowRight className="size-3.5" aria-hidden="true" />
@@ -4716,7 +4716,7 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
       <button
         type="button"
         onClick={() => setEditing(true)}
-        className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground transition-colors hover:bg-foreground/[0.05]"
+        className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground transition-colors hover:bg-wash"
       >
         <span className="truncate">{title || t('chat.untitled')}</span>
       </button>

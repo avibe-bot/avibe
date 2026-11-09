@@ -85,7 +85,7 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
                 className={clsx(
                   // `--surface-2` is white on a light theme, which is also the menu's own
                   // surface: a row highlighted with it reads as no highlight at all.
-                  'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-foreground/[0.06] hover:text-foreground',
+                  'flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-wash hover:text-foreground',
                   active ? 'bg-mint-soft text-foreground' : 'text-muted'
                 )}
               >

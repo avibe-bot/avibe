@@ -649,7 +649,7 @@ const HandleLine: React.FC<{
         onClick={onEdit}
         aria-label={editLabel}
         title={editLabel}
-        className="grid size-5 shrink-0 place-items-center rounded transition hover:bg-foreground/[0.06] hover:text-foreground"
+        className="grid size-5 shrink-0 place-items-center rounded transition hover:bg-wash hover:text-foreground"
       >
         <Pencil className="size-3.5" />
       </button>

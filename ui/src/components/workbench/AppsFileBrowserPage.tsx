@@ -1527,7 +1527,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                         ? 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan'
                         : selected.has(item.full)
                           ? 'bg-cyan-soft text-foreground'
-                          : 'text-foreground hover:bg-foreground/[0.04]',
+                          : 'text-foreground hover:bg-wash',
                     )}
                   >
                     {touchSelectionMode && <Checkbox checked={selected.has(item.full)} presentational className="mr-2" />}

@@ -464,7 +464,7 @@ export const FileEditorPane: React.FC<{
                 aria-pressed={mode === key}
                 className={clsx(
                   'flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium transition',
-                  mode === key ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.05] hover:text-foreground',
+                  mode === key ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-wash hover:text-foreground',
                 )}
               >
                 <Icon className="size-3" /> {label}

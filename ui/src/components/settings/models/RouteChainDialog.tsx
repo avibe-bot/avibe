@@ -59,7 +59,7 @@ import type {
 
 const sourceName = (sources: Source[], sourceId: string): string =>
   sources.find((source) => source.id === sourceId)?.display_name ?? sourceId;
-const MENU_ITEM = "model-hub-route-menu-item flex w-full items-center rounded-md text-left font-semibold hover:bg-surface-2";
+const MENU_ITEM = "model-hub-route-menu-item flex w-full items-center rounded-md text-left font-semibold hover:bg-wash";
 type RouteMode = "follow" | "custom";
 
 export type RouteReport = {

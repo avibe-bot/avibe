@@ -103,7 +103,7 @@ export function GettingStarted({
                   onClick={() => onNotNeeded(item)}
                   aria-label={t('workbench.home.setup.notNeeded')}
                   title={t('workbench.home.setup.notNeeded')}
-                  className="-mr-1 grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-foreground/5 hover:text-foreground"
+                  className="-mr-1 grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-wash hover:text-foreground"
                 >
                   <X className="size-3.5" />
                 </button>

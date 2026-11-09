@@ -181,7 +181,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
               <code className="min-w-0 flex-1 select-all break-all font-mono text-[13px] text-foreground">bind {bindCode}</code>
               <button
                 onClick={copyBindCode}
-                className="rounded-md p-1.5 text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+                className="rounded-md p-1.5 text-muted transition hover:bg-wash hover:text-foreground"
                 title="Copy"
                 aria-label={t('common.copy') as string}
               >

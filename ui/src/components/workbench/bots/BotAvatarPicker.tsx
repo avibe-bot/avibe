@@ -127,7 +127,7 @@ export const BotAvatarPicker: React.FC<BotAvatarPickerProps> = ({ current, onPic
                     onClick={() => pickEmoji(value, hue)}
                     className={clsx(
                       'grid aspect-square place-items-center rounded-lg text-[17px] transition',
-                      selected ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-foreground/[0.05]',
+                      selected ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-wash',
                     )}
                   >
                     {value}
@@ -144,7 +144,7 @@ export const BotAvatarPicker: React.FC<BotAvatarPickerProps> = ({ current, onPic
                 'relative grid aspect-square place-items-center rounded-lg transition',
                 pickedElsewhere
                   ? 'bg-mint-soft text-[17px] ring-[1.5px] ring-inset ring-mint'
-                  : 'text-muted hover:bg-foreground/[0.05] hover:text-foreground',
+                  : 'text-muted hover:bg-wash hover:text-foreground',
               )}
             >
               {pickedElsewhere ? (
@@ -200,7 +200,7 @@ export const BotAvatarPicker: React.FC<BotAvatarPickerProps> = ({ current, onPic
           }}
           className={clsx(
             'flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-6 text-center transition',
-            dragging ? 'border-mint bg-mint-soft' : 'border-border-strong hover:bg-foreground/[0.03]',
+            dragging ? 'border-mint bg-mint-soft' : 'border-border-strong hover:bg-wash',
           )}
         >
           <Upload className="size-5 text-muted" />

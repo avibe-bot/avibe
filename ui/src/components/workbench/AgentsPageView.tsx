@@ -358,7 +358,7 @@ const rowClass = (selected: boolean) =>
     'flex items-center gap-3 rounded-xl border px-3.5 text-left transition',
     selected
       ? 'border-mint/40 bg-mint-soft'
-      : 'border-edge bg-surface hover:bg-surface-2 shadow-elevation-0',
+      : 'border-edge bg-surface hover:bg-surface-wash shadow-elevation-0',
   );
 
 function BotCard({
@@ -551,7 +551,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
             }}
             className={clsx(
               'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
+              value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-wash',
             )}
           >
             {key !== 'all' && <BackendAvatar backend={key} className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
@@ -593,7 +593,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
               onImport(backend);
               setOpen(false);
             }}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash disabled:opacity-50"
           >
             <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
             <span>{t('agents.importFrom', { backend: BACKEND_LABEL[backend] })}</span>
