@@ -23,8 +23,8 @@ env:
 
 jobs:
   changes:
-    # Sole scope authority: cheap checks always run, heavy PR checks are
-    # conservatively routed, queue combinations are thin, master is full.
+    # Sole scope authority: preserve proven docs-only PRs; otherwise run cheap
+    # checks and route heavy work. Queue combinations are thin, master is full.
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -40,6 +40,17 @@ jobs:
       - name: Classify the complete change
         id: scope
         run: python3 scripts/ci_scope.py
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        if: steps.scope.outputs.docs_only == 'true'
+        with:
+          python-version: "3.12"
+      - name: Check repository guidance without application dependencies
+        if: steps.scope.outputs.docs_only == 'true'
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pip install --disable-pip-version-check pytest==9.0.3
+          python -m pytest --noconftest -p no:cacheprovider -c /dev/null -q tests/test_repository_guidance.py
 
   ios-shell:
     needs: changes
@@ -53,6 +64,7 @@ jobs:
 
   manifest-consistency:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['manifest-consistency'] == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -101,6 +113,7 @@ jobs:
 
   python-smoke:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['python-smoke'] == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -134,6 +147,7 @@ jobs:
 
   memory-insight-contract:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['memory-insight-contract'] == 'run'
     # Repository branch protection still requires this historical context name.
     # An administrator can rename that requirement after this compatibility job
     # has landed; the job itself is a substantive removal contract, not a shim.
@@ -177,6 +191,7 @@ jobs:
 
   ruff:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['ruff'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -213,6 +228,7 @@ jobs:
 
   ui-checks:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['ui-checks'] == 'run'
     name: ui-checks (static)
     runs-on: ubuntu-latest
     steps:
@@ -384,6 +400,7 @@ jobs:
 
   show-router-integration:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['show-router-integration'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -422,6 +439,7 @@ jobs:
 
   build-linux-artifacts:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['build-linux-artifacts'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -636,7 +654,7 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
-    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, manifest-consistency, python-smoke, ios-shell, desktop-shell]
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, manifest-consistency, python-smoke, ios-shell, desktop-shell, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper]
     if: always()
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -698,6 +716,7 @@ jobs:
 
   migration-release-guard:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['migration-release-guard'] == 'run'
     runs-on: ubuntu-latest
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
@@ -764,6 +783,7 @@ jobs:
 
   npm-wrapper:
     needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['npm-wrapper'] == 'run'
     runs-on: [self-hosted, Linux, X64, avibe]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

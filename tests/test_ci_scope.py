@@ -34,6 +34,8 @@ GATES = {
     "unit-tests": {
         "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests", "ui-browser-checks",
         "model-hub-hosted-wire", "manifest-consistency", "python-smoke", "ios-shell", "desktop-shell",
+        "ruff", "memory-insight-contract", "show-router-integration", "build-linux-artifacts",
+        "migration-release-guard", "npm-wrapper",
     },
     "install-upgrade-regression": {"install-upgrade-shards"},
     "windows-install-smoke": {
@@ -65,8 +67,10 @@ def scope(*paths):
 def test_representative_pr_diffs_are_conservative(paths, expected):
     plan = make_plan("PR", scope(*paths))
     assert set(plan["jobs"]) == FAST | PR_TESTS | HEAVY
-    assert all(plan["jobs"][job] == "run" for job in FAST | PR_TESTS)
-    assert {job for job in HEAVY if plan["jobs"][job] == "run"} == expected
+    assert all(plan["jobs"][job] == ("skip" if plan["docs_only"] else "run") for job in FAST | PR_TESTS)
+    assert {job for job in HEAVY if plan["jobs"][job] == "run"} == expected - {"ios-shell"}
+    # The same classification drives the visible but non-required PR iOS workflow.
+    assert heavy_routes(scope(*paths))["ios-shell"] == ("run" if "ios-shell" in expected else "skip")
 
 
 @pytest.mark.parametrize("change", [
@@ -85,7 +89,7 @@ def test_uncertain_diff_runs_every_heavy_pr_job(change):
 @pytest.mark.parametrize("mode", EVENT)
 def test_mode_declares_exact_coverage_even_for_docs(mode):
     plan = make_plan(mode, scope("docs/guide.md"))
-    expected = FAST if mode == "MG_THIN" else FAST | PR_TESTS if mode == "PR" else FAST | PR_TESTS | HEAVY
+    expected = FAST if mode == "MG_THIN" else set() if mode == "PR" else FAST | PR_TESTS | HEAVY
     assert {job for job, route in plan["jobs"].items() if route == "run"} == expected
     assert validate_plan(plan) == plan
 
@@ -98,10 +102,11 @@ def fixture(mode, gate, paths=("ui/src/App.tsx",)):
     return plan, needs
 
 
+@pytest.mark.parametrize("paths", [("ui/src/App.tsx",), ("docs/guide.md",)])
 @pytest.mark.parametrize("mode", EVENT)
 @pytest.mark.parametrize("gate", GATES)
-def test_every_gate_checks_each_scope_success_skip_failure_cancel_and_missing(mode, gate):
-    _, needs = fixture(mode, gate)
+def test_every_gate_checks_each_scope_success_skip_failure_cancel_and_missing(mode, gate, paths):
+    _, needs = fixture(mode, gate, paths)
     kwargs = {"event_name": EVENT[mode], "ref": "refs/heads/master"}
     assert check_gate(gate, needs, **kwargs) == []
     for job in GATES[gate]:
@@ -183,9 +188,7 @@ def test_workflow_routes_match_the_contract_and_every_producer_has_a_required_ga
         assert not job.get("continue-on-error")
         needs = job.get("needs")
         assert "changes" in ([needs] if isinstance(needs, str) else needs)
-        if name in FAST:
-            assert "if" not in job
-        elif name == "scenario-evidence":
+        if name == "scenario-evidence":
             assert job["if"] == "always() && needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).jobs['scenario-evidence'] == 'run'"
         else:
             assert job["if"] == f"fromJSON(needs.changes.outputs.plan).jobs['{name}'] == 'run'"
@@ -222,12 +225,96 @@ def test_backstop_coalesces_whole_reusable_workflow_without_cancelling_running_m
     }
     for filename in ("ios-shell.yml", "desktop-shell.yml", "web-fetch-runtime.yml"):
         called = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
-        assert set(called[True]) == {"workflow_call"}
-        assert "concurrency" not in called
+        if filename == "ios-shell.yml":
+            assert set(called[True]) == {"workflow_call", "pull_request"}
+            assert called["concurrency"] == {
+                "group": "ios-shell-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}",
+                "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+            }
+            assert called["jobs"]["route"]["if"] == "github.event_name == 'pull_request'"
+            simulator = called["jobs"]["simulator"]
+            assert simulator["needs"] == "route"
+            assert simulator["if"] == (
+                "!cancelled() && (github.event_name != 'pull_request' || "
+                "(needs.route.result == 'success' && needs.route.outputs.ios == 'run'))"
+            )
+            assert not simulator.get("continue-on-error")
+        else:
+            assert set(called[True]) == {"workflow_call"}
+            assert "concurrency" not in called
     for name in ("ios-shell", "desktop-shell", "web-fetch-runtime", "web-fetch-macos"):
         call = data["jobs"][name]
         assert call["uses"].startswith("./.github/workflows/")
     assert data["jobs"]["windows-install-smoke-runners"]["strategy"]["matrix"]["runner"] == ["windows-latest", "windows-11-arm"]
+
+
+@pytest.mark.parametrize("path", ["docs/guide.md", "AGENTS.md", ".github/PULL_REQUEST_TEMPLATE.md"])
+def test_docs_fast_path_is_explicit_and_cannot_leak_into_full_modes(path):
+    plan = make_plan("PR", scope(path))
+    assert plan["docs_only"] is True and set(plan["jobs"].values()) == {"skip"}
+    assert set(heavy_routes(scope(path)).values()) == {"skip"}
+    for job in plan["jobs"]:
+        bad = copy.deepcopy(plan)
+        bad["jobs"][job] = "run"
+        with pytest.raises(ValueError):
+            validate_plan(bad)
+    for value in ("true", "false", None, 0, 1):
+        with pytest.raises(ValueError):
+            validate_plan({**plan, "docs_only": value})
+    for mode in ("MG_THIN", "MASTER_FULL"):
+        with pytest.raises(ValueError):
+            validate_plan({**plan, "mode": mode})
+    uncertain = scope(path)._replace(routable=False)
+    plan = make_plan("PR", uncertain)
+    assert plan["docs_only"] is False
+    assert all(plan["jobs"][job] == "run" for job in FAST | PR_TESTS | (HEAVY - {"ios-shell"}))
+
+
+def test_docs_fast_path_keeps_only_the_existing_dependency_free_guidance_check():
+    steps = workflow()["jobs"]["changes"]["steps"]
+    guidance, = [s for s in steps if "pytest --noconftest" in s.get("run", "")]
+    assert guidance["if"] == "steps.scope.outputs.docs_only == 'true'"
+    assert guidance["env"] == {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    assert guidance["run"].splitlines() == [
+        "python -m pip install --disable-pip-version-check pytest==9.0.3",
+        "python -m pytest --noconftest -p no:cacheprovider -c /dev/null -q tests/test_repository_guidance.py",
+    ]
+
+
+@pytest.mark.parametrize("path,docs,ios", [
+    ("docs/guide.md", True, "skip"),
+    (".github/PULL_REQUEST_TEMPLATE.md", True, "skip"),
+    ("ui/src/App.tsx", False, "skip"),
+    ("ios/Avibe/NavigationPolicy.swift", False, "run"),
+    ("scripts/ci_scope.py", False, "run"),
+    ("unknown/input", False, "run"),
+])
+def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_path, path, docs, ios):
+    from tests.test_ci_docs_only import make_repo, synthetic_pr, writes
+
+    repo = make_repo(tmp_path / "repo")
+    event, sha = synthetic_pr(repo, writes(path))
+    event_file = tmp_path / "event.json"
+    event_file.write_text(json.dumps(event))
+    output = tmp_path / "output"
+    env = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/1/merge",
+           "GITHUB_EVENT_PATH": str(event_file), "GITHUB_SHA": sha, "GITHUB_OUTPUT": str(output)}
+    command = [sys.executable, str(ROOT / "scripts/ci_scope.py")]
+    result = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    plan = json.loads(outputs["plan"])
+    assert plan["docs_only"] is docs and outputs["docs_only"] == str(docs).lower()
+    assert plan["jobs"]["ios-shell"] == "skip"
+    output.unlink()
+    result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text() == f"ios={ios}\n"
+    output.unlink()
+    # Missing event evidence never silently skips the optional native probe.
+    event_file.write_text("{}")
+    result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 0 and output.read_text() == "ios=run\n"
 
 
 def test_check_results_never_accepts_absent_results():

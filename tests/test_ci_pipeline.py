@@ -415,7 +415,8 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert set(jobs["unit-tests"]["needs"]) == {
         "changes", "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
         "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency", "python-smoke",
-        "ios-shell", "desktop-shell",
+        "ios-shell", "desktop-shell", "ruff", "memory-insight-contract",
+        "show-router-integration", "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
     }
     # Captures are an explicit design-review command, not routine CI work.
     # Inspect commands in both steps and matrices, not just the old job name.
@@ -445,8 +446,8 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert ui_scripts["typecheck:e2e"] == "node scripts/typecheck-e2e.mjs"
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
-    for job in (checks, build):
-        assert "if" not in job
+    for name, job in (("ui-checks", checks), ("build-linux-artifacts", build)):
+        assert job["if"] == f"fromJSON(needs.changes.outputs.plan).jobs['{name}'] == 'run'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
     assert browsers["if"] == "fromJSON(needs.changes.outputs.plan).jobs['ui-browser-checks'] == 'run'"
@@ -505,7 +506,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
     )
-    assert workflow[True] == {"workflow_call": None}
+    assert workflow[True] == {"workflow_call": None, "pull_request": None}
 
     steps = workflow["jobs"]["simulator"]["steps"]
     setup_node, = [

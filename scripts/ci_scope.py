@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One scope contract for CI producers, required gates, and scenario evidence.
 
-PR always runs the cheap Linux checks; only proven unrelated paths omit heavy
-jobs. MG_THIN checks the exact combination, not PR test results. MASTER_FULL
-runs every producer. A skip is a declared disposition, never a passing test.
+PR preserves the proven narrative-only fast path; other PRs run cheap Linux
+checks and conservatively route heavy jobs. MG_THIN checks the combination;
+MASTER_FULL runs every producer. A skip is a declaration, never a passing test.
 """
 from __future__ import annotations
 
@@ -36,6 +36,8 @@ GATES = {
         "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
         "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency",
         "python-smoke", "ios-shell", "desktop-shell",
+        "ruff", "memory-insight-contract", "show-router-integration",
+        "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
     ),
     "install-upgrade-regression": ("install-upgrade-shards",),
     "windows-install-smoke": (
@@ -83,6 +85,8 @@ def common_input(path: str) -> bool:
 
 
 def heavy_routes(scope: Scope) -> dict[str, str]:
+    if scope.docs_only and scope.routable and scope.paths:
+        return dict.fromkeys(HEAVY_JOBS, "skip")
     if (not scope.paths or not scope.routable or any(common_input(p) for p in scope.paths)
             or scope.platform_reason.startswith("added name ")):
         return dict.fromkeys(HEAVY_JOBS, "run")
@@ -113,17 +117,25 @@ def make_plan(mode: str, scope: Scope | None = None) -> dict:
     if mode not in MODES:
         raise ValueError(f"Unknown CI mode: {mode!r}")
     jobs = dict.fromkeys(PRODUCERS, "run")
+    docs_only = False
     if mode == "MG_THIN":
         jobs.update(dict.fromkeys((*PR_TEST_JOBS, *HEAVY_JOBS), "skip"))
     elif mode == "PR":
         if scope is None:
             raise ValueError("PR routing needs a complete change classification")
+        docs_only = scope.docs_only and scope.routable and bool(scope.paths)
         jobs.update(heavy_routes(scope))
-    return {"mode": mode, "jobs": jobs}
+        # #3418: keep PR iOS failures visible but advisory in its own workflow.
+        # The main workflow's reusable iOS job belongs to the full backstop only.
+        jobs["ios-shell"] = "skip"
+        if docs_only:
+            jobs = dict.fromkeys(PRODUCERS, "skip")
+    return {"mode": mode, "docs_only": docs_only, "jobs": jobs}
 
 
 def validate_plan(plan: object) -> dict:
-    if not isinstance(plan, dict) or set(plan) != {"mode", "jobs"} or plan["mode"] not in MODES:
+    if (not isinstance(plan, dict) or set(plan) != {"mode", "docs_only", "jobs"}
+            or plan["mode"] not in MODES or type(plan["docs_only"]) is not bool):
         raise ValueError("Missing or invalid CI mode/plan")
     jobs = plan["jobs"]
     if not isinstance(jobs, dict) or set(jobs) != set(PRODUCERS) or set(jobs.values()) - {"run", "skip"}:
@@ -131,8 +143,13 @@ def validate_plan(plan: object) -> dict:
     if plan["mode"] != "PR":
         if plan != make_plan(plan["mode"]):
             raise ValueError(f"Producer dispositions do not match {plan['mode']}")
+    elif plan["docs_only"]:
+        if set(jobs.values()) != {"skip"}:
+            raise ValueError("Narrative-only PR must explicitly skip every producer")
     elif any(jobs[job] != "run" for job in (*FAST_JOBS, *PR_TEST_JOBS)):
-        raise ValueError("PR must run every cheap Linux check")
+        raise ValueError("Non-narrative PR must run every cheap Linux check")
+    if plan["mode"] == "PR" and jobs["ios-shell"] != "skip":
+        raise ValueError("PR iOS belongs to its separate advisory workflow until #3418 is fixed")
     return plan
 
 
@@ -186,7 +203,9 @@ def check_gate(gate: str, needs: dict, *, event_name: str, ref: str) -> list[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gate", choices=[*GATES, "master-full-backstop"])
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--gate", choices=[*GATES, "master-full-backstop"])
+    commands.add_argument("--optional-ios", action="store_true", help="Route the standalone advisory PR iOS check")
     args = parser.parse_args()
     event_name, ref = os.environ.get("GITHUB_EVENT_NAME", ""), os.environ.get("GITHUB_REF", "")
     try:
@@ -206,11 +225,20 @@ def main() -> int:
             except (KeyError, OSError, ValueError):
                 event = {}
             scope = classify(event_name, event, os.environ.get("GITHUB_SHA", ""), Path.cwd())
+        if args.optional_ios:
+            if mode != "PR" or scope is None:
+                raise ValueError("The advisory iOS route is only valid for a PR")
+            route = heavy_routes(scope)["ios-shell"]
+            if output := os.environ.get("GITHUB_OUTPUT"):
+                with Path(output).open("a", encoding="utf-8") as stream:
+                    stream.write(f"ios={route}\n")
+            print(f"Advisory PR iOS: {route}. {scope.reason}")
+            return 0
         plan = make_plan(mode, scope)
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a", encoding="utf-8") as stream:
-                stream.write(f"mode={mode}\nplan={serialized}\n")
+                stream.write(f"mode={mode}\ndocs_only={str(plan['docs_only']).lower()}\nplan={serialized}\n")
         summary = f"## CI scope: {mode}\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in plan["jobs"].items()) + "\n"
         if scope:
             summary += f"\n{scope.reason}\n"

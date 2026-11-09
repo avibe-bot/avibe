@@ -1,13 +1,16 @@
 # CI scope: routed PRs, thin merge groups, full master
 
-Owner decision: November 9, 2026. This replaces the earlier docs-only and
-PR/queue affected-routing policy. The merge queue still validates its exact
-combined tree, but it does not repeat every test already required on a PR.
+Owner decision: November 9, 2026. This replaces PR/queue affected routing while
+preserving the narrative-only PR fast path. The merge queue still validates its
+exact combined tree, but does not repeat every test already required on a PR.
 
 ## Change contract
 
 - Keep the same nine required contexts; no transitional ruleset change is needed.
-- Every PR, **including documentation-only changes**, runs the cheap Linux checks.
+- Proven narrative-only PRs keep their existing fast path: only classification,
+  dependency-free repository-guidance checks and skip-verifying aggregates.
+  They do not run unit tests, UI checks, builds, manifest checks or collection.
+  Other PRs run the cheap Linux checks.
 - A merge group runs only the combination-sensitive fast checks, targeting about
   five minutes p50 CI wall time. This is not a five-minute enqueue-to-merge promise.
 - Master runs the full suite after landings. A running pass finishes; only the
@@ -20,8 +23,10 @@ combined tree, but it does not repeat every test already required on a PR.
 
 `scripts/ci_scope.py` owns the literal modes `PR`, `MG_THIN`, `MASTER_FULL`, the
 complete producer disposition map, and required-gate validation. `changes`
-emits both the mode and a JSON plan. A job's condition reads its own disposition.
-The gates also verify the mode against the actual event, not just an output string.
+emits the mode and a JSON plan with an explicit boolean `docs_only`. A job's
+condition reads its own disposition. The gates verify the mode against the
+actual event, not just an output string. Only a proven narrative-only PR may
+set `docs_only`; neither queue nor master can inherit that shortcut.
 
 For PR routing, `scripts/ci_docs_only.py` still owns the complete Git diff:
 checked-out synthetic merge and both event parents, no rename detection, NUL
@@ -31,16 +36,21 @@ non-regular modes, non-default targets, unknown paths, and newly added
 non-portable names fail closed. Its standalone CLI remains a diff diagnostic,
 not the workflow's authority to skip cheap checks.
 
+Except for `changes`, the PR column below describes **non-narrative PRs**;
+proven narrative-only PRs explicitly skip every producer.
+
 | Producer family | PR | MG_THIN | MASTER_FULL |
 | --- | --- | --- | --- |
-| `changes`, Ruff, UI static/types, Linux artifact build, migration guard | Always | Always | Always |
+| `changes` and narrative-only guidance check | Classification always; guidance on narrative-only PRs | Classification | Classification |
+| Ruff, UI static/types, Linux artifact build, migration guard | Always | Always | Always |
 | `memory-insight-contract`, Show router integration, npm wrapper | Always | Always | Always |
 | Lock/manifest/workflow guard, Python collect smoke | Always | Always | Always |
 | Eight Python unit shards, Vitest | Always | Out of scope | Always |
 | Hosted-wire PR decision job | Always; compare only for an engine-changing PR | Out of scope | Successful no-op; the label decision belongs to the PR |
 | Scenario execution evidence | Validate selected producers | Out of scope; no scenario rows attested | Validate every producer |
 | Four browser lanes | Existing conservative browser routing | Out of scope | All |
-| iOS simulator, desktop shell | Native/contract paths, unknown paths | Out of scope | Both shells, all OS legs |
+| iOS simulator | Native/contract/unknown paths; separate **advisory** workflow until #3418 is fixed | Out of scope | Required |
+| Desktop shell | Native/contract paths, unknown paths; required | Out of scope | All OS legs |
 | Installer/distribution shards, Windows x64 + ARM install smoke | Packaging/install inputs, unknown paths | Out of scope | All |
 | Windows agent, Model Hub, control IPC | Python/runtime/test inputs, unknown paths | Out of scope | x64 + ARM where supported |
 | Linux/Windows web-fetch | Existing installed-package routing | Out of scope | All |
@@ -51,6 +61,17 @@ UI work therefore checks that bundle without allocating a simulator. Native
 bridge inputs (`ui/src/lib/native*`, `ui/src/lib/useNative*`, `ui/src/mobile/`),
 iOS sources, message/catalog contracts, and the bundled mascot select iOS.
 Desktop sources, native bridge inputs and i18n contracts select desktop.
+
+**iOS remains advisory on PRs:** NavigationPolicyTests #3418 is not fixed. The
+November 6–9 sample has 13 NavigationPolicy failures across 109 queue trees;
+making it required now would frequently block native PRs. `ios-shell.yml`
+therefore runs affected PRs independently using `ci_scope.py --optional-ios`,
+with real red results (no `continue-on-error`), but no required aggregate waits
+for that advisory workflow. The main lint iOS producer is explicitly out of PR
+scope. It still runs and must pass in `MASTER_FULL`, so failed native validation
+cannot qualify a release. Once #3418 is fixed, return the affected PR iOS call
+to lint and retire its separate PR trigger. Desktop remains required on affected
+PRs now. This is a quarantine decision, not a flake fix.
 
 Shared CI scripts/workflows, root manifests/locks, installer entry points,
 unknown roots, and UI build configuration/plugins are conservative full-PR
@@ -75,7 +96,8 @@ The six required leaf names remain substantive checks:
 The three existing required aggregate names remain:
 
 - `unit-tests`: unit shards, scenario evidence, UI static/types, Vitest, browser,
-  hosted-wire, manifest guard, Python smoke, iOS and desktop.
+  hosted-wire, manifest guard, Python smoke, the six required leaves, desktop,
+  and the main iOS producer (explicitly skipped on PR/MG, required on master).
 - `install-upgrade-regression`: installer/distribution shards.
 - `windows-install-smoke`: x64/ARM installation, all selected web-fetch legs,
   Windows agent, Model Hub and IPC.
@@ -123,9 +145,11 @@ collection and shared-schema combinations without executing the full unit suite.
 `lint.yml` triggers on `push: master` and supports a manual full run on master.
 Its concurrency group is shared by those two event types, with
 `cancel-in-progress: false` for master. This coalesces the **whole pass**,
-including iOS/desktop/web-fetch called workflows; they have no separate event
-triggers or concurrency groups. PR supersession still cancels only that PR.
-Immutable merge groups do not cancel one another.
+including iOS/desktop/web-fetch called workflows; none has an independent master
+or merge-group trigger. The advisory iOS PR trigger has its own PR cancellation
+group; full master calls use a unique run ID and are never independently
+cancelled. PR supersession cancels only that PR. Immutable merge groups do not
+cancel one another.
 
 `master-full-backstop` checks every producer and all three required aggregates
 in `MASTER_FULL`. `release_ai.yml` and `publish.yml` resolve the requested tag
@@ -148,7 +172,9 @@ is later feedback, not a repaired flake or permission for unbounded reruns.
 
 ## Representative dry run
 
-Executed by `tests/test_ci_scope.py`. Cheap Linux checks run for every row.
+Executed by `tests/test_ci_scope.py`. Cheap Linux checks run for every row
+**except narrative docs**, which retain the fast path. The iOS column describes
+the separate advisory PR run; desktop and all other selected jobs are required.
 `W` means Windows agent/Model Hub/IPC; installation is a separate column.
 
 | Representative diff | Browser | iOS | Desktop | Installer + Win install | W | Linux/Win fetch | Mac fetch |

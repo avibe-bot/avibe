@@ -16,7 +16,9 @@ that full pass after master pushes, including iOS, desktop, browser, installer,
 web-fetch and Windows checks. A running pass finishes; only the newest pending
 master pass waits. `release_ai.yml` and `publish.yml` enforce whole-run success
 plus the `master-full-backstop` certificate before any build/sign/publish path.
-See [CI scope and routing](plans/ci-affected-routing.md).
+See [CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
+NavigationPolicyTests quarantine (#3418) does not relax this release gate:
+iOS must pass in the exact full master run, even while its PR check is advisory.
 
 A green PR or merge-group head, another SHA's full run, or a missing/coalesced
 run is not proof. Select a full-green master SHA; wait for its current full pass,
