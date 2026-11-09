@@ -49,11 +49,15 @@ export function layoutBoxIn(within: Element, el: Element): { top: number; bottom
 const shifts = new WeakMap<Element, number>();
 /** A motion turns a jump of `dy` px in where the layout puts `el` into movement it draws itself. */
 export function noteShift(el: Element, dy: number) {
-  shifts.set(el, (shifts.get(el) ?? 0) + dy);
+  shifts.set(el, shiftOf(el) + dy);
+}
+/** How far the layout has moved `el` in total by changes a motion showed as movement (px). */
+export function shiftOf(el: Element): number {
+  return shifts.get(el) ?? 0;
 }
 /** Where the layout puts `el` inside `within` (px from `within`'s top), less what motions showed as movement:
  *  what holds a place on screen (the transcript's scroll anchor) compensates only the rest of what moved it (an
  *  older page, an image above), and lets a motion draw what it draws. It does not depend on when it is read. */
 export function placeIn(within: Element, el: Element, item: Element = el): number {
-  return layoutBoxIn(within, el).top - (shifts.get(item) ?? 0);
+  return layoutBoxIn(within, el).top - shiftOf(item);
 }

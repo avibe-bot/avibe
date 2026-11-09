@@ -44,9 +44,18 @@
 // a message can change element without leaving the transcript: a Harness row
 // that an older page turns into a group member is re-mounted inside the group,
 // or folded into its collapsed head. ``resolveScrollAnchor`` follows it there.
-import { placeIn } from './layoutBox';
+import { placeIn, shiftOf } from './layoutBox';
 
-export type ScrollAnchor = { el: HTMLElement; top: number; rowId?: string; rowTop?: number; key?: string };
+export type ScrollAnchor = {
+  el: HTMLElement;
+  top: number;
+  rowId?: string;
+  rowTop?: number;
+  key?: string;
+  /** Measured inside the content: the transcript item (a child of the content) whose motion shift ``top`` and
+   *  ``rowTop`` leave out (``topInContent``). */
+  item?: Element;
+};
 
 /** The visible band of the scroll container, in viewport coordinates. */
 export type ScrollViewport = { top: number; bottom: number };
@@ -118,13 +127,19 @@ export const anchorForTouched = (
  *  it is drawn, from `contentTop`. */
 export const topInContent = (el: Element, contentTop: number, content?: Element, rect?: DOMRect): number => {
   if (!content || !content.contains(el)) return (rect ?? el.getBoundingClientRect()).top - contentTop;
-  let item: Element = el;
+  return placeIn(content, el, itemIn(content, el));
+};
+
+/** The transcript item holding `el`: the child of the content it is in, or itself. */
+const itemIn = (content: Node, el: Element): Element => {
+  let item = el;
   while (item.parentElement && item.parentElement !== content) item = item.parentElement;
-  return placeIn(content, el, item);
+  return item;
 };
 
 function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number, content?: Element): ScrollAnchor {
   const anchor: ScrollAnchor = { el, top: topInContent(el, contentTop, content, rect) };
+  if (content?.contains(el)) anchor.item = itemIn(content, el);
   // A transcript item that is not a message (an activity card or chip, a
   // Harness group's members, its collapse bar) names itself, so it can be found
   // again when it re-mounts.
@@ -145,28 +160,42 @@ function anchorAt(el: HTMLElement, rect: DOMRect, contentTop: number, content?: 
 const byAttribute = (content: ParentNode, selector: string) => content.querySelector<HTMLElement>(selector);
 
 /**
- * The element to restore against, and where its top belongs inside the content.
- * The anchored element while it is still mounted; otherwise the item of the same
- * ``data-transcript-key`` where it was; otherwise the same message's row wherever
- * it now renders; otherwise the collapsed group that folded it in
- * (``data-harness-members`` lists a group's message ids), placed where the row
- * was. ``null`` when nothing of it is left in the transcript.
+ * The anchor to restore against: ``el`` and where its top belongs inside the
+ * content (``top``). The anchor itself while its element is still mounted;
+ * otherwise the item of the same ``data-transcript-key`` where it was; otherwise
+ * the same message's row wherever it now renders; otherwise the collapsed group
+ * that folded it in (``data-harness-members`` lists a group's message ids),
+ * placed where the row was. ``null`` when nothing of it is left in the transcript.
+ *
+ * A replacement is another item, with motion shifts of its own (lib/layoutBox),
+ * so the place is carried over into its terms: what the old item was shifted
+ * stays left out, what the new one was is left out of the place too. Only what
+ * moved the message since, beyond what a motion showed, is to be made up.
  */
-export const resolveScrollAnchor = (
-  anchor: ScrollAnchor,
-  content: ParentNode,
-): { el: HTMLElement; top: number } | null => {
-  if (anchor.el.isConnected) return { el: anchor.el, top: anchor.top };
+export const resolveScrollAnchor = (anchor: ScrollAnchor, content: ParentNode): ScrollAnchor | null => {
+  if (anchor.el.isConnected) return anchor;
+  const replacedBy = (el: HTMLElement, top: number): ScrollAnchor => {
+    const item = itemIn(content, el);
+    const rebase = (anchor.item ? shiftOf(anchor.item) : 0) - shiftOf(item);
+    return {
+      el,
+      top: top + rebase,
+      rowId: anchor.rowId,
+      rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + rebase,
+      key: el.dataset.transcriptKey,
+      item,
+    };
+  };
   // Quoted attribute values need only quotes and backslashes escaped.
   const quoted = (value: string) => value.replace(/["\\]/g, '\\$&');
   if (anchor.key !== undefined) {
     const item = byAttribute(content, `[data-transcript-key="${quoted(anchor.key)}"]`);
-    if (item) return { el: item, top: anchor.top };
+    if (item) return replacedBy(item, anchor.top);
   }
   if (anchor.rowId === undefined || anchor.rowTop === undefined) return null;
   const id = quoted(anchor.rowId);
   const row =
     byAttribute(content, `[data-message-id="${id}"]`) ??
     byAttribute(content, `[data-harness-members~="${id}"]`);
-  return row ? { el: row, top: anchor.rowTop } : null;
+  return row ? replacedBy(row, anchor.rowTop) : null;
 };

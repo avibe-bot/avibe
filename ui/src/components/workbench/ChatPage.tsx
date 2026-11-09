@@ -5336,9 +5336,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const anchor = anchorRef.current;
       const content = contentRef.current;
       // The anchored row may have re-mounted elsewhere (a Harness row an older
-      // page made a group member); follow the message, not the element.
+      // page made a group member); follow the message, not the element, and
+      // hold the new one from here, its place in its own terms (lib/layoutBox).
       const target = anchor && content ? resolveScrollAnchor(anchor, content) : null;
       if (!anchor || !target || !content) return;
+      anchorRef.current = target;
       // Both positions are inside the content, so only content that moved above
       // the anchor counts — never the reader's own scrolling since it was taken.
       // Where the layout puts it, not where it is drawn: a row a disclosure above it still pushes down moves
@@ -5357,20 +5359,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
       // (the position clamped) is dropped rather than retried on every commit.
       if (Math.abs(delta - applied) >= 1) {
         captureAnchor();
-      } else if (target.el === anchor.el) {
-        anchorRef.current = {
-          ...anchor,
-          top: anchor.top + applied,
-          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
-        };
       } else {
-        // Followed the message to its new element: hold that one from here.
         anchorRef.current = {
-          el: target.el,
+          ...target,
           top: target.top + applied,
-          rowId: anchor.rowId,
-          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
-          key: target.el.dataset.transcriptKey,
+          rowTop: target.rowTop === undefined ? undefined : target.rowTop + applied,
         };
       }
     }
