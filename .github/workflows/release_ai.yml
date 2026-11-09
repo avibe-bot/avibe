@@ -27,7 +27,31 @@ permissions:
   pull-requests: read
 
 jobs:
+  release-backstop:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      run_id: ${{ steps.verify.outputs.run_id }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The ref only selects the workflow code. The script resolves the
+          # dispatch/tag input through the API and never trusts a workflow
+          # context SHA as the release source.
+          ref: ${{ github.ref }}
+      - name: Require exact full master backstop
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+
   resolve-desktop-release:
+    needs: release-backstop
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.resolve.outputs.enabled }}
@@ -42,7 +66,7 @@ jobs:
           # unpinned checkout would run a dispatched branch's resolver against a
           # tag it never belonged to. fetch-depth keeps the tag history the
           # resolver walks.
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          ref: ${{ needs.release-backstop.outputs.source_sha }}
           fetch-depth: 0
       - name: Resolve exact TEST source and versions
         id: resolve
@@ -50,6 +74,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
           TEST_ENABLED: ${{ vars.DESKTOP_UPDATER_TEST }}
           STABLE_ENABLED: ${{ vars.DESKTOP_UPDATER_STABLE }}
+          BACKSTOP_SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
         shell: bash
         run: |
           enabled=false
@@ -64,12 +89,12 @@ jobs:
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
           echo "updater_enabled=$updater_enabled" >> "$GITHUB_OUTPUT"
           if [ "$enabled" = true ]; then
-            python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --output "$GITHUB_OUTPUT"
+            python scripts/desktop_release.py resolve --tag "$RELEASE_TAG" --source-sha "$BACKSTOP_SOURCE_SHA" --output "$GITHUB_OUTPUT"
           fi
 
   desktop-packages:
-    needs: resolve-desktop-release
-    if: needs.resolve-desktop-release.outputs.enabled == 'true'
+    needs: [release-backstop, resolve-desktop-release]
+    if: needs.release-backstop.result == 'success' && needs.resolve-desktop-release.outputs.enabled == 'true'
     uses: ./.github/workflows/desktop-package.yml
     with:
       source_sha: ${{ needs.resolve-desktop-release.outputs.source_sha }}
@@ -83,9 +108,9 @@ jobs:
     secrets: inherit
 
   certum-windows-sign:
-    needs: [resolve-desktop-release, desktop-packages]
+    needs: [release-backstop, resolve-desktop-release, desktop-packages]
     if: >-
-      ${{ !cancelled() && needs.resolve-desktop-release.outputs.enabled == 'true' &&
+      ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.resolve-desktop-release.outputs.enabled == 'true' &&
           startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') }}
     runs-on: windows-latest
     environment: windows-signing
@@ -205,9 +230,9 @@ jobs:
           retention-days: 14
 
   windows-updater-finalize:
-    needs: [resolve-desktop-release, certum-windows-sign]
+    needs: [release-backstop, resolve-desktop-release, certum-windows-sign]
     if: >-
-      ${{ !cancelled() && needs.certum-windows-sign.result == 'success' &&
+      ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.certum-windows-sign.result == 'success' &&
           needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
     runs-on: windows-latest
     environment: desktop-updater
@@ -262,8 +287,8 @@ jobs:
           retention-days: 14
 
   resolve-show-runtime-ref:
-    needs: resolve-desktop-release
-    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
+    needs: [release-backstop, resolve-desktop-release]
+    if: needs.release-backstop.result == 'success' && startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
@@ -282,7 +307,7 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   show-runtime-bundles:
-    needs: resolve-show-runtime-ref
+    needs: [release-backstop, resolve-show-runtime-ref]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -346,6 +371,7 @@ jobs:
 
   build-assets:
     needs:
+      - release-backstop
       - resolve-desktop-release
       - show-runtime-bundles
     runs-on: ubuntu-latest
@@ -476,13 +502,14 @@ jobs:
           path: dist/
 
   release:
-    needs: [build-assets, resolve-desktop-release, desktop-packages, certum-windows-sign, windows-updater-finalize]
+    needs: [release-backstop, build-assets, resolve-desktop-release, desktop-packages, certum-windows-sign, windows-updater-finalize]
     concurrency:
       group: avibe-gh-release-${{ github.event.inputs.tag || github.ref_name }}
       cancel-in-progress: false
     # Official assets belong to publish.yml; only previews require this build.
     if: >-
-      ${{ !cancelled() && needs.resolve-desktop-release.result == 'success' && (needs.build-assets.result == 'success' ||
+      ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.resolve-desktop-release.result == 'success' &&
+          (needs.build-assets.result == 'success' ||
           (needs.build-assets.result == 'skipped' &&
            !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) &&
           (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') ||
@@ -497,11 +524,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Publish with the release tooling and installation guidance the
-          # released source carries. resolve-desktop-release is skipped on the
-          # official v* path, so its output is empty there and the requested tag
-          # is the pin. fetch-depth keeps the tag and commit history that notes
-          # generation and the tag/source equality check walk.
-          ref: ${{ needs.resolve-desktop-release.outputs.source_sha || github.event.inputs.tag || github.ref_name }}
+          # released source carries. The backstop pins the tag's exact source;
+          # desktop resolution supplies the same pin when enabled. Keep the
+          # history needed by notes and tag/source equality checks.
+          ref: ${{ needs.resolve-desktop-release.outputs.source_sha || needs.release-backstop.outputs.source_sha || github.event.inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Resolve tag

@@ -10,6 +10,8 @@ import pytest
 import yaml
 
 from scripts import pytest_collection
+from scripts.ci_docs_only import full
+from scripts.ci_scope import make_plan
 from scripts.ci_scenario_evidence import (
     LINT_WORKFLOW,
     RELEASE_WORKFLOWS,
@@ -108,48 +110,54 @@ def test_release_evidence_fails_closed_for_bad_reports(tmp_path: Path, report_st
 
 
 @pytest.mark.parametrize(
-    ("reports", "selected", "verdict"),
+    ("reports", "selected", "verdict", "windows_route"),
     [
         pytest.param(
             _reports(unit_test_shards={f"{CASE}[linux]": ("skipped", "not on Linux")}, windows_control_ipc={f"{CASE}[win]": ("passed", "")}),
             {},
             None,
+            "run",
             id="passed-on-one-platform",
         ),
         pytest.param(
             _reports(unit_test_shards={CASE: ("skipped", "not on Linux")}),
             {WINDOWS: [CASE]},
-            "not run",
+            "out of scope",
+            "skip",
             id="its-other-job-was-path-skipped",
         ),
         pytest.param(
             _reports(unit_test_shards={CASE: ("skipped", "needs a Codex binary")}, windows_control_ipc={CASE: ("skipped", "needs a Codex binary")}),
             {WINDOWS: [CASE]},
             "skipped everywhere it ran (needs a Codex binary)",
+            "run",
             id="skipped-everywhere-it-ran",
         ),
-        pytest.param(_reports(), {RELEASE: [CASE]}, "release-gated", id="a-release-runs-it"),
-        pytest.param(_reports(), {}, "collected by no CI job that ran", id="no-job-runs-it"),
+        pytest.param(_reports(), {RELEASE: [CASE]}, "release-gated", "skip", id="a-release-runs-it"),
+        pytest.param(_reports(), {}, "collected by no CI job that ran", "skip", id="no-job-runs-it"),
         pytest.param(
             Reports(outcomes={UNIT_SHARD_JOB: {}}, artifacts={UNIT_SHARD_JOB: 7}),
             {},
             f"{UNIT_SHARD_JOB} left 7 of 8 junit reports",
+            "skip",
             id="a-unit-shard-left-no-report",
         ),
     ],
 )
-def test_only_evidence_skipped_or_absent_everywhere_it_could_have_run_fails(reports, selected, verdict) -> None:
+def test_only_evidence_skipped_or_absent_everywhere_it_could_have_run_fails(reports, selected, verdict, windows_route) -> None:
     """A job that left no report, such as one its path filter skipped, says nothing about its cases.
 
     The required gate must not turn red because a job did not run on this
-    change: such a job's cases are "not run", and a case fails only when it
+    change: such a job's cases are "out of scope", and a case fails only when it
     was skipped, or absent, wherever CI did run and no release runs it.
     """
 
     lint_commands = {UNIT_SHARD_JOB: [("tests",)], "windows-control-ipc": [WINDOWS]}
     lint_runs = {UNIT_SHARD_JOB: 8, "windows-control-ipc": 1}
-    if verdict == "not run":
+    if verdict == "out of scope":
         reports.artifacts.pop("windows-control-ipc", None)
+    plan = make_plan("PR", full("fixture", True))
+    plan["jobs"]["windows-control-ipc"] = windows_route
     problems, accounted = judge(
         {CASE: Evidence(CASE, ["ROW-1"])},
         reports,
@@ -157,15 +165,66 @@ def test_only_evidence_skipped_or_absent_everywhere_it_could_have_run_fails(repo
         lint_runs,
         [RELEASE],
         lambda args: selected.get(args, []),
+        plan=plan,
     )
 
     if verdict is None:
-        assert (problems, accounted) == ([], {"release-gated": [], "not run": []})
-    elif verdict in ("not run", "release-gated"):
+        assert (problems, accounted) == ([], {"release-gated": [], "out of scope": []})
+    elif verdict in ("out of scope", "release-gated"):
         assert problems == [] and accounted[verdict] == [CASE]
     else:
         (problem,) = problems
         assert verdict in problem
+
+
+def test_evidence_scope_never_confuses_an_omitted_report_with_a_routed_job():
+    """A missing Windows report used to be accepted as if its path filter skipped it."""
+    for mode in ("PR", "MASTER_FULL"):
+        plan = make_plan(mode, full("fixture", True))
+        problems, accounted = judge(
+            {CASE: Evidence(CASE, ["ROW-1"])}, _reports(),
+            {UNIT_SHARD_JOB: [("tests",)], "windows-control-ipc": [WINDOWS]},
+            {UNIT_SHARD_JOB: 8, "windows-control-ipc": 1}, [], lambda _args: [CASE], plan=plan,
+        )
+        assert problems == ["windows-control-ipc left 0 of 1 junit reports"]
+        assert accounted == {}
+
+
+def test_thin_queue_does_not_claim_any_scenario_ran():
+    plan = make_plan("MG_THIN")
+    problems, accounted = judge(
+        {CASE: Evidence(CASE, ["ROW-1"])}, Reports(), {}, {}, [], lambda _args: [], plan=plan,
+    )
+    assert problems == []
+    assert accounted == {"out of scope (MG_THIN)": [CASE]}
+    problems, _ = judge(
+        {CASE: Evidence(CASE, ["ROW-1"])}, _reports(unit_test_shards={CASE: ("passed", "")}),
+        {}, {}, [], lambda _args: [], plan=plan,
+    )
+    assert problems == ["MG_THIN cannot claim scenario execution evidence"]
+
+
+@pytest.mark.parametrize("count", [0, 1, 7, 9])
+def test_every_full_mode_requires_exact_unit_shard_artifact_count(count):
+    for mode in ("PR", "MASTER_FULL"):
+        plan = make_plan(mode, full("fixture", True))
+        problems, _ = judge(
+            {CASE: Evidence(CASE, ["ROW-1"])},
+            Reports(outcomes={UNIT_SHARD_JOB: {CASE: ("passed", "")}}, artifacts={UNIT_SHARD_JOB: count}),
+            {UNIT_SHARD_JOB: [("tests",)]}, {UNIT_SHARD_JOB: 8}, [], lambda _args: [CASE], plan=plan,
+        )
+        assert problems == [f"unit-test-shards left {count} of 8 junit reports"]
+
+
+def test_a_routed_producer_cannot_supply_pass_evidence():
+    plan = make_plan("PR", full("fixture", True))
+    plan["jobs"]["windows-control-ipc"] = "skip"
+    problems, _ = judge(
+        {CASE: Evidence(CASE, ["ROW-1"])}, _reports(windows_control_ipc={CASE: ("passed", "")}),
+        {UNIT_SHARD_JOB: [("tests",)], "windows-control-ipc": [WINDOWS]},
+        {UNIT_SHARD_JOB: 8, "windows-control-ipc": 1}, [], lambda _args: [CASE], plan=plan,
+    )
+    assert problems == ["windows-control-ipc left evidence despite being out of scope"]
 
 
 def test_a_report_names_each_case_by_its_node_id(tmp_path: Path) -> None:
