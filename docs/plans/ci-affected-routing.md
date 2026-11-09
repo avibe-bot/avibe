@@ -140,6 +140,27 @@ Caches contain downloaded dependencies, never permission to rewrite a lock.
 for the unit selection under the Linux loopback-only wrapper. It catches import,
 collection and shared-schema combinations without executing the full unit suite.
 
+Required queue API reads use the existing `release_asset_download.py` transport
+policy: at most three attempts, 1/2-second exponential backoff with up to 0.5s
+jitter, and one 30-second retry window. The predecessor's `gh api` listings
+(including the final freshness check) and wheel download share this policy;
+each CLI call also has a hard remaining-wall-time timeout. A failed paginated
+response is discarded, and wheel retries overwrite only the new temporary
+probe directory's partial file before mandatory digest validation.
+
+The other required-queue API consumer, Show/runtime metadata and asset lookup
+in `build-linux-artifacts`, already uses this same transport. There is no extra
+cache, nested retry loop, whole-job retry, or fallback to an older predecessor.
+Only transient network errors, 5xx, 429 and identified secondary limits qualify.
+Ordinary 4xx, unknown CLI errors, malformed successful JSON, digest failures and
+SQLite contract/freshness failures do not retry. Server `Retry-After` hints take
+precedence; a direct GitHub rate limit without a hint requires at least a minute,
+so it fails clearly outside this short budget rather than retrying too early.
+Existing unauthenticated public-asset fallback is retained, but cannot replay
+a throttled API during its own retries. For streaming assets the window limits
+retries, not a healthy large transfer;
+individual socket inactivity timeouts remain bounded by the remaining window.
+
 ## Full master backstop and releases
 
 `lint.yml` triggers on `push: master` and supports a manual full run on master.
