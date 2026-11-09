@@ -59,6 +59,7 @@ import subprocess
 import sys
 import threading
 import time
+from bisect import bisect_right
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
@@ -225,6 +226,7 @@ class LocalJobHost:
         self._jobs_dir = os.path.realpath(jobs_dir)
         self._on_hand_over = on_hand_over
         self._shell = shell or default_shell()
+        self._prune_cursor: Optional[str] = None
         # Wrappers this host spawned. Each has a reaper thread, so a finished wrapper never lingers
         # as a zombie (which would keep its process group alive), and an unreaped pid cannot be recycled.
         self._children: dict[str, subprocess.Popen] = {}
@@ -630,11 +632,30 @@ class LocalJobHost:
 
     # --- maintenance (J5) -------------------------------------------------
 
-    def prune(self, settled: Settled, *, older_than_s: float = FINISHED_JOB_RETENTION_S) -> list[str]:
-        """Remove jobs that are finished, settled (``settled(meta)``), and untouched for ``older_than_s``."""
+    def prune(
+        self,
+        settled: Settled,
+        *,
+        older_than_s: float = FINISHED_JOB_RETENTION_S,
+        max_jobs: Optional[int] = None,
+    ) -> list[str]:
+        """Remove finished, settled jobs, optionally examining only one rotating batch.
+
+        A bounded batch keeps maintenance from turning a large jobs directory into an
+        unbounded startup or event-loop wait. The cursor rotates across calls so a
+        long-lived host eventually examines every job without repeating the same prefix.
+        """
         removed: list[str] = []
         cutoff = time.time() - older_than_s
-        for name in self._job_ids():
+        names = self._job_ids()
+        if max_jobs is not None:
+            if max_jobs <= 0:
+                return removed
+            if len(names) > max_jobs:
+                start = bisect_right(names, self._prune_cursor) if self._prune_cursor else 0
+                names = (names[start:] + names[:start])[:max_jobs]
+                self._prune_cursor = names[-1]
+        for name in names:
             try:
                 job_dir = self.job_dir(name)
                 if max(entry.stat().st_mtime for entry in os.scandir(job_dir)) > cutoff:

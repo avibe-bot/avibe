@@ -6182,7 +6182,7 @@ async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session,
         await _until(lambda: suite.jobs.status(job_id).state != "running", "the job never ended")
 
 
-async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(
+async def test_startup_recovery_leaves_settled_job_pruning_until_after_readiness(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
     import core.agent_core.tools.jobs as jobs_module
@@ -6230,6 +6230,10 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(
     # Startup settles c's open call from its job's output (T2) before any file goes.
     [c_result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"][-1:]
     assert c_result.message.tool_call_id == "call_c" and "out" in c_result.message.content[0].text
+    present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
+    # Recovery settles T2 before readiness but leaves J5 bookkeeping off the critical path.
+    assert present == {name: True for name in jobs}
+    await harness.agent._prune_settled_jobs()
     present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
     # J5: a job is removed only once its call has a durable result and no Watch still manages it.
     assert present == {"a": False, "b": True, "c": False, "d": True, "e": True}

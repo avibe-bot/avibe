@@ -1,7 +1,8 @@
 """The single owner of Vibey's settlement outside a Turn.
 
-Settlement outside a Turn is T2 (open tool calls), T3 admission (accepted inputs
-no run consumed), and J5 (pruning settled jobs). The controller holds one
+Settlement outside a Turn is T2 (open tool calls) and T3 admission (accepted inputs
+no run consumed). Settled-job cleanup (J5) is independent bookkeeping scheduled
+only after readiness. The controller holds one
 ``VibeyRecovery`` and so at most one recovery task, whose passes run on the
 adapter the controller registered at startup. Every pass re-derives its
 candidates from the rows, so a retry picks up whatever the last pass left
