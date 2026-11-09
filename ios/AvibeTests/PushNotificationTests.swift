@@ -332,6 +332,43 @@ final class PushNotificationTests: XCTestCase {
         )
         assertFallback(result)
     }
+
+    func testNSERetiringKeyDecryptsBeforeDeadline() throws {
+        let receiver = try loadReceiverFixture()
+        let currentTime = Date(timeIntervalSince1970: 1_794_096_000)
+        let result = try processThroughNSE(
+            receiver: receiver,
+            privateKey: try XCTUnwrap(
+                PushBase64URL.decode(receiver.receiverPrivateKey)
+            ),
+            generation: receiver.expectedNative.bindGeneration,
+            state: .retiring,
+            pendingRevoke: false,
+            retirementDeadline: currentTime.addingTimeInterval(1),
+            now: currentTime
+        )
+
+        XCTAssertEqual(result.title, receiver.expected.title)
+        XCTAssertEqual(result.body, receiver.expected.body)
+    }
+
+    func testNSEKeepsFallbackForExpiredRetiringKey() throws {
+        let receiver = try loadReceiverFixture()
+        let currentTime = Date(timeIntervalSince1970: 1_794_096_000)
+        let result = try processThroughNSE(
+            receiver: receiver,
+            privateKey: try XCTUnwrap(
+                PushBase64URL.decode(receiver.receiverPrivateKey)
+            ),
+            generation: receiver.expectedNative.bindGeneration,
+            state: .retiring,
+            pendingRevoke: false,
+            retirementDeadline: currentTime.addingTimeInterval(-1),
+            now: currentTime
+        )
+
+        assertFallback(result)
+    }
 }
 
 private final class RecordingPushKeychainItemAccess:
@@ -449,7 +486,9 @@ private extension PushNotificationTests {
         privateKey: Data,
         generation: Int64,
         state: PushKeyRecord.State = .active,
-        pendingRevoke: Bool = false
+        pendingRevoke: Bool = false,
+        retirementDeadline: Date? = nil,
+        now: Date = Date()
     ) throws -> UNNotificationContent {
         let envelope = try XCTUnwrap(
             try JSONSerialization.jsonObject(
@@ -473,7 +512,8 @@ private extension PushNotificationTests {
                 vapidKeyHash: String(repeating: "a", count: 64),
                 state: state,
                 pendingRevoke: pendingRevoke,
-                replacementRegistrationIDs: []
+                replacementRegistrationIDs: [],
+                retirementDeadline: retirementDeadline
             )
         )
         let generationStore = InMemoryPushGenerationStore()
@@ -484,7 +524,8 @@ private extension PushNotificationTests {
         content.userInfo = envelope
         let service = NotificationService(
             keychain: keychain,
-            generationStore: generationStore
+            generationStore: generationStore,
+            now: { now }
         )
         let expectation = expectation(description: "NSE preserved fallback")
         var processed: UNNotificationContent?

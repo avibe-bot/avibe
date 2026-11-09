@@ -1,8 +1,10 @@
+import Foundation
 import UserNotifications
 
 final class NotificationService: UNNotificationServiceExtension {
     private let keychain: PushKeychainStoring
     private let generationStore: PushGenerationStoring
+    private let now: () -> Date
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttemptContent: UNMutableNotificationContent?
 
@@ -15,10 +17,12 @@ final class NotificationService: UNNotificationServiceExtension {
 
     init(
         keychain: PushKeychainStoring,
-        generationStore: PushGenerationStoring
+        generationStore: PushGenerationStoring,
+        now: @escaping () -> Date = Date.init
     ) {
         self.keychain = keychain
         self.generationStore = generationStore
+        self.now = now
         super.init()
     }
 
@@ -33,7 +37,8 @@ final class NotificationService: UNNotificationServiceExtension {
 
         let processed = PushNotificationProcessor(
             keychain: keychain,
-            generationStore: generationStore
+            generationStore: generationStore,
+            now: now
         ).process(content)
         contentHandler(processed)
         self.contentHandler = nil

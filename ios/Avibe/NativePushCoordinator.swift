@@ -126,6 +126,7 @@ final class NativePushCoordinator {
 
     private static let publicBaseURL = "https://avibe.bot"
     private static let topic = "bot.avibe.ios"
+    private static let retiringKeyTTL: TimeInterval = 86_400
 
     private final class TokenWaiter {
         let id = UUID()
@@ -146,6 +147,7 @@ final class NativePushCoordinator {
     private let installationMarker: PushInstallationMarkerStoring
     private let notificationCenter: PushNotificationCentering
     private let tokenWaitSeconds: Double
+    private let now: () -> Date
 
     private var tokenWaiters: [UUID: TokenWaiter] = [:]
     private var isFrozen = false
@@ -177,6 +179,7 @@ final class NativePushCoordinator {
             UserDefaultsPushInstallationMarkerStore(),
         notificationCenter: PushNotificationCentering? = nil,
         tokenWaitSeconds: Double = 15,
+        now: @escaping () -> Date = Date.init,
         onTap: @escaping TapHandler = { _ in },
         onTapRecovery: @escaping TapRecoveryHandler = {}
     ) {
@@ -191,6 +194,7 @@ final class NativePushCoordinator {
         self.notificationCenter =
             notificationCenter ?? SystemPushNotificationCenter()
         self.tokenWaitSeconds = tokenWaitSeconds
+        self.now = now
         self.onTap = onTap
         self.onTapRecovery = onTapRecovery
         NotificationCenter.default.addObserver(
@@ -749,6 +753,9 @@ final class NativePushCoordinator {
     }
 
     private func completeRegistration(_ record: PushKeyRecord) throws {
+        let retirementDeadline = now().addingTimeInterval(
+            Self.retiringKeyTTL
+        )
         for replacementID in record.replacementRegistrationIDs {
             guard replacementID != record.kid,
                   var replacement = try keychain.loadRecord(kid: replacementID)
@@ -758,13 +765,26 @@ final class NativePushCoordinator {
             replacement.state = .retiring
             replacement.pendingRevoke = false
             replacement.replacementRegistrationIDs = []
+            replacement.retirementDeadline = retirementDeadline
             try keychain.saveRecord(replacement)
         }
         var active = record
         active.state = .active
         active.pendingRevoke = false
         active.replacementRegistrationIDs = []
+        active.retirementDeadline = nil
         try keychain.saveRecord(active)
+    }
+
+    private func deleteExpiredRetiringKeys() throws {
+        let currentTime = now()
+        for record in try keychain.listRecords() where
+            record.state == .retiring
+                && !record.pendingRevoke
+                && (record.retirementDeadline.map { $0 <= currentTime } ?? true)
+        {
+            try keychain.deleteRecord(kid: record.kid)
+        }
     }
 
     private func requestPermission() async throws {
@@ -1057,6 +1077,7 @@ final class NativePushCoordinator {
                 guard let installation = try? self.loadOrCreateInstallation() else {
                     return
                 }
+                try? self.deleteExpiredRetiringKeys()
                 try? await self.reconcileProvider()
                 try? await self.reconcilePersistedBulkRevoke(for: installation)
                 try? await self.reconcilePendingRevokes(for: installation)

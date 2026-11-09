@@ -117,6 +117,7 @@ struct PushKeyRecord: Codable, Equatable {
     var state: State
     var pendingRevoke: Bool
     var replacementRegistrationIDs: [String]
+    var retirementDeadline: Date? = nil
 
     var publicSubscription: [String: Any] {
         let privateKey = try? P256KeyAgreementPrivateKey(rawRepresentation: privateKey)

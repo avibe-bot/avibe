@@ -23,18 +23,22 @@ struct NativePushPayload: Decodable {
 struct PushNotificationProcessor {
     private let keychain: PushKeychainStoring
     private let generationStore: PushGenerationStoring
+    private let now: () -> Date
 
     init(
         keychain: PushKeychainStoring,
-        generationStore: PushGenerationStoring
+        generationStore: PushGenerationStoring,
+        now: @escaping () -> Date = Date.init
     ) {
         self.keychain = keychain
         self.generationStore = generationStore
+        self.now = now
     }
 
     func process(
         _ content: UNMutableNotificationContent
     ) -> UNMutableNotificationContent {
+        let currentTime = now()
         guard
             let envelope = content.userInfo["avibe"] as? [AnyHashable: Any],
             let kid = envelope["kid"] as? String,
@@ -42,7 +46,13 @@ struct PushNotificationProcessor {
             let ciphertextData = PushBase64URL.decode(ciphertext),
             let record = try? keychain.loadRecord(kid: kid),
             record.state == .active
-                || (record.state == .retiring && !record.pendingRevoke),
+                || (
+                    record.state == .retiring
+                        && !record.pendingRevoke
+                        && record.retirementDeadline.map {
+                            $0 > currentTime
+                        } == true
+                ),
             record.accountGeneration == generationStore.generation,
             let privateKey = try? P256KeyAgreementPrivateKey(
                 rawRepresentation: record.privateKey

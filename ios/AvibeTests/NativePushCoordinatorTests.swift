@@ -896,6 +896,104 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
     }
 
+    func testReplacementKeyRetiresForTheMaximumAcceptedPushTTL() async throws {
+        let currentTime = Date(timeIntervalSince1970: 1_794_096_000)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 15, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 1
+            ),
+            providerPatchPending: false
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "old-registration",
+                state: .active,
+                pendingRevoke: false,
+                bindGeneration: 1
+            )
+        )
+        let coordinator = makeCoordinator(
+            store: store,
+            management: ManagementRecorder(),
+            now: { currentTime }
+        )
+
+        _ = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+
+        let retired = try XCTUnwrap(
+            try store.loadRecord(kid: "old-registration")
+        )
+        XCTAssertEqual(retired.state, .retiring)
+        XCTAssertFalse(retired.pendingRevoke)
+        XCTAssertEqual(
+            retired.retirementDeadline,
+            currentTime.addingTimeInterval(86_400)
+        )
+    }
+
+    func testRecoveryDeletesOnlyExpiredConfirmedRetiringKeys() async throws {
+        let currentTime = Date(timeIntervalSince1970: 1_794_096_000)
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "expired",
+                state: .retiring,
+                pendingRevoke: false,
+                bindGeneration: 1,
+                retirementDeadline: currentTime.addingTimeInterval(-1)
+            )
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "unexpired",
+                state: .retiring,
+                pendingRevoke: false,
+                bindGeneration: 1,
+                retirementDeadline: currentTime.addingTimeInterval(1)
+            )
+        )
+        try store.saveRecord(
+            makeRecord(
+                kid: "pending-revoke",
+                state: .retiring,
+                pendingRevoke: true,
+                bindGeneration: 1,
+                retirementDeadline: currentTime.addingTimeInterval(-1)
+            )
+        )
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { request in
+            XCTAssertEqual(request.method, "DELETE")
+            return PushManagementResponse(
+                statusCode: 503,
+                body: ["error": ["code": "relay_unavailable"]]
+            )
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder,
+            now: { currentTime }
+        )
+
+        coordinator.resumeAfterAccountActivation()
+        try await recorder.waitForRequestCount(1)
+
+        XCTAssertNil(try store.loadRecord(kid: "expired"))
+        XCTAssertNotNil(try store.loadRecord(kid: "unexpired"))
+        XCTAssertNotNil(try store.loadRecord(kid: "pending-revoke"))
+    }
+
     func testUnsubscribeScopesTheRecordToAccountAndInstanceOrigin() async throws {
         let store = makeInstallationStore(
             providerGeneration: 1,
@@ -1133,6 +1231,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         notificationAuthorizationStatus: @escaping @MainActor () async
             -> UNAuthorizationStatus = { .authorized },
         registerForRemoteNotifications: @escaping @MainActor () -> Void = {},
+        now: @escaping () -> Date = Date.init,
         onTap: @escaping @MainActor (PushNotificationTap) -> Void = { _ in },
         onTapRecovery: @escaping @MainActor () -> Void = {}
     ) -> NativePushCoordinator {
@@ -1159,6 +1258,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             notificationCenter: notificationCenter
                 ?? FakePushNotificationCenter(),
             tokenWaitSeconds: tokenWaitSeconds,
+            now: now,
             onTap: onTap,
             onTapRecovery: onTapRecovery
         )
@@ -1187,7 +1287,8 @@ final class NativePushCoordinatorTests: XCTestCase {
         kid: String,
         state: PushKeyRecord.State,
         pendingRevoke: Bool,
-        bindGeneration: Int64
+        bindGeneration: Int64,
+        retirementDeadline: Date? = nil
     ) -> PushKeyRecord {
         PushKeyRecord(
             kid: kid,
@@ -1200,7 +1301,8 @@ final class NativePushCoordinatorTests: XCTestCase {
             vapidKeyHash: String(repeating: "a", count: 64),
             state: state,
             pendingRevoke: pendingRevoke,
-            replacementRegistrationIDs: []
+            replacementRegistrationIDs: [],
+            retirementDeadline: retirementDeadline
         )
     }
 
