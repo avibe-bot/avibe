@@ -568,7 +568,7 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
         'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
         selected
           ? 'border-mint/40 bg-mint-soft'
-          : 'border-edge bg-surface hover:bg-surface-2 shadow-elevation-0',
+          : 'border-edge bg-surface hover:bg-surface-wash shadow-elevation-0',
         inherited && 'opacity-[0.66]',
       )}
     >
@@ -599,7 +599,7 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
           <LoginLink
             name={server.name}
             project={projectId}
-            className="inline-flex h-6 items-center rounded-md border border-edge bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2 shadow-elevation-0"
+            className="inline-flex h-6 items-center rounded-md border border-edge bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-wash shadow-elevation-0"
             onActivate={onActivateLogin}
           >
             {t('mcpHub.login')}

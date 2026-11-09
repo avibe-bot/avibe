@@ -780,7 +780,7 @@ export const EditorApp: React.FC<{
                       key={tab.id}
                       className={clsx(
                         'group/tab flex shrink-0 items-center gap-2 border-r border-border px-3 py-2 text-[12px] transition',
-                        active === tab.id ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
+                        active === tab.id ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-wash',
                       )}
                     >
                       <button
@@ -935,7 +935,7 @@ const Welcome: React.FC<{
         <div className="font-mono text-[11px] font-bold uppercase tracking-[0.1em] text-muted">{t('apps.editor.start')}</div>
         <div className="flex flex-col gap-1.5">
           {actions.map((a) => (
-            <button key={a.label} type="button" onClick={a.onClick} className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition hover:bg-foreground/[0.06]">
+            <button key={a.label} type="button" onClick={a.onClick} className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition hover:bg-wash">
               <a.Icon className={clsx('size-4', a.color)} />
               <span className="text-[13.5px] font-semibold text-foreground">{a.label}</span>
               <span className="flex-1" />
@@ -967,7 +967,7 @@ const Welcome: React.FC<{
 // One row in the welcome "Recent" list: an icon, the folder/file name, and its containing directory
 // (dimmed, truncated) so same-named entries in different places stay distinguishable.
 const RecentRow: React.FC<{ Icon: typeof FolderOpen; iconColor: string; name: string; dir: string; onClick: () => void }> = ({ Icon, iconColor, name, dir, onClick }) => (
-  <button type="button" onClick={onClick} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-left transition hover:bg-foreground/[0.06]">
+  <button type="button" onClick={onClick} className="flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-left transition hover:bg-wash">
     <Icon className={clsx('size-4 shrink-0', iconColor)} />
     <span className="max-w-[55%] shrink-0 truncate text-[13px] font-medium text-foreground">{name}</span>
     <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{dir}</span>

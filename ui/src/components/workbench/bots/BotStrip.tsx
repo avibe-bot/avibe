@@ -522,7 +522,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
               setMenuOpen(false);
               openProfile({ kind: 'edit', handle: bot.handle });
             }}
-            className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-foreground transition hover:bg-foreground/[0.05]"
+            className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-foreground transition hover:bg-wash"
           >
             <Pencil className="size-4 text-muted" />
             {t('bots.menu.editProfile')}

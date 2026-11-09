@@ -342,7 +342,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                 type="button"
                 aria-label={t('common.close')}
                 onClick={() => setSheet(null)}
-                className="absolute right-0 top-0 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+                className="absolute right-0 top-0 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-wash hover:text-foreground"
               >
                 <X className="size-4" />
               </button>

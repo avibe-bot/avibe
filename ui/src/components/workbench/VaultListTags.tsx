@@ -26,7 +26,7 @@ export function VaultFilterTag({ tag, active, onToggle, removable = false }: {
       onClick={() => onToggle(tag)}
       className={cn(
         badgeVariants({ variant: 'outline' }),
-        'min-w-0 max-w-full gap-1 transition-colors hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring',
+        'min-w-0 max-w-full gap-1 transition-colors hover:bg-wash focus-visible:ring-2 focus-visible:ring-ring',
         isSkillTag(tag) ? 'border-violet/40 bg-violet-soft text-violet-ink' : 'text-muted',
         active && 'border-accent bg-accent/10 text-accent-ink',
       )}
@@ -96,7 +96,7 @@ export function VaultTagDropdown({ secrets, selected, onToggle, onClear }: {
                     aria-checked={selected.includes(tag)}
                     aria-label={t('vaults.filter.entry', { name: skillName(tag), count })}
                     onClick={() => onToggle(tag)}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <Checkbox checked={selected.includes(tag)} presentational />
                     {isSkillTag(tag) ? <Puzzle className="size-3.5 shrink-0 text-violet-ink" /> : <Tag className="size-3.5 shrink-0 text-muted" />}
@@ -153,7 +153,7 @@ export function VaultRowTags({ secret, selected, onToggle }: {
             <button
               ref={trigger}
               type="button"
-              className={cn(badgeVariants({ variant: 'outline' }), 'text-muted hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring')}
+              className={cn(badgeVariants({ variant: 'outline' }), 'text-muted hover:bg-wash focus-visible:ring-2 focus-visible:ring-ring')}
               aria-label={t('vaults.filter.moreTags', { count: rest.length })}
               onMouseEnter={() => { cancelClose(); setOpen(true); }}
               onMouseLeave={closeAfterPointerLeaves}

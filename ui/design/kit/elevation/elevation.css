@@ -1,20 +1,3 @@
-/* The approved elevation and edge system (ui/design: system/elevation/*; owner, 2026-11-08), the
- * part not shipped yet: the Light hover wash (other fix #1). Levels, edges, fields, floating
- * surfaces, the composer, state, and glows have shipped. Each rule here stands in for a class
- * change in one component, gated on `:root:has([data-elevation-proposal])`, so it applies only
- * inside <ElevationProposal>; it leaves this file when its part ships. */
-
-@layer elevation-proposal.hover;
-
-@layer elevation-proposal.hover {
-/* Other fix #1 (docs/plans/elevation-system.md), previewed here: `hover:bg-surface-2` paints white on
-   white in Light, where --surface, --surface-2, --card and --popover are all #fff, so a ghost button
-   on a dialog or a list row on a card shows no hover. The proposal washes the foreground over
-   whatever the element rests on: 4% under the pointer, 6% pressed, the pair most of the tree uses. */
-:root:has([data-elevation-proposal]) :is([class~='hover:bg-surface-2'], [class~='hover:bg-surface-1']):hover {
-  background-image: linear-gradient(color-mix(in srgb, var(--foreground) 4%, transparent), color-mix(in srgb, var(--foreground) 4%, transparent));
-}
-:root:has([data-elevation-proposal]) [class~='active:bg-surface-2']:active {
-  background-image: linear-gradient(color-mix(in srgb, var(--foreground) 6%, transparent), color-mix(in srgb, var(--foreground) 6%, transparent));
-}
-}
+/* The approved elevation and edge system (ui/design: system/elevation/*; owner, 2026-11-08) has
+ * shipped: levels, edges, fields, floating surfaces, the composer, state, glows, and the hover wash.
+ * No proposal rule is left; this file and <ElevationProposal> go with the review frames. */

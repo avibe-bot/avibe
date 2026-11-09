@@ -56,7 +56,7 @@ export const buttonVariants = cva(
         // Cyan outline — for "Read Vibe Remote" / docs style CTAs.
         'outline-cyan':
           'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10] active:bg-cyan/[0.10]',
-        ghost: 'gap-1.5 text-foreground hover:bg-surface-2 active:bg-surface-2',
+        ghost: 'gap-1.5 text-foreground hover:bg-wash active:bg-wash-press',
         // Hover swaps the fill rather than fading it: opacity blends the fill toward
         // the page surface, which pulls the white label *down* toward AA (4.70:1 ->
         // ~4.25:1 in light). A fixed brightness-95 was no better — it only deepened,

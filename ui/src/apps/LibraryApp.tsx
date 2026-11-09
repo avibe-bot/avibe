@@ -243,7 +243,7 @@ const AppLibraryRow: React.FC<AppLibraryRowProps> = ({ item, leading, last, onOp
         }
       }}
       className={clsx(
-        'flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-foreground/[0.02] sm:gap-4 sm:px-5',
+        'flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-wash sm:gap-4 sm:px-5',
         !last && 'border-b border-border',
       )}
     >

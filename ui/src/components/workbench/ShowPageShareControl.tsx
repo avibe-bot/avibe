@@ -197,7 +197,7 @@ export const ShowPageShareControl: React.FC<{
           variant="ghost"
           size="icon"
           className={compact
-            ? 'size-6 shrink-0 rounded-md text-muted hover:bg-foreground/[0.06] hover:text-foreground'
+            ? 'size-6 shrink-0 rounded-md text-muted hover:bg-wash hover:text-foreground'
             : 'size-7 shrink-0'}
           aria-label={t('chat.showPage.share')}
         >

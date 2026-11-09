@@ -296,7 +296,7 @@ const AgentModelCard: React.FC<{
                   type="button"
                   aria-pressed="false"
                   disabled={pending}
-                  className="model-hub-mode-menu-item mt-0.5 flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
+                  className="model-hub-mode-menu-item mt-0.5 flex w-full items-start gap-2.5 rounded-[7px] px-2.5 py-2.5 text-left hover:bg-wash disabled:opacity-50"
                   onClick={() => {
                     setModeMenuOpen(false);
                     onSwitchDirect(agent);

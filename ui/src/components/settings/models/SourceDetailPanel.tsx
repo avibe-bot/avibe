@@ -118,7 +118,7 @@ const SourceManageMenu: React.FC<{
       onOpenChange={setOpen}
       sheetTitle={source.display_name}
       className="w-44"
-      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-surface-2 hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
+      trigger={<button type="button" disabled={busy} aria-label={label} title={label} className="model-hub-source-more grid place-items-center text-muted hover:bg-wash hover:text-foreground"><MoreHorizontal className="size-4" /></button>}
     >
       {manageActions().map((kind) => (
         <button
@@ -128,7 +128,7 @@ const SourceManageMenu: React.FC<{
           data-manage-kind={kind}
           data-manage-destination={MANAGE_DESTINATION[kind]}
           className={cn(
-            'flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold hover:bg-surface-2',
+            'flex w-full items-center rounded-md px-2.5 py-2 text-left text-[12px] font-semibold hover:bg-wash',
             kind === 'delete_source' && 'text-destructive-ink hover:bg-destructive/[0.08]',
           )}
           onClick={() => activate(kind)}

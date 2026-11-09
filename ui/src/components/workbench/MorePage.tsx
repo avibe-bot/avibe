@@ -67,7 +67,7 @@ export const MoreAccountSection: React.FC = () => {
         className={clsx(
           'flex w-full items-center gap-2 border-t border-border px-4 py-3 text-left text-sm font-medium transition disabled:opacity-60',
           nativeAccount
-            ? 'text-foreground hover:bg-surface-2'
+            ? 'text-foreground hover:bg-wash'
             : 'text-destructive-ink hover:bg-destructive/[0.06]',
         )}
       >

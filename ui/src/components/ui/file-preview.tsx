@@ -581,7 +581,7 @@ const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
               onClick={() => setActive(i)}
               className={clsx(
                 'shrink-0 rounded px-2 py-0.5 text-[11.5px] transition',
-                i === active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.06] hover:text-foreground',
+                i === active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-wash hover:text-foreground',
               )}
             >
               {s.name}

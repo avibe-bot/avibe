@@ -141,7 +141,7 @@ function ShowPageRow({
             ]
               .filter(Boolean)
               .join(' · ')}
-            className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
+            className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-wash"
           >
             <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconVersion={page.icon_version} />
             <span className="min-w-0">
@@ -195,7 +195,7 @@ function ShowPageRow({
             aria-label={t('showPages.details')}
             aria-expanded={expanded}
             onClick={() => onToggleExpand()}
-            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-wash hover:text-foreground"
           >
             {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} />}
           </button>
@@ -395,7 +395,7 @@ const InlineTitleRename: React.FC<{
             disabled={disabled || saving}
             title={t('showPages.rename')}
             aria-label={t('showPages.rename')}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
+            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-wash hover:text-foreground disabled:opacity-50"
           >
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Pencil className="size-3.5" />}
           </button>

@@ -50,7 +50,7 @@ export const SearchResultRow: React.FC<SearchResultRowProps> = ({ match, selecte
         'press-surface h-auto w-full justify-start gap-2.5 px-2.5 py-2 text-left font-normal',
         selected
           ? 'bg-mint-soft ring-1 ring-inset ring-mint/40 hover:bg-mint-soft active:bg-mint-soft'
-          : 'hover:bg-foreground/[0.04] active:bg-foreground/[0.04]',
+          : 'hover:bg-wash active:bg-wash-press',
       )}
     >
       <span

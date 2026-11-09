@@ -484,7 +484,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           disabled={disabled}
           className={clsx(
             compact
-              ? 'inline-flex h-9 min-w-0 items-center justify-start gap-1.5 rounded-lg border-transparent bg-transparent px-2 text-[12px] font-normal shadow-none hover:bg-foreground/[0.05]'
+              ? 'inline-flex h-9 min-w-0 items-center justify-start gap-1.5 rounded-lg border-transparent bg-transparent px-2 text-[12px] font-normal shadow-none hover:bg-wash'
               : 'inline-flex h-auto items-center justify-start gap-1.5 rounded-lg border-cyan/40 bg-surface-2 px-2.5 py-1.5 text-[12px] font-normal hover:bg-cyan/[0.06]',
             triggerClassName ?? (compact ? undefined : 'max-w-[62%]'),
           )}
@@ -592,7 +592,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           <button
             type="button"
             onClick={() => setAgentPage(false)}
-            className="flex w-full items-center gap-1 rounded px-1.5 py-1.5 text-left text-[12px] font-semibold text-foreground hover:bg-foreground/[0.04]"
+            className="flex w-full items-center gap-1 rounded px-1.5 py-1.5 text-left text-[12px] font-semibold text-foreground hover:bg-wash"
           >
             <ChevronLeft className="size-3.5 text-muted" />
             {t('chat.picker.agent')}
@@ -661,7 +661,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           <button
             type="button"
             onClick={() => setAgentPage(true)}
-            className="flex items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-foreground/[0.03]"
+            className="flex items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-wash"
           >
             {agentRowContent}
           </button>
@@ -964,7 +964,7 @@ const RouteItem: React.FC<{
     onClick={onClick}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal',
-      active ? 'bg-cyan/[0.10] text-cyan-ink hover:bg-cyan/[0.10] hover:text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
+      active ? 'bg-cyan/[0.10] text-cyan-ink hover:bg-cyan/[0.10] hover:text-cyan-ink' : 'text-foreground hover:bg-wash',
     )}
   >
     {children}

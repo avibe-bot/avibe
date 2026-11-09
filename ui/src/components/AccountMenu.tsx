@@ -84,7 +84,7 @@ export const AccountMenu: React.FC<{ openUpward?: boolean }> = ({ openUpward = f
             onClick={() => void handleAccountAction()}
             disabled={signingOut}
             className={clsx(
-              'flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60',
+              'flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-wash hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60',
               nativeAccount ? 'text-foreground' : 'text-muted',
             )}
           >

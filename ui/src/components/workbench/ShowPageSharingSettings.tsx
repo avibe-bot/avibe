@@ -116,7 +116,7 @@ function AccessModeSelect({
               }}
               className={clsx(
                 'flex w-full items-start gap-2.5 rounded-sm px-2.5 py-2 text-left transition-colors',
-                selected ? 'bg-mint/[0.1]' : 'hover:bg-foreground/[0.05]',
+                selected ? 'bg-mint/[0.1]' : 'hover:bg-wash',
               )}
             >
               <Icon
@@ -335,7 +335,7 @@ function AudienceCombobox({
                 onClick={() => commit(option)}
                 className={clsx(
                   'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs transition-colors',
-                  index === activeIndex ? 'bg-mint/[0.1]' : 'hover:bg-foreground/[0.05]',
+                  index === activeIndex ? 'bg-mint/[0.1]' : 'hover:bg-wash',
                 )}
               >
                 <OptionIcon className="size-3.5 shrink-0 text-muted" />

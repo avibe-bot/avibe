@@ -204,6 +204,16 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
+  /* The one hover and press wash (other fixes #1 and #3, docs/plans/elevation-system.md;
+     ui/design: system/elevation/hover-*): the foreground at 4% under the pointer and 6%
+     pressed, over whatever the element rests on. Light's surfaces are all white, so a hover
+     that swaps one surface for another shows nothing there; a wash shows in both themes. An
+     element that rests on `bg-surface` takes `surface-wash`, the same wash mixed into its
+     own fill, so it stays opaque. */
+  --color-wash: color-mix(in srgb, var(--foreground) 4%, transparent);
+  --color-wash-press: color-mix(in srgb, var(--foreground) 6%, transparent);
+  --color-surface-wash: color-mix(in srgb, var(--foreground) 4%, var(--surface));
+  --color-surface-wash-press: color-mix(in srgb, var(--foreground) 6%, var(--surface));
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);

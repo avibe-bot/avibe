@@ -316,7 +316,7 @@ const ActivityToolRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         title={open ? t('chat.agentActivity.hideCall') : t('chat.agentActivity.showCall')}
-        className="group/act flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-foreground/[0.04]"
+        className="group/act flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-wash"
       >
         <Icon className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
         <span className="shrink-0 font-mono text-[11px] font-medium text-foreground">{parsed.name || '—'}</span>

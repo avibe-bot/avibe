@@ -183,7 +183,7 @@ const ResultRow: React.FC<{
       onMouseDown={select}
       className={clsx(
         'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-        active ? 'bg-foreground/[0.06]' : 'hover:bg-foreground/[0.04]',
+        active ? 'bg-foreground/[0.06]' : 'hover:bg-wash',
         // Trigger rows get a violet left accent so they read distinctly from
         // session rows (spec: "行样式区分").
         result.kind === 'trigger' && 'border-l-2 border-violet/70 pl-1.5',

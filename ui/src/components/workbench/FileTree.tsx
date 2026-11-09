@@ -95,7 +95,7 @@ const Row: React.FC<{
     style={{ paddingLeft: 8 + depth * 14 }}
     className={clsx(
       'flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[12.5px] transition',
-      active ? 'bg-cyan-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.05]',
+      active ? 'bg-cyan-soft text-foreground' : 'text-foreground hover:bg-wash',
     )}
   >
     {children}

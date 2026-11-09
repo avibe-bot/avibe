@@ -406,7 +406,7 @@ const FileGroup: React.FC<{
       <button
         type="button"
         onClick={onToggle}
-        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-left transition hover:bg-foreground/[0.05]"
+        className="flex items-center gap-1.5 rounded px-1.5 py-1 text-left transition hover:bg-wash"
       >
         {collapsed ? <ChevronRight className="size-3 shrink-0 text-muted" /> : <ChevronDown className="size-3 shrink-0 text-muted" />}
         <CodeXml className="size-3.5 shrink-0 text-cyan-ink" />

@@ -213,7 +213,7 @@ export const FilePicker: React.FC<{
                 <button
                   type="button"
                   onClick={() => navigate(c.path)}
-                  className="max-w-[150px] truncate rounded px-1.5 py-0.5 text-[12px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+                  className="max-w-[150px] truncate rounded px-1.5 py-0.5 text-[12px] text-muted transition hover:bg-wash hover:text-foreground"
                 >
                   {c.label}
                 </button>
@@ -295,7 +295,7 @@ export const FilePicker: React.FC<{
                   onClick={() => isDir && navigate(joinPath(cwd, e.name))}
                   className={clsx(
                     'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition',
-                    isDir ? 'text-foreground hover:bg-foreground/[0.06]' : 'cursor-default text-muted/60',
+                    isDir ? 'text-foreground hover:bg-wash' : 'cursor-default text-muted/60',
                   )}
                 >
                   {isDir ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
@@ -346,7 +346,7 @@ const RailRow: React.FC<{ label: string; active: boolean; onClick: () => void }>
     onClick={onClick}
     className={clsx(
       'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition',
-      active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+      active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-wash hover:text-foreground',
     )}
   >
     <Folder className="size-3.5 shrink-0 text-muted" />
