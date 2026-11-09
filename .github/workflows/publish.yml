@@ -15,7 +15,27 @@ permissions:
   contents: read
 
 jobs:
+  release-backstop:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The ref only selects the workflow code. The script resolves the
+          # dispatch/tag input through the API and never trusts a workflow
+          # context SHA as the release source.
+          ref: ${{ github.ref }}
+      - name: Require exact full master backstop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+
   resolve-tag:
+    needs: release-backstop
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -75,7 +95,7 @@ jobs:
           echo "workflow_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
   resolve-show-runtime-ref:
-    runs-on: ubuntu-latest
+    needs: release-backstop
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
     steps:
@@ -93,7 +113,7 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   show-runtime-bundles:
-    needs: resolve-show-runtime-ref
+    needs: [release-backstop, resolve-show-runtime-ref]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -160,6 +180,7 @@ jobs:
 
   build:
     needs:
+      - release-backstop
       - resolve-tag
       - show-runtime-bundles
     runs-on: ubuntu-latest
@@ -457,6 +478,7 @@ jobs:
 
   publish-avibe-os:
     needs:
+      - release-backstop
       - build
       - finalize-github-release
     runs-on: ubuntu-latest
@@ -486,6 +508,7 @@ jobs:
 
   publish-vibe-remote:
     needs:
+      - release-backstop
       - resolve-tag
       - build
       - finalize-github-release
@@ -520,6 +543,7 @@ jobs:
 
   finalize-github-release:
     needs:
+      - release-backstop
       - resolve-tag
       - build
     # Latest is repository-wide: serialize its read/decide/edit across tags

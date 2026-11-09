@@ -27,7 +27,27 @@ permissions:
   pull-requests: read
 
 jobs:
+  release-backstop:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The ref only selects the workflow code. The script resolves the
+          # dispatch/tag input through the API and never trusts a workflow
+          # context SHA as the release source.
+          ref: ${{ github.ref }}
+      - name: Require exact full master backstop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+
   resolve-desktop-release:
+    needs: release-backstop
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.resolve.outputs.enabled }}
@@ -68,7 +88,7 @@ jobs:
           fi
 
   desktop-packages:
-    needs: resolve-desktop-release
+    needs: [release-backstop, resolve-desktop-release]
     if: needs.resolve-desktop-release.outputs.enabled == 'true'
     uses: ./.github/workflows/desktop-package.yml
     with:
@@ -83,7 +103,7 @@ jobs:
     secrets: inherit
 
   certum-windows-sign:
-    needs: [resolve-desktop-release, desktop-packages]
+    needs: [release-backstop, resolve-desktop-release, desktop-packages]
     if: >-
       ${{ !cancelled() && needs.resolve-desktop-release.outputs.enabled == 'true' &&
           startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') }}
@@ -205,7 +225,7 @@ jobs:
           retention-days: 14
 
   windows-updater-finalize:
-    needs: [resolve-desktop-release, certum-windows-sign]
+    needs: [release-backstop, resolve-desktop-release, certum-windows-sign]
     if: >-
       ${{ !cancelled() && needs.certum-windows-sign.result == 'success' &&
           needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
@@ -262,7 +282,7 @@ jobs:
           retention-days: 14
 
   resolve-show-runtime-ref:
-    needs: resolve-desktop-release
+    needs: [release-backstop, resolve-desktop-release]
     if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ubuntu-latest
     outputs:
@@ -282,7 +302,7 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   show-runtime-bundles:
-    needs: resolve-show-runtime-ref
+    needs: [release-backstop, resolve-show-runtime-ref]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -346,6 +366,7 @@ jobs:
 
   build-assets:
     needs:
+      - release-backstop
       - resolve-desktop-release
       - show-runtime-bundles
     runs-on: ubuntu-latest
@@ -476,7 +497,7 @@ jobs:
           path: dist/
 
   release:
-    needs: [build-assets, resolve-desktop-release, desktop-packages, certum-windows-sign, windows-updater-finalize]
+    needs: [release-backstop, build-assets, resolve-desktop-release, desktop-packages, certum-windows-sign, windows-updater-finalize]
     concurrency:
       group: avibe-gh-release-${{ github.event.inputs.tag || github.ref_name }}
       cancel-in-progress: false
