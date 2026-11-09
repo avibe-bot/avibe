@@ -276,6 +276,14 @@ load and later authenticated foreground sessions. It POSTs an `on`
 subscription to the existing `POST /api/web-push/subscriptions`; for `off` it
 uses the same Web-owned enable/reconcile path to call `push.subscribe` and then
 POSTs the result. Native does not initiate a Web call or POST to an instance.
+After an explicit native disable, the Web UI persists an opt-out marker in the
+current instance origin and account website-data store before destructive
+remote work. Automatic reconciliation, including `on` re-POST and pending
+registration replay, must observe that marker and perform no native or
+instance subscription write. Endpoint history remains cleanup evidence and
+does not grant opt-in authority. Only a later explicit enable clears the
+marker. The control reports the local opt-out separately from unconfirmed
+remote cleanup.
 Inside the native app the Web UI does not use `PushManager`; browser and
 installed-PWA behavior remains unchanged.
 
@@ -1013,6 +1021,11 @@ deletes its private/auth key, and attempts the single-ID relay revoke. Web also
 deletes the endpoint from the instance. An offline relay failure leaves a
 pending revoke for that ID and returns `revoked: false`; later subscriptions
 use fresh IDs, so retry cannot select them.
+The Web UI records its durable opt-out before these destructive calls. A
+`revoked: false` result is shown as cleanup pending, while a bridge transport
+failure is shown as an unconfirmed cleanup failure; neither result permits
+automatic re-subscription. A later explicit enable clears the opt-out and
+re-enters the existing registration flow.
 
 ### 9.6 Logout and account switch
 

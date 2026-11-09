@@ -5,10 +5,12 @@ import {
   nativePushStatus,
   nativePushSubscribe,
   nativePushUnsubscribe,
+  nativePushUnsubscribeOutcome,
 } from './native';
 
 const WEB_PUSH_DEVICE_ID_KEY = 'vibe.webPush.deviceId';
 const WEB_PUSH_ENDPOINTS_KEY = 'vibe.webPush.endpoints';
+const NATIVE_PUSH_DISABLED_INTENT_KEY = 'vibe.nativePush.disabledIntent';
 const WEB_PUSH_ENDPOINT_CACHE = 'avibe.web-push-endpoint.v1';
 const WEB_PUSH_ENDPOINT_ENTRY_PATH = '/__avibe/web-push-endpoint';
 const WEB_PUSH_DEVICE_ENTRY_PATH = '/__avibe/web-push-device-id';
@@ -157,6 +159,8 @@ export type WebPushReconcileStatus =
   | 'unsupported'
   | 'needs_install'
   | 'disabled'
+  | 'disable_pending'
+  | 'disable_failed'
   | 'enabled';
 
 export type WebPushReconcileResult = {
@@ -168,6 +172,7 @@ export type EnableWebPushOptions = {
   forceResubscribe?: boolean;
   recoverOnly?: boolean;
   pendingRegistrationStore?: NativePushPendingRegistrationStore;
+  disabledIntentStore?: NativePushDisabledIntentStore;
 };
 
 export type NativePushPendingRegistration = {
@@ -181,6 +186,59 @@ export interface NativePushPendingRegistrationStore {
   read(): NativePushPendingRegistration | null;
   write(registration: NativePushPendingRegistration): void;
   clear(): void;
+}
+
+/**
+ * This lives in localStorage because the native shell gives each account its
+ * own WKWebsiteDataStore, while localStorage is already scoped to that store
+ * and the current instance origin.
+ */
+export interface NativePushDisabledIntentStore {
+  isDisabled(): boolean;
+  cleanupStatus(): 'pending' | 'failed' | 'confirmed' | null;
+  disable(): void;
+  setCleanupStatus(status: 'pending' | 'failed' | 'confirmed'): void;
+  clear(): void;
+}
+
+export function createNativePushDisabledIntentStore(
+  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>,
+): NativePushDisabledIntentStore {
+  const read = (): 'pending' | 'failed' | 'confirmed' | null => {
+    const raw = storage.getItem(NATIVE_PUSH_DISABLED_INTENT_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as { cleanup?: unknown };
+      return parsed.cleanup === 'pending'
+        || parsed.cleanup === 'failed'
+        || parsed.cleanup === 'confirmed'
+        ? parsed.cleanup
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const write = (cleanup: 'pending' | 'failed' | 'confirmed') => {
+    storage.setItem(
+      NATIVE_PUSH_DISABLED_INTENT_KEY,
+      JSON.stringify({ cleanup }),
+    );
+    if (read() !== cleanup) {
+      throw new Error('native_push_disable_persistence_failed');
+    }
+  };
+  return {
+    isDisabled: () => read() !== null,
+    cleanupStatus: read,
+    disable: () => write('pending'),
+    setCleanupStatus: write,
+    clear: () => {
+      storage.removeItem(NATIVE_PUSH_DISABLED_INTENT_KEY);
+      if (storage.getItem(NATIVE_PUSH_DISABLED_INTENT_KEY) !== null) {
+        throw new Error('native_push_enable_persistence_failed');
+      }
+    },
+  };
 }
 
 const browserNativePushPendingRegistrationStore: NativePushPendingRegistrationStore = {
@@ -223,12 +281,20 @@ const browserNativePushPendingRegistrationStore: NativePushPendingRegistrationSt
   },
 };
 
+function getBrowserNativePushDisabledIntentStore(): NativePushDisabledIntentStore {
+  return createNativePushDisabledIntentStore(window.localStorage);
+}
+
 async function postNativePushRegistration(
   api: ApiContextType,
   registration: NativePushPendingRegistration,
   store: NativePushPendingRegistrationStore,
   recoverOnly?: boolean,
+  disabledIntentStore?: NativePushDisabledIntentStore,
 ): Promise<void> {
+  if (disabledIntentStore?.isDisabled()) {
+    throw new Error('native_push_disabled');
+  }
   store.write(registration);
   const result = await api.subscribeWebPush(
     {
@@ -248,6 +314,9 @@ async function postNativePushRegistration(
     }
     throw new Error('native_push_registration_not_accepted');
   }
+  if (disabledIntentStore?.isDisabled()) {
+    throw new Error('native_push_disabled');
+  }
   store.clear();
   await rememberWebPushEndpoint(registration.endpoint);
 }
@@ -257,11 +326,20 @@ async function enableNativeWebPush(
   publicKey: string,
   existing: Awaited<ReturnType<typeof nativePushStatus>>,
   options: EnableWebPushOptions,
+  respectDisabledIntent: boolean,
 ): Promise<PushSubscriptionJSON> {
+  const disabledIntentStore =
+    options.disabledIntentStore ?? getBrowserNativePushDisabledIntentStore();
+  if (respectDisabledIntent && disabledIntentStore.isDisabled()) {
+    throw new Error('native_push_disabled');
+  }
   const subscription = existing?.state === 'on' && !options.forceResubscribe
     ? existing
     : await nativePushSubscribe(publicKey);
   if (!subscription) throw new Error('native_push_unavailable');
+  if (respectDisabledIntent && disabledIntentStore.isDisabled()) {
+    throw new Error('native_push_disabled');
+  }
   const json: PushSubscriptionJSON = {
     endpoint: subscription.endpoint,
     keys: subscription.keys,
@@ -280,18 +358,27 @@ async function enableNativeWebPush(
     },
     options.pendingRegistrationStore ?? browserNativePushPendingRegistrationStore,
     options.recoverOnly,
+    respectDisabledIntent ? disabledIntentStore : undefined,
   );
   return json;
 }
 
-export async function enableWebPush(
+async function enableWebPushOnce(
   api: ApiContextType,
   options: EnableWebPushOptions = {},
+  explicitEnable = false,
 ): Promise<PushSubscriptionJSON> {
   if (hasNativeCapability('push')) {
+    const disabledIntentStore =
+      options.disabledIntentStore ?? getBrowserNativePushDisabledIntentStore();
+    if (explicitEnable) {
+      disabledIntentStore.clear();
+    } else if (disabledIntentStore.isDisabled()) {
+      throw new Error('native_push_disabled');
+    }
     const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
     const existing = await nativePushStatus(publicKey);
-    return enableNativeWebPush(api, publicKey, existing, options);
+    return enableNativeWebPush(api, publicKey, existing, options, !explicitEnable);
   }
   const support = getWebPushSupportState();
   if (!support.supported) {
@@ -345,27 +432,145 @@ export async function enableWebPush(
   return json;
 }
 
-export async function disableWebPush(api: ApiContextType): Promise<boolean> {
-  if (hasNativeCapability('push')) {
-    const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
-    const status = await nativePushStatus(publicKey);
-    if (status?.state !== 'on') return false;
-    await api.unsubscribeWebPush(status.endpoint);
-    const revoked = await nativePushUnsubscribe();
-    if (revoked) {
-      await rememberWebPushEndpoint(status.endpoint);
-    }
+let webPushLifecycleOperation: Promise<unknown> = Promise.resolve();
+
+function enqueueWebPushLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const next = webPushLifecycleOperation.then(operation, operation);
+  webPushLifecycleOperation = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+export async function enableWebPush(
+  api: ApiContextType,
+  options: EnableWebPushOptions = {},
+): Promise<PushSubscriptionJSON> {
+  return enqueueWebPushLifecycleOperation(
+    () => enableWebPushOnce(api, options, true),
+  );
+}
+
+export type WebPushDisableResult = {
+  accepted: true;
+  status: 'disabled' | 'pending' | 'failed';
+  remoteRevoked: boolean;
+  nativeRevoked: 'confirmed' | 'pending' | 'failed' | 'not_needed';
+};
+
+function persistNativePushCleanupStatus(
+  store: NativePushDisabledIntentStore,
+  status: 'pending' | 'failed' | 'confirmed',
+): boolean {
+  try {
+    store.setCleanupStatus(status);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function disableWebPushOnce(
+  api: ApiContextType,
+  disabledIntentStore?: NativePushDisabledIntentStore,
+): Promise<WebPushDisableResult> {
+  if (hasNativeCapability('push')) {
+    const intentStore = disabledIntentStore ?? getBrowserNativePushDisabledIntentStore();
+    intentStore.disable();
+    let status: Awaited<ReturnType<typeof nativePushStatus>>;
+    try {
+      const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
+      status = await nativePushStatus(publicKey);
+    } catch {
+      persistNativePushCleanupStatus(intentStore, 'failed');
+      return {
+        accepted: true,
+        status: 'failed',
+        remoteRevoked: false,
+        nativeRevoked: 'failed',
+      };
+    }
+    if (!status) {
+      persistNativePushCleanupStatus(intentStore, 'failed');
+      return {
+        accepted: true,
+        status: 'failed',
+        remoteRevoked: false,
+        nativeRevoked: 'failed',
+      };
+    }
+    if (status.state !== 'on') {
+      return {
+        accepted: true,
+        status: 'pending',
+        remoteRevoked: false,
+        nativeRevoked: 'not_needed',
+      };
+    }
+    await rememberWebPushEndpoint(status.endpoint);
+    let remoteRevoked: boolean;
+    try {
+      const result = await api.unsubscribeWebPush(status.endpoint);
+      remoteRevoked = result.disabled === true;
+    } catch {
+      remoteRevoked = false;
+    }
+    const nativeOutcome = await nativePushUnsubscribeOutcome();
+    const statusResult = remoteRevoked && nativeOutcome.status === 'confirmed'
+      ? 'disabled'
+      : !remoteRevoked || nativeOutcome.status === 'failed'
+        ? 'failed'
+        : 'pending';
+    if (
+      !persistNativePushCleanupStatus(
+        intentStore,
+        statusResult === 'disabled' ? 'confirmed' : statusResult,
+      )
+    ) {
+      return {
+        accepted: true,
+        status: 'failed',
+        remoteRevoked,
+        nativeRevoked: nativeOutcome.status,
+      };
+    }
+    return {
+      accepted: true,
+      status: statusResult,
+      remoteRevoked,
+      nativeRevoked: nativeOutcome.status,
+    };
   }
   const subscription = await getExistingWebPushSubscription();
   const endpoint = subscription?.endpoint;
+  let remoteRevoked = !endpoint;
   if (endpoint) {
-    await api.unsubscribeWebPush(endpoint, await getWebPushDeviceId());
+    const result = await api.unsubscribeWebPush(endpoint, await getWebPushDeviceId());
+    remoteRevoked = result.disabled === true;
   }
+  let browserRevoked = true;
   if (subscription) {
-    await subscription.unsubscribe();
+    browserRevoked = await subscription.unsubscribe();
   }
-  return Boolean(endpoint);
+  return {
+    accepted: true,
+    status: remoteRevoked && browserRevoked ? 'disabled' : 'failed',
+    remoteRevoked,
+    nativeRevoked: 'not_needed',
+  };
+}
+
+export async function disableWebPush(
+  api: ApiContextType,
+  disabledIntentStore?: NativePushDisabledIntentStore,
+): Promise<WebPushDisableResult> {
+  return enqueueWebPushLifecycleOperation(
+    () => disableWebPushOnce(
+      api,
+      disabledIntentStore,
+    ),
+  );
 }
 
 let webPushReconciliation: Promise<WebPushReconcileResult> | null = null;
@@ -373,10 +578,23 @@ let webPushReconciliation: Promise<WebPushReconcileResult> | null = null;
 async function reconcileWebPushOnce(
   api: ApiContextType,
   pendingRegistrationStore: NativePushPendingRegistrationStore,
+  disabledIntentStore?: NativePushDisabledIntentStore,
 ): Promise<WebPushReconcileResult> {
   const support = getWebPushSupportState();
   if (hasNativeCapability('push')) {
     try {
+      const intentStore = disabledIntentStore ?? getBrowserNativePushDisabledIntentStore();
+      const disabledStatus = intentStore.cleanupStatus();
+      if (disabledStatus) {
+        return {
+          support,
+          status: disabledStatus === 'confirmed'
+            ? 'disabled'
+            : disabledStatus === 'pending'
+              ? 'disable_pending'
+              : 'disable_failed',
+        };
+      }
       const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
       const nativeState = await nativePushStatus(publicKey);
       if (!nativeState || nativeState.state === 'unavailable') {
@@ -399,7 +617,8 @@ async function reconcileWebPushOnce(
         }
         await enableNativeWebPush(api, publicKey, nativeState, {
           pendingRegistrationStore,
-        });
+          disabledIntentStore: intentStore,
+        }, true);
         return { support, status: 'enabled' };
       }
       const previousEndpoints = [
@@ -420,6 +639,8 @@ async function reconcileWebPushOnce(
           api,
           pendingRegistration,
           pendingRegistrationStore,
+          undefined,
+          intentStore,
         );
         return { support, status: 'enabled' };
       }
@@ -440,7 +661,8 @@ async function reconcileWebPushOnce(
             forceResubscribe: true,
             recoverOnly: true,
             pendingRegistrationStore,
-          });
+            disabledIntentStore: intentStore,
+          }, true);
           const repaired = await nativePushStatus(publicKey);
           if (repaired?.state === 'on') {
             const repairedStatus = await api.getWebPushStatus({
@@ -470,6 +692,8 @@ async function reconcileWebPushOnce(
             vapidPublicKey: publicKey,
           },
           pendingRegistrationStore,
+          undefined,
+          intentStore,
         );
         return { support, status: 'enabled' };
       }
@@ -514,7 +738,7 @@ async function reconcileWebPushOnce(
       && Notification.permission === 'granted'
     ) {
       try {
-        await enableWebPush(api, { forceResubscribe: Boolean(existing), recoverOnly: true });
+        await enableWebPushOnce(api, { forceResubscribe: Boolean(existing), recoverOnly: true });
         const repaired = await getExistingWebPushSubscription();
         if (repaired) {
           const repairedStatus = await api.getWebPushStatus({
@@ -550,9 +774,16 @@ export function reconcileWebPush(
   api: ApiContextType,
   pendingRegistrationStore: NativePushPendingRegistrationStore =
     browserNativePushPendingRegistrationStore,
+  disabledIntentStore?: NativePushDisabledIntentStore,
 ): Promise<WebPushReconcileResult> {
   if (!webPushReconciliation) {
-    webPushReconciliation = reconcileWebPushOnce(api, pendingRegistrationStore).finally(() => {
+    webPushReconciliation = enqueueWebPushLifecycleOperation(
+      () => reconcileWebPushOnce(
+        api,
+        pendingRegistrationStore,
+        disabledIntentStore,
+      ),
+    ).finally(() => {
       webPushReconciliation = null;
     });
   }
@@ -569,6 +800,7 @@ export function reconcileWebPush(
 export async function readWebPushDeviceState(api: ApiContextType): Promise<'on' | 'off' | 'unavailable'> {
   if (hasNativeCapability('push')) {
     try {
+      if (getBrowserNativePushDisabledIntentStore().isDisabled()) return 'off';
       const publicKey = (await api.getWebPushVapidPublicKey()).public_key;
       const status = await nativePushStatus(publicKey);
       return status?.state === 'on' ? 'on' : 'off';

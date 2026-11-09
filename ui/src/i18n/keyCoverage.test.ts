@@ -966,6 +966,7 @@ const NON_KEY_LITERALS = [
   'avibe.vault.crypto',
   'avibe.workbench.windows.v1',
   'vibe.nativePush.pendingRegistration',
+  'vibe.nativePush.disabledIntent',
   'vibe.webPush.deviceId',
   'vibe.webPush.endpoints',
 

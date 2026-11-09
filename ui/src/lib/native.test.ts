@@ -7,6 +7,7 @@ import {
   isNativeShell,
   nativeAppInfo,
   nativeHapticImpact,
+  nativePushUnsubscribeOutcome,
   nativeShowAccount,
   nativeVoicePermission,
   onNativePushOpened,
@@ -125,6 +126,36 @@ describe('native shell bridge', () => {
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(false);
     await expect(nativeShowAccount()).resolves.toBe(false);
     await expect(setNativeAccountActionAvailable(true)).resolves.toBe(false);
+  });
+
+  it.each([
+    ['confirmed', { revoked: true }, 'confirmed'],
+    ['deferred', { revoked: false }, 'pending'],
+  ])(
+    'keeps the %s native push revoke outcome distinct',
+    async (_label, result, expected) => {
+      installBridge({
+        capabilities: { push: 1 },
+        call: vi.fn(async () => result),
+      });
+
+      await expect(nativePushUnsubscribeOutcome()).resolves.toEqual({
+        status: expected,
+      });
+    },
+  );
+
+  it('reports a native push bridge failure separately from deferred cleanup', async () => {
+    installBridge({
+      capabilities: { push: 1 },
+      call: vi.fn(async () => {
+        throw new Error('bridge unavailable');
+      }),
+    });
+
+    await expect(nativePushUnsubscribeOutcome()).resolves.toEqual({
+      status: 'failed',
+    });
   });
 
   it('normalizes same-origin native notification paths and rejects foreign origins', () => {

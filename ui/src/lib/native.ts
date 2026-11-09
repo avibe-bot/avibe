@@ -211,14 +211,28 @@ export async function nativePushSubscribe(
 }
 
 export async function nativePushUnsubscribe(): Promise<boolean> {
+  return (await nativePushUnsubscribeOutcome()).status === 'confirmed';
+}
+
+export type NativePushUnsubscribeOutcome =
+  | { status: 'confirmed' }
+  | { status: 'pending' }
+  | { status: 'failed' };
+
+/**
+ * Keep the bridge payload as `{revoked: boolean}`, while preserving the
+ * distinction between a relay-deferred revoke and a bridge failure for Web UI.
+ */
+export async function nativePushUnsubscribeOutcome(): Promise<NativePushUnsubscribeOutcome> {
   try {
     const result = await callNative<{ revoked: boolean }>(
       'push',
       'push.unsubscribe',
     );
-    return result?.revoked === true;
+    if (!result) return { status: 'failed' };
+    return result.revoked ? { status: 'confirmed' } : { status: 'pending' };
   } catch {
-    return false;
+    return { status: 'failed' };
   }
 }
 
