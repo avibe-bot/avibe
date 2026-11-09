@@ -170,7 +170,8 @@ own. A Session has none of these; a Bot has all three.
 - CLI examples in the prompts get parser-backed contract tests.
 - **Handing out work is resident; the Harness Skill is not** (owner decision,
   2026-11-08). Every Bot dispatches on most Turns, so a short Bot-only section
-  ("Handing out work" below) says whom to hand work to, what a brief must
+  ("Handing out work" below) opens with the boundary every Bot keeps (D9), then
+  says whom to hand work to, what a brief must
   say, how to choose the model, how to bring a Session to the front, and how
   to follow up. The `use-avibe-harness` Skill (about 4k tokens) stays out of
   the Bot prompt, and a Bot loads it only to set a Task or Watch. The section
@@ -425,12 +426,21 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
 - The boundary (owner-approved wording, 2026-11-06): "Whatever the user brings
   is a matter to run, brief or lasting. Answer from what you know and
   remember; anything that takes finding out or getting done goes to a Session,
-  in a Project that fits how long the matter will last." The prompt lists no
-  concrete actions: Avibe users are personal-agent users, not only
-  programmers.
-- The strictness is the main Bot's, in its own section. Whether custom Bots
-  should be as strict is not settled; they get the identity, memory, and
-  handing-out sections, and their definition decides how they work.
+  in a Project that fits how long the matter will last."
+- The boundary holds for every Bot (owner decision, 2026-11-09, superseding
+  "custom Bots are not as strict as main"). It opens the shared "Handing out
+  work" section: a Bot talks with the user, decides with them, and keeps its
+  memory, and hands everything else to Sessions. A Bot's definition says what
+  it is responsible for, not whether it does the work itself.
+- The section names one kind of finding out, searching the web and reading
+  pages or code, after a fresh check in which the main Bot researched a
+  comparison itself (seven web searches, two page reads, no dispatch). Bots
+  keep their web tools; the prompt draws the line. It lists no other actions:
+  Avibe users are personal-agent users, not only programmers.
+- The main Bot's own section keeps only what is the main Bot's: the user's
+  first point of contact who sees everything, talking things through and
+  deciding with the user, a lead Session per lasting Project, suggesting a Bot
+  (the user decides), and what its memory holds.
 - Lead Sessions (owner decision, 2026-11-08): each lasting Project gets a
   lead Session that coordinates its work, named in the main Bot's note on the
   Project, and handed over to a fresh one when its context grows long. A
@@ -701,9 +711,7 @@ Your working directory is your home and your long-term memory. Keep it as an eng
 
 ```markdown
 ## You are the user's main Bot
-You are the user's first point of contact, and you can see everything on this machine: every Project, Session, Agent, and Bot. Talk things through with the user and decide with them; apart from keeping your memory, you do no work yourself.
-
-Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Follow each matter through to the end.
+You are the user's first point of contact, and you can see everything on this machine: every Project, Session, Agent, and Bot. Talk things through with the user and decide with them.
 
 Give each lasting Project a lead Session that coordinates its work, and name it in your note on the Project; when its context grows long, have it hand over to a fresh one. When an area needs a standing relationship with the user (they talk to it often, it outlives single pieces of work or spans Projects, it needs a memory of its own), suggest a Bot for it; the user decides.
 
@@ -722,6 +730,8 @@ complete is still reported (D4, D14). It does not ask for
 
 ```markdown
 ## Handing out work
+You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Searching the web and reading pages or code count as finding out. Follow each matter through to the end.
+
 `vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`, which joins the Turn under way unless you add `--queue`), another Bot (`--bot <bot>`), or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
 The Sessions you dispatch report back to you; if one handles your message without writing back, Avibe sends you a read receipt with its last reply, and following up is yours when you were waiting on it. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
