@@ -34,6 +34,7 @@
 // fades what enters and what leaves, in place, and nothing glides.
 import { Component, useCallback, useRef } from 'react';
 
+import { atOneMoment, layoutBoxIn, noteShift } from './layoutBox';
 import { canAnimate, curveOf, motionTiming, prefersReducedMotion, readMotionMs, readMotionNumber, springTiming, timeToProgress, type MotionTiming } from './motion';
 
 /** How a departing element leaves. */
@@ -352,46 +353,8 @@ function itemOf(column: HTMLElement, el: Element): Element | null {
   return item;
 }
 
-/** How far down an element is drawn by its own `translate` (px): where an unfold or a fold has a row. */
-function translateOf(el: Element): number {
-  const value = getComputedStyle(el).translate;
-  return value && value !== 'none' ? parseFloat(value.split(/\s+/)[1] ?? '0') || 0 : 0;
-}
-/** How far down an element is drawn by its `translate` and its transform together (px). */
-function offsetOf(el: Element): number {
-  const { transform } = getComputedStyle(el);
-  return translateOf(el) + (transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0);
-}
-
-/** How many times a read is taken again to take it at one moment. */
-const ONE_MOMENT_READS = 4;
-/** Takes `read` again until what moves (`clocks`: their own offsets) reads the same before and after it, a few
- *  times at the most. WebKit samples a running animation at the time of each read, to the millisecond, not once
- *  per frame as Chromium does: two boxes read a moment apart while they move can disagree by as far as they
- *  moved in it. */
-function atOneMoment<T>(clocks: Element[], read: () => T): T {
-  let value!: T;
-  for (let attempt = 0; attempt < ONE_MOMENT_READS; attempt += 1) {
-    const before = clocks.map(offsetOf);
-    value = read();
-    if (clocks.every((clock, index) => offsetOf(clock) === before[index])) break;
-  }
-  return value;
-}
-
-/** Where the layout puts `el` in the column (px from the column's top): without what a glide draws the column
- *  at, nor what a disclosure draws `el`, its item, or anything between them at (a Harness row's time moves with
- *  the edge inside its row), all read at one moment. The layout's place, unlike where it is drawn, is the same
- *  whenever it is read, so places read apart can be compared. */
-function layoutBox(column: HTMLElement, el: Element): { top: number; bottom: number } {
-  const chain: Element[] = [];
-  for (let node: Element | null = el; node && node !== column; node = node.parentElement) chain.push(node);
-  return atOneMoment([column, ...chain], () => {
-    const origin = column.getBoundingClientRect().top + chain.reduce((sum, node) => sum + offsetOf(node), 0);
-    const box = el.getBoundingClientRect();
-    return { top: box.top - origin, bottom: box.bottom - origin };
-  });
-}
+/** Where the layout puts `el` in the column (px from the column's top): see lib/layoutBox. */
+const layoutBox = (column: HTMLElement, el: Element) => layoutBoxIn(column, el);
 /** The top and the bottom the layout gives `els` together (px from the column's top). */
 function layoutSpan(column: HTMLElement, els: Element[]): { top: number; bottom: number } {
   const boxes = els.map((el) => layoutBox(column, el));
@@ -714,7 +677,11 @@ function unfold(column: HTMLElement, item: Element, nodes: HTMLElement[], growth
   // Where opening starts: what was there before, and nothing of what opens.
   const from: State = {
     edge: keep,
-    rows: rows.map(() => -growth),
+    rows: rows.map((row) => {
+      // The layout put it `growth` further down; the opening shows that as movement.
+      noteShift(row, growth);
+      return -growth;
+    }),
     content: copy ? 0 : 0.4,
     copy: 1,
     late: 1,
@@ -838,6 +805,8 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     rows.forEach((row) => {
       const own = settled.moves.get(row);
       const left = (own ? shareAt(own, now) : 0) + shrink;
+      // The layout put it `shrink` further up; the fold showed that as movement (and what is left glides).
+      if (known && row.isConnected) noteShift(row, -shrink);
       const glides = known && row.isConnected && Math.abs(left) >= 0.5;
       setShare(settled.moves, row, glides ? { start: now, duration: tokens.discloseOpen.duration, from: left, to: 0, curve: curveOf(tokens.discloseOpen.easing), hold: false } : null);
     });
@@ -870,7 +839,10 @@ function resettle(entry: Disclosing, delta: number, viewportBottom: number, toke
   const now = clockNow();
   const settles = new Map<HTMLElement, Share>();
   entry.settles.push(settles);
-  for (const row of rows) setShare(settles, row, { start: now, duration: tokens.discloseOpen.duration, from: -delta, to: 0, curve: curveOf(tokens.discloseOpen.easing), hold: false });
+  for (const row of rows) {
+    noteShift(row, delta);
+    setShare(settles, row, { start: now, duration: tokens.discloseOpen.duration, from: -delta, to: 0, curve: curveOf(tokens.discloseOpen.easing), hold: false });
+  }
   const opened = entry.open;
   entry.open += delta;
   entry.rise += delta;

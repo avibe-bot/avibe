@@ -93,7 +93,7 @@ import {
   reconcileWorkbenchClaimedDeliveries,
 } from '../../lib/transcriptOrder';
 import { prefersReducedMotion } from '../../lib/motion';
-import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
+import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, topInContent, type ScrollAnchor } from '../../lib/transcriptScrollAnchor';
 import { BeforeCommit, HEAD_ATTRIBUTE, ITEM_FOR_ATTRIBUTE, ITEM_KEY_ATTRIBUTE, REVEAL_ATTRIBUTE, SIDE_ATTRIBUTE, useTranscriptMotion, WORKING_ATTRIBUTE, type DepartureKind } from '../../lib/transcriptMotion';
 import { useDisclosure } from '../../lib/motion';
 import { AgentRoutePicker } from './AgentRoutePicker';
@@ -5247,6 +5247,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       Array.from(content.children) as HTMLElement[],
       { top: viewport.top, bottom: viewport.bottom },
       content.getBoundingClientRect().top,
+      content,
     );
   }, []);
 
@@ -5335,12 +5336,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const anchor = anchorRef.current;
       const content = contentRef.current;
       // The anchored row may have re-mounted elsewhere (a Harness row an older
-      // page made a group member); follow the message, not the element.
+      // page made a group member); follow the message, not the element, and
+      // hold the new one from here, its place in its own terms (lib/layoutBox).
       const target = anchor && content ? resolveScrollAnchor(anchor, content) : null;
       if (!anchor || !target || !content) return;
+      anchorRef.current = target;
       // Both positions are inside the content, so only content that moved above
       // the anchor counts — never the reader's own scrolling since it was taken.
-      const currentTop = target.el.getBoundingClientRect().top - content.getBoundingClientRect().top;
+      // Where the layout puts it, not where it is drawn: a row a disclosure above it still pushes down moves
+      // on screen without anything above it changing size (lib/layoutBox).
+      const currentTop = topInContent(target.el, content.getBoundingClientRect().top, content);
       const delta = currentTop - target.top;
       if (Math.abs(delta) < 0.5) return;
       const before = el.scrollTop;
@@ -5354,20 +5359,11 @@ export const Transcript: React.FC<TranscriptProps> = ({
       // (the position clamped) is dropped rather than retried on every commit.
       if (Math.abs(delta - applied) >= 1) {
         captureAnchor();
-      } else if (target.el === anchor.el) {
-        anchorRef.current = {
-          ...anchor,
-          top: anchor.top + applied,
-          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
-        };
       } else {
-        // Followed the message to its new element: hold that one from here.
         anchorRef.current = {
-          el: target.el,
+          ...target,
           top: target.top + applied,
-          rowId: anchor.rowId,
-          rowTop: anchor.rowTop === undefined ? undefined : anchor.rowTop + applied,
-          key: target.el.dataset.transcriptKey,
+          rowTop: target.rowTop === undefined ? undefined : target.rowTop + applied,
         };
       }
     }
@@ -5657,14 +5653,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
       const element = target instanceof Element ? target : target.parentElement;
       const control = element?.closest('[aria-expanded]');
       if (!control || !content.contains(control)) return;
-      const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
+      const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top, content);
       if (!anchor) return;
       setFollowingTail(false);
       anchorRef.current = anchor;
       return;
     }
     restoreScrollPosition();
-    const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top);
+    const anchor = anchorForTouched(Array.from(content.children) as HTMLElement[], target, content.getBoundingClientRect().top, content);
     if (anchor) anchorRef.current = anchor;
   };
   // A touch that left the tail but never moved the transcript (a tap, or a drag
@@ -5788,7 +5784,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
   // Prepending and trimming can leave the total height unchanged. Restore after
   // every DOM commit, before paint or a queued scroll can capture a different
   // row. This also covers the loading slot being inserted or removed.
-  useLayoutEffect(restoreScrollPosition);
+  //
+  // While the reader follows the tail, the pin comes first: the conversation's
+  // glide (below) is measured to where the pin puts the rows. While they read,
+  // the hold on their anchor comes after the motion has taken on what it shows
+  // as movement in this commit (a disclosure's rows below sliding as its steps
+  // land: lib/layoutBox), so it makes up only the rest and never writes a
+  // position the motion is already drawing its way to.
+  useLayoutEffect(() => {
+    if (pinnedRef.current) restoreScrollPosition();
+  });
 
   // What came in live enters (a sent message from the composer's edge, a reply
   // in place), the conversation gliding up to meet it. Not while a deep link
@@ -5796,6 +5801,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const { afterCommit } = motion;
   useLayoutEffect(() => {
     afterCommit(isLiveMessage, Boolean(jumpTarget) || skeleton || rowHandover !== undefined);
+  });
+
+  useLayoutEffect(() => {
+    if (!pinnedRef.current) restoreScrollPosition();
   });
 
   // One upward gesture asks for one page, but a page that landed above the
