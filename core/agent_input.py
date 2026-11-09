@@ -123,7 +123,10 @@ def harness_source(spec: Mapping[str, Any]) -> str:
         parts = ["webhook", definition, name]
     elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("delegation-idle:"):
         title = _token(spec.get("source_session_title")).replace('"', "'")
-        parts = ["Session", f'"{title}"' if title else "", f"#{session}", "went idle without reporting"]
+        if bot:
+            parts = ["read receipt", origin]
+        else:
+            parts = ["read receipt", origin, f'"{title}"' if title else ""]
     elif trigger == "agent_run" and source_kind == "callback" and actor.startswith("vault:"):
         parts = ["Vault request", _token(actor[len("vault:") :])]
     elif trigger == "agent_run" and source_kind == "callback" and _NOTICE_ACTOR_MARKER in actor:

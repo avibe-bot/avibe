@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -138,6 +139,21 @@ def test_prompt_cli_examples_parse_against_the_real_cli(capsys):
     assert {"--queue", "--visible", "--model"} <= run_flags
     for fragment in fragments:
         assert set(re.findall(r"--[a-z][a-z-]*", fragment)) <= run_flags, fragment
+
+
+def test_bot_harness_prompt_matches_plan_draft_and_teaches_read_receipts():
+    root = Path(__file__).resolve().parents[1]
+    prompt = (root / "core/prompts/bot-harness.md").read_text()
+    plan = (root / "docs/plans/bots.md").read_text()
+    section = plan.split("### Handing out work (every Bot, after the main Bot's section)\n", 1)[1]
+    draft = section.split("```markdown\n", 1)[1].split("\n```", 1)[0] + "\n"
+    assert prompt == draft
+
+    built = _blocks(enabled_agents=_ROSTER, bot=_CSO)["bot-harness-prompt"]
+    assert "read receipt with its last reply" in built
+    assert "handles your message without writing back" in built
+    assert "following up is yours when you were waiting on it" in built
+    assert "goes idle without answering" not in built
 
 
 def test_bots_get_no_messaging_guidance_in_their_system_prompt():

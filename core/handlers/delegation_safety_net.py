@@ -28,7 +28,11 @@ def notice_message(session_id: str, reply: str) -> str:
     from core.agent_input import _address
 
     _, command = _address(session_id)
-    return f"Last reply: {excerpt or '(no reply recorded)'}\nFollow up: {command}"
+    return (
+        "[It handled your message without writing back; its last reply is below. "
+        f"Follow up with {command} only if you were waiting on it.]\n"
+        f"{excerpt or '(no reply recorded)'}"
+    )
 
 
 class DelegationSafetyNet:
