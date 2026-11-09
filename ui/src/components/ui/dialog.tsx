@@ -114,7 +114,7 @@ export const DialogContent = React.forwardRef<
         {/* Bottom-sheet drag handle — mobile only. */}
         <div className="mx-auto h-1.5 w-10 shrink-0 rounded-full bg-border-strong md:hidden" aria-hidden />
         {children}
-        <DialogPrimitive.Close ref={closeRef} className="absolute right-4 top-4 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring">
+        <DialogPrimitive.Close ref={closeRef} className="absolute right-4 top-4 rounded-md p-1 text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <X className="size-4" />
           <span className="sr-only">{closeLabel}</span>
         </DialogPrimitive.Close>

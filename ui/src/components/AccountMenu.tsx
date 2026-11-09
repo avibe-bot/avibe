@@ -57,7 +57,7 @@ export const AccountMenu: React.FC<{ openUpward?: boolean }> = ({ openUpward = f
         aria-expanded={isOpen}
         className={clsx(
           accountAvatarClassName,
-          'transition hover:bg-cyan/[0.16] hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring',
+          'transition hover:bg-cyan/[0.16] hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
         )}
       >
         {accountInitialFor(email)}

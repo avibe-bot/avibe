@@ -87,7 +87,7 @@ export const MenuDrawer: React.FC<{
                 {subtitle}
               </DialogPrimitive.Description>
             </div>
-            <DialogPrimitive.Close className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring sm:size-7">
+            <DialogPrimitive.Close className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:size-7">
               <X className="size-5" />
               <span className="sr-only">{t('common.close')}</span>
             </DialogPrimitive.Close>

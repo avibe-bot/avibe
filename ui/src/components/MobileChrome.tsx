@@ -231,7 +231,7 @@ const NativeHeaderAccountAction: React.FC = () => {
       title={accountLabel}
       disabled={signingOut}
       onClick={() => void openAccount()}
-      className="inline-flex size-11 shrink-0 items-center justify-center rounded-full transition hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60 disabled:cursor-not-allowed disabled:opacity-60"
+      className="inline-flex size-11 shrink-0 items-center justify-center rounded-full transition hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
     >
       <span className={accountHeaderAvatarClassName} aria-hidden="true">
         {accountInitialFor(email)}
@@ -250,7 +250,7 @@ export const MobileBrandHeader: React.FC<{
       {title && <h1 className="sr-only">{title}</h1>}
       <Link
         to="/"
-        className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+        className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <img
           src={logoImg}

@@ -99,7 +99,7 @@ export const CitationBadge: React.FC<{ citation: CitationSource; className?: str
             // citation grows taller than the uncited lines around it; inheriting
             // `.vr-markdown`'s 1.6 makes it do exactly that. (Same reason the
             // `recommendation` badge variant fixes its own leading.)
-            'vr-citation align-baseline px-1.5 font-mono leading-none tabular-nums focus-visible:ring-1 focus-visible:ring-cyan/60',
+            'vr-citation align-baseline px-1.5 font-mono leading-none tabular-nums focus-visible:ring-2 focus-visible:ring-ring',
             className,
           )}
         >

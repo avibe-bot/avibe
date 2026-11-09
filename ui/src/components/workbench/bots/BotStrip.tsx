@@ -185,7 +185,7 @@ export const BotStrip: React.FC<{
         type="button"
         onClick={() => openProfile({ kind: 'create' })}
         aria-label={t('bots.addLabel')}
-        className="group rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+        className="group rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="grid size-10 place-items-center rounded-full border border-dashed border-border-strong text-muted transition group-hover:border-mint group-hover:bg-mint-soft group-hover:text-mint-ink">
           <Plus className="size-4" />
@@ -473,7 +473,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
             }}
             aria-label={label}
             aria-current={selected ? 'page' : undefined}
-            className="bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+            className="bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {/* The open Bot's own edge lights up (the shared selected look); a hovered
                 one shows a quiet edge in the same place. */}

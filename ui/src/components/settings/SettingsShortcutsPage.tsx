@@ -161,7 +161,7 @@ export const SettingsShortcutsPage: React.FC = () => {
           onKeyDown={(event) => capture(id, event)}
           className={clsx(
             'flex h-9 w-full items-center justify-between gap-3 rounded-lg border bg-surface-2 px-3 text-left transition-colors md:w-[190px]',
-            'focus:outline-none focus:ring-2 focus:ring-mint/40',
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
             active
               ? 'border-mint/60 text-mint-ink'
               : 'border-edge text-foreground hover:border-mint/35 bg-field hover:bg-field-hover',
@@ -209,7 +209,7 @@ export const SettingsShortcutsPage: React.FC = () => {
           onKeyDown={(event) => capture(id, event)}
           className={clsx(
             'flex h-9 w-full items-center justify-between gap-3 rounded-lg border bg-surface-2 px-3 text-left transition-colors md:w-[190px]',
-            'focus:outline-none focus:ring-2 focus:ring-mint/40',
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
             active
               ? 'border-mint/60 text-mint-ink'
               : 'border-edge text-foreground hover:border-mint/35 bg-field hover:bg-field-hover',

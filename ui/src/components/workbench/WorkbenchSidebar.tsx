@@ -778,7 +778,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
       <div className="flex shrink-0 items-center gap-2 pb-3">
         <Link
           to="/"
-          className="group flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+          className="group flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {/* Decorative: the link's accessible name is the localized brand text
               beside it, so naming the image too would read the destination twice. */}

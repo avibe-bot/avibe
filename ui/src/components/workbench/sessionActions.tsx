@@ -173,7 +173,7 @@ export const SessionActionMenu: React.FC<{
               }}
               className={clsx(
                 'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-                'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 action.disabled
                   ? 'cursor-not-allowed text-muted hover:bg-transparent'
                   : action.danger

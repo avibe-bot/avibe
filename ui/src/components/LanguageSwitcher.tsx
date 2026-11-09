@@ -58,7 +58,7 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
         aria-expanded={isOpen}
         className={round
           ? 'onboarding-language-button'
-          : 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-edge text-[11px] font-semibold text-muted transition hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring bg-field hover:bg-field-hover active:bg-field-hover'}
+          : 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-edge text-[11px] font-semibold text-muted transition hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring bg-field hover:bg-field-hover active:bg-field-hover'}
       >
         {round ? <Languages size={22} /> : shortLabel(currentLang.code)}
       </button>

@@ -2174,7 +2174,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
                         if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
                       }}
                       disabled={renaming}
-                      className="field-sizing-content min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-surface-2 focus:bg-surface-2 focus:ring-2 focus:ring-ring"
+                      className="field-sizing-content min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-surface-2 focus:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     <Pencil className="size-3 shrink-0 text-muted" aria-hidden="true" />
                   </>

@@ -336,7 +336,7 @@ const BotProfileForm: React.FC<{ request: BotProfileRequest; onClose: () => void
         <button
           type="button"
           aria-label={t('bots.dialog.avatar')}
-          className="relative shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+          className="relative shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <BotAvatar avatar={shownAvatar} name={avatarName} size={64} previewUrl={previewUrl} />
           <span className="absolute -bottom-0.5 -right-0.5 grid size-6 place-items-center rounded-full border border-edge text-foreground bg-field">
