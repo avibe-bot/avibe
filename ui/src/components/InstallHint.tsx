@@ -105,7 +105,7 @@ export const InstallHint: React.FC = () => {
             <div className="text-[13px] font-semibold text-foreground">{t('installHint.title')}</div>
           </div>
           <p className="text-[12px] leading-relaxed text-muted">{t('installHint.body')}</p>
-          <ol className="flex flex-col gap-1.5 rounded-lg border border-border bg-foreground/[0.02] p-2.5 text-[12px] text-foreground">
+          <ol className="flex flex-col gap-1.5 rounded-lg border border-edge bg-foreground/[0.02] p-2.5 text-[12px] text-foreground shadow-elevation-0">
             <li className="flex items-center gap-2">
               <Share className="size-4 shrink-0 text-cyan-ink" />
               <span>{t('installHint.step1')}</span>

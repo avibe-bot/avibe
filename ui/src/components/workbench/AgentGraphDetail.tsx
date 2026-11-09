@@ -184,7 +184,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
           {timeLabel !== '—' && <span className="font-mono text-[10px] opacity-80">· {timeLabel}</span>}
         </span>
         {node.visibility && (
-          <span className="inline-flex items-center gap-1 rounded-full border border-border-strong bg-foreground/[0.04] px-2 py-0.5 text-[10px] text-muted">
+          <span className="inline-flex items-center gap-1 rounded-full border border-edge px-2 py-0.5 text-[10px] text-muted bg-field">
             {background ? <EyeOff className="size-3" /> : <Eye className="size-3" />}
             {t(background ? 'agents.graph.detail.background' : 'agents.graph.detail.foreground')}
           </span>
@@ -205,7 +205,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
             </span>
           )}
           {node.agent_backend && (
-            <span className="rounded border border-border-strong bg-foreground/[0.04] px-1 font-mono text-[9px] font-bold uppercase">
+            <span className="rounded border border-edge bg-foreground/[0.04] px-1 font-mono text-[9px] font-bold uppercase shadow-elevation-0">
               {node.agent_backend}
             </span>
           )}
@@ -286,7 +286,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
               <Link
                 key={run.id}
                 to={`/harness?tab=runs&run=${encodeURIComponent(run.id)}`}
-                className="flex items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[11px] transition hover:border-border-strong"
+                className="flex items-center gap-2 rounded-lg border border-edge px-2.5 py-1.5 text-[11px] transition bg-field hover:bg-field-hover active:bg-field-hover"
               >
                 <span className={clsx('size-1.5 shrink-0 rounded-full', statusMeta(runStatus(run.status)).dotClass)} />
                 <code className="font-mono text-foreground">{run.id}</code>
@@ -373,7 +373,7 @@ function statusPillClass(tone: string): string {
   if (tone === 'gold') return 'border-gold/40 bg-gold/10 text-gold-ink';
   if (tone === 'cyan') return 'border-cyan/40 bg-cyan-soft text-cyan-ink';
   if (tone === 'destructive') return 'border-destructive/40 bg-destructive/10 text-destructive-ink';
-  return 'border-border-strong bg-foreground/[0.04] text-muted';
+  return 'border-edge bg-field text-muted';
 }
 
 const Fact: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (

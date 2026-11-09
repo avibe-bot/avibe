@@ -9,7 +9,7 @@ import { ToggleSwitch } from '../SettingsPrimitives';
 import { Field } from './dialogFields';
 import { atLeast, cooldownTime, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { KEYLESS_EXA_SOURCE_ID, candidateEnabled, serviceSettings } from './searchServices';
+import { candidateEnabled, serviceSettings } from './searchServices';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { usageHasNoPrice, type ServiceMonth } from './usageProjection';
 import { VendorGlyph } from './vendorGlyph';
@@ -63,7 +63,7 @@ export const SearchCandidateStatus: React.FC<{
   const { t, i18n } = useTranslation();
   const state = candidate.kind === 'service' ? candidate.state : source?.state;
   const success = tool.status.verified.find((row) => row.source_id === candidate.source_id && row.model_id === candidate.model_id);
-  const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
+  const keyless = candidate.kind === 'service' && tool.service_vendors?.some((row) => row.facts.built_in && row.source_ids.includes(candidate.source_id)) === true;
   let text: string | null = null;
   let tone = 'model-hub-status-mint';
   const until = candidate.kind === 'service' ? candidate.cooldown_until : null;
@@ -97,11 +97,10 @@ export const SearchCandidateStatus: React.FC<{
 
 export const SearchServiceNotes: React.FC<{ vendor?: HostedSearchServiceVendor }> = ({ vendor }) => {
   const { t } = useTranslation();
-  const keyless = vendor?.id === 'exa-mcp';
   return <div className="model-hub-tool-note flex flex-col gap-2">
-    <p>{keyless ? t('settings.models.searchServices.keylessQueryDestination') : vendor ? t('settings.models.searchServices.queryVendor', { vendor: vendor.name }) : t('settings.models.searchServices.queryDestination')}</p>
+    <p>{vendor ? t('settings.models.searchServices.queryVendor', { vendor: vendor.name }) : t('settings.models.searchServices.queryDestination')}</p>
     <p>{t('settings.models.searchServices.placement')}</p>
-    <p className="flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t(keyless ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
+    <p className="flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t('settings.models.searchServices.custody')}</p>
   </div>;
 };
 
@@ -110,10 +109,10 @@ export const SearchVendorFacts: React.FC<{ vendor: HostedSearchServiceVendor }> 
   return <>
     <p className="model-hub-tool-note">{t(`settings.models.searchServices.vendor.${vendor.id}`, { defaultValue: t(vendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch') })}</p>
     <span className="model-hub-tool-note flex flex-wrap gap-2">
-      {vendor.free_tier !== null && <span className="model-hub-pill border border-border">{vendor.facts.built_in ? t('settings.models.searchServices.freeTier') : vendor.free_tier}</span>}
-      {vendor.facts.built_in && <span className="model-hub-pill border border-border">{t('settings.models.searchServices.noSetup')}</span>}
-      <span className="model-hub-pill border border-border">{t('settings.models.searchServices.maxResults', { count: vendor.results_max })}</span>
-      {vendor.id === 'deepseek' && <span className="model-hub-pill border border-border">{t('settings.models.searchServices.deepseekFacts')}</span>}
+      {vendor.free_tier !== null && <span className="model-hub-pill border border-edge bg-field">{vendor.facts.built_in ? t('settings.models.searchServices.freeTier') : vendor.free_tier}</span>}
+      {vendor.facts.built_in && <span className="model-hub-pill border border-edge bg-field">{t('settings.models.searchServices.noSetup')}</span>}
+      <span className="model-hub-pill border border-edge bg-field">{t('settings.models.searchServices.maxResults', { count: vendor.results_max })}</span>
+      {vendor.id === 'deepseek' && <span className="model-hub-pill border border-edge bg-field">{t('settings.models.searchServices.deepseekFacts')}</span>}
     </span>
   </>;
 };
@@ -182,6 +181,6 @@ export const SearchServiceSettings: React.FC<{
     </Field>
     <p className="model-hub-tool-note">{t('settings.models.searchServices.settingsNote')}</p>
     <SearchServicePrice price={vendor.price} />
-    {month && <ServiceMonthLine month={month} keyless={source.id === KEYLESS_EXA_SOURCE_ID} onOpenUsage={onOpenUsage} />}
+    {month && <ServiceMonthLine month={month} keyless={vendor.facts.built_in === true} onOpenUsage={onOpenUsage} />}
   </section>;
 };

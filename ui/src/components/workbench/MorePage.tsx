@@ -24,7 +24,7 @@ import { VersionBadge } from '../VersionBadge';
 export const MoreAppearanceSection: React.FC = () => {
   const { t } = useTranslation();
   return (
-    <div className="rounded-xl border border-border bg-surface">
+    <div className="rounded-xl border border-edge bg-surface shadow-elevation-0">
       <div className="flex items-center gap-3 px-4 py-3">
         <span className="flex-1 text-sm font-medium">{t('more.appearance')}</span>
         <ThemeToggle />
@@ -50,7 +50,7 @@ export const MoreAccountSection: React.FC = () => {
   };
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-surface">
+    <div className="overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
       <div className="flex items-center gap-3 px-4 py-3">
         <span className={accountDrawerAvatarClassName}>
           {accountInitialFor(email)}
@@ -103,7 +103,7 @@ export const MoreConnectionSection: React.FC = () => {
       <div
         className={clsx(
           'flex items-center gap-2.5 rounded-xl border px-4 py-3.5',
-          isRunning ? 'border-mint/30 bg-mint/[0.08]' : 'border-border bg-surface',
+          isRunning ? 'border-mint/30 bg-mint/[0.08]' : 'border-edge bg-surface shadow-elevation-0',
         )}
       >
         <span
@@ -121,7 +121,7 @@ export const MoreConnectionSection: React.FC = () => {
       {/* Connection — host only. The version badge already lives in the status
           card above, so a second version row here would be redundant. */}
       {hostname && (
-        <div className="rounded-xl border border-border bg-surface">
+        <div className="rounded-xl border border-edge bg-surface shadow-elevation-0">
           <div className="flex items-center gap-3 px-4 py-3">
             <LinkIcon className="size-4 text-muted" />
             <span className="flex-1 text-sm font-medium">{t('more.host')}</span>

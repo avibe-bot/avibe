@@ -298,7 +298,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
                   ref={imgRef}
                   src={src}
                   alt=""
-                  className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+                  className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-elevation-3"
                 />
               </TransformComponent>
             </TransformWrapper>

@@ -59,7 +59,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   //
   // A card is one concept across Settings: one step above the page (`bg-surface`)
   // with the resting edge in place of a grey line (ui/design:
-  // system/elevation/settings-general).
+  // settings/general/default).
   if (variant === 'preference') {
     return (
       <section className={clsx('rounded-lg border border-edge bg-surface shadow-elevation-0', className)}>
@@ -191,7 +191,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
       : clsx(
           'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-mint/40 disabled:opacity-50',
           enabled
-            ? 'border-mint/50 bg-mint shadow-glow-xs-mint'
+            ? 'border-mint/50 bg-mint'
             : 'border-border-strong bg-border-strong'
         )}
   >
@@ -199,7 +199,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
       className={variant === 'onboarding'
         ? undefined
         : clsx(
-            'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
+            'inline-block size-3.5 rounded-full bg-background shadow-elevation-1 transition-transform',
             enabled ? 'translate-x-[18px]' : 'translate-x-1'
           )}
     />
@@ -235,7 +235,7 @@ export const SettingsResourceRow: React.FC<SettingsResourceRowProps> = ({
 }) => (
   <div
     className={clsx(
-      'flex flex-col gap-4 rounded-xl border border-border bg-background px-5 py-4 transition-colors hover:border-border-strong',
+      'flex flex-col gap-4 rounded-xl border border-edge bg-surface px-5 py-4 transition-colors shadow-elevation-0',
       footer ? 'md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center' : 'md:flex-row md:items-center',
       className
     )}

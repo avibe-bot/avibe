@@ -17,7 +17,7 @@ export function HomeAsks({ asks, quiet, onAsk }: { asks: HomeAsk[]; quiet: boole
           disabled={quiet}
           onClick={() => onAsk(ask)}
           className={clsx(
-            'flex min-w-0 items-center gap-2.5 rounded-xl border border-border bg-surface px-3 text-sm text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50',
+            'flex min-w-0 items-center gap-2.5 rounded-xl border border-edge bg-surface px-3 text-sm text-foreground transition hover:border-mint/40 hover:bg-mint-soft hover:text-mint-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 shadow-elevation-0',
             desktop ? 'h-12' : 'h-11',
           )}
         >

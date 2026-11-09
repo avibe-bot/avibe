@@ -58,7 +58,7 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
         aria-expanded={isOpen}
         className={round
           ? 'onboarding-language-button'
-          : 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2/40 text-[11px] font-semibold text-muted transition hover:bg-surface-2 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring'}
+          : 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-edge text-[11px] font-semibold text-muted transition hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring bg-field hover:bg-field-hover active:bg-field-hover'}
       >
         {round ? <Languages size={22} /> : shortLabel(currentLang.code)}
       </button>
@@ -69,7 +69,7 @@ export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward =
           className={round
             ? 'onboarding-language-menu'
             : clsx(
-                'absolute z-50 min-w-[10rem] rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-xl',
+                'absolute z-50 min-w-[10rem] rounded-lg border border-edge bg-popover py-1 text-popover-foreground shadow-elevation-2',
                 openUpward ? 'bottom-full left-0 mb-2' : 'top-full right-0 mt-2'
               )}
         >

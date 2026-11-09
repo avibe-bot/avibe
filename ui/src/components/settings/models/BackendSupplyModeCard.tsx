@@ -61,7 +61,7 @@ const OptionCard: React.FC<{
     }}
     className={cn(
       'flex cursor-pointer flex-col gap-3 rounded-xl border p-4 transition-colors',
-      selected ? 'border-mint/50 bg-mint-soft/40' : 'border-border hover:border-border-strong',
+      selected ? 'border-mint/50 bg-mint-soft/40' : 'border-edge shadow-elevation-0',
       disabled && 'cursor-default opacity-70',
     )}
   >

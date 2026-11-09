@@ -80,7 +80,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
     <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent
         closeLabel={t('common.close')}
-        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl p-5"
       >
         <div className="flex min-w-0 items-start gap-3">
           <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint-soft text-mint-ink">
@@ -99,7 +99,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
             {t('agents.runDialog.projectLabel')}
           </label>
           {projects === null ? (
-            <div className="flex items-center gap-2 rounded-md border border-border-strong bg-surface-2 px-3 py-2 text-[12px] text-muted">
+            <div className="flex items-center gap-2 rounded-md border border-edge bg-surface-2 px-3 py-2 text-[12px] text-muted shadow-elevation-0">
               <Loader2 className="size-3 animate-spin" />
               {t('common.loading')}
             </div>

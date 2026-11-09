@@ -80,6 +80,17 @@ const designFrames = frames([
     render: chatDesktop,
   },
   {
+    name: 'queued-hover',
+    title: '排队区 · 指针停在一条排队消息上',
+    width: 1192,
+    height: 720,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: chatFixtures({ session: { title: 'Inbox 未读数' }, messages, queued: waiting, turnState: runningTurn, api }),
+    hover: '[data-queue-row="true"]',
+    render: chatDesktop,
+  },
+  {
     name: 'queued-sending',
     title: '排队区 · Agent 运行中发出的消息直接进排队（发送中）',
     width: 1192,

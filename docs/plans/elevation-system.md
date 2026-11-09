@@ -96,7 +96,7 @@ appears outside it; while an Agent works, a light sweeps its edge (2.8 s a turn,
 | 4 | One focus ring | `ring-ring`, `ring-cyan/60`, `ring-mint/60`, `/40`, `/30`; `focus:` (draws on click) mixed with `focus-visible:` | medium |
 | 5 | One segmented control | Inbox filter (glow) and Diagnostics tabs (raised thumb) hand-roll what `SegmentedRadio` already draws | small |
 | 6 | One radius for floating surfaces | Popover md, menus lg, bespoke popovers 2xl, Model Hub 10px → `rounded-xl`; dialogs already mostly `rounded-xl` | small |
-| 7 | Use or delete dead tokens | `--shadow-glow-nav-mint`, `--nav-selected-*`, `--nav-hover-bg` | small |
+| 7 | Use or delete dead tokens (lands in part 2) | `--shadow-glow-nav-mint`, `--nav-selected-*`, `--nav-hover-bg` | small |
 | 8 | Legacy colour aliases | `bg-panel`, `text-text`, `bg-text`, `text-bg`, `bg-bg` ×33, including the Popover and Command primitives | small |
 | 9 | One active-tab indicator | Editor tabs: cyan top line; Terminal tabs: mint bottom line | small |
 | 10 | Snap arbitrary radii outside approved designs | `rounded-[10px]` ×39, `[9px]` ×12, `[4px]`/`[5px]` ×14, `[14px]` ×6 | medium |
@@ -113,9 +113,20 @@ rules out of the kit stylesheet.
 
 1. Primitives (shipped): Dark `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
    ResponsiveMenu, ContextMenu, Dialog, Toast, switch, segmented control, the composer.
-2. Call sites and state: hand-written `rounded + border-border + bg-surface` cards and bespoke
+2. Call sites and state (shipped): hand-written `rounded + border-border + bg-surface` cards and bespoke
    shadow literals onto the primitives or tokens; state glows to fill/border; card washes to the
-   edge; navigation onto `--nav-selected-*` (fix 7).
-3. Glow theming: dot and microphone glows follow the theme; Light brand decoration and unread cards
-   as same-hue soft shadows; the new-session button's drop shadow.
+   edge; navigation onto `--nav-selected-*` (fix 7). The dead tokens go with it:
+   `--shadow-mint-card*`, `--shadow-glow-nav-mint`, `--nav-hover-bg` (the nav hovers with the
+   shared `foreground/[0.04]` wash), and the desktop and connection overlay shadows.
+   `--card-wash` stays for the onboarding provider cards. Deliberately unchanged: the Agents
+   "Run" button keeps its mint tint; chat bubbles; the new-Agent dialog's `border-2` choice tiles;
+   the Model Hub drawer's directional shadow; the onboarding stylesheet.
+3. Glow theming (shipped): every glow role but `cta` mixes its hue from the theme's accent (Dark
+   unchanged), and dots are 6px at 60% in Light. Brand decoration (icon tiles, eyebrow badges,
+   success seals) draws `shadow-decor-*`: the glow in Dark, `--glow-soft` in Light. A brand mark (the
+   logo image, the Apps launcher) draws `shadow-mark-*`: the glow in Dark, nothing in Light. An unread
+   card draws `shadow-unread`; a listening voice card draws `shadow-elevation-2-live`; the phone tab
+   bar's new-session button keeps only the brand button's glow. Where no approved frame drew a case,
+   the text above decides: the mint eyebrow, the success seals, and the Doctor tile take the soft
+   shadow like every other decoration, and the press ring (a live microphone) takes the theme's mint.
 4. One small PR per chosen fix (1 and 3 share their call sites and land together).

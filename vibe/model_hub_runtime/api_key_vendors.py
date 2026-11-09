@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from config.v2_config import normalize_model_hub_base_url, normalize_model_hub_vendor_id
+from config.v2_config import is_model_hub_source_id, normalize_model_hub_base_url, normalize_model_hub_vendor_id
 
 
 _SUPPORTED_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google", "search"}
@@ -149,6 +149,7 @@ class APIKeyVendorCatalogEntry:
     models_dev_provider: str | None = None
     # Built-ins are catalog rows, not addable API-key vendors.
     built_in: bool = False
+    source_id: str | None = None
     # Bundled wire metadata, never supplied by a caller or a remote catalog.
     search: dict | None = None
 
@@ -165,8 +166,28 @@ def _validate_search_catalog(item: object, *, protocol: str, built_in: bool = Fa
     required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "outcomes", "billing", "tool_only"}
     if protocol != "search":
         required.add("auto_enroll")
+    if built_in:
+        required.update({"default_enabled", "default_in_chain", "mcp"})
     if set(item) != required:
         raise ValueError("api-key vendor search catalog is invalid")
+    if built_in:
+        mcp = item.get("mcp")
+        if (
+            item.get("auth") != "none"
+            or type(item.get("default_enabled")) is not bool
+            or type(item.get("default_in_chain")) is not bool
+            or not isinstance(mcp, dict)
+            or set(mcp) != {"tool", "required_arguments", "headers"}
+            or not isinstance(mcp.get("tool"), str) or not mcp["tool"].strip()
+            or not isinstance(mcp.get("required_arguments"), list) or not mcp["required_arguments"]
+            or any(not isinstance(key, str) or not key for key in mcp["required_arguments"])
+            or not isinstance(mcp.get("headers"), dict)
+            or any(not isinstance(key, str) or not isinstance(value, str)
+                   or key.lower() in {"authorization", "x-api-key", "cookie", "host", "mcp-session-id"}
+                   or any(c in key + value for c in "\r\n")
+                   for key, value in mcp["headers"].items())
+        ):
+            raise ValueError("api-key vendor keyless MCP catalog is invalid")
     endpoint = normalize_model_hub_base_url(item.get("endpoint"))
     if endpoint is None or urlsplit(endpoint).scheme != "https":
         raise ValueError("api-key vendor search catalog endpoint is invalid")
@@ -174,6 +195,12 @@ def _validate_search_catalog(item: object, *, protocol: str, built_in: bool = Fa
         raise ValueError("api-key vendor search catalog service id is invalid")
     if item.get("auth") not in {"bearer", "x-api-key", "none"} or (item.get("auth") == "none" and not built_in) or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
+    if built_in:
+        seconds = item["limits"].get("attempt_seconds")
+        concurrent = item["limits"].get("max_concurrent")
+        if (type(seconds) not in {int, float} or not 0 < seconds <= 30
+                or type(concurrent) is not int or not 1 <= concurrent <= 3):
+            raise ValueError("api-key vendor keyless search limits are invalid")
     if "reported_cost" in item["result"]:
         reported_cost = item["result"]["reported_cost"]
         if (
@@ -251,6 +278,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
     entries: list[APIKeyVendorCatalogEntry] = []
     seen_ids: set[str] = set()
     seen_service_ids: set[str] = set()
+    seen_source_ids: set[str] = set()
     for item in payload:
         if not isinstance(item, dict):
             raise ValueError("api-key vendor catalog is invalid")
@@ -276,7 +304,21 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
         built_in = item.get("built_in", False)
         if not isinstance(built_in, bool) or (built_in and protocol != "search"):
             raise ValueError("api-key vendor catalog is invalid")
+        source_id = item.get("source_id")
+        if built_in:
+            if not is_model_hub_source_id(source_id) or source_id in seen_source_ids:
+                raise ValueError("api-key vendor builtin identity is invalid")
+            from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identity
+
+            fetch_identity = builtin_tool_identity(source_id)
+            if fetch_identity is not None and fetch_identity["vendor"] != vendor_id:
+                raise ValueError("api-key vendor builtin identity conflicts with fetch catalog")
+            seen_source_ids.add(source_id)
+        elif source_id is not None:
+            raise ValueError("api-key vendor builtin identity is invalid")
         search = _validate_search_catalog(item.get("search"), protocol=protocol, built_in=built_in)
+        if built_in and search is None:
+            raise ValueError("api-key vendor builtin search is required")
         if search is not None and search["service_id"] in seen_service_ids:
             raise ValueError("api-key vendor catalog is invalid")
         entries.append(
@@ -288,6 +330,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
                 models_dev_provider=models_dev_provider.strip() if models_dev_provider else None,
                 search=search,
                 built_in=built_in,
+                source_id=source_id,
             )
         )
         seen_ids.add(vendor_id)
@@ -303,6 +346,15 @@ def _catalog_by_id() -> dict[str, APIKeyVendorCatalogEntry]:
 
 def api_key_vendor_entry(vendor: str) -> APIKeyVendorCatalogEntry | None:
     return _catalog_by_id().get(vendor.strip().lower())
+
+
+def builtin_search_entries() -> tuple[APIKeyVendorCatalogEntry, ...]:
+    """Shipped anonymous search identities, independent of saved opt-in settings."""
+    return tuple(entry for entry in api_key_vendor_catalog() if entry.built_in)
+
+
+def builtin_search_entry(source_id: object) -> APIKeyVendorCatalogEntry | None:
+    return next((entry for entry in builtin_search_entries() if entry.source_id == source_id), None)
 
 
 def search_service(vendor: str, protocol: str, base_url: str | None = None) -> dict | None:

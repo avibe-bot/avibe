@@ -10,7 +10,7 @@ export function HubOwnedAuthNotice({ onNavigate }: { onNavigate?: () => void }) 
   return (
     <div
       role="alert"
-      className="flex items-start gap-2 rounded-md border border-border bg-surface-2/60 px-3 py-2"
+      className="flex items-start gap-2 rounded-md border border-edge bg-surface-2/60 px-3 py-2 shadow-elevation-0"
     >
       <ShieldCheck className="mt-0.5 size-3.5 shrink-0 text-muted" />
       <div className="flex min-w-0 flex-col gap-1">

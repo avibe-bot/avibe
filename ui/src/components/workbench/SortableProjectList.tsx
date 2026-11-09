@@ -116,7 +116,7 @@ export function SortableProjectList({ projects, disabled, mobile = false, onReor
             <div
               data-project-drag-preview
               className={cn(
-                'project-drag-preview flex cursor-grabbing items-center gap-2 rounded-md border border-border-strong bg-surface-2 text-foreground shadow-lg',
+                'project-drag-preview flex cursor-grabbing items-center gap-2 rounded-md border border-edge bg-popover text-foreground shadow-elevation-2',
                 mobile ? 'px-4 py-3.5 text-sm font-semibold' : 'px-2 py-1.5 text-xs font-medium',
               )}
             >

@@ -91,7 +91,7 @@ const SidebarNavRow: React.FC<{
       clsx(
         'group flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
         isActive
-          ? 'border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
+          ? 'border-(--nav-selected-border) bg-(--nav-selected-bg) text-foreground'
           : 'border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
       )
     }
@@ -786,7 +786,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             src={logoImg}
             alt=""
             aria-hidden="true"
-            className="size-8 shrink-0 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
+            className="size-8 shrink-0 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-mark-sm-mint transition-shadow group-hover:shadow-mark-md-mint"
           />
           <div className="min-w-0 leading-tight">
             <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
@@ -812,7 +812,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     // Cyan active state — mint is reserved
                     // for sessions / projects so the two reads stay distinct.
                     isActive
-                      ? 'border-cyan/40 bg-cyan-soft shadow-glow-sm-cyan'
+                      ? 'border-cyan/40 bg-cyan-soft'
                       : 'border-transparent hover:bg-foreground/[0.04]',
                   )
                 }
@@ -826,7 +826,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                         keeps the foreground ink beside its grey dot. */}
                     <Inbox className={clsx('size-[18px]', badge || isActive ? 'text-cyan-ink' : quietUnread ? 'text-foreground' : 'text-muted group-hover:text-foreground')} />
                     {badge ? (
-                      <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+                      <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground">
                         {badge}
                       </span>
                     ) : quietUnread ? (

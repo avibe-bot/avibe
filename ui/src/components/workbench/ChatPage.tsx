@@ -3821,7 +3821,7 @@ export const QueueRow: React.FC<{
       className={clsx(
         pending && 'opacity-60',
         sentHere && 'motion-rise-in',
-        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius,opacity] hover:z-10 hover:rounded-lg hover:bg-foreground/[0.04] hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-foreground/[0.04] focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         hasExpandedContent ? 'items-start' : 'items-center',
         // Wrapping is enabled only while the remainder is disclosed. A collapsed
         // row therefore cannot wrap at any width — the one thing that could make
@@ -4057,7 +4057,6 @@ const ActivityStrip: React.FC<{
       aria-live="polite"
       className={clsx(
         'min-h-7 min-w-0 max-w-full gap-2 px-3 py-1 text-[11px] font-normal',
-        !queuedOnly && 'shadow-sm shadow-mint/5',
         expandable && 'cursor-pointer select-none',
       )}
       indicator={
@@ -4111,7 +4110,7 @@ const ActivityStrip: React.FC<{
               // (a downward flip would cover the composer). Disable Radix
               // collision flipping so the popover stays above even when zoomed.
               avoidCollisions={false}
-              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg border-border-strong p-0 shadow-lg"
+              className="flex max-h-[340px] w-[420px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-lg p-0"
             >
               <div className="flex max-h-[300px] flex-col gap-0.5 overflow-y-auto p-1">
                 {active.map((item) => (

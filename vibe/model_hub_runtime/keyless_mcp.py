@@ -1,4 +1,4 @@
-"""Small, reusable MCP session for keyless Exa services.
+"""Bounded, reusable MCP sessions for catalog-owned keyless services.
 
 The session is deliberately transport-only: it knows how to negotiate MCP,
 adapt a live tool schema, and return one bounded JSON-RPC response. Search
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,16 +22,11 @@ from core.handlers.model_hub.adapter import SearchResponse
 from vibe import __version__ as AVIBE_VERSION
 
 
-KEYLESS_EXA_ENDPOINT = "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa"
-KEYLESS_EXA_SEARCH_TOOL = "web_search_advanced_exa"
-KEYLESS_EXA_FETCH_TOOL = "web_fetch_exa"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SESSION_HEADER = "Mcp-Session-Id"
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _TIMEOUT_SECONDS = 30.0
 _CONNECT_TIMEOUT_SECONDS = 5.0
-_REQUIRED_SEARCH_FIELDS = frozenset({"query", "numResults", "enableHighlights", "textMaxCharacters"})
-_REQUIRED_FETCH_FIELDS = frozenset({"urls", "maxCharacters"})
 
 
 @dataclass(frozen=True)
@@ -59,7 +55,7 @@ def _parse_messages(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
         candidates.append(stripped)
     else:
         data_lines: list[str] = []
-        for line in text.splitlines():
+        for line in re.split(r"\r\n|\r|\n", text):
             if line.startswith("data:"):
                 value = line[5:].lstrip()
                 if value and value != "[DONE]":
@@ -80,15 +76,50 @@ def _parse_messages(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
     return tuple(messages)
 
 
-async def _read_bounded(content: Any) -> tuple[bytes | None, bool]:
+async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | None = None) -> tuple[bytes | None, bool]:
     chunks: list[bytes] = []
     total = 0
+    # SSE responses may remain open after their RPC result. Parse only complete
+    # events, preserving non-ASCII line separators inside JSON strings.
+    line = bytearray()
+    event = bytearray()
+    consumed = bytearray()
+    after_cr = False
     async for chunk in content.iter_chunked(64 * 1024):
         data = bytes(chunk)
         total += len(data)
         if total > _MAX_BODY_BYTES:
             return None, True
         chunks.append(data)
+        if not sse or request_id is None:
+            continue
+        # Normalize only the three SSE line endings. A CR at a chunk boundary
+        # already ends a line; swallow a subsequent LF rather than inventing a
+        # blank event. Unicode separators in JSON strings remain untouched.
+        if after_cr and data.startswith(b"\n"):
+            data = data[1:]
+        after_cr = data.endswith(b"\r")
+        parts = re.split(rb"\r\n|\r|\n", data)
+        for part in parts[:-1]:
+            line.extend(part)
+            if line:
+                event.extend(line)
+                event.extend(b"\n")
+                line.clear()
+            elif event:
+                completed_event = bytes(event)
+                messages = await asyncio.to_thread(_parse_messages, completed_event)
+                event.clear()
+                if _matching_message(messages, request_id) is not None:
+                    # Do not reparse arbitrary bytes that followed the matching
+                    # event in this chunk; they may be an incomplete UTF-8
+                    # notification and would hide the valid response. Keep
+                    # notifications already consumed before it so _request can
+                    # invalidate cached tool schemas.
+                    return bytes(consumed + completed_event), False
+                consumed.extend(completed_event)
+                consumed.extend(b"\n\n")
+        line.extend(parts[-1])
     return b"".join(chunks), False
 
 
@@ -106,8 +137,7 @@ def _session_not_found(exchange: _Exchange) -> bool:
 def _tool_properties(
     tool: Mapping[str, Any],
     *,
-    require_search_controls: bool = False,
-    require_fetch_controls: bool = False,
+    required_arguments: tuple[str, ...] = (),
 ) -> Mapping[str, Any] | None:
     schema = tool.get("inputSchema")
     if not isinstance(schema, Mapping):
@@ -115,25 +145,25 @@ def _tool_properties(
     properties = schema.get("properties")
     if not isinstance(properties, Mapping):
         return None
-    if require_search_controls and not _REQUIRED_SEARCH_FIELDS.issubset(properties):
-        return None
-    if require_fetch_controls and not _REQUIRED_FETCH_FIELDS.issubset(properties):
+    if not set(required_arguments).issubset(properties):
         return None
     return properties
 
 
-class KeylessExaMcpClient:
+class KeylessMcpClient:
     """Reusable MCP session with single-flight setup and concurrent tool calls."""
 
     def __init__(
         self,
+        service: Mapping[str, Any],
         *,
-        endpoint: str = KEYLESS_EXA_ENDPOINT,
+        endpoint: str | None = None,
         client_version: str = AVIBE_VERSION,
         timeout_seconds: float = _TIMEOUT_SECONDS,
         connect_timeout_seconds: float = _CONNECT_TIMEOUT_SECONDS,
     ) -> None:
-        self.endpoint = endpoint
+        self.service = service
+        self.endpoint = endpoint or service["endpoint"]
         self.client_version = client_version
         self.timeout_seconds = timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
@@ -216,7 +246,7 @@ class KeylessExaMcpClient:
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
             "User-Agent": f"Avibe/{self.client_version}",
             "X-Avibe-Client": "avibe",
-            "x-exa-source": "avibe",
+            **self.service["mcp"].get("headers", {}),
         }
         if self._session_id is not None:
             headers[MCP_SESSION_HEADER] = self._session_id
@@ -253,7 +283,11 @@ class KeylessExaMcpClient:
                         "content-type", "retry-after", "x-ratelimit-reset", "mcp-session-id", "date", "content-length",
                     }
                 }
-                body, too_large = await _read_bounded(response.content)
+                body, too_large = await _read_bounded(
+                    response.content,
+                    sse=response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() == "text/event-stream",
+                    request_id=request_id,
+                )
                 if too_large:
                     return _Exchange(
                         response_status, response_headers, None, "body_too_large", callback_state["called"],
@@ -349,9 +383,9 @@ class KeylessExaMcpClient:
         """Single-flight only the session setup and cached schema refresh."""
 
         async with self._setup_lock:
-            if self._session_id is None:
+            if self._protocol_version is None:
                 initialized = await self._initialize(deadline=deadline)
-                if initialized.error or initialized.status != 200 or self._session_id is None:
+                if initialized.error or initialized.status != 200 or self._protocol_version is None:
                     return initialized
             if self._tools is None:
                 return await self._list_tools(deadline=deadline)
@@ -381,6 +415,7 @@ class KeylessExaMcpClient:
         tool_name: str,
         arguments: Mapping[str, Any],
         *,
+        required_arguments: tuple[str, ...] = (),
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Call one live-schema MCP tool; retry one stale session before the call."""
@@ -410,8 +445,7 @@ class KeylessExaMcpClient:
             properties = (
                 _tool_properties(
                     tool,
-                    require_search_controls=tool_name == KEYLESS_EXA_SEARCH_TOOL,
-                    require_fetch_controls=tool_name == KEYLESS_EXA_FETCH_TOOL,
+                    required_arguments=required_arguments,
                 )
                 if isinstance(tool, Mapping) else None
             )
@@ -420,14 +454,13 @@ class KeylessExaMcpClient:
             adapted = self._adapt_arguments(properties, arguments)
             if adapted is None:
                 return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
-            if tool_name == KEYLESS_EXA_FETCH_TOOL:
-                required = tool["inputSchema"].get("required", [])
-                if (
-                    not isinstance(required, list)
-                    or not all(isinstance(name, str) and name in adapted for name in required)
-                    or not _REQUIRED_FETCH_FIELDS.issubset(adapted)
-                ):
-                    return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
+            required = tool["inputSchema"].get("required", [])
+            if (
+                not isinstance(required, list)
+                or not all(isinstance(name, str) and name in adapted for name in required)
+                or not set(required_arguments).issubset(adapted)
+            ):
+                return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
             request_session = self._session_id
             called = await self._request(
                 "tools/call",
@@ -451,15 +484,10 @@ class KeylessExaMcpClient:
         *,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
-        return await self.call_tool(KEYLESS_EXA_SEARCH_TOOL, arguments, on_sent=on_sent)
-
-    async def fetch(
-        self,
-        arguments: Mapping[str, Any],
-        *,
-        on_sent: Callable[[], Awaitable[None] | None] | None = None,
-    ) -> SearchResponse:
-        return await self.call_tool(KEYLESS_EXA_FETCH_TOOL, arguments, on_sent=on_sent)
+        mcp = self.service["mcp"]
+        return await self.call_tool(
+            mcp["tool"], arguments, required_arguments=tuple(mcp["required_arguments"]), on_sent=on_sent,
+        )
 
     @staticmethod
     async def _as_search_response(exchange: _Exchange) -> SearchResponse:
@@ -495,4 +523,4 @@ class KeylessExaMcpClient:
         )
 
 
-__all__ = ["KEYLESS_EXA_ENDPOINT", "KEYLESS_EXA_SEARCH_TOOL", "KEYLESS_EXA_FETCH_TOOL", "KeylessExaMcpClient"]
+__all__ = ["KeylessMcpClient"]

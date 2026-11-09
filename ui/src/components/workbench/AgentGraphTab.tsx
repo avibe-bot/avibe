@@ -395,7 +395,7 @@ export const AgentGraphTab: React.FC = () => {
   // the two columns read as one pane; its body scrolls when the content is taller
   // than the fill. On mobile (fillHeight === undefined) it stays natural-height.
   const panelBoxClass = clsx(
-    'rounded-2xl border border-border-strong bg-surface p-5',
+    'rounded-2xl border border-edge bg-surface p-5 shadow-elevation-0',
     fillHeight != null ? 'overflow-y-auto' : 'self-start',
   );
   const panelBoxStyle = fillHeight != null ? { height: fillHeight } : undefined;
@@ -791,7 +791,7 @@ const FilterDropdown: React.FC<FilterDropdownProps> = ({ icon, label, children }
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface px-3 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+          className="flex items-center gap-1.5 rounded-md border border-edge px-3 py-2 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
         >
           {icon}
           <span className="max-w-[160px] truncate">{label}</span>

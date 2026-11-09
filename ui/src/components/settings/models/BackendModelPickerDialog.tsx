@@ -177,7 +177,7 @@ export const BackendModelPickerDialog: React.FC<{
       <DialogContent
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
-        className="model-hub-catalog-dialog model-hub-picker flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
+        className="model-hub-catalog-dialog model-hub-picker flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
       >
         <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">
           <DialogTitle className="model-hub-catalog-title">
@@ -357,7 +357,7 @@ const PickerRow: React.FC<{
             {candidate.suppliers.map((supplier) => (
               <span
                 key={`${supplier.source_id}\0${supplier.model_id}`}
-                className="model-hub-pill model-hub-fill-0a border border-border text-muted"
+                className="model-hub-pill model-hub-fill-0a border border-edge text-muted"
               >
                 {supplier.source_name}
               </span>

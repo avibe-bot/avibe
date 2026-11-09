@@ -22,6 +22,8 @@ export type ApiKeyVendorPreset = {
   label: string;
   official_base_url: string;
   protocol: SourceProtocol;
+  built_in?: boolean;
+  source_id?: string;
 };
 
 /** The dropdown's default, and the ladder's rungs 2 and 3: no preset, no pin.

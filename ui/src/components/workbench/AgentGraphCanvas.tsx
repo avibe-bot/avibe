@@ -379,7 +379,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
     // remaining space; the min-height floors it on short windows. React Flow
     // observes this box and pans/zooms within it — it never re-runs the layout.
     <div
-      className="min-h-[480px] w-full overflow-hidden rounded-2xl border border-border-strong bg-surface-3/60"
+      className="min-h-[480px] w-full overflow-hidden rounded-2xl border border-edge bg-surface-3/60 shadow-elevation-0"
       style={{ height: heightPx }}
     >
       <InteractionContext.Provider value={interaction}>
@@ -419,7 +419,7 @@ const Legend: React.FC<{
   showDisabled: boolean;
   onToggleDisabled: (next: boolean) => void;
 }> = ({ t, showDisabled, onToggleDisabled }) => (
-  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-border-strong bg-surface/90 px-3 py-2 text-[11px] text-muted backdrop-blur">
+  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-edge bg-surface/90 px-3 py-2 text-[11px] text-muted backdrop-blur shadow-elevation-0">
     <LegendItem label={t('agents.graph.legend.spawn')}>
       <span className="h-[2px] w-5" style={{ background: 'var(--mint)' }} />
     </LegendItem>

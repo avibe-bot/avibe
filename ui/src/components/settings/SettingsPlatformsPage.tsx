@@ -266,7 +266,7 @@ export const SettingsPlatformsPage: React.FC = () => {
           <div
             role="status"
             aria-live="polite"
-            className="sticky top-2 z-10 flex items-center gap-3 rounded-xl border border-cyan/35 bg-cyan/[0.08] px-4 py-3 shadow-[0_8px_24px_-8px_rgba(0,212,255,0.35)]"
+            className="sticky top-2 z-10 flex items-center gap-3 rounded-xl border border-cyan/35 bg-cyan/[0.08] px-4 py-3"
           >
             <Loader2 size={16} className="shrink-0 animate-spin text-cyan-ink" />
             <div className="min-w-0 flex-1">
@@ -280,7 +280,7 @@ export const SettingsPlatformsPage: React.FC = () => {
 
         {/* Enabled platforms — always open, the master control. Check a tile to
             reveal its setup below; nothing persists until credentials save. */}
-        <section className="overflow-hidden rounded-xl border border-border bg-surface-2">
+        <section className="overflow-hidden rounded-xl border border-edge bg-surface-2 shadow-elevation-0">
           <div className="border-b border-border px-5 py-4">
             <div className="text-[14px] font-semibold text-foreground">{t('platform.enabledPlatforms')}</div>
             <p className="mt-1 text-[12px] leading-relaxed text-muted">{t('platform.subtitle')}</p>
@@ -446,7 +446,7 @@ const PlatformCard: React.FC<{
     <section
       className={clsx(
         'overflow-hidden rounded-xl border bg-surface-2 transition-colors',
-        expanded ? 'border-mint/35 shadow-mint-card-sm' : 'border-border'
+        expanded ? 'border-mint/35' : 'border-edge shadow-elevation-0'
       )}
     >
       <div className="flex items-stretch gap-3 px-5 py-4">
@@ -458,7 +458,7 @@ const PlatformCard: React.FC<{
             'inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-medium transition',
             expanded
               ? 'border-mint/35 bg-mint/[0.08] text-mint-ink'
-              : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
+              : 'border-edge text-foreground bg-field hover:bg-field-hover'
           )}
         >
           {expanded ? (

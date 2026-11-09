@@ -19,7 +19,7 @@ import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
 import { modelCapabilities } from './hostedTools';
-import { searchServicesActive, serviceVendorForSource, webSearchTool, KEYLESS_EXA_SOURCE_ID } from './searchServices';
+import { searchServicesActive, serviceVendorForSource, webSearchTool, isSyntheticKeylessSource, keylessEndpoint as catalogKeylessEndpoint } from './searchServices';
 import { SearchServiceSettings, SearchVendorGlyph, ServiceMonthLine } from './SearchServiceParts';
 import { FetchServiceSettings } from './WebFetchOrder';
 import { webFetchTool, fetchVendorForSource } from './webFetch';
@@ -175,7 +175,7 @@ const ServiceMonthSearchSettings: React.FC<Omit<SearchSettingsProps, 'month'>> =
 
 const ServiceMonthFetchSettings: React.FC<React.ComponentProps<typeof FetchServiceSettings> & { onOpenUsage?: () => void }> = (props) => {
   const month = useServiceMonth(props.sourceId, 'web_fetch');
-  return <><FetchServiceSettings {...props} /><div className="px-5 py-3"><ServiceMonthLine month={month} keyless={props.sourceId === KEYLESS_EXA_SOURCE_ID} onOpenUsage={props.onOpenUsage} /></div></>;
+  return <><FetchServiceSettings {...props} /><div className="px-5 py-3"><ServiceMonthLine month={month} keyless={fetchVendorForSource(props.tool, props.sourceId)?.facts.built_in === true} onOpenUsage={props.onOpenUsage} /></div></>;
 };
 
 type SourceReconciliation =
@@ -258,9 +258,11 @@ export const SourceDetailPanel: React.FC<{
   const fetchTool = webFetchTool(capabilityStatus);
   const fetchSettings = fetchTool && fetchVendorForSource(fetchTool, source.id) && onSaveFetch && onRetryFetch
     ? <ServiceMonthFetchSettings sourceId={source.id} tool={fetchTool} pending={busy || (hostedPending?.has('web_fetch') ?? false)} onSave={onSaveFetch} onRetry={onRetryFetch} onOpenUsage={onOpenUsage} /> : null;
-  const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID;
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
-  const serviceDetail = keylessExa || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
+  // Keyless is the exact synthetic row of a catalog built-in vendor, never a source id alone; only a read without the catalog still knows Exa.
+  const keylessBuiltin = isSyntheticKeylessSource(source, searchTool);
+  const keylessEndpoint = catalogKeylessEndpoint(serviceVendor, source.id);
+  const serviceDetail = keylessBuiltin || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
   // Usage, like the Tools rows, waits for the read to list this Source as a search service.
   const serviceCandidate = searchServicesActive(searchTool)
     && Boolean(searchTool?.executor_candidates.some((row) => row.kind === 'service' && row.source_id === source.id));
@@ -818,7 +820,7 @@ export const SourceDetailPanel: React.FC<{
   const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
   const protocolLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const interfaceLabel = detailsHidden ? protocolLabel : `${providerLabel} · ${protocolLabel}`;
-  const credentialLabel = keylessExa
+  const credentialLabel = keylessBuiltin
     ? t('settings.models.searchServices.noSetup')
     : source.kind === 'api_key'
       ? t('settings.models.sourceDetail.metadata.apiKey')
@@ -829,7 +831,7 @@ export const SourceDetailPanel: React.FC<{
   const lastFetched = source.last_discovered_at
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
-  const testable = !keylessExa && source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
+  const testable = !keylessBuiltin && source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
   const usageSummary = adoptedBackends.length > 0
     ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
     : t('settings.models.gateway.modelCount', { count: source.models.length });
@@ -840,14 +842,14 @@ export const SourceDetailPanel: React.FC<{
         <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-4">
           <SearchVendorGlyph vendor={source.vendor} />
           <div className="flex min-w-0 flex-col gap-1">
-            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{keylessExa ? t('settings.models.searchServices.vendorName.exa-mcp') : source.display_name}</h2>
+            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{keylessBuiltin ? t(`settings.models.searchServices.vendorName.${source.vendor}`, { defaultValue: source.display_name }) : source.display_name}</h2>
             <p className="model-hub-tool-note">{t(source.protocol === 'search' ? fetchSettings ? 'settings.models.webFetch.noModels' : 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
-            {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
+            {keylessBuiltin && keylessEndpoint && <p className="model-hub-tool-note">{keylessEndpoint}</p>}
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {capabilityFailure}
-          {!keylessExa && state.key && wasBlocked(source.state) && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
+          {!keylessBuiltin && state.key && wasBlocked(source.state) && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
             <p className="font-semibold">{t(state.key, state.values)}</p>
             <p className="model-hub-tool-note">{t(source.state.detail_key ?? 'models.source.error.unclassified')}</p>
             {source.vendor === 'tavily' && source.state.detail_key === 'models.source.needs_action.spend_limit_reached' && <p className="model-hub-tool-note">{t('settings.models.searchServices.tavilyLimit')}</p>}
@@ -856,10 +858,10 @@ export const SourceDetailPanel: React.FC<{
           </div>}
           {source.trial_pending && <p className="model-hub-tool-note px-5 pt-3">{t('settings.models.searchServices.trialPending')}</p>}
           <section className="flex flex-col gap-3 border-b border-border px-5 py-4">
-            <h3 className="font-semibold text-foreground">{keylessExa ? t('settings.models.searchServices.noSetup') : t('settings.models.sourceDetail.metadata.apiKey')}</h3>
+            <h3 className="font-semibold text-foreground">{keylessBuiltin ? t('settings.models.searchServices.noSetup') : t('settings.models.sourceDetail.metadata.apiKey')}</h3>
             {source.protocol === 'search' ? <div className="flex flex-wrap items-center gap-3">
-              {!keylessExa && credentialValue && <SourcePrivateValue value={credentialValue} className="font-mono" />}
-              {!keylessExa && <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacingKey(true)}>{t('settings.models.searchServices.replaceKey')}</Button>}
+              {!keylessBuiltin && credentialValue && <SourcePrivateValue value={credentialValue} className="font-mono" />}
+              {!keylessBuiltin && <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacingKey(true)}>{t('settings.models.searchServices.replaceKey')}</Button>}
             </div> : <>
               <p className="model-hub-tool-note">{t('settings.models.searchServices.sharedKey', { source: source.display_name })}</p>
               <Button variant="outline" size="sm" className="self-start" onClick={() => { onManageSource?.(); setReplacingKey(true); }}>{t('settings.models.searchServices.manageSource')}</Button>
@@ -867,9 +869,12 @@ export const SourceDetailPanel: React.FC<{
           </section>
           {searchSettings}
           {fetchSettings}
-          <p className="model-hub-tool-note px-5 py-4">{t(keylessExa ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
+          <div className="model-hub-tool-note flex flex-col gap-2 px-5 py-4">
+            {keylessBuiltin && keylessEndpoint && <p>{t('settings.models.searchServices.keylessQueryDestination', { endpoint: keylessEndpoint })}</p>}
+            <p>{t(keylessBuiltin ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
+          </div>
         </div>
-        {source.protocol === 'search' && !keylessExa && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
+        {source.protocol === 'search' && !keylessBuiltin && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
           <p className="model-hub-tool-note">{t('settings.models.searchServices.removeNote')}</p>
           <Button variant="outline" size="sm" className="text-destructive-ink" disabled={busy} onClick={beginDelete}>{t('settings.models.sourceDetail.row.remove')}</Button>
         </footer>}
@@ -889,11 +894,9 @@ export const SourceDetailPanel: React.FC<{
         {(source.base_url || credentialValue) && <SourcePrivacyToggle />}
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
-        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{keylessExa
-          ? t('settings.models.searchServices.keylessEndpoint')
-          : source.base_url
-            ? <SourcePrivateValue value={source.base_url} />
-            : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{source.base_url
+          ? <SourcePrivateValue value={source.base_url} />
+          : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
         <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{credentialValue
           ? <SourcePrivateValue value={credentialValue} />
           : '—'}</dd></div>
@@ -912,7 +915,7 @@ export const SourceDetailPanel: React.FC<{
       </div>}
       {!serviceDetail && <>
       <section className="model-hub-source-toolbar flex shrink-0 flex-col gap-2 border-b border-border px-5 py-2.5 sm:flex-row sm:items-center">
-        <span className="flex shrink-0 items-center gap-2"><h3 className="text-[13px] font-bold text-foreground">{t('settings.models.sourceDetail.modelsHeading')}</h3><span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{models.length}</span></span>
+        <span className="flex shrink-0 items-center gap-2"><h3 className="text-[13px] font-bold text-foreground">{t('settings.models.sourceDetail.modelsHeading')}</h3><span className="model-hub-pill model-hub-fill-0a border border-edge text-muted">{models.length}</span></span>
         <div className="relative min-w-0 flex-1 sm:ml-auto sm:max-w-[200px]">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted" aria-hidden="true" />
           <Input value={query} onChange={(event) => setQuery(event.target.value)} aria-label={t('settings.models.sourceDetail.search') as string} placeholder={t('settings.models.sourceDetail.search') as string} className="model-hub-source-search h-8 pl-8 text-[11.5px]" />
@@ -1021,7 +1024,7 @@ export const SourceDetailPanel: React.FC<{
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
           <DialogPrimitive.Content
-            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none"
+            className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-edge bg-popover outline-none"
             onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
             onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
           >

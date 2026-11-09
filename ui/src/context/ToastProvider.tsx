@@ -360,7 +360,7 @@ function ToastCard({
       onPointerUp={onPointerEnd}
       onPointerCancel={onPointerEnd}
       // Floating over whatever is under it, so opaque: the popover fill with its tone washed over it,
-      // level 2, no outline (ui/design: system/elevation/toast).
+      // level 2, no outline (ui/design: system/elevation/scale).
       className={`flex touch-pan-y items-center gap-3 px-4 py-3 rounded-lg border border-edge bg-popover shadow-elevation-2 ${
         toast.type === 'success'
           ? 'bg-linear-to-r from-mint/10 to-mint/10 text-mint-ink'

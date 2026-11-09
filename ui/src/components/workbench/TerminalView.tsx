@@ -535,7 +535,7 @@ export const TerminalView: React.FC<{
             // Compact find widget pinned to the terminal's top-right, like an editor's find bar. Colors
             // are fixed-dark (not theme tokens) because the terminal body is theme-locked dark — the
             // same reason the touch key bar below uses fixed colors rather than the global palette.
-            <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-lg border border-zinc-700/80 bg-zinc-900/95 px-1.5 py-1 shadow-lg backdrop-blur-sm">
+            <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-lg border border-zinc-700/80 bg-zinc-900/95 px-1.5 py-1 shadow-elevation-2 backdrop-blur-sm">
               <Search className="ml-0.5 size-3.5 shrink-0 text-zinc-500" aria-hidden />
               <Input
                 ref={searchInputRef}
@@ -612,7 +612,7 @@ export const TerminalView: React.FC<{
             // the key bar. Fixed-dark like the find widget (the terminal body is theme-locked dark);
             // pointer-events-none so it never intercepts a tap. Only the touch-only Paste key sets this.
             <div className="pointer-events-none absolute inset-x-0 bottom-2 z-10 flex justify-center px-3">
-              <span className="rounded-md bg-zinc-900/95 px-3 py-1.5 text-center text-[11px] text-zinc-200 shadow-lg ring-1 ring-zinc-700/70">
+              <span className="rounded-md bg-zinc-900/95 px-3 py-1.5 text-center text-[11px] text-zinc-200 shadow-elevation-2 ring-1 ring-zinc-700/70">
                 {t('apps.terminal.pasteBlocked')}
               </span>
             </div>
@@ -630,7 +630,7 @@ export const TerminalView: React.FC<{
             type="button"
             onClick={pasteFromClipboard}
             aria-label={t('apps.terminal.keys.paste')}
-            className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2.5 py-1.5 text-[12px] text-foreground active:bg-foreground/[0.08]"
+            className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-[12px] text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
           >
             <ClipboardPaste className="size-3.5" aria-hidden />
             {t('apps.terminal.keys.paste')}
@@ -640,7 +640,7 @@ export const TerminalView: React.FC<{
               key={k.labelKey}
               type="button"
               onClick={() => sendKey(k)}
-              className="shrink-0 rounded-md border border-border-strong px-2.5 py-1.5 font-mono text-[12px] text-foreground active:bg-foreground/[0.08]"
+              className="shrink-0 rounded-md border border-edge px-2.5 py-1.5 font-mono text-[12px] text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
             >
               {t(k.labelKey)}
             </button>

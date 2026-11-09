@@ -85,7 +85,7 @@ test('another tab is another list: switching cuts', async ({ page }) => {
   await expect(page.locator('[data-inbox-session-id="session-2"]')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => document.getAnimations().length)).toBe(0);
   await record(page);
-  await page.getByRole('button', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
+  await page.getByRole('radio', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
   await expect(page.locator('[data-inbox-session-id="session-2"]')).toHaveCount(1);
   await expect(rows(page).first()).toBeVisible();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));

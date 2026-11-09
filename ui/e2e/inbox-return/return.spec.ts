@@ -32,7 +32,7 @@ const enter = async (page: Page, id: number) => {
 
 test('returns to the same reading position through browser history and the Back button', async ({ page }, testInfo) => {
   await open(page);
-  await page.getByRole('button', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
+  await page.getByRole('radio', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
   for (const browserBack of [true, false, true]) {
     await row(page, 50).scrollIntoViewIfNeeded();
     const before = await position(page);
@@ -77,7 +77,7 @@ test('preserves the read neighborhood across new activity and loaded additional 
   await open(page);
   await page.getByRole('button', { name: copy('workbench.inbox.loadMore'), exact: true }).click();
   await expect(rows(page)).toHaveCount(90);
-  await page.getByRole('button', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
+  await page.getByRole('radio', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
   await row(page, 80).scrollIntoViewIfNeeded();
   const before = await row(page, 80).evaluate((el) => el.getBoundingClientRect().top);
   await enter(page, 80);
@@ -118,7 +118,7 @@ test('a fresh Inbox navigation does not inherit an older history entry position'
 
 test('does not reuse an old Chat position when a later Search visit returns', async ({ page, isMobile }) => {
   await open(page);
-  await page.getByRole('button', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
+  await page.getByRole('radio', { name: copy('workbench.inbox.filterAll'), exact: true }).click();
   await row(page, 50).scrollIntoViewIfNeeded();
   const before = await position(page);
   await enter(page, 50);
