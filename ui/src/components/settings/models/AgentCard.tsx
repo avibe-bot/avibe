@@ -47,7 +47,7 @@ const ManageModelsButton: React.FC<{
     <Button
       variant="outline"
       size="xs"
-      className={cn('rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm', className)}
+      className={cn('rounded-md px-2.5 text-[11px] font-semibold', className)}
       onClick={onClick}
       disabled={disabled}
     >
@@ -327,7 +327,7 @@ const AgentModelCard: React.FC<{
           {agent.mode === 'hub' ? (
             <div className="model-hub-agent-head-actions">
               <ManageModelsButton className="model-hub-agent-head-action" disabled={pending} onClick={() => onOpenModels(agent)} />
-              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md bg-background px-2.5 text-[11px] font-semibold shadow-sm" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
+              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
             </div>
           ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToGateway')}</Button>}
         </div>

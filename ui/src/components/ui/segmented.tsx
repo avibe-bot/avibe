@@ -29,7 +29,7 @@ const ACTIVE_TONES: Record<SegmentedTone, string> = {
   mint: 'border border-mint/30 bg-mint-soft font-bold text-mint-ink',
   gold: 'border border-gold/40 bg-gold/10 font-bold text-gold-ink',
   cyan: 'border border-cyan/40 bg-cyan-soft font-bold text-cyan-ink',
-  muted: 'border border-border-strong bg-foreground/[0.06] font-bold text-foreground',
+  muted: 'border border-edge bg-foreground/[0.06] font-bold text-foreground shadow-elevation-0',
 };
 
 export interface SegmentedRadioProps<T extends string> {
@@ -57,7 +57,8 @@ export function SegmentedRadio<T extends string>({
       aria-label={ariaLabel}
       aria-disabled={disabled || undefined}
       className={clsx(
-        'flex h-9 items-stretch gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5',
+        // A filled track, no outline (ui/design: system/elevation/edges).
+        'flex h-9 items-stretch gap-0.5 rounded-md border border-edge bg-field p-0.5',
         className,
         disabled && 'opacity-60',
       )}

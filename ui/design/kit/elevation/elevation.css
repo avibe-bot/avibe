@@ -1,8 +1,10 @@
-/* The approved elevation and edge system (ui/design: system/elevation/*; owner, 2026-11-08). Not
- * shipped yet: each rule here stands in for a class change in one component, gated on
- * `:root:has([data-elevation-proposal])`, so it applies only inside <ElevationProposal> and the
- * shipped frames around it are untouched. As each part ships, its tokens move into `src/index.css`,
- * its components switch to the utilities, its frames become `shipped`, and its rules leave this file.
+/* The approved elevation and edge system (ui/design: system/elevation/*; owner, 2026-11-08), the
+ * parts not shipped yet. The tokens, the primitives (Card, fields, Button, Badge, Popover, menus,
+ * Dialog, Toast, Switch, Segmented, SettingsPanel) and the composer have shipped. Each rule here
+ * stands in for a class change in one component, gated on `:root:has([data-elevation-proposal])`,
+ * so it applies only inside <ElevationProposal> and the shipped frames around it are untouched. As
+ * each part ships, its components switch to the utilities, its frames become `shipped`, and its
+ * rules leave this file.
  *
  * Overrides set `--tw-shadow`, the part of Tailwind's composed box-shadow a `shadow-*` utility owns,
  * so a ring drawn on the same element (focus, a live microphone's edge) survives.
@@ -28,19 +30,6 @@
  *   hairline, turns mint on focus, and while an Agent works a light sweeps its edge (still under
  *   reduced motion). No glass. */
 
-:root:has([data-elevation-proposal]),
-:root:has([data-elevation-proposal]) [data-theme] {
-  /* Dark floating fill: one step above --card (#11111c), below --nav-hover-bg (#1a1a26). */
-  --popover: #161622;
-}
-
-:root[data-theme='light']:has([data-elevation-proposal]),
-:root:has([data-elevation-proposal]) [data-theme='light'] {
-  --popover: #ffffff;
-  /* Light's focus ring, now the edge a borderless field has (owner, 2026-11-08). */
-  --ring: #10b981;
-}
-
 /* Precedence follows the families, not selector weight: a level, then the floating recipe, then
    the live glows, then Light's decorative cut, then state, which always wins. The layers come after
    Tailwind's own, so each also outranks the utility it stands in for. */
@@ -57,7 +46,6 @@
  * ---------------------------------------------------------------------------------------------- */
 :root:has([data-elevation-proposal]) :is(
   [class~='border-input'][class~='shadow-sm'],
-  [class~='shadow-[0_1px_2px_rgba(0,0,0,0.05)]'],
   [class~='shadow-mint/5'],
   [class~='shadow-mint-card-sm'],
   [class~='shadow-mint-card'],
@@ -75,8 +63,6 @@
  * ---------------------------------------------------------------------------------------------- */
 :root:has([data-elevation-proposal]) :is(
   [class~='shadow-sm']:not([class~='border-input'], [class~='shadow-mint/5']),
-  [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]'],
-  [class~='shadow-[0_1px_3px_rgba(0,0,0,0.15),0_4px_8px_rgba(0,0,0,0.1)]'],
   [class~='shadow-[0_1px_4px_rgba(0,0,0,0.5)]'],
   /* The setup wizard's one centred panel. */
   [class~='sm:shadow-mint-card-lg']
@@ -135,21 +121,6 @@
   background-color: var(--popover);
   border-color: var(--border-strong);
   --tw-shadow: var(--elevation-2);
-}
-
-/* A toast floats over whatever is under it, so it is opaque: the floating fill with its tone
-   washed over it. Today it is a 10% tint with the page showing through. */
-:root:has([data-elevation-proposal]) [role='status'][class~='shadow-lg'][class~='bg-mint/10'] {
-  background-color: var(--popover);
-  background-image: linear-gradient(color-mix(in srgb, var(--mint) 10%, transparent), color-mix(in srgb, var(--mint) 10%, transparent));
-}
-:root:has([data-elevation-proposal]) [role='status'][class~='shadow-lg'][class~='bg-gold/10'] {
-  background-color: var(--popover);
-  background-image: linear-gradient(color-mix(in srgb, var(--gold) 10%, transparent), color-mix(in srgb, var(--gold) 10%, transparent));
-}
-:root:has([data-elevation-proposal]) [role='status'][class~='shadow-lg'][class~='bg-destructive/10'] {
-  background-color: var(--popover);
-  background-image: linear-gradient(color-mix(in srgb, var(--destructive) 10%, transparent), color-mix(in srgb, var(--destructive) 10%, transparent));
 }
 
 :root:has([data-elevation-proposal]) :is(
@@ -302,14 +273,9 @@
 
 /* Edges designed with the elevation, and the freshness kit (see the header above). */
 
-@property --elevation-sweep {
-  syntax: '<angle>';
-  inherits: false;
-  initial-value: 0deg;
-}
 
 
-@layer elevation-proposal.edge, elevation-proposal.field, elevation-proposal.floating, elevation-proposal.hero, elevation-proposal.tinted;
+@layer elevation-proposal.edge, elevation-proposal.field, elevation-proposal.floating, elevation-proposal.tinted;
 
 /* ------------------------------------------------------------------------------------------------
  * Resting cards and panels: the border goes; the edge is the fill plus the card edge.
@@ -372,16 +338,6 @@
     background-color: var(--field-hover);
     background-image: none;
   }
-  /* Outline and secondary buttons become soft: a filled chip, no outline. */
-  :root:has([data-elevation-proposal]) :is([class~='shadow-[0_1px_2px_rgba(0,0,0,0.05)]'], [class~='bg-secondary'][class~='border-border']) {
-    border-color: transparent;
-    background-color: var(--field);
-    --tw-shadow: 0 0 #0000;
-  }
-  :root:has([data-elevation-proposal]) :is([class~='shadow-[0_1px_2px_rgba(0,0,0,0.05)]'], [class~='bg-secondary'][class~='border-border']):hover:not(:disabled) {
-    background-color: var(--field-hover);
-    background-image: none;
-  }
   /* Segmented controls: a filled track. */
   :root:has([data-elevation-proposal]) [role='radiogroup'][class~='border'][class~='border-border'] {
     border-color: transparent;
@@ -410,42 +366,6 @@
   }
 }
 
-/* ------------------------------------------------------------------------------------------------
- * Hero surface: the composer.
- * ---------------------------------------------------------------------------------------------- */
-@layer elevation-proposal.hero {
-  /* At rest: a gradient hairline (mint, cyan, violet) drawn as the border, and a soft edge. */
-  :root:has([data-elevation-proposal]) [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]'] {
-    --hairline-fill: var(--surface-2);
-    border-color: transparent;
-    background:
-      linear-gradient(var(--hairline-fill), var(--hairline-fill)) padding-box,
-      linear-gradient(120deg, color-mix(in srgb, var(--mint) 60%, transparent), color-mix(in srgb, var(--cyan) 45%, transparent) 50%, color-mix(in srgb, var(--violet) 45%, transparent)) border-box;
-    --tw-shadow: var(--composer-shadow);
-  }
-  /* Focused: a mint ring outside the hairline. */
-  :root:has([data-elevation-proposal]) [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]']:focus-within {
-    --tw-shadow: var(--composer-shadow-focus);
-  }
-  /* An Agent at work: light sweeps around the composer's edge. Reduced motion: it holds still. */
-  :root:has([data-elevation-proposal]) [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]']:has(button[class~='bg-pink/15']) {
-    background:
-      linear-gradient(var(--hairline-fill), var(--hairline-fill)) padding-box,
-      conic-gradient(from var(--elevation-sweep), transparent 0deg, color-mix(in srgb, var(--mint) 85%, transparent) 60deg, color-mix(in srgb, var(--cyan) 70%, transparent) 110deg, transparent 170deg, transparent 360deg) border-box,
-      linear-gradient(color-mix(in srgb, var(--mint) 25%, transparent), color-mix(in srgb, var(--mint) 25%, transparent)) border-box;
-    --tw-shadow: var(--composer-shadow-focus);
-    animation: elevation-sweep 2.8s linear infinite;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    :root:has([data-elevation-proposal]) [class~='shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]']:has(button[class~='bg-pink/15']) {
-      animation: none;
-      --elevation-sweep: 200deg;
-    }
-  }
-}
-@keyframes elevation-sweep {
-  to { --elevation-sweep: 360deg; }
-}
 
 /* ------------------------------------------------------------------------------------------------
  * In Light, the brand light comes back as a tinted soft shadow, not a neon halo: unread cards,

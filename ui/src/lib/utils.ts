@@ -1,5 +1,12 @@
 import { clsx, type ClassValue } from "clsx"
-import { twMerge } from "tailwind-merge"
+import { extendTailwindMerge } from "tailwind-merge"
+
+// The elevation shadows (index.css `--shadow-elevation-*`) are box-shadow sizes,
+// so a caller's `shadow-none` or `shadow-elevation-3` replaces a primitive's
+// default instead of both landing in the class list.
+const twMerge = extendTailwindMerge({
+  extend: { theme: { shadow: ["elevation-0", "elevation-1", "elevation-2", "elevation-3", "elevation-3-up"] } },
+})
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
