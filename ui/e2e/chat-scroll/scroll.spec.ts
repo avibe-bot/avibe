@@ -388,30 +388,35 @@ const standAt = async (page: Page, screensUp: number) => {
 test('an explicit jump to latest clears an old anchor takeback before a reader scroll', async ({ page }) => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
+  const requestedImages = new Set<string>();
+  page.on('request', (request) => { requestedImages.add(request.url()); });
   await open(page, 'delay=0&count=60', { imagesHeldUntil: held });
   await setTop(page, 0);
   await expect(transcript(page).locator('[data-message-id]')).toHaveCount(60);
+  // Start the lazy image's request before leaving it above the viewport.
+  const image = transcript(page).locator('img').first();
+  const imageSource = await image.evaluate((el: HTMLImageElement) => el.src);
+  await image.scrollIntoViewIfNeeded();
+  await expect.poll(() => requestedImages.has(imageSource)).toBe(true);
   await transcript(page).evaluate((el) => {
     const image = [...el.querySelectorAll('img')].find((img) => !img.complete || img.naturalHeight === 0)!;
     const row = image.closest<HTMLElement>('[data-message-id]')!;
     el.scrollTop += row.getBoundingClientRect().bottom - el.getBoundingClientRect().top + el.clientHeight * 2;
   });
   await page.waitForTimeout(100);
-  await transcript(page).evaluate((el) => {
-    const fling = { stop: false };
-    (window as unknown as { takebackFling: typeof fling }).takebackFling = fling;
-    const step = () => {
-      if (fling.stop || el.scrollTop <= 0) return;
-      el.scrollTop -= 3;
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  });
-  await page.waitForTimeout(150);
+  // Let the image move content above a stationary reader. A continuing fling
+  // would consume the takeback on its next scroll, before the jump could clear it.
+  await record(page);
+  const reference = await page.evaluate(() => window.__scrollLab.refTop());
   release();
-  await page.waitForTimeout(400);
-  await page.evaluate(() => { (window as unknown as { takebackFling: { stop: boolean } }).takebackFling.stop = true; });
+  await expect.poll(() => page.evaluate(() =>
+    window.__scrollLab.writes.some((write) => write.to - write.from >= 2),
+  )).toBe(true);
   await nextFrames(page);
+  const compensation = await stop(page);
+  expect(restoreWrites(compensation.writes).some((write) => write.to - write.from >= 2)).toBe(true);
+  const after = await page.evaluate(() => window.__scrollLab.refTop());
+  expect(Math.abs(after! - reference!)).toBeLessThanOrEqual(1);
 
   await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
@@ -424,6 +429,9 @@ test('an explicit jump to latest clears an old anchor takeback before a reader s
   });
   await toLatest(page).click();
   await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
+  // Reaching a rounded bottom pixel may precede the last glide frame. The
+  // hidden jump control is the observable completion while scroll events are held.
+  await expect(toLatest(page)).toBeHidden();
   await page.evaluate(() => window.__scrollLab.start());
   await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
