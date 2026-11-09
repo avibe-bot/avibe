@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 
 import psutil
@@ -687,6 +688,28 @@ async def test_job_files_stay_until_the_call_is_settled(tmp_path):
     assert host.prune(lambda meta: True, older_than_s=0) == [finished]
     assert os.path.isdir(host.job_dir(running))
     await host.kill(running)
+
+
+async def test_prune_can_bound_and_rotate_directory_checks(tmp_path):
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    jobs = [await _start(host, tmp_path, "true") for _ in range(2)]
+    for job_id in jobs:
+        await host.wait(job_id, deadline_s=5)
+        assert _wait_until(lambda job_id=job_id: _wrapper_gone(host.job_dir(job_id)))
+        old = time.time() - 8 * 24 * 3600
+        for entry in Path(host.job_dir(job_id)).iterdir():
+            os.utime(entry, (old, old))
+
+    seen: list[str] = []
+
+    def settled(meta):
+        seen.append(meta["job_id"])
+        return True
+
+    assert len(host.prune(settled, max_jobs=1)) == 1
+    assert len(seen) == 1
+    assert len(host.prune(settled, max_jobs=1)) == 1
+    assert len(seen) == 2
 
 
 async def test_hand_over_gives_a_job_at_most_one_watch(tmp_path, monkeypatch):

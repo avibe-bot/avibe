@@ -13,8 +13,16 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller = Controller.__new__(Controller)
     opencode_agent = SimpleNamespace(restore_active_polls=AsyncMock(return_value=0))
     codex_agent = SimpleNamespace(prepare_model_hub_runtime=AsyncMock())
+    vibey_agent = SimpleNamespace()
+    events = []
+
+    def schedule_post_readiness_maintenance():
+        assert events == ["ready"]
+        events.append("maintenance")
+
+    vibey_agent.schedule_post_readiness_maintenance = schedule_post_readiness_maintenance
     controller.agent_service = SimpleNamespace(
-        agents={"opencode": opencode_agent, "codex": codex_agent}
+        agents={"opencode": opencode_agent, "codex": codex_agent, "vibey": vibey_agent}
     )
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
@@ -54,6 +62,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     # died first. Publishing itself is a no-op in a process that does not hold
     # the service lock, which no test process does.
     controller._im_run_exception = None
+    controller._publish_readiness_unless_im_runtime_failed = lambda: events.append("ready")
 
     async def start_up():
         await asyncio.wait_for(controller._on_runtime_ready(), timeout=5)
@@ -61,6 +70,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
 
     asyncio.run(start_up())
     assert seed_started == [True]
+    assert events == ["ready", "maintenance"]
 
     opencode_agent.restore_active_polls.assert_awaited_once_with({"avibe"})
     codex_agent.prepare_model_hub_runtime.assert_awaited_once_with()
