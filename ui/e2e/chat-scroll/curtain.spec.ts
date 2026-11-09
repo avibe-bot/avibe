@@ -80,7 +80,7 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
   return page.evaluate(async ({ hostSelector, sourceSelector, hostKind, steps }) => {
     const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
     const column = scroller.firstElementChild!.firstElementChild!;
-    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
     const bottom = scroller.getBoundingClientRect().bottom;
     const ownOffset = (el: Element) => {
       const style = getComputedStyle(el);
@@ -145,35 +145,37 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     const tapped: { el: HTMLElement; at: number; moved: number[] }[] = [];
     // (A row that is gone, re-mounted as what stands for it closed, has nothing left to hold.)
     const follow = () => tapped.forEach((row) => { if (row.el.isConnected) row.moved.push(row.el.getBoundingClientRect().top - row.at); });
-    // Frames in which the other one played its own disclosure while the host's curtain was down.
-    let overlap = 0;
-    const sourceMoved = () => {
+    // When the other one played its own disclosure while the host's curtain was down (frame times, ms), and when
+    // the curtain was down: as time, which does not depend on how many frames a runner draws in it.
+    const overlap: number[] = [];
+    const down: number[] = [];
+    const sourceMoved = (stamp: number) => {
       const playing = sourceItem()?.getAnimations({ subtree: true }).some((animation) => animation.id === 'transcript-disclose' && animation.playState === 'running');
-      if (playing && curtainOf()) overlap += 1;
+      if (playing && curtainOf()) overlap.push(stamp);
     };
-    let curtainFrames = 0;
     for (const { who, after } of steps) {
       for (let count = 0; count < after; count += 1) {
-        await frame();
+        const stamp = await frame();
         out.push(read());
         follow();
-        sourceMoved();
+        sourceMoved(stamp);
       }
       const item = who === 'host' ? hostItem() : sourceItem();
       item.querySelector<HTMLElement>('button[aria-expanded]')!.click();
       if (!tapped.some((row) => row.el === item)) tapped.push({ el: item, at: item.getBoundingClientRect().top, moved: [] });
     }
     for (let count = 0; count < 50; count += 1) {
-      await frame();
+      const stamp = await frame();
       const value = read();
       out.push(value);
       follow();
-      sourceMoved();
-      if (value.box !== null) curtainFrames += 1;
+      sourceMoved(stamp);
+      if (value.box !== null) down.push(stamp);
     }
+    const span = (stamps: number[]) => (stamps.length > 1 ? stamps.at(-1)! - stamps[0] : 0);
     // The uppermost row tapped: nothing tapped in the cell lies above it.
     const uppermost = tapped.reduce((top, row) => (row.el.compareDocumentPosition(top.el) & Node.DOCUMENT_POSITION_FOLLOWING ? row : top));
-    return { frames: out, curtainFrames, overlap, barTop, bottom, tappedMoved: uppermost.moved };
+    return { frames: out, down: span(down), overlap: span(overlap), overlapFrames: overlap.length, barTop, bottom, tappedMoved: uppermost.moved };
   }, { hostSelector: HOSTS[host], sourceSelector, hostKind: host, steps });
 }
 
@@ -220,9 +222,11 @@ for (const cell of cells) {
     const writes: LabWrite[] = await page.evaluate(() => window.__scrollLab.resolveSites());
 
     // What the cell is about: the other one played its disclosure while the host's curtain was down, for a good
-    // part of the way, and the collapse bar lay where the cell says.
-    expect(result.overlap).toBeGreaterThan(5);
-    expect(result.curtainFrames).toBeGreaterThan(6);
+    // part of the way (an opening takes 440 ms, a fold about 350), read in a few frames at least, and the
+    // collapse bar lay where the cell says.
+    expect(result.overlap).toBeGreaterThanOrEqual(150);
+    expect(result.overlapFrames).toBeGreaterThanOrEqual(3);
+    expect(result.down).toBeGreaterThanOrEqual(200);
     if (cell.bar === 'on screen') expect(result.barTop!).toBeLessThan(result.bottom);
     if (cell.bar === 'below the screen') expect(result.barTop!).toBeGreaterThan(result.bottom);
     const boxes = result.frames.map(({ box }) => box).filter((box): box is number => box !== null);
