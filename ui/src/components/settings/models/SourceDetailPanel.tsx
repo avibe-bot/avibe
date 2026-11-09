@@ -894,11 +894,9 @@ export const SourceDetailPanel: React.FC<{
         {(source.base_url || credentialValue) && <SourcePrivacyToggle />}
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
-        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{keylessBuiltin
-          ? keylessEndpoint ?? '—'
-          : source.base_url
-            ? <SourcePrivateValue value={source.base_url} />
-            : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{source.base_url
+          ? <SourcePrivateValue value={source.base_url} />
+          : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
         <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{credentialValue
           ? <SourcePrivateValue value={credentialValue} />
           : '—'}</dd></div>
