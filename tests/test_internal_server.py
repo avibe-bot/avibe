@@ -7818,6 +7818,29 @@ def test_turn_claim_retires_terminal_agent_run_and_dispatches_the_rest(tmp_path,
     assert retired["state"] == "retired"
 
 
+@pytest.mark.parametrize("policies", [(True, False), (False, True), (True, True), (None, False)])
+def test_flush_batches_only_matching_reply_policies(tmp_path, monkeypatch, policies):
+    """No-reply is per input: a combined report/no-reply hint would contradict itself."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    queued = []
+    for index, policy in enumerate(policies):
+        spec = {
+            "task_execution_id": f"run-{index}", "task_trigger_kind": "agent_run",
+            "source_kind": "agent", "source_actor": "sescaller01", "vibe_agent_name": "codex",
+        }
+        if policy is not None:
+            spec["no_reply"] = policy
+        queued.append((f"body {index}", {"message_id": f"agent_run:run-{index}", "platform_specific": spec}))
+    session_id = _seed_avibe_session_with_queue(queued)
+    mgr, runs = _manager_capturing_runs()
+    assert asyncio.run(mgr.flush_queue(session_id))
+    assert len(runs) == 1
+    compatible = bool(policies[0]) == bool(policies[1])
+    assert runs[0][0] == ("body 0\n\n---\n\nbody 1" if compatible else "body 0")
+    with mgr._sqlite_engine().connect() as conn:
+        assert len(message_deliveries.list_queued(conn, session_id)) == (0 if compatible else 1)
+
+
 def test_flush_merges_agent_runs_with_different_callback_targets(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

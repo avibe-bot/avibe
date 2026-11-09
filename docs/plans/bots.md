@@ -125,7 +125,9 @@ own. A Session has none of these; a Bot has all three.
   work keeps the PREFIX suppression rule. `--no-reply` is only for an existing
   Session or Bot and changes the line to `[No reply needed.]`; it opens no
   delegation and sends no read receipt. It rejects `--sync` and new/forked
-  Sessions. Why: the receipt is now the one successful-result mechanism, while
+  Sessions. Ordinary and no-reply Deliveries do not share an input batch, so
+  their reply-policy hints cannot contradict each other.
+  Why: the receipt is now the one successful-result mechanism, while
   an informational dispatch should not create a follow-up obligation.
 - **Delivery and compatibility.** The accepted-exchange projection records a
   delegation only for ordinary Agent dispatches. The receipt carries the full
