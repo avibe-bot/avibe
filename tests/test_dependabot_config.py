@@ -77,6 +77,22 @@ def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:
     assert "^20." in lock["packages"]["node_modules/vitest"]["engines"]["node"]
 
 
+def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
+    # 31.0.0 excludes Node20 and fails startup there. Keep this candidate out
+    # without blocking later independently reviewed releases or changing tests.
+    ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
+    assert [item for item in ui["ignore"] if item["dependency-name"] == "jsdom"] == [
+        {"dependency-name": "jsdom", "versions": ["31.0.0"]}
+    ]
+    package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
+    assert "^20." in package["engines"]["node"]
+    assert package["devDependencies"]["jsdom"] == "^29.1.1"
+    assert lock["packages"][""]["devDependencies"]["jsdom"] == package["devDependencies"]["jsdom"]
+    assert lock["packages"]["node_modules/jsdom"]["version"] == "29.1.1"
+    assert "^20." in lock["packages"]["node_modules/jsdom"]["engines"]["node"]
+
+
 def test_ui_playwright_hold_keeps_the_test_runner_and_browser_driver_coherent() -> None:
     # 1.65.0 regresses the unchanged activity-expiry consumer. Exclude only that
     # tested candidate and retain one matching runner/driver set for npm ci.
