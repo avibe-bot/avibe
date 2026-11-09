@@ -20,9 +20,6 @@ import aiohttp
 import config.v2_config as model_hub_config
 from config.v2_config import (
     KEYLESS_EXA_SERVICE_ID,
-    PARALLEL_SOURCE_ID,
-    PARALLEL_SERVICE_ID,
-    PARALLEL_VENDOR_ID,
     KEYLESS_EXA_SOURCE_ID,
     normalize_model_hub_base_url,
 )
@@ -77,7 +74,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
     search_service,
     validate_api_key_auth_scheme,
 )
-from vibe.model_hub_runtime.keyless_exa_mcp import KeylessExaMcpClient
+from vibe.model_hub_runtime.keyless_mcp import KeylessMcpClient
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -1522,7 +1519,7 @@ class CLIProxyEngineAdapter:
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
-        self._keyless_exa_client = KeylessExaMcpClient()
+        self._keyless_clients: dict[str, KeylessMcpClient] = {}
 
     async def install(self) -> EngineStatus:
         await self.recover_installation()
@@ -1902,7 +1899,9 @@ class CLIProxyEngineAdapter:
                     raise
             except Exception:  # noqa: BLE001
                 pass
-        await self._keyless_exa_client.close()
+        for client in self._keyless_clients.values():
+            await client.close()
+        self._keyless_clients.clear()
         await asyncio.to_thread(self.supervisor.stop)
 
     async def status(self) -> EngineStatus:
@@ -2267,6 +2266,12 @@ class CLIProxyEngineAdapter:
 
         return await asyncio.to_thread(decode)
 
+    def _keyless_client(self, service: Mapping[str, Any]) -> KeylessMcpClient:
+        service_id = service["service_id"]
+        if service_id not in self._keyless_clients:
+            self._keyless_clients[service_id] = KeylessMcpClient(service)
+        return self._keyless_clients[service_id]
+
     async def search(
         self,
         source_id: str,
@@ -2277,25 +2282,16 @@ class CLIProxyEngineAdapter:
         *,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
-        if service_id == PARALLEL_SERVICE_ID:
-            if source_id != PARALLEL_SOURCE_ID or vendor != PARALLEL_VENDOR_ID or credential_ref is not None:
-                return SearchResponse(None, {}, None, "invalid_endpoint")
-            from vibe.model_hub_runtime.parallel_mcp import search_parallel
-            return await search_parallel(request, on_sent=on_sent)
-        if service_id == KEYLESS_EXA_SERVICE_ID:
-            if (
-                not model_hub_config.KEYLESS_EXA_ACTIVE
-                or source_id != KEYLESS_EXA_SOURCE_ID
-                or vendor != "exa-mcp"
-            ):
-                return SearchResponse(None, {}, None, "invalid_endpoint")
-            service = search_service(vendor, "search")
-            if service is None or service.get("service_id") != service_id:
-                return SearchResponse(None, {}, None, "invalid_endpoint")
-            return await self._keyless_exa_client.search(request, on_sent=on_sent)
-        service = search_service(vendor, "search" if vendor in {"tavily", "exa"} else "openai_chat")
+        from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_entry
+
+        entry = api_key_vendor_entry(vendor)
+        service = search_service(vendor, entry.protocol) if entry is not None else None
         if service is None or service.get("service_id") != service_id:
             return SearchResponse(None, {}, None, "invalid_endpoint")
+        if entry.built_in:
+            if source_id != entry.source_id or credential_ref is not None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            return await self._keyless_client(service).search(request, on_sent=on_sent)
         catalog = {"vendor": vendor, **service}
         return await self._search_http(
             catalog=catalog,
@@ -2335,7 +2331,11 @@ class CLIProxyEngineAdapter:
             )
             if service is None:
                 return SearchResponse(None, {}, None, "invalid_endpoint")
-            return await self._keyless_exa_client.fetch(request, on_sent=on_sent)
+            search = search_service(vendor, "search")
+            return await self._keyless_client(search).call_tool(
+                service["request"]["tool"], request,
+                required_arguments=tuple(service["request"]["required_arguments"]), on_sent=on_sent,
+            )
 
         # Keyed services use the same custody and bounded HTTP transport as search,
         # but their immutable fetch catalog owns a different endpoint and body shape.

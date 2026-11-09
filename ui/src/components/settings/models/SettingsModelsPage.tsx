@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { webFetchTool } from './webFetch';
 import { AddSearchServiceDialog } from './AddSearchServiceDialog';
-import { searchServicesActive, webSearchTool, KEYLESS_EXA_SOURCE_ID, keylessExaSource, builtinSearchSource } from './searchServices';
+import { searchServicesActive, webSearchTool, builtinSearchSource } from './searchServices';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
@@ -1203,25 +1203,29 @@ export const SettingsModelsPage: React.FC = () => {
       // its own stale treatment and Retry, and raises the page's refresh toast.
     }
   }, [selectSource, showToast, t]);
-  const selectedSource = sources.find((source) => source.id === selectedSourceId)
-    ?? (selectedSourceId === KEYLESS_EXA_SOURCE_ID
-      ? { ...keylessExaSource(), display_name: t('settings.models.searchServices.vendorName.exa-mcp') as string }
-      : builtinSearchSource(selectedSourceId));
+  // A built-in search service has no Source row: the hosted read below names it
+  // (only an old read's Exa resolves without it), so that read is not gated on it.
+  const rowSource = sources.find((source) => source.id === selectedSourceId);
+  const earlySource = rowSource ?? builtinSearchSource(selectedSourceId);
   // Read while the tab is open, or while a Source's detail shows its capability
   // chips, and again when that Source changes: an edit can change its identity,
   // which drops its evidence on the server.
   // The open Source's identity as evidence follows it (`retry.source_identity`).
-  const selectedSourceIdentity = selectedSource
+  const selectedSourceIdentity = earlySource
     ? JSON.stringify([
-        selectedSource.id, selectedSource.kind, selectedSource.vendor, selectedSource.protocol, selectedSource.supply_channel,
-        selectedSource.base_url ?? null, selectedSource.credential_ref ?? null, selectedSource.credential_generation ?? null,
+        earlySource.id, earlySource.kind, earlySource.vendor, earlySource.protocol, earlySource.supply_channel,
+        earlySource.base_url ?? null, earlySource.credential_ref ?? null, earlySource.credential_generation ?? null,
       ])
     : null;
-  const hostedTools = useHostedTools(runtimeConfigurationVisible && (tab === 'tools' || tab === 'sources' || selectedSource !== null), selectedSourceIdentity, tab);
+  const hostedTools = useHostedTools(runtimeConfigurationVisible && (tab === 'tools' || tab === 'sources' || selectedSourceId !== null), selectedSourceIdentity, tab);
   const hostedStatus = foldRegionRead(hostedTools.read, {
     loading: () => null, unread: () => null, ready: (data) => data, degraded: (data) => data,
   });
   const searchTool = webSearchTool(hostedStatus);
+  const builtinSource = rowSource ? null : builtinSearchSource(selectedSourceId, searchTool);
+  const selectedSource = rowSource ?? (builtinSource
+    ? { ...builtinSource, display_name: t(`settings.models.searchServices.vendorName.${builtinSource.vendor}`, { defaultValue: builtinSource.display_name }) as string }
+    : null);
   const fetchTool = webFetchTool(hostedStatus);
   const openSearchServices = (opener: HTMLButtonElement) => {
     apiKeyTriggerRef.current = opener;

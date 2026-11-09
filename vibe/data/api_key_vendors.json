@@ -239,8 +239,16 @@
     "official_base_url": "https://mcp.exa.ai/mcp",
     "protocol": "search",
     "built_in": true,
+    "source_id": "src_exakeyless",
     "search": {
       "service_id": "exa/mcp",
+      "default_enabled": true,
+      "default_in_chain": true,
+      "mcp": {
+        "tool": "web_search_advanced_exa",
+        "required_arguments": ["query", "numResults", "enableHighlights", "textMaxCharacters"],
+        "headers": {"x-exa-source": "avibe"}
+      },
       "endpoint": "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa",
       "auth": "none",
       "request": {
@@ -286,14 +294,22 @@
     "official_base_url": "https://mcp.parallel.ai/mcp",
     "protocol": "search",
     "built_in": true,
+    "source_id": "src_parallelkeyless",
     "search": {
       "service_id": "parallel/mcp",
+      "default_in_chain": false,
+      "mcp": {
+        "tool": "web_search",
+        "required_arguments": ["objective", "search_queries"],
+        "headers": {}
+      },
       "endpoint": "https://mcp.parallel.ai/mcp",
       "auth": "none",
       "request": {
         "method": "POST",
         "query": "objective",
-        "results": "max_results",
+        "query_array": "search_queries",
+        "results": null,
         "defaults": {}
       },
       "result": {

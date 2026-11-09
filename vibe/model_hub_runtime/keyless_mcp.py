@@ -1,4 +1,4 @@
-"""Small, reusable MCP session for keyless Exa services.
+"""Bounded, reusable MCP sessions for catalog-owned keyless services.
 
 The session is deliberately transport-only: it knows how to negotiate MCP,
 adapt a live tool schema, and return one bounded JSON-RPC response. Search
@@ -21,16 +21,11 @@ from core.handlers.model_hub.adapter import SearchResponse
 from vibe import __version__ as AVIBE_VERSION
 
 
-KEYLESS_EXA_ENDPOINT = "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa"
-KEYLESS_EXA_SEARCH_TOOL = "web_search_advanced_exa"
-KEYLESS_EXA_FETCH_TOOL = "web_fetch_exa"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SESSION_HEADER = "Mcp-Session-Id"
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _TIMEOUT_SECONDS = 30.0
 _CONNECT_TIMEOUT_SECONDS = 5.0
-_REQUIRED_SEARCH_FIELDS = frozenset({"query", "numResults", "enableHighlights", "textMaxCharacters"})
-_REQUIRED_FETCH_FIELDS = frozenset({"urls", "maxCharacters"})
 
 
 @dataclass(frozen=True)
@@ -59,7 +54,8 @@ def _parse_messages(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
         candidates.append(stripped)
     else:
         data_lines: list[str] = []
-        for line in text.splitlines():
+        for line in text.split("\n"):
+            line = line.removesuffix("\r")
             if line.startswith("data:"):
                 value = line[5:].lstrip()
                 if value and value != "[DONE]":
@@ -80,15 +76,36 @@ def _parse_messages(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
     return tuple(messages)
 
 
-async def _read_bounded(content: Any) -> tuple[bytes | None, bool]:
+async def _read_bounded(content: Any, *, sse: bool = False, request_id: int | None = None) -> tuple[bytes | None, bool]:
     chunks: list[bytes] = []
     total = 0
+    # SSE responses may remain open after their RPC result. Parse only complete
+    # events, preserving non-ASCII line separators inside JSON strings.
+    pending = bytearray()
+    scanned = 0
     async for chunk in content.iter_chunked(64 * 1024):
         data = bytes(chunk)
         total += len(data)
         if total > _MAX_BODY_BYTES:
             return None, True
         chunks.append(data)
+        if not sse or request_id is None:
+            continue
+        pending.extend(data)
+        while True:
+            newline = pending.find(b"\n", scanned)
+            if newline < 0:
+                break
+            line_start = pending.rfind(b"\n", 0, newline) + 1
+            blank = pending[line_start:newline] in (b"", b"\r")
+            scanned = newline + 1
+            if blank:
+                event = bytes(pending[:scanned])
+                del pending[:scanned]
+                scanned = 0
+                messages = await asyncio.to_thread(_parse_messages, event)
+                if _matching_message(messages, request_id) is not None:
+                    return b"".join(chunks), False
     return b"".join(chunks), False
 
 
@@ -106,8 +123,7 @@ def _session_not_found(exchange: _Exchange) -> bool:
 def _tool_properties(
     tool: Mapping[str, Any],
     *,
-    require_search_controls: bool = False,
-    require_fetch_controls: bool = False,
+    required_arguments: tuple[str, ...] = (),
 ) -> Mapping[str, Any] | None:
     schema = tool.get("inputSchema")
     if not isinstance(schema, Mapping):
@@ -115,25 +131,25 @@ def _tool_properties(
     properties = schema.get("properties")
     if not isinstance(properties, Mapping):
         return None
-    if require_search_controls and not _REQUIRED_SEARCH_FIELDS.issubset(properties):
-        return None
-    if require_fetch_controls and not _REQUIRED_FETCH_FIELDS.issubset(properties):
+    if not set(required_arguments).issubset(properties):
         return None
     return properties
 
 
-class KeylessExaMcpClient:
+class KeylessMcpClient:
     """Reusable MCP session with single-flight setup and concurrent tool calls."""
 
     def __init__(
         self,
+        service: Mapping[str, Any],
         *,
-        endpoint: str = KEYLESS_EXA_ENDPOINT,
+        endpoint: str | None = None,
         client_version: str = AVIBE_VERSION,
         timeout_seconds: float = _TIMEOUT_SECONDS,
         connect_timeout_seconds: float = _CONNECT_TIMEOUT_SECONDS,
     ) -> None:
-        self.endpoint = endpoint
+        self.service = service
+        self.endpoint = endpoint or service["endpoint"]
         self.client_version = client_version
         self.timeout_seconds = timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
@@ -216,7 +232,7 @@ class KeylessExaMcpClient:
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
             "User-Agent": f"Avibe/{self.client_version}",
             "X-Avibe-Client": "avibe",
-            "x-exa-source": "avibe",
+            **self.service["mcp"].get("headers", {}),
         }
         if self._session_id is not None:
             headers[MCP_SESSION_HEADER] = self._session_id
@@ -253,7 +269,11 @@ class KeylessExaMcpClient:
                         "content-type", "retry-after", "x-ratelimit-reset", "mcp-session-id", "date", "content-length",
                     }
                 }
-                body, too_large = await _read_bounded(response.content)
+                body, too_large = await _read_bounded(
+                    response.content,
+                    sse=response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() == "text/event-stream",
+                    request_id=request_id,
+                )
                 if too_large:
                     return _Exchange(
                         response_status, response_headers, None, "body_too_large", callback_state["called"],
@@ -349,9 +369,9 @@ class KeylessExaMcpClient:
         """Single-flight only the session setup and cached schema refresh."""
 
         async with self._setup_lock:
-            if self._session_id is None:
+            if self._protocol_version is None:
                 initialized = await self._initialize(deadline=deadline)
-                if initialized.error or initialized.status != 200 or self._session_id is None:
+                if initialized.error or initialized.status != 200 or self._protocol_version is None:
                     return initialized
             if self._tools is None:
                 return await self._list_tools(deadline=deadline)
@@ -381,6 +401,7 @@ class KeylessExaMcpClient:
         tool_name: str,
         arguments: Mapping[str, Any],
         *,
+        required_arguments: tuple[str, ...] = (),
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Call one live-schema MCP tool; retry one stale session before the call."""
@@ -410,8 +431,7 @@ class KeylessExaMcpClient:
             properties = (
                 _tool_properties(
                     tool,
-                    require_search_controls=tool_name == KEYLESS_EXA_SEARCH_TOOL,
-                    require_fetch_controls=tool_name == KEYLESS_EXA_FETCH_TOOL,
+                    required_arguments=required_arguments,
                 )
                 if isinstance(tool, Mapping) else None
             )
@@ -420,14 +440,13 @@ class KeylessExaMcpClient:
             adapted = self._adapt_arguments(properties, arguments)
             if adapted is None:
                 return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
-            if tool_name == KEYLESS_EXA_FETCH_TOOL:
-                required = tool["inputSchema"].get("required", [])
-                if (
-                    not isinstance(required, list)
-                    or not all(isinstance(name, str) and name in adapted for name in required)
-                    or not _REQUIRED_FETCH_FIELDS.issubset(adapted)
-                ):
-                    return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
+            required = tool["inputSchema"].get("required", [])
+            if (
+                not isinstance(required, list)
+                or not all(isinstance(name, str) and name in adapted for name in required)
+                or not set(required_arguments).issubset(adapted)
+            ):
+                return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
             request_session = self._session_id
             called = await self._request(
                 "tools/call",
@@ -451,15 +470,10 @@ class KeylessExaMcpClient:
         *,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
-        return await self.call_tool(KEYLESS_EXA_SEARCH_TOOL, arguments, on_sent=on_sent)
-
-    async def fetch(
-        self,
-        arguments: Mapping[str, Any],
-        *,
-        on_sent: Callable[[], Awaitable[None] | None] | None = None,
-    ) -> SearchResponse:
-        return await self.call_tool(KEYLESS_EXA_FETCH_TOOL, arguments, on_sent=on_sent)
+        mcp = self.service["mcp"]
+        return await self.call_tool(
+            mcp["tool"], arguments, required_arguments=tuple(mcp["required_arguments"]), on_sent=on_sent,
+        )
 
     @staticmethod
     async def _as_search_response(exchange: _Exchange) -> SearchResponse:
@@ -495,4 +509,4 @@ class KeylessExaMcpClient:
         )
 
 
-__all__ = ["KEYLESS_EXA_ENDPOINT", "KEYLESS_EXA_SEARCH_TOOL", "KEYLESS_EXA_FETCH_TOOL", "KeylessExaMcpClient"]
+__all__ = ["KeylessMcpClient"]

@@ -1,4 +1,4 @@
-"""MH-SEARCH-SERVICES-001: optional Parallel dispatch and SDK lifecycle.
+"""MH-SEARCH-SERVICES-001: optional Parallel dispatch through shared MCP.
 
 Synthetic HTTP responses protect consent, bounded excerpts, header coverage and
 cleanup. Existing Exa fixtures cannot catch a Parallel schema or dispatch error.
@@ -12,7 +12,6 @@ from aiohttp import web
 import pytest
 
 from config.v2_config import (
-    PARALLEL_SOURCE_ID,
     ModelHubConfig, ModelHubSourceStateConfig, V2Config, hosted_tool_setting, model_hub_builtin_source,
 )
 from core.handlers.model_hub.events import BoundedEventLog
@@ -20,7 +19,33 @@ from core.handlers.model_hub.hosted_tools import apply_hosted_tool_put
 from core.handlers.model_hub.service import ModelHubService, V2ModelHubConfigStore
 from vibe import __version__
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime import parallel_mcp
+from vibe.model_hub_runtime import api_key_vendors
+from vibe.model_hub_runtime.keyless_mcp import KeylessMcpClient
+from core.handlers.model_hub.search_services import search_request
+
+PARALLEL_SOURCE_ID = "src_parallelkeyless"
+
+
+def _endpoint(monkeypatch, endpoint):
+    original = api_key_vendors.api_key_vendor_entry
+    vendor = original("parallel-mcp")
+    monkeypatch.setattr(api_key_vendors, "api_key_vendor_entry", lambda key:
+                        replace(vendor, search={**vendor.search, "endpoint": endpoint})
+                        if key == "parallel-mcp" else original(key))
+
+
+async def _search_parallel(request):
+    service = api_key_vendors.search_service("parallel-mcp", "search")
+    client = KeylessMcpClient(service)
+    try:
+        return await client.search(search_request(service, request["objective"], 5))
+    finally:
+        await client.close()
+
+
+async def _close_clients(adapter):
+    for client in adapter._keyless_clients.values():
+        await client.close()
 
 
 @pytest.mark.asyncio
@@ -65,8 +90,8 @@ async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypat
             notice = {'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'}
             for message in (notice, reply):
                 await stream.write(('event: message\r\ndata: ' + json.dumps(message, ensure_ascii=False) + '\r\n\r\n').encode())
-            # A finite response cannot catch buffering until EOF. Hold for eight
-            # seconds; the SDK must close promptly on the matching result/error.
+            # Hold the SSE response open after its matching result/error: the
+            # shared client must finish without waiting for EOF.
             for _ in range(800):
                 if request.transport is None or request.transport.is_closing():
                     closed_before_eof.set()
@@ -83,7 +108,7 @@ async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypat
     await runner.setup()
     site = web.TCPSite(runner, '127.0.0.1', 0)
     await site.start()
-    monkeypatch.setattr(parallel_mcp, 'ENDPOINT', f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
+    _endpoint(monkeypatch, f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
     config = V2Config.default()
     config.model_hub.enabled = True
     config.save()
@@ -115,7 +140,7 @@ async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypat
             assert result['record']['sources'][0]['snippet'] == 'alpha\u0085beta\u2028gamma\u2029delta'
             assert result['execution']['executor_origin']['provider'] == 'parallel-mcp'
         assert {c[:2] for c in calls} >= {('POST', 'initialize'), ('POST', 'notifications/initialized'),
-                                        ('POST', 'tools/list'), ('POST', 'tools/call'), ('DELETE', None)}
+                                        ('POST', 'tools/list'), ('POST', 'tools/call')}
         assert all(h.get('User-Agent') == f'Avibe/{__version__}' for _, _, h in calls)
         assert all('Authorization' not in h and 'x-api-key' not in h for _, _, h in calls)
         tool_calls = sum(method == 'tools/call' for _, method, _ in calls)
@@ -124,7 +149,7 @@ async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypat
             raise RuntimeError('synthetic final admission refused')
 
         refused = await adapter.search(PARALLEL_SOURCE_ID, 'parallel-mcp', 'parallel/mcp', None,
-                                       {'objective': 'refused'}, on_sent=refuse)
+                                       {'objective': 'refused', 'search_queries': ['refused']}, on_sent=refuse)
         assert refused.on_sent_fired is False
         assert sum(method == 'tools/call' for _, method, _ in calls) == tool_calls
         count = len(calls)
@@ -139,7 +164,7 @@ async def test_parallel_opt_in_dispatch_headers_and_teardown(tmp_path, monkeypat
         assert 'web_search' not in service.freeze_turn_hosted_tools(store.load()).tools
         assert len(calls) == count
     finally:
-        await adapter._keyless_exa_client.close()
+        await _close_clients(adapter)
         await runner.cleanup()
 
 
@@ -187,12 +212,12 @@ async def test_parallel_persisted_collision_blocks_registered_dispatch(tmp_path,
         assert not calls
         assert store.load().to_payload() == snapshot
     finally:
-        await adapter._keyless_exa_client.close()
+        await _close_clients(adapter)
 
 
 @pytest.mark.asyncio
 async def test_parallel_ignores_environment_https_proxy(monkeypatch):
-    """MH-SEARCH-SERVICES-001: real SDK egress stays direct even with HTTPS_PROXY.
+    """MH-SEARCH-SERVICES-001: real shared-client egress ignores HTTPS_PROXY.
 
     A local TLS sink closes before HTTP; no query/key is sent. This catches proxy
     routing at the socket boundary, which client configuration assertions miss.
@@ -223,7 +248,7 @@ async def test_parallel_ignores_environment_https_proxy(monkeypatch):
             monkeypatch.setenv(name, f'http://127.0.0.1:{proxy_server.sockets[0].getsockname()[1]}')
         for name in ('NO_PROXY', 'no_proxy'):
             monkeypatch.setenv(name, '')
-        monkeypatch.setattr(parallel_mcp, 'ENDPOINT', f'https://127.0.0.1:{target.sockets[0].getsockname()[1]}/mcp')
+        _endpoint(monkeypatch, f'https://127.0.0.1:{target.sockets[0].getsockname()[1]}/mcp')
         adapter = CLIProxyEngineAdapter()
         try:
             result = await asyncio.wait_for(adapter.search(PARALLEL_SOURCE_ID, 'parallel-mcp', 'parallel/mcp', None,
@@ -232,13 +257,13 @@ async def test_parallel_ignores_environment_https_proxy(monkeypatch):
             assert direct_handshakes == [True]
             assert proxy_lines == []
         finally:
-            await adapter._keyless_exa_client.close()
+            await _close_clients(adapter)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('boundary', ['redirect', 'oversize'])
 async def test_parallel_rejects_redirects_and_oversized_responses(monkeypatch, boundary):
-    """MH-SEARCH-SERVICES-001: the SDK must honor Model Hub's transport limits before parsing.
+    """MH-SEARCH-SERVICES-001: MCP must bound decoded bodies and refuse redirects.
 
     A small valid result can hide a large HTTP body. A same-origin redirect
     still leaves the configured endpoint, including during session teardown.
@@ -250,7 +275,7 @@ async def test_parallel_rejects_redirects_and_oversized_responses(monkeypatch, b
         received.append((request.path, message.get('method') or request.method))
         if request.path == '/other':
             return web.Response(status=204)
-        if boundary == 'redirect' and request.method == 'DELETE':
+        if boundary == 'redirect':
             return web.Response(status=307, headers={'Location': '/other'})
         if message.get('method') != 'initialize':
             return web.Response(status=503)
@@ -271,13 +296,13 @@ async def test_parallel_rejects_redirects_and_oversized_responses(monkeypatch, b
     try:
         site = web.TCPSite(runner, '127.0.0.1', 0)
         await site.start()
-        monkeypatch.setattr(parallel_mcp, 'ENDPOINT', f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
-        answer = await asyncio.wait_for(parallel_mcp.search_parallel({'objective': 'private query'}), 3)
+        _endpoint(monkeypatch, f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
+        answer = await asyncio.wait_for(_search_parallel({'objective': 'private query'}), 3)
     finally:
         await runner.cleanup()
     if boundary == 'redirect':
-        assert answer.http_status == 503  # Failed tools/list, followed by a redirect at teardown.
-        assert ('/mcp', 'DELETE') in received
+        assert answer.http_status == 307 and answer.error == 'redirect'
+        assert received == [('/mcp', 'initialize')]
         assert all(path == '/mcp' for path, _ in received), received
     else:
         assert received == [('/mcp', 'initialize')]
@@ -337,22 +362,24 @@ async def test_parallel_search_exchange_owns_retry_and_size(monkeypatch, case):
     try:
         site = web.TCPSite(runner, '127.0.0.1', 0)
         await site.start()
-        monkeypatch.setattr(parallel_mcp, 'ENDPOINT', f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
-        answer = await asyncio.wait_for(parallel_mcp.search_parallel({'objective': 'test'}), 5)
+        _endpoint(monkeypatch, f'http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/mcp')
+        answer = await asyncio.wait_for(_search_parallel({'objective': 'test'}), 5)
     finally:
         await runner.cleanup()
 
     service = model_hub_search_service(model_hub_builtin_source(PARALLEL_SOURCE_ID))
     record = map_response(service, answer, sent=answer.on_sent_fired, results=1, say=lambda key: key).record
     assert answer.on_sent_fired
+    headers = {k.lower(): v for k, v in answer.headers.items()}
     if case == 'disconnect':
-        assert (answer.http_status, answer.headers, answer.response_received_at) == (None, {}, None)
+        assert (answer.http_status, answer.response_received_at) == (None, None)
+        assert 'retry-after' not in headers
         assert record['error_code'] == 'service_unavailable'
     elif case == 'limited':
-        assert (answer.http_status, answer.headers) == (429, {'retry-after': '41'})
+        assert answer.http_status == 429 and headers['retry-after'] == '41'
         assert record['error_code'] == 'service_rate_limited'
     elif case.startswith('oversize'):
         assert record['status'] == 'failed'
     else:
-        assert answer.http_status == 200 and answer.headers == {}
+        assert answer.http_status == 200 and 'retry-after' not in headers
         assert record['sources'] == [{'url': 'https://example.org/guide', 'snippet': 'x' * 1000}]

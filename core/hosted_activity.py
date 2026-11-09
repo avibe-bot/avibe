@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any, Callable, Literal, Mapping, Optional
 
-from config.v2_config import KEYLESS_EXA_SOURCE_ID, PARALLEL_SOURCE_ID
+from config.v2_config import KEYLESS_EXA_SOURCE_ID, is_builtin_search_source_id
 from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
@@ -50,7 +50,7 @@ HOSTED_ACTIVITY_VERSION = 1
 
 # The longest query or prompt an IM line quotes; the Web card shows it whole.
 LINE_SUBJECT_MAX_CHARS = 60
-_BUILTIN_LABELS = {PARALLEL_SOURCE_ID: "keylessParallel", KEYLESS_EXA_SOURCE_ID: "keylessExa", "src_localfetch": "fetch.local", "src_jinakeyless": "fetch.jina"}
+_BUILTIN_LABELS = {"src_parallelkeyless": "keylessParallel", KEYLESS_EXA_SOURCE_ID: "keylessExa", "src_localfetch": "fetch.local", "src_jinakeyless": "fetch.jina"}
 
 SourceNames = Callable[[str], Optional[str]]
 #: A Source as Model Hub holds it now: ``protocol``, ``vendor``, ``needs_action`` (its ``needs_action`` or ``error``
@@ -443,7 +443,7 @@ def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optio
         reason = f"skip.{attempt.skipped}"
         if attempt.skipped == "disabled" and current is not None and current.get("enabled") is False:
             remedy = "repair.disabled"
-    if (attempt.source_id in {KEYLESS_EXA_SOURCE_ID, PARALLEL_SOURCE_ID, "src_jinakeyless"} and not superseded
+    if ((is_builtin_search_source_id(attempt.source_id) or attempt.source_id == "src_jinakeyless") and not superseded
             and current is not None and current.get("enabled") is not False
             and (attempt.error_code == "service_rate_limited" or attempt.skipped == "cooling")):
         remedy = "repair.retrySearch"

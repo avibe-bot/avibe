@@ -49,6 +49,7 @@ export const KEYLESS_ACTIVE_SEARCH: HostedWebSearchToolStatus = {
   ],
   service_vendors: [...ACTIVE_SEARCH.service_vendors!, {
     id: 'exa-mcp', name: 'Exa (free)', results_max: 100, price: price(0), free_tier: 'Free; IP rate-limited',
-    source_ids: ['src_exakeyless'], facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false },
+    source_ids: ['src_exakeyless'], endpoint: ['mcp', 'exa', 'ai'].join('.'), // joined: a dotted literal would read as an i18n key
+    facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false, default_enabled: true },
   }],
 };

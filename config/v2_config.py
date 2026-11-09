@@ -3210,27 +3210,29 @@ KEYLESS_EXA_SOURCE_ID = "src_exakeyless"
 KEYLESS_EXA_VENDOR_ID = "exa-mcp"
 KEYLESS_EXA_SERVICE_ID = "exa/mcp"
 KEYLESS_EXA_DISPLAY_NAME = "Exa (free)"
-PARALLEL_SOURCE_ID = "src_parallelkeyless"
-PARALLEL_VENDOR_ID = "parallel-mcp"
-PARALLEL_SERVICE_ID = "parallel/mcp"
 
 
 def is_keyless_search_source(source: "ModelHubSourceConfig") -> bool:
-    return is_keyless_exa_source(source) or (
-        source.id == PARALLEL_SOURCE_ID and source.vendor == PARALLEL_VENDOR_ID
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entry
+
+    entry = builtin_search_entry(source.id)
+    return (
+        entry is not None and source.vendor == entry.id
         and source.protocol == "search" and source.kind == "api_key"
         and source.supply_channel == "hub" and source.credential_ref is None and source.base_url is None
     )
 
 
 def model_hub_builtin_search_sources() -> list["ModelHubSourceConfig"]:
-    sources = [model_hub_keyless_exa_source()] if KEYLESS_EXA_ACTIVE else []
-    return sources + [model_hub_builtin_source(PARALLEL_SOURCE_ID)]
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entries
+
+    return [model_hub_builtin_source(entry.source_id) for entry in builtin_search_entries()]
 
 
 def is_builtin_search_source_id(value: object) -> bool:
-    return value in (KEYLESS_EXA_SOURCE_ID, PARALLEL_SOURCE_ID)
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entry
 
+    return builtin_search_entry(value) is not None
 
 
 def is_keyless_exa_source(source: "ModelHubSourceConfig") -> bool:
@@ -3255,10 +3257,12 @@ def model_hub_keyless_exa_source() -> "ModelHubSourceConfig":
 def model_hub_builtin_source(source_id: str) -> "ModelHubSourceConfig | None":
     """Credential-free catalog identity, never a persisted Source or model supplier."""
     from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identity
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entry
 
+    search = builtin_search_entry(source_id)
     entry = (
-        {"source_id": PARALLEL_SOURCE_ID, "vendor": PARALLEL_VENDOR_ID, "label": "Parallel (free)"}
-        if source_id == PARALLEL_SOURCE_ID else builtin_tool_identity(source_id)
+        {"source_id": search.source_id, "vendor": search.id, "label": search.label}
+        if search is not None else builtin_tool_identity(source_id)
     )
     if entry is None:
         return None
@@ -3272,7 +3276,13 @@ def model_hub_builtin_source(source_id: str) -> "ModelHubSourceConfig | None":
 def model_hub_builtin_sources() -> list["ModelHubSourceConfig"]:
     from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identities
 
-    return [model_hub_builtin_source(entry["source_id"]) for entry in builtin_tool_identities()] + [model_hub_builtin_source(PARALLEL_SOURCE_ID)]
+    from vibe.model_hub_runtime.api_key_vendors import builtin_search_entries
+
+    source_ids = dict.fromkeys(
+        [entry["source_id"] for entry in builtin_tool_identities()]
+        + [entry.source_id for entry in builtin_search_entries()]
+    )
+    return [model_hub_builtin_source(source_id) for source_id in source_ids]
 
 
 def is_keyless_exa_source_id(value: object) -> bool:
@@ -3290,7 +3300,10 @@ def model_hub_search_service(source: ModelHubSourceConfig) -> Optional[dict[str,
         return search_service(source.vendor, "search", None)
     if source.kind != "api_key" or source.supply_channel != "hub" or not source.credential_ref:
         return None
-    return search_service(source.vendor, source.protocol, source.base_url)
+    service = search_service(source.vendor, source.protocol, source.base_url)
+    # An anonymous endpoint belongs only to its exact synthetic identity, never
+    # to a credential-bearing or retargeted persisted Source.
+    return service if service is not None and service["auth"] != "none" else None
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from config.v2_config import (
     ModelHubSourceStateConfig,
-    PARALLEL_SOURCE_ID,
+    is_builtin_search_source_id,
     model_hub_search_service,
     is_keyless_search_source,
     model_hub_builtin_search_sources,
@@ -71,10 +71,10 @@ class SearchChain:
         """
         owner = self.owner
         source = next((s for s in [*model_hub_builtin_search_sources(), *config.sources] if s.id == slot.source_id), None)
-        if slot.source_id == PARALLEL_SOURCE_ID:
+        if is_builtin_search_source_id(slot.source_id):
             # Never shadow a persisted credential/endpoint or blocked state
             # with the anonymous catalog identity, including at final admission.
-            persisted = next((s for s in config.sources if s.id == PARALLEL_SOURCE_ID), None)
+            persisted = next((s for s in config.sources if s.id == slot.source_id), None)
             if persisted is not None:
                 source = persisted if is_keyless_search_source(persisted) else None
         fact = {"source_id": slot.source_id, "label": slot.label or slot.source_id, "kind": slot.kind, "outcome": "skipped"}

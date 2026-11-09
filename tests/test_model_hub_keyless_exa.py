@@ -15,7 +15,7 @@ from core.handlers.model_hub.search_services import ServiceCooldowns, map_respon
 from core.handlers.model_hub.service_diagnostics import transport_cause
 from config.v2_config import model_hub_keyless_exa_source
 from vibe.model_hub_runtime.api_key_vendors import search_service
-from vibe.model_hub_runtime.keyless_exa_mcp import KeylessExaMcpClient
+from vibe.model_hub_runtime.keyless_mcp import KeylessMcpClient
 
 
 NOW = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
@@ -129,7 +129,7 @@ async def _mcp_stub(
 async def test_keyless_mcp_negotiates_once_adapts_live_schema_and_maps_highlights(sse: bool) -> None:
     """KEX-2: one session sends only advertised search controls and maps highlights, not text."""
     async with _mcp_stub(sse=sse) as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint, client_version="test")
         sent: list[bool] = []
         response = await client.search(
             {
@@ -181,10 +181,10 @@ async def test_fetch_reuses_search_mcp_session_and_sends_explicit_page_bound(sse
 
     schema = {"type": "object", "properties": {"urls": {"type": "array"}, "maxCharacters": {"type": "integer"}}, "required": ["urls"]}
     async with _mcp_stub(sse=sse, fetch_schema=schema) as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint, client_version="test")
         await client.search({"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1})
         sent = []
-        response = await client.fetch({"urls": ["https://example.com/"], "maxCharacters": 48000}, on_sent=lambda: sent.append(True))
+        response = await client.call_tool("web_fetch_exa", {"urls": ["https://example.com/"], "maxCharacters": 48000}, required_arguments=("urls", "maxCharacters"), on_sent=lambda: sent.append(True))
         await client.close()
     assert [call["payload"]["method"] for call in calls] == [
         "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call",
@@ -215,8 +215,8 @@ async def test_fetch_incompatible_live_schema_or_arguments_never_send(variant):
         arguments.pop("urls")
     async with _mcp_stub(fetch_schema=schema) as (endpoint, calls):
         sent = []
-        client = KeylessExaMcpClient(endpoint=endpoint)
-        response = await client.fetch(arguments, on_sent=lambda: sent.append(True))
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint)
+        response = await client.call_tool("web_fetch_exa", arguments, required_arguments=("urls", "maxCharacters"), on_sent=lambda: sent.append(True))
         await client.close()
     assert response.error == "invalid_endpoint"
     assert sent == []
@@ -227,7 +227,7 @@ async def test_fetch_incompatible_live_schema_or_arguments_never_send(variant):
 async def test_keyless_mcp_does_not_continue_after_initialized_transport_error() -> None:
     """KEX-2: notification transport failures stop the handshake before tools/list."""
     async with _mcp_stub(notification_status=500) as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint)
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint)
         response = await client.search({"query": "avibe"})
         await client.close()
     assert response.http_status == 500
@@ -238,7 +238,7 @@ async def test_keyless_mcp_does_not_continue_after_initialized_transport_error()
 async def test_keyless_mcp_discards_session_after_invalid_initialization() -> None:
     """KEX-2: a failed handshake cannot authorize a later search on the stale session."""
     async with _mcp_stub(invalid_init_once=True) as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint)
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint)
         first = await client.search({"query": "first"})
         second = await client.search({"query": "second", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1})
         await client.close()
@@ -253,7 +253,7 @@ async def test_keyless_mcp_discards_session_after_invalid_initialization() -> No
 async def test_keyless_mcp_caches_tools_schema_for_warm_searches_on_one_session() -> None:
     """KEX-2: a warm session caches tools/list until the server invalidates it."""
     async with _mcp_stub() as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint, client_version="test")
         arguments = {"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1}
         await client.search(arguments)
         await client.search(arguments)
@@ -268,7 +268,7 @@ async def test_keyless_mcp_caches_tools_schema_for_warm_searches_on_one_session(
 async def test_keyless_mcp_parallel_calls_share_setup_but_not_tool_calls() -> None:
     """KEX-2: setup is single-flight; independent JSON-RPC calls run concurrently."""
     async with _mcp_stub() as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint, client_version="test")
         arguments = {"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1}
         responses = await asyncio.gather(client.search(arguments), client.search(arguments))
         await client.close()
@@ -285,7 +285,7 @@ async def test_keyless_mcp_parallel_calls_share_setup_but_not_tool_calls() -> No
 async def test_keyless_mcp_replays_one_stale_pre_tool_session_without_double_counting_admission() -> None:
     """KEX-2: session-not-found before tools/call reinitializes and invokes admission once."""
     async with _mcp_stub(stale_tools_once=True) as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint, client_version="test")
         admitted: list[bool] = []
         response = await client.search(
             {"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1},
@@ -304,7 +304,7 @@ async def test_keyless_mcp_replays_one_stale_pre_tool_session_without_double_cou
 async def test_keyless_mcp_rejects_a_schema_without_text_bound_before_tools_call() -> None:
     """KEX-2: a missing required highlight/text control is unavailable without sending a call."""
     async with _mcp_stub(missing="textMaxCharacters") as (endpoint, calls):
-        client = KeylessExaMcpClient(endpoint=endpoint)
+        client = KeylessMcpClient(SERVICE, endpoint=endpoint)
         response = await client.search({"query": "avibe", "numResults": 3})
         await client.close()
     assert response.error == "invalid_endpoint"

@@ -113,7 +113,7 @@ def test_keyless_candidate_and_catalog_are_active_by_default(tmp_path):
                for row in visible["executor_candidates"])
     vendor = next(row for row in visible["service_vendors"] if row["id"] == "exa-mcp")
     assert vendor["facts"] == {"tool_only": True, "auto_enroll": False, "free_check": False,
-                                "built_in": True, "requires_setup": False}
+                                "built_in": True, "requires_setup": False, "default_enabled": True}
     assert vendor["source_ids"] == [KEYLESS_EXA_SOURCE_ID]
 
 
@@ -482,7 +482,10 @@ async def test_active_service_read_validates_without_paid_calls(tmp_path):
     assert deepseek["source_ids"] == [DEEPSEEK] and deepseek["facts"]["auto_enroll"] is True
     assert deepseek["free_tier"] is None
     for vendor in visible["service_vendors"]:
-        assert set(vendor) == {"id", "name", "price", "free_tier", "facts", "results_max", "source_ids"}
+        expected = {"id", "name", "price", "free_tier", "facts", "results_max", "source_ids"}
+        if vendor["facts"].get("built_in"):
+            expected.add("endpoint")
+        assert set(vendor) == expected
         assert vendor["price"]["extra"] == []
     validator = Draft7Validator({"$ref": CONTRACT + "#/definitions/ServiceExecutor"}, registry=_api_response_registry())
     for changed in (

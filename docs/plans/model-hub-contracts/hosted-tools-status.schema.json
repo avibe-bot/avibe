@@ -162,6 +162,7 @@
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
         "price": { "$ref": "#/definitions/ServiceListPrice" },
+        "endpoint": { "type": "string", "format": "uri", "description": "The catalog-owned destination of an anonymous search service." },
         "free_tier": { "type": ["string", "null"], "description": "Catalog-verified free-tier description, null when unknown (not a claim of no free tier). The built-in keyless Exa row may state its free IP-rate-limited access." },
         "facts": {
           "type": "object",
@@ -172,7 +173,9 @@
             "auto_enroll": { "type": "boolean" },
             "free_check": { "type": "boolean" },
             "built_in": { "type": "boolean", "description": "True for a catalog-provided Source that needs no setup and is not addable." },
-            "requires_setup": { "type": "boolean" }          }
+            "requires_setup": { "type": "boolean" },
+            "default_enabled": { "type": "boolean" }
+          }
         },
         "results_max": { "type": "integer", "minimum": 1, "maximum": 100 },
         "source_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "All current search-capable Sources for this vendor, including opted-out Sources. A built-in vendor contains its synthetic Source id; empty means not added for ordinary vendors." }

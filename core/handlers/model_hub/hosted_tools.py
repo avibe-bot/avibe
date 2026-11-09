@@ -277,7 +277,7 @@ def _search_chain(
     disabled: list[ExecutorCandidate] = []
     ordered = _vibey_order(config)
     builtins = [source for source in model_hub_builtin_search_sources()
-                if source.id == KEYLESS_EXA_SOURCE_ID or source.id in setting.services]
+                if model_hub_search_service(source)["default_in_chain"] or source.id in setting.services]
     ordered.extend(builtins)
     by_id = {source.id: source for source in ordered}
     first = [by_id[sid] for sid in (setting.service_order or ()) if sid in by_id and by_id[sid].protocol == "search"]
@@ -642,11 +642,13 @@ def _service_vendors(config: ModelHubConfig) -> list[dict[str, Any]]:
             "name": vendor.label,
             "price": {**service["price"], "extra": [dict(part) for part in service["price"]["extra"]]},
             "free_tier": "Free; IP rate-limited" if vendor.built_in else None,
+            **({"endpoint": service["endpoint"]} if vendor.built_in else {}),
             "facts": {
                 "tool_only": service["tool_only"],
                 "auto_enroll": bool(service.get("auto_enroll")),
                 "free_check": service["free_check"] is not None,
-                **({"built_in": True, "requires_setup": False} if vendor.built_in else {}),
+                **({"built_in": True, "requires_setup": False,
+                    "default_enabled": service["default_enabled"]} if vendor.built_in else {}),
             },
             "results_max": service["limits"]["results_max"],
             "source_ids": source_ids,

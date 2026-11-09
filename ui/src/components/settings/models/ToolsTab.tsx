@@ -162,7 +162,7 @@ const ExecutorPrice: React.FC<{ candidate: HostedExecutorCandidate }> = ({ candi
 /** Explain the automatic order and which service receives a query. */
 const SearchOrderHint: React.FC<{ tool: HostedWebSearchToolStatus; custom: boolean }> = ({ tool, custom }) => {
   const { t } = useTranslation();
-  const keyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
+  const keyless = tool.service_vendors?.some((vendor) => vendor.facts.built_in) === true;
   return (
     <span className="flex flex-col gap-2">
       <span>{t(keyless ? 'settings.models.searchServices.orderAutoKeyless' : 'settings.models.searchServices.orderAuto')}</span>
@@ -185,10 +185,12 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
   const movable = candidates.filter(candidateEnabled);
   const custom = tool.executor_order !== null;
   const candidateName = (candidate: HostedExecutorCandidate): string => {
-    if (candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID) return t('settings.models.searchServices.vendorName.exa-mcp') as string;
     const vendor = candidate.kind === 'service'
       ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
       : undefined;
+    // A built-in service has no Source row: its localized catalog name stands in.
+    if (vendor?.facts.built_in) return t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string;
+    if (candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID) return t('settings.models.searchServices.vendorName.exa-mcp') as string;
     return lookup.source(candidate.source_id)?.display_name
       ?? (vendor ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string : lookup.name(candidate.source_id));
   };
@@ -578,7 +580,7 @@ type ServiceActions = {
 const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save } & ServiceActions> = ({ tool, lookup, pending, onSave, onAddService, onOpenService, onRetryService }) => {
   const { t } = useTranslation();
   const noServices = !tool.service_vendors?.some((vendor) => !vendor.facts.built_in && vendor.source_ids.length > 0);
-  const hasKeyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
+  const hasKeyless = tool.service_vendors?.some((vendor) => vendor.facts.built_in) === true;
   return <div className="flex flex-col gap-4 border-t border-border p-4">
     <div className="flex items-center justify-between gap-4 rounded-lg border border-edge bg-surface p-3 shadow-elevation-0">
       <div className="flex min-w-0 flex-col gap-1"><h4 className="font-semibold text-foreground">{t('settings.models.searchServices.preferNative')}</h4><p className="model-hub-tool-note">{t(tool.prefer_native ? 'settings.models.searchServices.nativeOn' : 'settings.models.searchServices.nativeOff')}</p></div>

@@ -17,12 +17,12 @@ import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { readyRegion } from './regionRead';
 import { formatSmallUsd } from './format';
-import { builtinSearchSource, keylessExaSource } from './searchServices';
+import { builtinSearchSource, keylessEndpoint, keylessExaSource, serviceDefaultEnabled } from './searchServices';
 import { ACTIVE_SEARCH, KEYLESS_ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourcesCard } from './SourcesCard';
 import { ToolsTab } from './ToolsTab';
-import type { HostedServiceExecutorCandidate, HostedWebSearchToolStatus, Source, UsageReport } from './types';
+import type { HostedSearchServiceVendor, HostedServiceExecutorCandidate, HostedWebSearchToolStatus, Source, UsageReport } from './types';
 
 const wrap = (element: React.ReactElement, lng = 'en') => <I18nextProvider i18n={i18n.cloneInstance({ lng })}><ToastProvider>{element}</ToastProvider></I18nextProvider>;
 const tab = (tool = ACTIVE_SEARCH, save = vi.fn()) => {
@@ -430,54 +430,59 @@ describe('search service add dialog', () => {
 });
 
 
+// A second keyless built-in is catalog data only: the read supplies its identity,
+// endpoint and default, and the UI carries no vendor-specific branch for it.
+const optInKeyless = (base: HostedSearchServiceVendor): HostedSearchServiceVendor => ({
+  ...base, id: 'acme-mcp', name: 'Acme (free)', source_ids: ['src_acmekeyless'], endpoint: 'mcp.acme.example',
+  facts: { ...base.facts, default_enabled: false },
+});
+
 // MH-SEARCH-SERVICES-001: existing add tests cover credential setup, not a
 // disabled built-in provider's explicit election. This is a synthetic read.
-it('elects Parallel only after the user chooses Use for web search', async () => {
+it('elects an opt-in keyless service only after the user chooses Use for web search', async () => {
   const base = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((row) => row.id === 'exa-mcp')!;
   const tool: HostedWebSearchToolStatus = {
     ...KEYLESS_ACTIVE_SEARCH,
-    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, {
-      ...base, id: 'parallel-mcp', name: 'Parallel (free)', source_ids: ['src_parallelkeyless'],
-    }],
+    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, optInKeyless(base)],
   };
   const { onEnableService, onViewOrder } = addDialog(tool);
-  const row = screen.getByRole('region', { name: 'Parallel (free)' });
-  expect(row.textContent).toContain('mcp.parallel.ai');
+  const row = screen.getByRole('region', { name: 'Acme (free)' });
+  expect(row.textContent).toContain('mcp.acme.example');
   expect(onEnableService).not.toHaveBeenCalled();
   await userEvent.click(within(row).getByRole('button', { name: 'Use for web search' }));
-  expect(onEnableService).toHaveBeenCalledExactlyOnceWith('src_parallelkeyless');
+  expect(onEnableService).toHaveBeenCalledExactlyOnceWith('src_acmekeyless');
   expect(onViewOrder).not.toHaveBeenCalled();
   expect(screen.queryByLabelText('API key')).toBeNull();
 });
 
 // MH-SEARCH-SERVICES-001: a direct detail route must not present an unelected
 // service as enabled; the add-dialog election test cannot see that switch.
-it('shows unelected Parallel disabled in its service detail', () => {
+it('shows an unelected keyless service disabled in its service detail', () => {
   const base = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((row) => row.id === 'exa-mcp')!;
   const tool: HostedWebSearchToolStatus = {
     ...KEYLESS_ACTIVE_SEARCH,
-    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, {
-      ...base, id: 'parallel-mcp', name: 'Parallel (free)', source_ids: ['src_parallelkeyless'],
-    }],
+    service_vendors: [...KEYLESS_ACTIVE_SEARCH.service_vendors!, optInKeyless(base)],
   };
-  detail(builtinSearchSource('src_parallelkeyless')!, tool);
+  detail(builtinSearchSource('src_acmekeyless', tool)!, tool);
+  expect(screen.getByRole('heading', { name: 'Acme (free)' })).toBeTruthy();
+  expect(screen.getAllByText('mcp.acme.example').length).toBeGreaterThan(0);
   expect(screen.getByRole('switch', { name: 'Use for web search' }).getAttribute('aria-checked')).toBe('false');
   expect(screen.queryByLabelText('API key')).toBeNull();
 });
 
 // MH-SEARCH-SERVICES-001: the order hint describes the selected route, while
 // provider-specific destinations belong to the cards where a user opts in.
-it.each(['en', 'zh'])('does not present Exa as the destination for a Parallel-only search in %s', async (lng) => {
+it.each(['en', 'zh'])('does not present Exa as the destination for a different keyless service search in %s', async (lng) => {
   const locale = i18n.cloneInstance({ lng });
   const exa = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((v) => v.id === 'exa-mcp')!;
   const base = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row): row is HostedServiceExecutorCandidate => row.kind === 'service' && row.source_id === 'src_exakeyless')!;
-  const parallel = { ...exa, id: 'parallel-mcp', name: 'Parallel (free)', source_ids: ['src_parallelkeyless'] };
+  const acme = optInKeyless(exa);
   const tool: HostedWebSearchToolStatus = {
-    ...KEYLESS_ACTIVE_SEARCH, prefer_native: false, service_vendors: [exa, parallel],
-    services: { src_exakeyless: { enabled: false }, src_parallelkeyless: { enabled: true } },
-    effective_order: ['src_parallelkeyless'],
+    ...KEYLESS_ACTIVE_SEARCH, prefer_native: false, service_vendors: [exa, acme],
+    services: { src_exakeyless: { enabled: false }, src_acmekeyless: { enabled: true } },
+    effective_order: ['src_acmekeyless'],
     executor_candidates: [
-      { ...base, source_id: 'src_parallelkeyless', model_id: 'parallel/mcp' },
+      { ...base, source_id: 'src_acmekeyless', model_id: 'acme/mcp' },
       { ...base, settings: { ...base.settings, enabled: false } },
     ],
   };
@@ -489,6 +494,22 @@ it.each(['en', 'zh'])('does not present Exa as the destination for a Parallel-on
   addDialog(tool, lng);
   const exaCard = screen.getByRole('region', { name: locale.t('settings.models.searchServices.vendorName.exa-mcp') });
   expect(within(exaCard).getByText(/mcp\.exa\.ai/)).toBeTruthy();
-  expect(within(screen.getByRole('region', { name: parallel.name })).getByText(/mcp\.parallel\.ai/)).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: acme.name })).getByText(/mcp\.acme\.example/)).toBeTruthy();
   expect(screen.getByText(locale.t('settings.models.searchServices.queryDestination'))).toBeTruthy();
+});
+
+// An older read has neither `default_enabled` nor `endpoint`: Exa keeps its identity and endpoint,
+// and enrollment facts still decide the default.
+it('keeps a legacy read resolving keyless Exa without the new catalog facts', () => {
+  const legacy: HostedWebSearchToolStatus = {
+    ...KEYLESS_ACTIVE_SEARCH,
+    service_vendors: KEYLESS_ACTIVE_SEARCH.service_vendors!.map(({ endpoint: _endpoint, facts: { default_enabled: _default, ...facts }, ...vendor }) => ({ ...vendor, facts })),
+  };
+  expect(builtinSearchSource('src_exakeyless')?.vendor).toBe('exa-mcp');
+  expect(builtinSearchSource('src_exakeyless', legacy)?.vendor).toBe('exa-mcp');
+  expect(builtinSearchSource('src_unknownkeyless', legacy)).toBeNull();
+  const vendor = legacy.service_vendors!.find((row) => row.id === 'exa-mcp')!;
+  expect(keylessEndpoint(vendor, 'src_exakeyless')).toBe('mcp.exa.ai');
+  expect(serviceDefaultEnabled(vendor)).toBe(true);
+  expect(serviceDefaultEnabled(optInKeyless(vendor))).toBe(false);
 });
