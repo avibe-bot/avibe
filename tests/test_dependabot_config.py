@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
+from packaging.markers import Marker
+from packaging.requirements import Requirement
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,3 +83,34 @@ def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:
     assert lock["packages"][""]["devDependencies"]["vitest"] == package["devDependencies"]["vitest"]
     assert lock["packages"]["node_modules/vitest"]["version"].startswith("4.")
     assert "^20." in lock["packages"]["node_modules/vitest"]["engines"]["node"]
+
+
+@pytest.mark.parametrize("python_version,expected", [("3.10", "2.0.57"), ("3.11", "2.1.0"), ("3.12", "2.1.0")])
+@pytest.mark.parametrize("platform,machine", [("linux", "x86_64"), ("darwin", "arm64"), ("win32", "AMD64")])
+def test_sqlalchemy_requirements_and_lock_preserve_python_version_branches(
+    python_version: str, expected: str, platform: str, machine: str,
+) -> None:
+    # A Python3.10 patch must not collapse the already-adopted 2.1 branch on
+    # newer Python. Check the actual requirement and root lock edge per target.
+    environment = {
+        "python_version": python_version,
+        "python_full_version": f"{python_version}.0",
+        "sys_platform": platform,
+        "platform_machine": machine,
+    }
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    requirements = [Requirement(value) for value in project["dependencies"]]
+    selected = [item for item in requirements if item.name.lower() == "sqlalchemy"
+                and (item.marker is None or item.marker.evaluate(environment))]
+    assert len(selected) == 1
+    assert expected in selected[0].specifier
+    assert "2.0.55" not in selected[0].specifier
+    assert ("2.1.0" if python_version == "3.10" else "2.0.57") not in selected[0].specifier
+
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    root = next(item for item in lock["package"] if item["name"] == "avibe-os")
+    edges = [item for item in root["dependencies"] if item["name"] == "sqlalchemy"
+             and ("marker" not in item or Marker(item["marker"]).evaluate(environment))]
+    assert len(edges) == 1
+    assert edges[0]["version"] == expected
+    assert any(item["name"] == "sqlalchemy" and item["version"] == expected for item in lock["package"])
