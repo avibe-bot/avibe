@@ -384,7 +384,17 @@ async function reconcileWebPushOnce(
       }
       if (nativeState.state !== 'on') {
         const rememberedEndpoints = await getRememberedWebPushEndpoints();
-        if (rememberedEndpoints.length === 0) {
+        const rememberedEndpoint = rememberedEndpoints[0];
+        if (!rememberedEndpoint) {
+          return { support, status: 'disabled' };
+        }
+        const rememberedStatus = await api.getWebPushStatus({
+          endpoint: rememberedEndpoint,
+        });
+        if (
+          !rememberedStatus.current_subscription_enabled
+          && !rememberedStatus.current_subscription_repairable
+        ) {
           return { support, status: 'disabled' };
         }
         await enableNativeWebPush(api, publicKey, nativeState, {
