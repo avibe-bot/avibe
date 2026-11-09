@@ -2139,16 +2139,14 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Runs are asynchronous by default. A run that fails, is canceled, or is interrupted still tells its sender.
-        `--callback`, `--callback-session-id`, and `--no-callback` are accepted as deprecated no-ops.
-        `--no-reply` is for an existing Session or Bot when no receipt is wanted.
-        `--model`, `--reasoning-effort`, `--visible`, `--same-scope`, `--scope-id`, and `--close-after`
+        Failed, canceled, or interrupted runs still notify the sender.
+        --no-reply rejects --sync and new/forked Sessions.
+        --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
           apply only to a new or forked Session.
 
         Examples:
-          vibe agent run --agent reviewer --message 'Review the latest deployment result.'
-          vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
-          vibe agent run --bot reviewer --no-reply --message 'Record this fact; no response is needed.'
+          vibe agent run --session-id sesk8m4q2p7x --queue --message 'Update docs next.'
+          vibe agent run --bot reviewer --no-reply --message 'Record this fact.'
         """
     )
 
@@ -18799,13 +18797,13 @@ def build_parser():
     agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
     agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
-    agent_run_parser.add_argument("--callback", action="store_true", help="Deprecated no-op; successful results use a read receipt")
-    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Deprecated no-op; successful results use a read receipt")
+    agent_run_parser.add_argument("--callback", action="store_true", help="Deprecated no-op")
+    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Deprecated no-op")
     agent_run_parser.add_argument("--no-callback", action="store_true", help="Deprecated no-op (the default)")
     agent_run_parser.add_argument(
         "--no-reply",
         action="store_true",
-        help="For an existing Session or Bot: do not open a delegation or send a read receipt",
+        help="Existing Session/Bot: no delegation or read receipt",
     )
     agent_run_parser.add_argument(
         "--close-after",

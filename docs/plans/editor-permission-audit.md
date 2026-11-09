@@ -433,9 +433,10 @@ Executed:
   With PM's independent signed-HTTP callback probe, this is the executed
   evidence that a recorded authority survives to its final consumer
 - PERMISSIONS-028 drives the real `cli.main` on a real pairing for both instance
-  kinds, over every deferred producer — Run, hook, explicit callback, Task and
-  Watch, add and update, target typed, defaulted from the caller env or named by
-  a legacy scope key. A refusal is asserted as unchanged Run, definition and
+  kinds, over every deferred producer — Run, hook, Task and Watch, add and
+  update, target typed, defaulted from the caller env or named by a legacy scope
+  key. Deprecated callback flags add no destination and cannot bypass admission
+  to the actual target. A refusal is asserted as unchanged Run, definition and
   Session counts and, for an update, a byte-identical stored row; the permitted
   Editor, the Member, the Owner and the local caller all still queue their work.
   It also holds the replacement pair both ways: an edit that repoints a Task or

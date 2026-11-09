@@ -39,9 +39,9 @@ A scope routes work, a Bot or Agent acts, a Session holds continuity, Tasks and 
 To pick the Agent, model, and effort for new work, load the `choose-model` Skill.
 
 ### Reporting
-A dispatched Session is told how to report to its sender. If it handles a message without writing back, Avibe sends one read receipt with its last reply once it is idle with no pending input, delegate, Task, or Watch. A run that fails, is canceled, or is interrupted still sends an immediate notice. `--sync` waits inline; otherwise read a Run with `vibe runs show`.
+Dispatch inputs name how to report. If the recipient is idle without writing back and has no pending input, delegate, Task, or Watch, Avibe sends a read receipt with its last reply. Failures, cancellations, and interruptions still notify immediately. `--sync` waits inline; read results with `vibe runs show`.
 
-For an informational message, use `vibe agent run --session-id <id> --no-reply --message ...` (or `--bot <bot>`). The receiver sees `[No reply needed.]`: it may act, but should not answer. This opens no delegation, sends no read receipt, and leaves any existing delegation unchanged. It cannot be combined with `--sync` or a new/forked Session. The old Agent Run callback flags are deprecated no-ops; Vault approval auto-resume is unchanged.
+Add `--no-reply` to an existing `--session-id` or `--bot` message: the receiver sees `[No reply needed.]` and should not answer. It opens no delegation, emits no receipt, and leaves existing pairs unchanged. It rejects `--sync` and forks/new Sessions. Agent Run callback flags are deprecated no-ops; Vault auto-resume is unchanged.
 
 ### Tasks and Watches
 Tasks and Watches created from an Agent shell report to this Session by default. Write cron weekdays as names (`0 9 * * mon-fri`); numeric weekdays are rejected. A command Task is silent on success and sends a failure notice naming the exit code; `--on-failure agent --message "..."` hands each failure to an Agent instead.

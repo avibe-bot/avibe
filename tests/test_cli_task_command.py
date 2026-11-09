@@ -415,9 +415,10 @@ def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
     text = " ".join(capsys.readouterr().out.split())
     assert "or a fork. Runs are async." in text
     assert "--callback Deprecated no-op" in text
-    assert "A run that fails, is canceled, or is interrupted still tells its sender." in text
+    assert "Failed, canceled, or interrupted runs still notify the sender." in text
     assert "--no-callback Deprecated no-op (the default)" in text
-    assert "--no-reply For an existing Session or Bot" in text
+    assert "--no-reply Existing Session/Bot: no delegation or read receipt" in text
+    assert "--no-reply rejects --sync and new/forked Sessions." in text
     assert "--session-id ID Join this Session's running turn, or start one if idle" in text
     assert "--queue With --session-id: wait for the running turn" in text
     assert "Fork this Session's context, backend, scope, and cwd" in text
