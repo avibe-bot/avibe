@@ -1,72 +1,10 @@
 /* The approved elevation and edge system (ui/design: system/elevation/*; owner, 2026-11-08), the
- * parts not shipped yet: glows themed per palette (live light in the theme's own accent; brand
- * decoration and unread cards as a same-hue soft shadow in Light) and the Light hover wash (other
- * fix #1). Levels, edges, fields, floating surfaces, the composer, and state have shipped. Each rule
- * here stands in for a class change in one component, gated on `:root:has([data-elevation-proposal])`,
- * so it applies only inside <ElevationProposal>; it leaves this file when its part ships.
- *
- * Overrides set `--tw-shadow`, the part of Tailwind's composed box-shadow a `shadow-*` utility owns,
- * so a ring drawn on the same element (focus, a live microphone's edge) survives. */
+ * part not shipped yet: the Light hover wash (other fix #1). Levels, edges, fields, floating
+ * surfaces, the composer, state, and glows have shipped. Each rule here stands in for a class
+ * change in one component, gated on `:root:has([data-elevation-proposal])`, so it applies only
+ * inside <ElevationProposal>; it leaves this file when its part ships. */
 
-@layer elevation-proposal.live, elevation-proposal.decor, elevation-proposal.tinted, elevation-proposal.hover;
-
-@layer elevation-proposal.live {
-/* ------------------------------------------------------------------------------------------------
- * Light: live glows in the theme's own accent; decorative glows only in Dark.
- * ---------------------------------------------------------------------------------------------- */
-:root:has([data-elevation-proposal]) [class~='shadow-glow-dot-mint'] {
-  --tw-shadow: 0 0 var(--dot-glow-blur) color-mix(in srgb, var(--mint) var(--dot-glow-alpha), transparent);
-}
-:root:has([data-elevation-proposal]) [class~='shadow-glow-dot-gold'] {
-  --tw-shadow: 0 0 var(--dot-glow-blur) color-mix(in srgb, var(--gold) var(--dot-glow-alpha), transparent);
-}
-:root:has([data-elevation-proposal]) [class~='shadow-glow-dot-destructive'] {
-  --tw-shadow: 0 0 var(--dot-glow-blur) color-mix(in srgb, var(--destructive) var(--dot-glow-alpha), transparent);
-}
-
-/* A live microphone (holding a Bot, the voice card, the main Bot's centre button) keeps its glow,
-   in the palette's mint. */
-:root[data-theme='light']:has([data-elevation-proposal]) [class~='shadow-glow-md-mint'] {
-  --tw-shadow: 0 0 24px -6px color-mix(in srgb, var(--mint) 44%, transparent);
-}
-:root[data-theme='light']:has([data-elevation-proposal]) [class~='shadow-glow-lg-mint'] {
-  --tw-shadow: 0 0 32px -8px color-mix(in srgb, var(--mint) 44%, transparent);
-}
-:root[data-theme='light']:has([data-elevation-proposal]) [class~='shadow-glow-xl-mint'] {
-  --tw-shadow: 0 0 48px -12px color-mix(in srgb, var(--mint) 44%, transparent);
-}
-
-/* A floating voice card that is listening is floating and live at once: both. */
-:root:has([data-elevation-proposal]) [class~='shadow-elevation-2'][class~='shadow-glow-md-mint'] {
-  --tw-shadow: var(--elevation-2), 0 0 24px -6px color-mix(in srgb, var(--mint) 44%, transparent);
-}
-
-/* The phone tab bar's new-session button wore its own neon drop shadow on top of the brand
-   button's glow; it keeps only the brand glow. */
-:root:has([data-elevation-proposal]) [class~='shadow-[0_8px_20px_-4px_rgba(91,255,160,0.6)]'] {
-  --tw-shadow: 0 0 var(--brand-glow-blur) -4px rgba(91, 255, 160, 0.6);
-}
-}
-
-@layer elevation-proposal.decor {
-/* Decorative: page and panel icon tiles, the logo, eyebrow badges, the Apps launcher. Dark keeps
-   them; Light drops them. */
-:root[data-theme='light']:has([data-elevation-proposal]) :is(
-  [class*='shadow-glow-sm-'][class*='text-'][class*='-ink'],
-  [class*='shadow-glow-md-'][class*='text-'][class*='-ink']:not([class~='border-mint'], [class~='border-mint/40'], [class~='border-mint/35'], [class~='ring-mint']),
-  [class*='shadow-glow-lg-'][class*='text-'][class*='-ink'],
-  [class*='shadow-glow-xl-'][class*='text-'][class*='-ink'],
-  img[class~='shadow-glow-sm-mint'],
-  img[class~='shadow-glow-sm-mint']:hover,
-  [class~='bg-cyan-soft'][class~='shadow-glow-sm-cyan'],
-  [class~='bg-cyan-soft'][class~='shadow-glow-md-cyan']
-) {
-  --tw-shadow: 0 0 #0000;
-}
-:root[data-theme='light']:has([data-elevation-proposal]) .group:hover img[class~='shadow-glow-sm-mint'] {
-  --tw-shadow: 0 0 #0000;
-}
-}
+@layer elevation-proposal.hover;
 
 @layer elevation-proposal.hover {
 /* Other fix #1 (docs/plans/elevation-system.md), previewed here: `hover:bg-surface-2` paints white on
@@ -79,21 +17,4 @@
 :root:has([data-elevation-proposal]) [class~='active:bg-surface-2']:active {
   background-image: linear-gradient(color-mix(in srgb, var(--foreground) 6%, transparent), color-mix(in srgb, var(--foreground) 6%, transparent));
 }
-}
-
-/* ------------------------------------------------------------------------------------------------
- * In Light, the brand light comes back as a tinted soft shadow, not a neon halo: unread cards,
- * and decorative tiles (each in its own accent, through currentColor). Dark keeps its glows.
- * ---------------------------------------------------------------------------------------------- */
-@layer elevation-proposal.tinted {
-  :root[data-theme='light']:has([data-elevation-proposal]) [class~='border-mint/45'][class~='bg-mint/[0.05]'] {
-    --tw-shadow: var(--unread-shadow);
-    box-shadow: var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow);
-  }
-  :root[data-theme='light']:has([data-elevation-proposal]) :is(
-    [class*='shadow-glow-sm-'][class*='text-'][class*='-ink']:not([class~='bg-mint-soft'][class~='border-mint/40']:not([class~='text-mint-ink'])),
-    [class*='shadow-glow-md-'][class*='text-'][class*='-ink']:not([class~='border-mint'], [class~='border-mint/40'], [class~='border-mint/35'], [class~='border-mint/45'], [class~='border-mint/50'], [class~='ring-mint'])
-  ) {
-    --tw-shadow: var(--glow-soft);
-  }
 }

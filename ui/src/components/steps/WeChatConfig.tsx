@@ -380,7 +380,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {isAlreadyBound && (
             <div className="rounded-xl border border-edge bg-surface px-6 py-6 shadow-elevation-0">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-lg-mint">
                   <Check size={32} />
                 </div>
                 <div>
@@ -486,7 +486,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           {loginState === 'connected' && (
             <div className="rounded-xl border border-edge bg-surface-2 px-6 py-6 shadow-elevation-0">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-lg-mint">
                   <Check size={32} />
                 </div>
                 <div>

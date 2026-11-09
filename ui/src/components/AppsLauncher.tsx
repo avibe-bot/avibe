@@ -174,8 +174,8 @@ const LauncherPresentation = ({ pinned, setPinned }: {
         className={clsx(
           'group flex h-[39px] w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-0 text-[13px] font-bold text-foreground transition-colors',
           visible
-            ? 'border-cyan shadow-glow-sm-cyan'
-            : 'border-cyan/45 shadow-glow-sm-cyan hover:border-cyan/70',
+            ? 'border-cyan shadow-mark-sm-cyan'
+            : 'border-cyan/45 shadow-mark-sm-cyan hover:border-cyan/70',
         )}
       >
         <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />

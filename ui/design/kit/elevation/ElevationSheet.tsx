@@ -128,7 +128,7 @@ export function ElevationSheet() {
         </Specimen>
         <Specimen name="装饰图标块" use="深色：光晕；浅色：同色柔影" className="w-44">
           <div className="flex h-14 items-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
+            <div className="flex size-12 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-md-mint">
               <Inbox className="size-5" />
             </div>
           </div>
