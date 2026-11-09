@@ -15,6 +15,11 @@ import type { LabWrite } from './recorder';
 //   it; the rows under it move only as the disclosures draw them, never by a jump);
 // - nothing writes the scroll position.
 //
+// The disclosures watched run three times slower (their duration tokens, which the motion and the content's
+// unmount both read), and the cell's taps and reads are paced in time, not in frames: what is checked is geometry, which
+// does not depend on how long a motion takes, and a slow runner (which draws a few frames in an opening at its own
+// speed) still sees the two disclosures move together for many frames.
+//
 // A source below its host moves nothing of it by construction (a disclosure moves only what follows it): those
 // cells are run where both fit on one screen (a chip, a Harness row); a Harness group's cell would need the
 // group and what follows its collapse bar on one screen with the group open.
@@ -27,6 +32,12 @@ type Cell = { host: Host; source: 'above' | 'inside' | 'below'; bar?: 'on screen
 // Chips of their own before replies 371 (right above the group), 377 and 381 (above and below the Harness row
 // msg_00380), 383 and 387 (above and below the chip before msg_00386).
 const QUERY = 'delay=0&count=392&activity=1&chips=371,377,381,383,387';
+/** How much slower the disclosures run than in the product. */
+const SLOWER = 3;
+/** How long after the tap before it the next tap in a cell comes (ms; at least a frame). */
+const APART_MS = 150;
+/** How long the frames are read after the last tap (ms): past a slowed fold, its hold and what glides after. */
+const READ_MS = 3400;
 const HOSTS: Record<Host, string> = {
   group: '[data-harness-group]',
   chip: '[data-transcript-key="activity:grp_msg_00386"]',
@@ -74,10 +85,10 @@ async function place(page: Page, selector: string, y: number) {
 
 type Frame = { box: number | null; edge: number | null };
 
-/** Runs the cell's taps (`steps`: whose control, after how many frames) and reads every frame from the first
+/** Runs the cell's taps (`steps`: whose control, after how many ms) and reads every frame from the first
  *  tap on, at one moment. */
 async function watch(page: Page, host: Host, sourceSelector: string, steps: { who: 'host' | 'source'; after: number }[]) {
-  return page.evaluate(async ({ hostSelector, sourceSelector, hostKind, steps }) => {
+  return page.evaluate(async ({ hostSelector, sourceSelector, hostKind, steps, readFor }) => {
     const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
     const column = scroller.firstElementChild!.firstElementChild!;
     const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
@@ -153,8 +164,9 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
       const playing = sourceItem()?.getAnimations({ subtree: true }).some((animation) => animation.id === 'transcript-disclose' && animation.playState === 'running');
       if (playing && curtainOf()) overlap.push(stamp);
     };
+    let lastTap = performance.now();
     for (const { who, after } of steps) {
-      for (let count = 0; count < after; count += 1) {
+      for (let count = 0; count === 0 ? after > 0 : performance.now() - lastTap < after; count += 1) {
         const stamp = await frame();
         const value = read();
         out.push(value);
@@ -164,9 +176,10 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
       }
       const item = who === 'host' ? hostItem() : sourceItem();
       item.querySelector<HTMLElement>('button[aria-expanded]')!.click();
+      lastTap = performance.now();
       if (!tapped.some((row) => row.el === item)) tapped.push({ el: item, at: item.getBoundingClientRect().top, moved: [] });
     }
-    for (let count = 0; count < 50; count += 1) {
+    while (performance.now() - lastTap < readFor) {
       const stamp = await frame();
       const value = read();
       out.push(value);
@@ -178,7 +191,7 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     // The uppermost row tapped: nothing tapped in the cell lies above it.
     const uppermost = tapped.reduce((top, row) => (row.el.compareDocumentPosition(top.el) & Node.DOCUMENT_POSITION_FOLLOWING ? row : top));
     return { frames: out, down: span(down), overlap: span(overlap), overlapFrames: overlap.length, barTop, bottom, tappedMoved: uppermost.moved };
-  }, { hostSelector: HOSTS[host], sourceSelector, hostKind: host, steps });
+  }, { hostSelector: HOSTS[host], sourceSelector, hostKind: host, steps, readFor: READ_MS });
 }
 
 for (const cell of cells) {
@@ -215,20 +228,30 @@ for (const cell of cells) {
     const steps: { who: 'host' | 'source'; after: number }[] =
       cell.phase === 'opening'
         ? cell.change === 'shrinks' && cell.source === 'inside'
-          ? [{ who: 'host', after: 0 }, { who: 'source', after: 2 }, { who: 'source', after: 2 }]
-          : [{ who: 'host', after: 0 }, { who: 'source', after: 2 }]
-        : [{ who: 'source', after: 0 }, { who: 'host', after: 2 }];
+          ? [{ who: 'host', after: 0 }, { who: 'source', after: APART_MS }, { who: 'source', after: APART_MS }]
+          : [{ who: 'host', after: 0 }, { who: 'source', after: APART_MS }]
+        : [{ who: 'source', after: 0 }, { who: 'host', after: APART_MS }];
+    // What is watched runs SLOWER times slower (what set it up ran at the product's speed).
+    const slowed = await page.evaluate((factor) => {
+      const root = document.documentElement;
+      return ['--motion-disclose-open-duration', '--motion-disclose-close-duration'].map((name) => {
+        const ms = parseFloat(getComputedStyle(root).getPropertyValue(name));
+        root.style.setProperty(name, `${ms * factor}ms`);
+        return ms * factor;
+      });
+    }, SLOWER);
+    expect(slowed.every((ms) => ms > 0)).toBe(true);
     await page.evaluate(() => { window.__scrollLab.pinRef(0.4); window.__scrollLab.start(); });
     const result = await watch(page, cell.host, source, steps);
     await page.evaluate(() => window.__scrollLab.stop());
     const writes: LabWrite[] = await page.evaluate(() => window.__scrollLab.resolveSites());
 
     // What the cell is about: the other one played its disclosure while the host's curtain was down, for a good
-    // part of the way (an opening takes 440 ms, a fold about 350), read in a few frames at least, and the
+    // part of the way (an opening takes 440 ms, a fold 350, both SLOWER times here), read in a few frames at least, and the
     // collapse bar lay where the cell says.
-    expect(result.overlap).toBeGreaterThanOrEqual(150);
+    expect(result.overlap).toBeGreaterThanOrEqual(150 * SLOWER);
     expect(result.overlapFrames).toBeGreaterThanOrEqual(3);
-    expect(result.down).toBeGreaterThanOrEqual(200);
+    expect(result.down).toBeGreaterThanOrEqual(200 * SLOWER);
     if (cell.bar === 'on screen') expect(result.barTop!).toBeLessThan(result.bottom);
     if (cell.bar === 'below the screen') expect(result.barTop!).toBeGreaterThan(result.bottom);
     const boxes = result.frames.map(({ box }) => box).filter((box): box is number => box !== null);
