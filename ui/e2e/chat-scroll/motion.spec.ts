@@ -1138,6 +1138,63 @@ test('a Harness group closed while it still opens, after a member opened in it, 
   expectLandsAsItGoes(closing);
 });
 
+// A member's body opened while its group still opens: the group's curtain lies in its collapse bar, which the
+// layout puts lower at once, on screen or below it.
+for (const [where, block] of [['below the screen', 'center'], ['on screen', 'start']] as const) {
+  test(`a member opened while its group still opens leaves the curtain of the group on its top, its edge going with what the body pushes down (collapse bar ${where})`, async ({ page }) => {
+    await open(page, 'delay=0&count=392');
+    await transcript(page).evaluate((scroller, at) => [...scroller.querySelectorAll('[data-harness-group]')].at(-1)!.scrollIntoView({ block: at }), block);
+    await page.waitForTimeout(400);
+    const { bottom, bar, growth, frames } = await page.evaluate(async () => {
+      const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
+      const column = scroller.firstElementChild!.firstElementChild!;
+      const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+      [...scroller.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+      for (let count = 0; count < 2; count += 1) await frame();
+      const group = [...column.children].filter((el) => /^harness-(member|collapse):/.test((el as HTMLElement).dataset.transcriptKey ?? '')) as HTMLElement[];
+      // The first member (the top of what the group covers), the one under it, and the collapse bar.
+      const [member, below] = group;
+      const host = group.at(-1)!;
+      // Read at one moment (WebKit samples a running animation at each read): where the curtain's box lies from the
+      // group's top, and where its edge is carried, besides its own slide, from the member under the opened body.
+      const take = () => {
+        const clip = host.querySelector(':scope > [data-transcript-curtain-clip]');
+        const curtain = clip?.firstElementChild;
+        if (!clip || !curtain) return null;
+        const slide = new DOMMatrixReadOnly(getComputedStyle(curtain).transform).m42;
+        return { box: clip.getBoundingClientRect().top - member.getBoundingClientRect().top, edge: curtain.getBoundingClientRect().top - slide - below.getBoundingClientRect().top, slide };
+      };
+      const read = () => {
+        for (let attempt = 0; ; attempt += 1) {
+          const value = take();
+          const again = take();
+          if (!value || !again || (value.box === again.box && value.edge === again.edge && value.slide === again.slide) || attempt === 4) return value;
+        }
+      };
+      const height = member.offsetHeight;
+      const bar = host.getBoundingClientRect();
+      const out = [read()];
+      member.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+      for (let count = 0; count < 30 && host.querySelector('[data-transcript-curtain-clip]'); count += 1) {
+        await frame();
+        out.push(read());
+      }
+      return { bottom: scroller.getBoundingClientRect().bottom, bar: { top: bar.top, bottom: bar.bottom }, growth: member.offsetHeight - height, frames: out };
+    });
+    // What it is about: the body grew, the collapse bar lay where this case says, and the group still opened for a
+    // good part of the body's way.
+    expect(growth).toBeGreaterThan(20);
+    if (block === 'center') expect(bar.top).toBeGreaterThan(bottom + growth);
+    else expect(bar.bottom).toBeLessThan(bottom);
+    const kept = frames.filter((at): at is NonNullable<typeof at> => at !== null);
+    expect(kept.length).toBeGreaterThan(8);
+    // The box stays on the top of what it covers; the edge goes with the members the body pushes down, so none of
+    // what it covers shows before the edge reaches it.
+    expect(Math.max(...kept.map(({ box }) => Math.abs(box)))).toBeLessThanOrEqual(1);
+    expect(Math.max(...kept.map(({ edge }) => Math.abs(edge - kept[0].edge)))).toBeLessThanOrEqual(1);
+  });
+}
+
 test('a Harness group a link opened folds back into its card when closed, rising once to where the layout puts the rows', async ({ page }) => {
   // Opened by a link to one of its members, not by a tap: nothing was measured as it opened.
   await open(page, 'delay=0&count=392&msg=msg_00373');
