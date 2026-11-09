@@ -99,7 +99,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
         className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[500px] flex-col items-center gap-5 overflow-y-auto rounded-2xl p-7"
       >
         {/* Hero icon — 64x64 violet-soft tile with glow */}
-        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-glow-md-violet">
+        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-decor-md-violet">
           <Sparkles className="size-[30px]" />
         </div>
 

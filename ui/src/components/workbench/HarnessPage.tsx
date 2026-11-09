@@ -625,7 +625,7 @@ export const HarnessPage: React.FC = () => {
       <CapabilityTabs />
       {/* Header */}
       <div className="flex items-center gap-4">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-glow-md-violet">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-decor-md-violet">
           <Activity className="size-5" />
         </div>
         <div className="flex flex-1 flex-col">

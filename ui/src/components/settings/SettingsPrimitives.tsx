@@ -59,7 +59,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   //
   // A card is one concept across Settings: one step above the page (`bg-surface`)
   // with the resting edge in place of a grey line (ui/design:
-  // system/elevation/settings-general).
+  // settings/general/default).
   if (variant === 'preference') {
     return (
       <section className={clsx('rounded-lg border border-edge bg-surface shadow-elevation-0', className)}>

@@ -107,14 +107,14 @@ export function ElevationEdgeSheet() {
 
       <Section title={d('光 · 浅色里换成品牌色柔影', 'Light · a tinted soft shadow in Light')} note={d('品牌主按钮、选中伙伴、状态点保持现状；未读卡和装饰图标块在浅色里是同色柔影，深色不变', 'CTA, selected Bot and dots unchanged; in Light, unread cards and decorative tiles get a same-hue soft shadow')}>
         <Specimen name={d('未读卡', 'Unread card')} use={d('浅色：同色柔影', 'Light: same-hue soft shadow')} className="w-64">
-          <div className="flex w-64 flex-col gap-1.5 rounded-xl border border-mint/45 bg-mint/[0.05] p-3">
+          <div className="flex w-64 flex-col gap-1.5 rounded-xl border border-mint/45 bg-mint/[0.05] p-3 shadow-unread">
             <div className="text-[13px] font-semibold">{d('首席安全官', 'Security lead')}</div>
             <div className="text-[12px] text-muted">{d('发现 2 个高危漏洞，要我开 PR 吗？', 'Found 2 critical issues; open a PR?')}</div>
           </div>
         </Specimen>
         <Specimen name={d('装饰图标块', 'Decorative tile')} use={d('深色：光晕；浅色：同色柔影', 'Dark: glow; Light: soft shadow')} className="w-48">
           <div className="flex h-[76px] items-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
+            <div className="flex size-12 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-md-mint">
               <Inbox className="size-5" />
             </div>
           </div>

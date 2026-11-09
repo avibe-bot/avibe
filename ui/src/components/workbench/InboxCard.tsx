@@ -93,7 +93,7 @@ export const InboxCard = memo(function InboxCard({
             unread > 0
               ? quiet
                 ? 'border-edge bg-foreground/[0.03] hover:bg-foreground/[0.05] [&:active:not(:has(button:active))]:bg-foreground/[0.05] shadow-elevation-0'
-                : 'border-mint/45 bg-mint/[0.05] hover:bg-mint/[0.08] [&:active:not(:has(button:active))]:bg-mint/[0.08]'
+                : 'border-mint/45 bg-mint/[0.05] shadow-unread hover:bg-mint/[0.08] [&:active:not(:has(button:active))]:bg-mint/[0.08]'
               : 'border-edge bg-surface hover:bg-foreground/[0.03] [&:active:not(:has(button:active))]:bg-foreground/[0.03] shadow-elevation-0',
           )}
         >
