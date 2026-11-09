@@ -1326,10 +1326,14 @@ test('a chip whose steps are still loading opens straight to their skeleton, and
   expect(Math.min(...frames.slice(landing - 1).map(({ body }) => body ?? 0))).toBeGreaterThanOrEqual(0.9);
 });
 
-test('steps that land in a long commit while the chip still opens keep the rows below with its edge', async ({ page }) => {
+test('steps that land in a long commit while the chip still opens keep the rows below with its edge', async ({ page, browserName }) => {
   // The steps land 40 ms into the opening, and there are many of them: rendering them is a long task (over 100 ms
   // here), and the frame due meanwhile is drawn right after the commit, at its own earlier time. What the landing
   // adds to the rows below must be drawn on that frame's clock, like the opening it joins.
+  // Chromium only: WebKit has no frame left due from before a long task (with the old clock this passed there
+  // while Chromium failed every time), and with this many rows landing its frame reads seldom fall within the
+  // millisecond of their frame, so there is nothing for it to judge.
+  test.skip(browserName === 'webkit', 'A frame due before a long commit and drawn after it is a Chromium case');
   await open(page, 'delay=0&activity=1&records=1&recordsRepeat=60&activityDelay=40&count=392');
   const frames = await discloseAndWatch(page, `${CHIP} button[aria-expanded="false"]`, { frames: 70 });
   expect(frames.some(({ busy }) => busy)).toBe(true);
