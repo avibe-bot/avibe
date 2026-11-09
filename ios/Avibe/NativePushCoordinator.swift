@@ -121,6 +121,8 @@ final class NativePushCoordinator {
     typealias TapHandler = @MainActor (PushNotificationTap) -> Void
     typealias TapRecoveryHandler = @MainActor () -> Void
     typealias RequestNotificationAuthorization = @MainActor () async throws -> Bool
+    typealias NotificationAuthorizationStatus = @MainActor () async
+        -> UNAuthorizationStatus
 
     private static let publicBaseURL = "https://avibe.bot"
     private static let topic = "bot.avibe.ios"
@@ -138,6 +140,7 @@ final class NativePushCoordinator {
     private let accountProvider: AccountProvider
     private let registerForRemoteNotifications: RemoteRegistration
     private let requestNotificationAuthorization: RequestNotificationAuthorization
+    private let notificationAuthorizationStatus: NotificationAuthorizationStatus
     private let onTap: TapHandler
     private let onTapRecovery: TapRecoveryHandler
     private let installationMarker: PushInstallationMarkerStoring
@@ -163,6 +166,13 @@ final class NativePushCoordinator {
                 options: [.alert, .badge, .sound]
             )
         },
+        notificationAuthorizationStatus: @escaping NotificationAuthorizationStatus = {
+            await withCheckedContinuation { continuation in
+                UNUserNotificationCenter.current().getNotificationSettings {
+                    continuation.resume(returning: $0.authorizationStatus)
+                }
+            }
+        },
         installationMarker: PushInstallationMarkerStoring =
             UserDefaultsPushInstallationMarkerStore(),
         notificationCenter: PushNotificationCentering? = nil,
@@ -176,6 +186,7 @@ final class NativePushCoordinator {
         self.accountProvider = accountProvider
         self.registerForRemoteNotifications = registerForRemoteNotifications
         self.requestNotificationAuthorization = requestNotificationAuthorization
+        self.notificationAuthorizationStatus = notificationAuthorizationStatus
         self.installationMarker = installationMarker
         self.notificationCenter =
             notificationCenter ?? SystemPushNotificationCenter()
@@ -200,6 +211,13 @@ final class NativePushCoordinator {
             name: .avibePushNotificationTapped,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        refreshAPNsRegistration()
     }
 
     deinit {
@@ -242,12 +260,24 @@ final class NativePushCoordinator {
         handleNotificationTap(userInfo: payload)
     }
 
+    @objc
+    private func applicationDidBecomeActive() {
+        guard accountProvider() != nil else {
+            return
+        }
+        resumeAfterAccountActivation()
+    }
+
     func status(
         vapidPublicKey: String?,
         instanceOrigin: String
-    ) throws -> [String: Any] {
+    ) async throws -> [String: Any] {
         guard let account = accountProvider() else {
             return ["state": "unavailable"]
+        }
+        let authorizationStatus = await notificationAuthorizationStatus()
+        guard Self.authorizationAllowsAlerts(authorizationStatus) else {
+            return ["state": "off"]
         }
         guard
             let installation = try keychain.loadInstallation(),
@@ -436,6 +466,27 @@ final class NativePushCoordinator {
             guard let self else { return }
             do {
                 var installation = try loadOrCreateInstallation()
+                let topic = Self.topic
+                if let provider = installation.provider,
+                   provider.deviceToken == deviceToken,
+                   provider.environment == environment,
+                   provider.topic == topic
+                {
+                    resumeTokenWaiters()
+                    guard
+                        installation.accountID != nil,
+                        installation.providerPatchPending
+                    else {
+                        return
+                    }
+                    _ = try? await enqueueMutation {
+                        guard !self.isFrozen else {
+                            return
+                        }
+                        try await self.reconcileProvider()
+                    }
+                    return
+                }
                 let nextGeneration = try Self.nextGeneration(
                     after: installation.providerGeneration
                 )
@@ -443,7 +494,7 @@ final class NativePushCoordinator {
                 installation.provider = PushProviderState(
                     deviceToken: deviceToken,
                     environment: environment,
-                    topic: Self.topic,
+                    topic: topic,
                     generation: nextGeneration
                 )
                 installation.providerPatchPending = true
@@ -562,7 +613,45 @@ final class NativePushCoordinator {
 
     func resumeAfterAccountActivation() {
         isFrozen = false
+        refreshAPNsRegistration()
         startRecovery()
+    }
+
+    private func refreshAPNsRegistration() {
+        Task { @MainActor [weak self] in
+            guard let self, !self.isFrozen else {
+                return
+            }
+            guard self.hasEnabledRegistrationOrPendingProvider() else {
+                return
+            }
+            let authorizationStatus = await self.notificationAuthorizationStatus()
+            guard Self.authorizationAllowsAlerts(authorizationStatus) else {
+                return
+            }
+            self.registerForRemoteNotifications()
+        }
+    }
+
+    private func hasEnabledRegistrationOrPendingProvider() -> Bool {
+        guard
+            let account = accountProvider(),
+            let installation = try? keychain.loadInstallation(),
+            installation.accountID == account.id,
+            installation.bindGeneration > 0
+        else {
+            return false
+        }
+        if installation.providerPatchPending && installation.provider != nil {
+            return true
+        }
+        return (try? keychain.listRecords().contains {
+            $0.state == .active
+                && !$0.pendingRevoke
+                && $0.accountID == account.id
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.accountGeneration == generationStore.generation
+        }) == true
     }
 
     private func ensureBound(to account: MobileAccount) async throws -> PushInstallationState {
@@ -789,51 +878,54 @@ final class NativePushCoordinator {
                     guard let currentProvider = current.provider else {
                         return
                     }
-                    if currentProvider.generation != provider.generation {
-                        guard current.providerPatchPending else {
-                            return
-                        }
-                        let nextGeneration = try Self.nextGeneration(
-                            after: max(
-                                current.providerGeneration,
-                                conflict.providerGeneration
-                            )
-                        )
-                        current.providerGeneration = nextGeneration
-                        current.provider = PushProviderState(
-                            deviceToken: currentProvider.deviceToken,
-                            environment: currentProvider.environment,
-                            topic: currentProvider.topic,
-                            generation: nextGeneration
-                        )
-                        current.providerPatchPending = true
-                        try self.keychain.saveInstallation(current)
-                        continue
-                    }
-
                     let localMatches = conflict.deviceTokenSHA256
-                        == Self.deviceTokenSHA256(provider.deviceToken)
-                        && conflict.environment == provider.environment
-                        && conflict.topic == provider.topic
+                        == Self.deviceTokenSHA256(currentProvider.deviceToken)
+                        && conflict.environment == currentProvider.environment
+                        && conflict.topic == currentProvider.topic
                     if localMatches {
                         current.providerGeneration =
                             conflict.providerGeneration
                         current.provider = PushProviderState(
-                            deviceToken: provider.deviceToken,
-                            environment: provider.environment,
-                            topic: provider.topic,
+                            deviceToken: currentProvider.deviceToken,
+                            environment: currentProvider.environment,
+                            topic: currentProvider.topic,
                             generation: conflict.providerGeneration
                         )
-                    } else {
+                        current.providerPatchPending = false
+                        try self.keychain.saveInstallation(current)
+                        return
+                    }
+
+                    guard
+                        current.providerPatchPending,
+                        currentProvider.generation != provider.generation
+                    else {
                         current.providerGeneration = max(
                             current.providerGeneration,
                             conflict.providerGeneration
                         )
                         current.provider = nil
+                        current.providerPatchPending = false
+                        try self.keychain.saveInstallation(current)
+                        return
                     }
-                    current.providerPatchPending = false
+
+                    let nextGeneration = try Self.nextGeneration(
+                        after: max(
+                            current.providerGeneration,
+                            conflict.providerGeneration
+                        )
+                    )
+                    current.providerGeneration = nextGeneration
+                    current.provider = PushProviderState(
+                        deviceToken: currentProvider.deviceToken,
+                        environment: currentProvider.environment,
+                        topic: currentProvider.topic,
+                        generation: nextGeneration
+                    )
+                    current.providerPatchPending = true
                     try self.keychain.saveInstallation(current)
-                    return
+                    continue
                 }
                 throw Self.managementError(response)
             }
@@ -1199,6 +1291,19 @@ final class NativePushCoordinator {
     ) -> String? {
         response.body["error"] as? String
             ?? (response.body["error"] as? [String: Any])?["code"] as? String
+    }
+
+    private static func authorizationAllowsAlerts(
+        _ status: UNAuthorizationStatus
+    ) -> Bool {
+        switch status {
+        case .authorized, .provisional, .ephemeral:
+            return true
+        case .notDetermined, .denied:
+            return false
+        @unknown default:
+            return false
+        }
     }
 
     private static func int64(_ value: Any?) -> Int64? {

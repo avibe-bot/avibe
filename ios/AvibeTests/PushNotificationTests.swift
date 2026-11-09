@@ -5,6 +5,18 @@ import XCTest
 @testable import Avibe
 
 final class PushNotificationTests: XCTestCase {
+    func testMainAppBundleContainsFallbackLocalization() throws {
+        let appBundle = try XCTUnwrap(Bundle(identifier: "bot.avibe.ios"))
+        let value = appBundle.localizedString(
+            forKey: "AVIBE_PUSH_FALLBACK",
+            value: nil,
+            table: nil
+        )
+
+        XCTAssertFalse(value.isEmpty)
+        XCTAssertNotEqual(value, "AVIBE_PUSH_FALLBACK")
+    }
+
     func testSharedAccessGroupResolverRejectsUnexpandedOrMissingValues() {
         XCTAssertEqual(
             try? PushKeychainStore.resolveSharedAccessGroup(

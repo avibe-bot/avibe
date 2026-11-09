@@ -349,7 +349,7 @@ final class WebViewFactory {
             guard let coordinator = self?.pushCoordinator else {
                 return ["state": "unavailable"]
             }
-            return try coordinator.status(
+            return try await coordinator.status(
                 vapidPublicKey: vapidPublicKey,
                 instanceOrigin: origin.serialized
             )

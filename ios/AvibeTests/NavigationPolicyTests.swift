@@ -489,6 +489,51 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeBridgeQueuesPushOpenedUntilTheWebListenerSubscribes()
+        async throws
+    {
+        let configuration = NativeBridgeConfiguration.make(
+            instanceOrigin: instance,
+            setOuterScrollLocked: { _, _ in false }
+        )
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: configuration
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.dispatchEvent(new CustomEvent(
+                "avibe:native:push.opened",
+                { detail: { url: "/chat/queued" } }
+              ));
+            </script>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return new Promise((resolve) => {
+              window.avibeNative.on("push.opened", (payload) => {
+                resolve(payload.url);
+              });
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+
+        XCTAssertEqual(result as? String, "/chat/queued")
+    }
+
+    @MainActor
     func testWebViewFactoryUsesTheSameKeyboardLayoutForPrimaryAndChild() {
         let factory = WebViewFactory(
             instanceOrigin: instance,

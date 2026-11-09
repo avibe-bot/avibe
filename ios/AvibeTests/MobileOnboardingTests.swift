@@ -967,6 +967,55 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(pushLogoutCalls, 1)
     }
 
+    func testRefreshFromAccountToAnotherAccountLogsOutPushWithoutSelection()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var pushLogoutCalls = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport, FakeMobileAuthTransport()],
+            onPreparePushLogout: {
+                pushLogoutCalls += 1
+            }
+        )
+        coordinator.activateAccountSurface()
+        guard case .signedIn(_, nil) = try await coordinator.bootstrap() else {
+            return XCTFail("Expected an account without a persisted selection")
+        }
+
+        transport.session = snapshot(accountID: "account-2")
+        let state = try await coordinator.refresh()
+
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertEqual(pushLogoutCalls, 1)
+    }
+
+    func testRefreshSignedOutAnswerLogsOutPushBeforeStoreReplacement()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var pushLogoutCalls = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport, FakeMobileAuthTransport()],
+            onPreparePushLogout: {
+                pushLogoutCalls += 1
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+
+        transport.session = nil
+        let state = try await coordinator.refresh()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertEqual(pushLogoutCalls, 1)
+    }
+
     func testHiddenTransportStopsBeforeRuntimeAndRestartsOnlyForAccountSurface() async throws {
         let defaults = makeDefaults()
         var events: [String] = []
@@ -1528,10 +1577,14 @@ final class MobileOnboardingTests: XCTestCase {
             throw MobileAccountError.signedOut
         }
         let replacement = FakeMobileAuthTransport()
+        var pushLogoutCalls = 0
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
-            transports: [transport, replacement]
+            transports: [transport, replacement],
+            onPreparePushLogout: {
+                pushLogoutCalls += 1
+            }
         )
         coordinator.activateAccountSurface()
         _ = try await coordinator.bootstrap()
@@ -1546,6 +1599,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNotEqual(store.identifier, storeIdentifier)
         XCTAssertTrue(transport.invalidated)
         XCTAssertTrue(coordinator.isAccountSurfaceActive)
+        XCTAssertEqual(pushLogoutCalls, 1)
     }
 
     func testPasskeyExchangeStaysBetweenTransportAndNativeCode() async throws {

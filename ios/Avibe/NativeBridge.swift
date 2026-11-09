@@ -204,7 +204,7 @@ enum NativeBridgeConfiguration {
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
-        ) throws -> [String: Any] = { _, _ in
+        ) async throws -> [String: Any] = { _, _ in
             ["state": "unavailable"]
         },
         pushSubscribe: @escaping @MainActor (
@@ -340,9 +340,32 @@ enum NativeBridgeConfiguration {
             });
           }
 
+          const pushOpenedType = "avibe:native:push.opened";
+          const pushOpenedHandlers = new Set();
+          const pendingPushOpened = [];
+          window.addEventListener(pushOpenedType, (nativeEvent) => {
+            if (pushOpenedHandlers.size === 0) {
+              pendingPushOpened.push(nativeEvent.detail);
+              return;
+            }
+            for (const handler of Array.from(pushOpenedHandlers)) {
+              handler(nativeEvent.detail);
+            }
+          });
+
           const on = (event, handler) => {
             if (typeof event !== "string" || typeof handler !== "function") return () => {};
             const type = `avibe:native:${event}`;
+            if (event === "push.opened") {
+              pushOpenedHandlers.add(handler);
+              const pending = pendingPushOpened.splice(0);
+              for (const detail of pending) {
+                queueMicrotask(() => {
+                  if (pushOpenedHandlers.has(handler)) handler(detail);
+                });
+              }
+              return () => pushOpenedHandlers.delete(handler);
+            }
             const listener = (nativeEvent) => handler(nativeEvent.detail);
             window.addEventListener(type, listener);
             return () => window.removeEventListener(type, listener);
@@ -460,7 +483,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let pushStatus: @MainActor (
         String?,
         WebOrigin
-    ) throws -> [String: Any]
+    ) async throws -> [String: Any]
     private let pushSubscribe: @MainActor (
         String,
         WebOrigin
@@ -480,7 +503,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
-        ) throws -> [String: Any],
+        ) async throws -> [String: Any],
         pushSubscribe: @escaping @MainActor (
             String,
             WebOrigin
@@ -564,17 +587,26 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             let vapidPublicKey = request.params["vapidPublicKey"] as? String
-            do {
-                reply(
-                    replyHandler,
-                    result: try pushStatus(vapidPublicKey, instanceOrigin)
-                )
-            } catch {
-                reply(
-                    replyHandler,
-                    error: .failed((error as? NativePushError)?.bridgeMessage
-                        ?? "The native push status is unavailable.")
-                )
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                do {
+                    let result = try await self.pushStatus(
+                        vapidPublicKey,
+                        instanceOrigin
+                    )
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(
+                        replyHandler,
+                        error: .failed(
+                            (error as? NativePushError)?.bridgeMessage
+                                ?? "The native push status is unavailable."
+                        )
+                    )
+                }
             }
         case .pushSubscribe:
             guard

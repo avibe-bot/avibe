@@ -684,6 +684,7 @@ final class MobileSessionCoordinator {
 
     func refresh() async throws -> MobileSessionState {
         return try await runExclusive {
+            let previousAccountID = self.snapshot?.account.id
             let requestGeneration = self.beginAccountTransition(
                 clearSelection: false
             )
@@ -695,7 +696,11 @@ final class MobileSessionCoordinator {
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
-            if self.belongsToAnotherAccount(discovery) {
+            if
+                case .signedIn(let fresh) = discovery,
+                previousAccountID != nil,
+                previousAccountID != fresh.account.id
+            {
                 await self.preparePushLogout()
                 self.clearStoredSelection()
                 await self.replaceWithFreshSignedOutStore()
