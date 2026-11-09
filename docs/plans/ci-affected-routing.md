@@ -104,8 +104,9 @@ out-of-scope producers; release-only cases keep their separate release gate.
 - `npm ci --ignore-scripts --dry-run --no-audit --no-fund` for UI and desktop.
 - `uv lock --check`; `--frozen` alone would skip the freshness check.
 - Before/after manifest and lock hashes, including failed resolver invocations.
-- Tracked JSON/YAML syntax, JSON Schema dialect validation, pinned actionlint
-  for the CI/release workflow boundary, and repository workflow-contract tests.
+- Tracked JSON/YAML syntax, JSON Schema dialect validation and tracked companion
+  data/schema consistency, pinned actionlint for the CI/release workflow boundary,
+  and repository workflow-contract tests.
 
 The dependency-free npm launcher has an explicit no-lock contract. Two existing
 TypeScript JSONC configs remain owned by `tsc`. Actionlint 1.7.12 has one exact

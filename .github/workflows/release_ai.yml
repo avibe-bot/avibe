@@ -523,10 +523,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Publish with the release tooling and installation guidance the
-          # released source carries. resolve-desktop-release is skipped on the
-          # official v* path, so its output is empty there and the requested tag
-          # is the pin. fetch-depth keeps the tag and commit history that notes
-          # generation and the tag/source equality check walk.
+          # released source carries. The backstop pins the tag's exact source;
+          # desktop resolution supplies the same pin when enabled. Keep the
+          # history needed by notes and tag/source equality checks.
           ref: ${{ needs.resolve-desktop-release.outputs.source_sha || needs.release-backstop.outputs.source_sha || github.event.inputs.tag || github.ref_name }}
           fetch-depth: 0
 
