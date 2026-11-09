@@ -902,6 +902,10 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
       read(stamp);
       if (second && performance.now() - t0 >= second.after) {
         tapped = true;
+        // The tap lands 8 ms into the frame, as on a busy phone: what turns must start from where things are drawn
+        // at the frame's time, not from where WebKit would sample them at the moment of the tap.
+        const late = performance.now();
+        while (performance.now() - late < 8) { /* a late tap */ }
         [...transcript.querySelectorAll<HTMLElement>(second.control)].at(-1)!.click();
         second = null;
       }
