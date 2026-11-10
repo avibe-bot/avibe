@@ -461,7 +461,7 @@ async def test_sync_wait_is_pending_then_terminal_read_durably_answers_pair(harn
     h.service.controller.scheduled_task_service = h.service
     seen = []
 
-    def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id):
+    def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id, hub_agent_reader=None):
         # Stand in for target routing, not the behavior under test: the actual
         # store, acceptance, live-wait guard, waiter and acknowledgement run below.
         assert run_id in h.service.sync_waiting_run_ids
@@ -558,7 +558,7 @@ async def test_sync_disconnect_hands_off_callback_or_idle_notice(harness, monkey
         loop.call_soon_threadsafe(polling.set)
         return result
 
-    def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id):
+    def enqueue(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id, hub_agent_reader=None):
         loop.call_soon_threadsafe(enqueued.set)
         if disconnect_at == "enqueue":
             assert release_enqueue.wait(5)
