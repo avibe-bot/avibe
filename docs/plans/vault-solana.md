@@ -126,16 +126,29 @@ parses, displays and signs the same message without reserialization.
 
 ## 3. Approval: short summary, one Details section
 
-Summary: transaction kind, signing key, decoded destination/raw amount where
-available, and the notice whenever anything remains raw. Everything else lives
-in **Details / 详情**, inside the same trusted popup, complete and copyable.
-The notice is never hidden there. The parent card cannot substitute for this
-trusted view. All labels have EN/ZH strings; addresses, hex and program names
-stay unchanged. No first-version ALT UI beyond the original raw bytes.
+Summary: transaction kind, signing address, decoded destination/amount where
+available, and the notice whenever anything remains raw. Preserve the requesting
+Session as one small line under the title when the authenticated display has it;
+the current protected popup already shows it upfront. The command and complete
+request fields remain in **Details / 详情**, inside the same trusted popup, complete
+and copyable. The notice is never hidden there. The parent card cannot substitute
+for this trusted view. All labels have EN/ZH strings; addresses, hex and program
+names stay unchanged. No first-version ALT UI beyond the original raw bytes.
+
+Native units get an exact readable amount beside the original integer:
+`1.5 SOL (1500000000 lamports)` and, for Ethereum chain ID 1,
+`0.01 ETH (10000000000000000 wei)`. Format using integer/decimal-string arithmetic,
+never floating-point rounding. Do not label arbitrary EVM chains' native value
+ETH or add a network/token list; other chains retain the raw value. Token amounts
+remain raw base units with encoded decimals where present, without a symbol.
+The EVM signing address is derived from the record's public key inside the
+sandbox; keep the complete compressed key in Details. A Solana public key's
+base58 address already serves as the signing identity.
 
 Common summary labels: **Signing key / 签名密钥**, **To / 收款地址**,
 **Amount / 数量**, **Mint / Mint 地址**, **Token account / 代币账户**,
-**Contract / 合约**, **Value (wei) / 转账金额（wei）**.
+**Contract / 合约**, **Value / 转账金额** (with the readable native unit where
+known and the complete raw integer beside it).
 Details retain the authenticated operation's existing surrounding fields, full
 key/public key, version, and **Exact message (hex) / 完整消息（十六进制）** for
 Solana; for EVM, the accepted envelope, all existing decoded fields, **Selector /
@@ -148,10 +161,10 @@ not production truncation. The notice is rendered once in the chosen locale.
 
 | Scenario | Summary lines, in order | Details additions |
 | --- | --- | --- |
-| SOL transfer | `Solana transfer / Solana 转账` → `Signing key / 签名密钥: <key>` → `To / 收款地址: <destination>` → `Amount (lamports) / 数量（lamports）: 1000000000` | `From / 转出地址: <source>`; complete message. No notice if all content is decoded. |
+| SOL transfer | `Solana transfer / Solana 转账` → `Signing key / 签名密钥: <key>` → `To / 收款地址: <destination>` → `Amount / 数量: 1 SOL (1000000000 lamports)` | `From / 转出地址: <source>`; complete message. No notice if all content is decoded. |
 | USDC TransferChecked (scenario name only) | `Token transfer / 代币转账: TransferChecked` → signing key → `Mint / Mint 地址: <encoded mint>` → `Destination token account / 收款代币账户: <address>` → `Amount (base units) / 数量（基础单位）: 1000000` | `Source token account / 转出代币账户: <address>`; `Authority / 授权地址: <address>`; `Encoded decimals / 编码精度: 6`; full message. No “USDC” label or wallet-owner claim. |
 | Jupiter swap with ALT | `Solana transaction / Solana 交易` → signing key → `Not decoded / 未解析` → blind-signing notice | Full original message, including all instruction and ALT bytes. No Jupiter/route/output interpretation or resolved address. |
-| ETH transfer | `EVM transfer / EVM 转账` → signing key → `To / 收款地址: <address>` → `Value (wei) / 转账金额（wei）: 1000000000000000000` | Chain ID 1, type, nonce, all gas/fee fields, empty calldata, full unsigned payload and digest. No notice for this empty-calldata example. |
+| ETH transfer | `EVM transfer / EVM 转账` → signing key → `To / 收款地址: <address>` → `Value / 转账金额: 1 ETH (1000000000000000000 wei)` | Chain ID 1, type, nonce, all gas/fee fields, empty calldata, full unsigned payload and digest. No notice for this empty-calldata example. |
 | ERC-20 transfer | `Decoded calldata / 已解析调用数据: transfer(address,uint256)` → signing key → `Contract / 合约: <address>` → `Recipient argument / 收款地址参数: <address>` → `Amount argument / 数量参数: 1000000` | Existing envelope, selector `0xa9059cbb`, full calldata/payload/digest. No symbol, decimals lookup or verified-execution claim. |
 | Uniswap swap | `EVM contract call / EVM 合约调用` → signing key → `Contract / 合约: <transaction destination>` → `Value (wei) / 转账金额（wei）: <integer>` → blind-signing notice | Complete envelope, selector, raw calldata, unsigned payload and digest; no swap-specific presentation. |
 
