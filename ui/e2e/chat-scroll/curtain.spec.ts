@@ -263,7 +263,11 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
 for (const cell of cells) {
   const name = `${cell.host}, the other ${cell.source}${cell.bar ? `, collapse bar ${cell.bar}` : ''}, ${cell.phase}, the other ${cell.change}`;
   test(`a curtain stays on what it covers while another disclosure moves it (${name})`, async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 1100 });
+    // Three times slower motion, the setup taps, and placing past the prefetch band take longer than a default test.
+    test.setTimeout(90_000);
+    // Tall enough that a curtain's band stays on screen (where its edge is judged) all the way, however far the
+    // other one pushes it and however late a slow runner reads the first frames.
+    await page.setViewportSize({ width: 390, height: 1400 });
     await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
     await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${QUERY}`);
     await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
@@ -281,11 +285,12 @@ for (const cell of cells) {
       }, selector);
       await page.waitForTimeout(900);
     };
-    // A chip's steps load the first time it opens (its skeleton gives way to them, and its curtain goes on by as
-    // much): that is its own, not what this is about, so they are loaded first.
-    if (cell.host === 'chip') {
-      await tap(HOSTS.chip);
-      await tap(HOSTS.chip);
+    // A chip's steps load the first time it opens (its skeleton gives way to them, and it grows or shrinks by as
+    // much): that is its own, not what this is about, so every chip the cell taps (the host or the other one) has
+    // them loaded first.
+    for (const chip of [HOSTS[cell.host], source].filter((selector) => selector.includes('activity:'))) {
+      await tap(chip);
+      await tap(chip);
     }
     // What is open before what is watched: the host when it folds; the other one when it shrinks (a member's
     // body inside a group that still opens is opened two frames before it closes, as the group opens).
