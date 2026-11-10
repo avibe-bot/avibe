@@ -2943,6 +2943,8 @@
       "deviceTitle": "本设备",
       "pushTitle": "推送（浏览器 / 主屏幕 App）",
       "pushHint": "这台设备是否接收推送。",
+      "nativePushTitle": "iPhone 通知",
+      "nativePushHint": "这台 iPhone 上的 Avibe 通知，只对本机生效。",
       "desktopTitle": "桌面 App 系统通知",
       "desktopHint": "Vault 审批和后台任务完成。只对本机生效，和菜单栏里的开关是同一个。",
       "desktopHintMenuBar": "Vault 审批和后台任务完成。本机的开关在菜单栏图标 › 通知。",
