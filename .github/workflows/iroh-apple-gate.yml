@@ -72,7 +72,7 @@ jobs:
             | tee "$RUNNER_TEMP/iroh-apple-build.log"
           echo "IROH_OUTPUT=$output_dir" >> "$GITHUB_ENV"
 
-      - name: Verify upstream prebuilt positive control
+      - name: Verify upstream prebuilt positive control (including iOS arm64)
         run: |
           set -euo pipefail
           source "$IROH_GATE_DIR/versions.env"
@@ -87,6 +87,10 @@ jobs:
           ditto -x -k "$upstream_zip" "$upstream_dir"
           bash "$IROH_GATE_DIR/check-private-apple-datapath.sh" --expect-hit "$upstream_dir" \
             | tee "$IROH_OUTPUT/positive-control-check.log"
+          upstream_ios_arm64="$upstream_dir/Iroh.xcframework/ios-arm64/libiroh_ffi.a"
+          test -f "$upstream_ios_arm64"
+          bash "$IROH_GATE_DIR/check-private-apple-datapath.sh" --expect-hit "$upstream_ios_arm64" \
+            | tee -a "$IROH_OUTPUT/positive-control-check.log"
 
       - name: Upload qualified iOS artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

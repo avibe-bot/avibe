@@ -104,6 +104,26 @@ for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
   assert_feature_graph "$target"
 done
 
+RESOLVED_IROH_FEATURES_JSON=$(python3 - "$OUTPUT_DIR"/feature-graph-*.txt <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+features = set()
+for name in sys.argv[1:]:
+    for line in Path(name).read_text().splitlines():
+        match = re.search(r'(?:^|\s)iroh feature "([^"]+)"', line)
+        if match:
+            features.add(match.group(1))
+if not features:
+    raise SystemExit("could not extract resolved iroh features from feature graphs")
+print(json.dumps(sorted(features)))
+PY
+)
+
+echo "resolved iroh features: $RESOLVED_IROH_FEATURES_JSON"
+
 echo '==> host build for UniFFI metadata'
 cargo +"$RUST_VERSION" build --locked --lib
 
@@ -221,6 +241,7 @@ cat > "$OUTPUT_DIR/manifest.json" <<EOF
   "iroh_relay_version": "$IROH_RELAY_VERSION",
   "noq_version": "$NOQ_VERSION",
   "features": ["metrics", "tls-ring"],
+  "resolved_iroh_features": $RESOLVED_IROH_FEATURES_JSON,
   "excluded_iroh_features": ["fast-apple-datapath", "portmapper"],
   "excluded_local_discovery": ["multicast", "mDNS", "local-network address lookup"],
   "rust_toolchain": "$RUST_VERSION",

@@ -34,9 +34,18 @@ patches only that manifest's iroh edge to `default-features = false`; the
 upstream `Cargo.lock` remains the lockfile and every Cargo command uses
 `--locked`. Every iOS target's resolved feature graph is checked for
 `fast-apple-datapath` on iroh/noq/noq-udp, for iroh's `portmapper` feature, and
-for multicast/mDNS/local-network address-lookup features or crates.
+for multicast/mDNS/local-network address-lookup features or crates. The
+manifest records both the declared iroh features and the complete resolved
+iroh feature set; in this pin, `unstable-net-report` is pulled transitively by
+`iroh-services`.
 
 ## What the gate proves
+
+The resolved graph also compiles the `iroh-services` binding, including n0's
+hosted telemetry client, and the transitive `portmapper` crate. Neither runs
+unless application code constructs `ServicesClient`; Phase 1 must not
+construct or use it. A later patch may remove that binding and its transitive
+code, but this Phase 0 gate does not change the upstream API surface.
 
 On GitHub Actions `macos-26` with the repository's pinned Xcode 26.6 path, it:
 
@@ -51,14 +60,16 @@ On GitHub Actions `macos-26` with the repository's pinned Xcode 26.6 path, it:
    those Swift builds for both `sendmsg_x` and `recvmsg_x` as symbols and as
    literal strings; and
 6. verifies the same checker **does** find the private names in the upstream
-   prebuilt `IrohLib.xcframework.zip` after checking its published SHA-256.
+   prebuilt `IrohLib.xcframework.zip` after checking its published SHA-256, and
+   requires a hit in that archive's `ios-arm64` slice specifically.
 
 The positive control is important: a checker that never fires is not evidence
 that the patched artifact is clean.
 
 The artifact contains the iOS-only xcframework zip, its SHA-256, the generated
 `IrohLib.swift` binding, feature-graph captures, build logs, and `manifest.json`
-with pins, toolchain versions, deployment target, and slice layout.
+with pins, declared and resolved iroh features, toolchain versions, deployment
+target, and slice layout.
 
 ## What the gate does not prove
 
