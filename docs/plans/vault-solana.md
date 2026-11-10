@@ -1,7 +1,8 @@
 # Solana support in Avibe Vault
 
-**Status:** Standard tier proposed for 3.2.6; protected-tier Solana is a
-next-release design, not an implementation authorization.
+**Status:** Standard tier proposed for 3.2.6; protected-tier Solana (native SOL
+first, then SPL tokens) is a post-3.2.6 design, not an implementation
+authorization.
 **Date:** 2026-11-10
 **Owners:** Vaults workstream
 **Related:** `avault/docs/DESIGN.md`, `docs/plans/avault-custody-core.md`,
@@ -226,8 +227,11 @@ I recommend a **native-SOL protected slice first**:
 
 - support legacy messages and v0 messages with no address-table lookups;
 - decode System Program transfers, a narrow Compute Budget subset, and Memo;
-- reject SPL Token and Token-2022 transfers in that first slice until a trusted
-  account-state witness exists;
+- deliver in two steps on one parser, wire kind, and key path: **step 1 native
+  SOL**, then **step 2 classic SPL Token transfers** (§7.5). Tokens are a
+  required, planned step (owner decision, 2026-11-10), not an optional
+  extension. Token-2022 and address lookup tables stay refused until their own
+  later steps;
 - reject every unknown instruction or program with a specific reason; do not
   render “unrecognized program” and let the user approve it;
 - require one signer, the Vault Ed25519 key as the fee payer, and the exact
@@ -235,11 +239,9 @@ I recommend a **native-SOL protected slice first**:
 - preserve fresh R3 passkey approval, expiry, replay protection, signed release
   binding, and fail-closed behavior. There is no protected-to-standard fallback.
 
-This is narrower than the initial System + SPL + Token-2022 proposal, but it is
-honest and independently verifiable offline. A token instruction cannot, from
-its bytes alone, prove the mint, current token-account owner, transfer-hook
-behavior, or Token-2022 fee. Adding a token opcode without that state would make
-the approval look more informative than it is.
+Both steps show only facts that the signed bytes carry, or that the invoked
+program enforces when the transaction runs. Neither step needs a network call
+from the sandbox, a requester-supplied label, or a state snapshot.
 
 ### 7.2 Wire context and exact-byte binding
 
@@ -371,47 +373,110 @@ only valid UTF-8 instruction data. Display the exact text with escaped control
 characters and the byte length. A non-UTF-8 memo is refused rather than shown as
 an ambiguous replacement-character string.
 
+**Step 2: Associated Token Account Program, `CreateIdempotent` only.** Data is
+exactly `[1]`. Exactly six accounts: the funding account (must be the Vault fee
+payer), the associated token account `A`, the wallet `W`, the mint `M`, the
+System Program, and the classic Token Program. `Create`, `RecoverNested`, a
+different funding account, or the Token-2022 program ID is refused.
+
+**Step 2: Token Program, `TransferChecked` only.** Data is exactly 10 bytes
+(tag 12, little-endian u64 amount, u8 decimals). Exactly four accounts: source
+`S`, mint `M`, destination `A`, and the authority, which must be the Vault key.
+Plain `Transfer`, multisig authorities, and every other Token instruction
+(`Approve`, `SetAuthority`, `CloseAccount`, `Burn`, `MintTo`, and the rest) are
+refused by name.
+
 **Unknown programs and instructions.** Refuse them with a stable reason such as
 “program X instruction Y is not supported by protected Solana approval.” Do not
 show an “unrecognized program” row with an approve button. That would be a
 blind-signing surface under a more reassuring label.
 
-### 7.5 SPL Token and Token-2022: why they are a separate slice
+### 7.5 Token transfers (step 2): the transaction proves the recipient
 
-The initial proposal includes SPL `Transfer`/`TransferChecked` and their
-Token-2022 equivalents. The parser can decode their instruction data and exact
-account indices, but that is not enough for an honest wallet approval:
+Token transfers are in scope. The first token step covers the classic SPL Token
+program, which owns the USDC and USDT mints on mainnet. It needs no outside
+trust.
 
-- `Transfer` does not carry a mint or decimals. The source and destination
-  accounts must be read to learn the mint and their current owner/authority.
-- `TransferChecked` carries the mint account and decimals, but the destination
-  is still a token-account address. The message does not carry the wallet owner.
-- An ATA address is deterministically derived from wallet, token program, and
-  mint, but that derivation alone is not proof that the account currently exists,
-  has that mint, or still has that wallet as its mutable owner. Token-2022's
-  `ImmutableOwner` extension changes that last property only when it is actually
-  present and verified.
-- Token-2022 transfer hooks can CPI into arbitrary custom programs with extra
-  accounts and logic. Transfer-fee extensions can withhold a configured amount
-  whose active configuration depends on chain state. A plain
-  `TransferChecked` decode cannot promise the net recipient amount or complete
-  effects.
+**Accepted shape.** A token send is two instructions in one message:
 
-Therefore the native-SOL slice refuses all token transfers. A future
-state-backed token slice may show `source token account`, `destination token
-account`, `mint`, amount, decimals when present, and **owner only when a trusted
-state witness proves it**. For an ATA it should say “ATA derived for owner X”
-only when the derivation and account state are both verified; it must not label X
-as the current owner from the address alone. Token-2022 hooks, transfer fees,
-confidential transfers, and other extensions remain refused unless their effects
-are explicitly covered.
+1. `CreateIdempotent(funding = Vault key, A, W, M, System, Token)`
+2. `TransferChecked(S, M, A, authority = Vault key, amount, decimals)`
 
-A safe state-backed design needs a separate trust contract: an authenticated RPC
-or attestor response containing the relevant account/mint/extension bytes,
-program IDs, commitment slot, and freshness relation to the blockhash, with the
-sandbox verifying the response rather than trusting a parent-supplied label.
-That is a network/state-proof feature, not a small parser extension, and is not
-part of the first protected slice.
+Every `TransferChecked` destination must be the account `A` of exactly one
+earlier `CreateIdempotent` with the same mint and token program, and every
+`CreateIdempotent` must be used by a later `TransferChecked`. The wallet `W`
+comes from the message bytes; the signing context stays `{kind, message}`.
+
+**What is proven, and by what.**
+
+| Fact shown | Proven by |
+| --- | --- |
+| Mint `M`, amount in base units, decimals | `TransferChecked` data and accounts; the Token program fails the transfer on a mint or decimals mismatch |
+| `A` is the associated token account address of `W` for `M` | The ATA program recomputes the address from (`W`, token program, `M`) and fails on a mismatch |
+| `W` is the token-account authority of `A`, and `A` holds `M`, when the transfer runs | `CreateIdempotent` fails if an existing `A` has another token-account authority or mint; otherwise it creates `A` with authority `W`. No instruction this grammar accepts can change that authority before the transfer |
+| The Vault key is the owner or delegate of `S` | The Token program's authority check |
+
+These are execution-time checks by programs whose deployed mainnet authorities
+must be verified as part of release acceptance: the ATA program must be under a
+non-upgradeable loader and the classic Token program must have no upgrade
+authority. Source tags alone do not establish the deployed binaries. A failed
+check fails the whole transaction: the fee is charged and no tokens move.
+
+**Why derivation alone is not enough.** A classic token account's token-account
+authority can be reassigned with `SetAuthority`; the classic program accepts but
+ignores `InitializeImmutableOwner`. A wallet `W` that signed such a
+reassignment, by choice or under phishing, leaves the address derived for `W`
+under another key's control. A bare `TransferChecked` to that address, displayed
+as “to W”, would be false. `CreateIdempotent` in the same transaction turns that
+case into a failed transaction, so the window never needs the weaker wording.
+
+**Why no state witness.** An authenticated RPC or attestor would report the
+owner as of an earlier slot; the program check holds at execution. A witness
+would also add a hosted service to the signing path, a new pinned trust key,
+recipient disclosure to that service, an availability dependency, and an
+exception to `connect-src 'none'`. It remains the route for facts the bytes
+cannot carry: address lookup tables, non-associated destination accounts, and
+Token-2022 mint configuration.
+
+**Cost the bytes do not carry.** When `A` does not exist, the Vault key pays its
+storage deposit. The amount is a network parameter and is not encoded in the
+message. The approval states that a possible storage deposit will be charged,
+without presenting a fixed figure that was not verified for the execution
+cluster; the same rule applies to the base transaction fee.
+
+**Display, all sandbox-derived.** For each token send: the amount in token
+units and in base units with decimals; the full mint address; the destination
+wallet `W` and its token account `A`; the source token account `S`; the
+statement that the transaction fails unless `W` is the token-account authority
+of `A` for this mint when it runs; and the possible storage deposit. Amount
+For example, `send 10 USDC to W` shows `10 USDC` (`10,000,000` base units,
+6 decimals), the full USDC mint address, wallet `W`, derived token account `A`,
+source account `S`, the execution-time ownership guarantee, and a possible
+storage deposit; it does not invent a network or exact fee. The full mint address is always shown. A pinned table compiled
+into the sandbox names well-known mainnet mints, initially USDC
+(`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) and USDT
+(`Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB`), both 6 decimals and both
+classic Token Program mints. A name appears only on an exact address match; a
+pinned mint with different decimals is refused. Any other mint is labelled
+“unlisted token” and shown by address. The requester never supplies a name.
+Each entry is re-verified against the issuer's published address when it is
+added; a new entry needs a new sandbox release.
+
+**Refused in step 2.** Plain `Transfer` (no mint or decimals in the bytes); a
+`TransferChecked` without its `CreateIdempotent`, which covers raw and
+non-associated destination accounts; multisig authorities; every other Token
+and ATA instruction; and every instruction addressed to the Token-2022 program.
+
+**Token-2022 (later, narrower).** No Token-2022 transfer is accepted in step 2.
+The program has an upgrade authority, and mint configuration can add a transfer
+fee, a transfer hook, or a display multiplier. A later step can stay state-free
+for a pinned mint list: `TransferCheckedWithFee` carries the fee and the program
+fails on a mismatch, so the net amount is provable; with exactly four accounts
+and no other program in the message, a hook program receives only the four
+transfer accounts, read-only. That second claim must be demonstrated on a local
+validator before it is relied on. Display multipliers (`ScaledUiAmount`,
+`InterestBearing`) are not in the bytes, so such a step shows base units and
+decimals only. Confidential transfers stay refused.
 
 ### 7.6 v0 address lookup tables
 
@@ -426,8 +491,7 @@ Table Program, correct table address/index ordering, writable/read-only loaded
 address sets, deactivation/extension state, and a commitment/freshness witness
 that is meaningful for the same cluster as the recent blockhash. The resulting
 state witness must be included in the signed context or authenticated directly
-by the sandbox. This belongs with the state-backed token design, not protected
-Solana v1.
+by the sandbox. This belongs to a later state-witness design, not to steps 1 and 2.
 
 ### 7.7 Protected key creation and import
 
@@ -494,6 +558,13 @@ The implementation needs distinct cross-language and end-to-end evidence:
   zero lookups, every accepted instruction, every refusal, durable nonce,
   duplicate keys, nonminimal short-vectors, truncation, trailing bytes, unknown
   programs, oversized messages, and all three-way scheme/context pairings;
+- step 2 fixtures in both languages: the accepted two-instruction shape; every
+  refusal in §7.5; pairing errors (missing, duplicate, unused, reordered, wrong
+  mint or program); pinned-name match and decimals mismatch; u64 amount edges;
+- step 2 on a local validator running the mainnet ATA and Token program
+  binaries: a send to a new wallet creates `A` and moves the tokens; a send to an
+  `A` whose token-account authority was reassigned fails with no token movement;
+  wrong mint and wrong decimals fail;
 - RFC 8032 Ed25519 vectors plus exact Solana message fixtures, including a
   self-transfer and multiple native transfers. The signature must verify against
   the parsed fee payer key and never be verified against a digest alias;
@@ -524,37 +595,43 @@ The smallest implementation split is:
    release exists.
 4. **Web UI PR.** Protected Solana key builder state, secure-window handoff,
    localized approval/list/detail surfaces, and real isolated-browser acceptance.
-5. **Optional later PRs.** Sandbox-owned protected import; then a separately
-   reviewed authenticated state witness for tokens and ALTs. These should not be
-   stacked onto the native-SOL approval proof.
+5. **Token step.** One vault-sandbox PR (ATA and Token instruction recognition,
+   pairing rule, display, pinned names) and one Avibe PR (Python mirror, shared
+   fixtures, pin update). It reuses the step 1 parser, wire kind, key path, and
+   approval window.
+6. **Later, separately decided.** Sandbox-owned protected import; a narrow
+   Token-2022 step; a state witness for address lookup tables.
 
 Rough engineering estimate, assuming the current sandbox protocol and release
 pin machinery remain reusable:
 
-- native-SOL protected slice: **16–23 engineer-days** across sandbox, Avibe,
-  UI, fixtures, review fixes, and isolated acceptance;
+- step 1, native SOL: **16–23 engineer-days** across sandbox, Avibe, UI,
+  fixtures, review fixes, and isolated acceptance;
+- step 2, classic SPL tokens: **+7–10 days** on top of step 1;
 - sandbox-owned protected import: **+4–6 days**;
-- state-backed SPL/Token-2022 and ALT support: **+8–15 days** for the trust
-  source, freshness rules, parser/display, and adversarial tests, before any
-  broader Token-2022 extension coverage.
+- narrow Token-2022 step: **+4–6 days**;
+- state witness (lookup tables, non-associated destinations): not estimated
+  here; it includes a hosted service and its operation.
 
 This should **not** be squeezed into the standard 3.2.6 cut. It can follow
 closely as the next release's first feature, but the recommended target is the
 next release (for example 3.2.7): the sandbox source release, immutable pin,
 production deployment, passkey acceptance, cross-repository exact-head review,
-and security-boundary approval are independent gates. Native SOL can ship there
-without waiting for tokens or ALTs; protected import and state-backed tokens
-should follow only after their own decisions.
+and security-boundary approval are independent gates. Native SOL ships first and
+classic SPL tokens follow as the next step; both come after 3.2.6. Whether they
+share one sandbox release is an owner decision (§7.11).
 
 ### 7.11 Questions for the owner
 
-1. Is the recommended first protected slice accepted: native SOL transfers plus
-   narrow Compute Budget and Memo, with every unknown, token, and ALT refused?
-2. Should protected Solana target the next release rather than the open 3.2.6
-   standard cut, and is protected key import allowed to follow generation?
-3. If token support is required, which trust source may the sandbox use for
-   account/mint/extension state: a pinned authenticated RPC/attestor, or should
-   tokens remain out until that source is designed?
+1. Is the token shape accepted: a token send must carry `CreateIdempotent` for
+   its destination, and the approval states a possible storage deposit whose
+   amount is set by the network and is not in the message?
+2. Token names: a pinned USDC/USDT table in the sandbox with every other
+   classic mint shown as “unlisted token”, or only pinned mints accepted, or
+   addresses only?
+3. Should native SOL and tokens ship in one sandbox release (one deployment and
+   approval cycle, later) or two (native SOL sooner)? Is any Token-2022 token
+   needed soon?
 
 ### 7.12 Sources of truth
 
@@ -569,6 +646,13 @@ Protocol references used for this design:
 - SPL transfer semantics and token-account ownership:
   <https://solana.com/docs/tokens/basics/transfer-tokens> and
   <https://solana.com/docs/tokens/basics/create-token-account>
+- Associated token account creation and the idempotent owner check:
+  <https://github.com/solana-program/associated-token-account/blob/program%40v8.0.0/program/src/processor.rs>
+- Classic Token `TransferChecked`, `SetAuthority`, and the ignored
+  `InitializeImmutableOwner`:
+  <https://github.com/solana-program/token/blob/program%40v9.0.0/program/src/processor.rs>
+- Token-2022 fee check and hook invocation:
+  <https://github.com/solana-program/token-2022/blob/program%40v10.0.0/program/src/processor.rs>
 - Token-2022 immutable owners, transfer hooks, and transfer fees:
   <https://solana.com/docs/tokens/extensions/immutable-owner>,
   <https://solana.com/docs/tokens/extensions/transfer-hook>, and
