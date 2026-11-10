@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import zipfile
@@ -372,18 +373,34 @@ def install_origin_recorder(environment: Path, directory: Path) -> None:
 class ProcessOrigins:
     """What one Python process reported: how it was started and what it imported."""
 
-    argv: tuple[str, ...]
-    executable: str
+    command: tuple[str, ...]
+    cwd: str
+    prefix: str
     distribution_version: str | None
     modules: Mapping[str, Any]
 
     @property
-    def is_service(self) -> bool:
-        return bool(self.argv) and Path(self.argv[0]).name == "main.py"
+    def script(self) -> Path | None:
+        """The script this interpreter was started on, if it was started on one."""
+
+        for argument in self.command[1:]:
+            if argument in {"-c", "-m"}:
+                return None
+            if not argument.startswith("-"):
+                return (Path(self.cwd) / argument).resolve()
+        return None
 
     @property
     def is_test_runner(self) -> bool:
-        return any("pytest" in Path(argument).parts or Path(argument).name == "pytest" for argument in self.argv[:2])
+        if self.script is not None:
+            return self.script.name == "pytest"
+        return any(
+            flag == "-m" and module == "pytest" for flag, module in zip(self.command[1:], self.command[2:])
+        )
+
+    @property
+    def label(self) -> str:
+        return " ".join(self.command[1:4]) or "a process"
 
 
 def read_origin_logs(directory: Path) -> list[ProcessOrigins]:
@@ -404,8 +421,9 @@ def read_origin_logs(directory: Path) -> list[ProcessOrigins]:
                 raise ValueError("no process record")
             processes.append(
                 ProcessOrigins(
-                    argv=tuple(str(item) for item in header["argv"]),
-                    executable=str(header["executable"]),
+                    command=tuple(str(item) for item in header["command"]),
+                    cwd=str(header["cwd"]),
+                    prefix=str(header["prefix"]),
                     distribution_version=header["distribution_version"],
                     modules=modules,
                 )
@@ -426,46 +444,44 @@ def origin_problems(
     which is the wheel's own.
     """
 
-    root = environment.resolve()
+    roots = {environment.absolute(), environment.resolve()}
 
     def inside(origin: Any) -> bool:
         origins = origin if isinstance(origin, list) else [origin]
         return bool(origins) and all(
-            isinstance(item, str) and root in Path(item).resolve().parents for item in origins
+            isinstance(item, str) and not roots.isdisjoint(Path(item).resolve().parents) for item in origins
         )
 
     problems: list[str] = []
     for process in processes:
-        label = " ".join(process.argv[:2]) or "a process"
         outside = sorted(name for name, origin in process.modules.items() if not inside(origin))
         if outside:
             problems.append(
-                f"{label} imported {len(outside)} product modules from outside the released wheel's environment, "
-                f"such as {outside[0]} from {process.modules[outside[0]]!r}"
+                f"{process.label} imported {len(outside)} product modules from outside the released wheel's "
+                f"environment, such as {outside[0]} from {process.modules[outside[0]]!r}"
             )
         if process.modules and process.distribution_version != version:
-            problems.append(f"{label} ran Avibe {process.distribution_version!r}, not {version}")
-        if process.modules and root not in Path(process.executable).resolve().parents:
-            problems.append(f"{label} ran under {process.executable}, not the released wheel's environment")
+            problems.append(f"{process.label} ran Avibe {process.distribution_version!r}, not {version}")
+        # ``sys.prefix`` names the environment; the interpreter in it is a link to a base one elsewhere.
+        if process.modules and Path(process.prefix).resolve() not in roots and Path(process.prefix) not in roots:
+            problems.append(f"{process.label} ran in {process.prefix}, not the released wheel's environment")
 
-    def covered(selected: list[ProcessOrigins], roots: Sequence[str]) -> bool:
-        return any(all(name in process.modules for name in roots) for process in selected)
+    def covered(selected: list[ProcessOrigins], packages: Sequence[str]) -> bool:
+        return any(all(name in process.modules for name in packages) for process in selected)
 
     if not covered([process for process in processes if process.is_test_runner], ("vibe",)):
         problems.append("the test runner reported no import of Avibe")
-    services = [
-        process for process in processes
-        if process.is_service and Path(process.argv[0]).resolve() == (harness / "main.py").resolve()
-    ]
-    if not covered(services, ("core", "vibe")):
+    entry = (harness / "main.py").resolve()
+    if not covered([process for process in processes if process.script == entry], ("core", "vibe")):
         problems.append("no spawned service reported importing Avibe from the wheel's entry script")
     return problems
 
 
-def origin_summary(processes: Sequence[ProcessOrigins]) -> dict[str, int]:
+def origin_summary(processes: Sequence[ProcessOrigins], harness: Path) -> dict[str, int]:
+    entry = (harness / "main.py").resolve()
     return {
         "processes": len(processes),
-        "services": sum(1 for process in processes if process.is_service),
+        "services": sum(1 for process in processes if process.script == entry),
         "product_modules": sum(len(process.modules) for process in processes),
     }
 
@@ -892,7 +908,7 @@ def released_e2e_evidence(
         "role": role,
         "avibe": released.identity(),
         "imports_from_wheel": True,
-        "origins": origin_summary(processes),
+        "origins": origin_summary(processes, harness),
         "provenance": recorded,
         "selection": E2E_SELECTION,
         "junit": junit_summary(junit),
@@ -932,7 +948,7 @@ def rehearsal_record(
         "wheel": {"name": wheel.name, "sha256": wheel_sha256},
         "harness_sha256": harness_digest(),
         "provenance": recorded,
-        "origins": origin_summary(processes),
+        "origins": origin_summary(processes, harness),
         "selection": E2E_SELECTION,
         "junit": summary,
         "failing": junit_failures(junit),
@@ -1083,8 +1099,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os
-
     args = _build_parser().parse_args(argv)
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     try:

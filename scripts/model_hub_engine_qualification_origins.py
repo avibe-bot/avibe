@@ -49,8 +49,13 @@ class _Recorder:
             {
                 "process": {
                     "pid": os.getpid(),
-                    "argv": list(getattr(sys, "argv", [])),
-                    "executable": sys.executable,
+                    # The interpreter's own command line: ``sys.argv`` is not
+                    # final this early, and hides the module behind ``-m``.
+                    "command": list(getattr(sys, "orig_argv", [])),
+                    "cwd": os.getcwd(),
+                    # The environment this interpreter runs in. Its executable
+                    # is only a link to a base interpreter somewhere else.
+                    "prefix": sys.prefix,
                     "distribution_version": version,
                 }
             }

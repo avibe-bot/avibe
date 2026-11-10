@@ -521,18 +521,22 @@ class WheelRun:
         )
         self.provenance = {**PROVENANCE, "tests_sha256": qualification.tree_digest(self.harness / "tests")}
         self.python = str(self.environment / "bin" / "python")
-        self.log(101, [str(self.environment / "bin" / "pytest"), "-m", "e2e_model_hub"],
+        self.log(101, [self.python, "-m", "pytest", "-m", "e2e_model_hub", "tests/e2e"],
                  {"vibe": "vibe/__init__.py", "vibe.api": "vibe/api.py", "core": "core/__init__.py"})
-        self.log(202, [str(self.harness / "main.py"), "/tmp/home"],
+        # The harness starts the service by a relative path from its own directory.
+        self.log(202, [self.python, "main.py", "/tmp/home"],
                  {"core": "core/__init__.py", "core.controller": "core/controller.py", "vibe": "vibe/__init__.py",
                   "config": "config/__init__.py"})
-        self.log(303, ["-c"], {"vibe": "vibe/__init__.py", "vibe.ui_server": "vibe/ui_server.py"})
+        self.log(303, [self.python, "-c", "from vibe.ui_server import run_ui_server"],
+                 {"vibe": "vibe/__init__.py", "vibe.ui_server": "vibe/ui_server.py"})
 
-    def log(self, pid: int, argv: list[str], modules: dict, *, version: str | None = None,
-            executable: str | None = None) -> None:
+    def log(self, pid: int, command: list[str], modules: dict, *, version: str | None = None,
+            prefix: str | None = None, cwd: Path | None = None) -> None:
         """Write one process's import log. A relative origin is inside the wheel's environment."""
-        lines: list[dict] = [{"process": {"pid": pid, "argv": argv, "executable": executable or self.python,
-                                          "distribution_version": self.VERSION if version is None else version}}]
+        lines: list[dict] = [{"process": {
+            "pid": pid, "command": command, "cwd": str(cwd or self.harness), "prefix": prefix or str(self.environment),
+            "distribution_version": self.VERSION if version is None else version,
+        }}]
         for name, origin in modules.items():
             inside = isinstance(origin, str) and not Path(origin).is_absolute()
             lines.append({"module": name, "origin": str(self.site / origin) if inside else origin})
@@ -574,32 +578,39 @@ def _checkout(run: WheelRun) -> str:
     return str(run.root / "checkout")
 
 
+SERVICE = {"core": "core/__init__.py", "vibe": "vibe/__init__.py"}
+
+
 @pytest.mark.parametrize(
     ("alter", "message"),
     [
         # A product module from a checkout: in the test runner, deep inside the service, or in a helper process.
-        (lambda run: run.log(101, ["pytest"], {"vibe": f"{_checkout(run)}/vibe/__init__.py"}),
+        (lambda run: run.log(101, [run.python, "-m", "pytest"], {"vibe": f"{_checkout(run)}/vibe/__init__.py"}),
          "outside the released wheel"),
-        (lambda run: run.log(202, [str(run.harness / "main.py")],
-                             {"core": "core/__init__.py", "vibe": "vibe/__init__.py",
+        (lambda run: run.log(202, [run.python, "main.py"],
+                             {**SERVICE,
                               "core.handlers.model_hub.service": f"{_checkout(run)}/core/handlers/model_hub/service.py"}),
          "core.handlers.model_hub.service"),
-        (lambda run: run.log(404, ["-c"], {"storage.db": f"{_checkout(run)}/storage/db.py"}),
+        (lambda run: run.log(404, [run.python, "-c", "pass"], {"storage.db": f"{_checkout(run)}/storage/db.py"}),
          "outside the released wheel"),
-        (lambda run: run.log(404, ["-c"], {"config": [f"{_checkout(run)}/config"]}), "outside the released wheel"),
-        (lambda run: run.log(404, ["-c"], {"modules": []}), "outside the released wheel"),
+        (lambda run: run.log(404, [run.python, "-c", "pass"], {"config": [f"{_checkout(run)}/config"]}),
+         "outside the released wheel"),
+        (lambda run: run.log(404, [run.python, "-c", "pass"], {"modules": []}), "outside the released wheel"),
         # Another Avibe than the released one, or another interpreter than the environment's.
-        (lambda run: run.log(202, [str(run.harness / "main.py")],
-                             {"core": "core/__init__.py", "vibe": "vibe/__init__.py"}, version="0.0.0.dev0"),
-         "ran Avibe '0.0.0.dev0'"),
-        (lambda run: run.log(101, ["pytest"], {"vibe": "vibe/__init__.py"}, executable="/usr/bin/python3"),
-         "not the released wheel's environment"),
+        (lambda run: run.log(202, [run.python, "main.py"], SERVICE, version="0.0.0.dev0"), "ran Avibe '0.0.0.dev0'"),
+        (lambda run: run.log(101, ["/usr/bin/python3", "-m", "pytest"], {"vibe": "vibe/__init__.py"},
+                             prefix="/usr"), "not the released wheel's environment"),
         # The test runner or the real service left no log.
         (lambda run: (run.origins / "101.jsonl").unlink(), "test runner reported no import"),
+        (lambda run: run.log(101, [run.python, "-m", "pip", "list"], {"vibe": "vibe/__init__.py"}),
+         "test runner reported no import"),
         (lambda run: (run.origins / "202.jsonl").unlink(), "no spawned service reported"),
-        (lambda run: run.log(202, [f"{_checkout(run)}/main.py"],
-                             {"core": "core/__init__.py", "vibe": "vibe/__init__.py"}), "no spawned service reported"),
-        (lambda run: run.log(202, [str(run.harness / "main.py")], {}), "no spawned service reported"),
+        # A ``main.py`` that is not the harness's: started elsewhere, or a checkout's by absolute path.
+        (lambda run: run.log(202, [run.python, "main.py"], SERVICE, cwd=Path(_checkout(run))),
+         "no spawned service reported"),
+        (lambda run: run.log(202, [run.python, f"{_checkout(run)}/main.py"], SERVICE), "no spawned service reported"),
+        (lambda run: run.log(202, [run.python, "-c", "import main"], SERVICE), "no spawned service reported"),
+        (lambda run: run.log(202, [run.python, "main.py"], {}), "no spawned service reported"),
         # The entry script in the harness is not the wheel's, or the tests changed after they were recorded.
         (lambda run: (run.harness / "main.py").write_text("# the checkout's entry script\n"), "wheel's own entry script"),
         (lambda run: (run.harness / "tests/e2e/test_case.py").write_text("def test_case(): assert True\n"),
@@ -718,10 +729,27 @@ def test_the_recorder_logs_every_product_module_a_process_imports_from_inside_th
         "vibe.handlers.deep": str(site / "vibe/handlers/deep.py"),
     }
     assert leaking.modules == {"core": str(checkout / "core/__init__.py"), "core.leak": str(checkout / "core/leak.py")}
+    assert clean.command[1:3] == ("-S", "-c") and Path(clean.cwd).resolve() == tmp_path.resolve()
+    assert clean.script is None and not clean.is_test_runner and clean.prefix == sys.prefix
     problems = qualification.origin_problems(
         processes, environment=environment, version="3.2.6", harness=tmp_path / "harness"
     )
     assert any("imported 2 product modules from outside" in problem for problem in problems)
+
+
+def test_processes_are_told_apart_by_the_interpreters_own_command_line(tmp_path) -> None:
+    run = WheelRun(tmp_path / "run")
+    # The interpreter in an environment is a link to a base one; the command line names it either way.
+    run.log(505, ["/opt/python/bin/python3.12", "-m", "pytest", "tests/e2e"], {"vibe": "vibe/__init__.py"})
+    run.log(606, [run.python, str(run.environment / "bin" / "pytest"), "tests/e2e"], {"vibe": "vibe/__init__.py"})
+
+    processes = qualification.read_origin_logs(run.origins)
+
+    assert qualification.origin_problems(
+        processes, environment=run.environment, version=run.VERSION, harness=run.harness
+    ) == []
+    assert [process.is_test_runner for process in processes] == [True, False, False, True, True]
+    assert [process.script for process in processes][:3] == [None, (run.harness / "main.py").resolve(), None]
 
 
 def test_a_harness_directory_holds_the_tags_tests_the_wheels_entry_script_and_no_product_package(tmp_path) -> None:
