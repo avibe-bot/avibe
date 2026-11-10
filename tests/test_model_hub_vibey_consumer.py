@@ -650,6 +650,75 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("moved_to", ["other-alias", "blocked-alias"])
+async def test_a_vibey_turn_that_moves_to_another_model_is_routed_and_recorded_under_it(tmp_path, moved_to):
+    """MH-VIBEY-011: a Vibey Turn follows its Session between requests, so one Turn can ask for two models.
+
+    Once its previous request has ended, a resolution that names another model replaces the Turn's route: the next
+    request is served on that model's Source, and the Turn's record names the model it asked for last. A model
+    nothing can serve is refused there as at any resolution, and the record says which model that was.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    other = _source("src_other0001", "Other", model_id="other-upstream")
+    blocked = _source("src_blocked01", "Blocked", model_id="blocked-upstream")
+    blocked.state = ModelHubSourceStateConfig(
+        status="needs_action", detail_key="models.source.needs_action.credential_revoked",
+    )
+    service = _vibey_service(tmp_path, [primary, other, blocked], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=other.id), (b"{}",)),
+    ])
+    agent = service.store.config.agents["vibey"]
+    agent.models += [ModelHubBackendModelConfig(id="other-alias"), ModelHubBackendModelConfig(id="blocked-alias")]
+    agent.routes["menu-alias"] = ModelHubRouteConfig((ModelHubRouteHopConfig(primary.id, primary.models[0].id),))
+    agent.routes["other-alias"] = ModelHubRouteConfig((ModelHubRouteHopConfig(other.id, "other-upstream"),))
+    agent.routes["blocked-alias"] = ModelHubRouteConfig((ModelHubRouteHopConfig(blocked.id, "blocked-upstream"),))
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    turn_id = "turn-moved-model"
+    try:
+        first = await router.resolve_hop("menu-alias", process_scope="vibey:moved-model", turn_id=turn_id)
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{first["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {first["token"]}', **first["request_headers"]},
+                json={"model": first["runtime_model"], "messages": []},
+            ) as response:
+                assert response.status == 200
+                await response.read()
+                assert _served_hop(response)["source"] == primary.id
+            if moved_to == "blocked-alias":
+                with pytest.raises(ModelHubError) as refused:
+                    await router.resolve_hop(moved_to, process_scope="vibey:moved-model", turn_id=turn_id)
+                assert refused.value.status == 409 and refused.value.turn_outcome is not None
+            else:
+                moved = await router.resolve_hop(moved_to, process_scope="vibey:moved-model", turn_id=turn_id)
+                assert (moved["requested_model"], moved["source_id"]) == (moved_to, other.id)
+                async with client.post(
+                    f'{moved["base_url"]}/responses',
+                    headers={"Authorization": f'Bearer {moved["token"]}', **moved["request_headers"]},
+                    json={"model": moved["runtime_model"], "input": "next"},
+                ) as response:
+                    assert response.status == 200
+                    await response.read()
+                    origin = _served_hop(response)
+        completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+        if completion:
+            await completion
+        record = service.provenance.get(turn_id)
+        assert record is not None and record["requested_model_id"] == moved_to
+        if moved_to == "blocked-alias":
+            assert record["outcome"] == "no_candidate"
+            assert [blocker["model_id"] for blocker in record["blockers"]] == ["blocked-upstream"]
+        else:
+            assert record["outcome"] == "served"
+            assert _recorded_hop(record["served"]) == origin and origin["source"] == other.id
+        _validate("turn-provenance.schema.json", record)
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provenance(tmp_path):
     """MH-VIBEY-008: the consumer is the service, so a Session's scope lives until it exits, with no per-Turn rotation.
 

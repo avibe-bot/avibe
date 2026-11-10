@@ -709,11 +709,18 @@ Code or Codex Agent lists its bundled catalog and offers no fast mode.
 `changeable: false` with a `reason` says the caller may not change it.
 
 `vibe session update --model`, `--reasoning-effort`, and `--speed` make the same
-change as the Web picker, from the Session's next Turn. A running Turn keeps
-its settings, and so does a message that joins it, so send the next message
-with `vibe agent run --session-id <id> --queue`, or stop the Turn with
-`vibe runs cancel <run-id>` first. The reply adds `applies_from: "next_turn"`,
-`turn_running`, and any `notes`. Like the Web picker, a new model whose
+change as the Web picker. The reply adds `applies_from`, `turn_running`, and
+any `notes`:
+
+- `applies_from: "next_request"` on a Vibey Session. A running Turn takes the
+  change at its next model request, so there is no need to wait for the Turn
+  or stop it. The Turn keeps its tool list and system prompt until it ends.
+- `applies_from: "next_turn"` on a Claude Code, Codex, or OpenCode Session. A
+  running Turn keeps its settings, and so does a message that joins it, so
+  send the next message with `vibe agent run --session-id <id> --queue`, or
+  stop the Turn with `vibe runs cancel <run-id>` first.
+
+Like the Web picker, a new model whose
 efforts do not include the current one clears it (the Agent's default then
 applies), and fast stays set across a model without a fast tier, which runs at
 the standard tier. The CLI never changes the remembered fast default for new

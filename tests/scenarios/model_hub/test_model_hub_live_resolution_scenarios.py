@@ -1663,6 +1663,64 @@ def test_mh_fast_002_refused_fast_tier_is_served_at_the_standard_tier(
     asyncio.run(exercise())
 
 
+def test_mh_fast_005_a_running_turn_moves_to_the_tier_its_session_names_now(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-FAST-005: a Vibey Turn's next request runs at the tier its latest resolution asked for, and a resolution that asks for the same tier keeps it."""
+
+    from vibe import models_dev_catalog
+
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
+    model_id = _requested_model("codex")
+    _cache_fast_modes({model_id: {"service_tier": "priority"}})
+
+    async def exercise() -> None:
+        adapter = AdapterBoundaryFake(
+            [AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}') for _ in range(4)]
+        )
+        source = _source("src_chatgpt1", kind="subscription")
+        config = _config(source)
+        vibey = config.agents["vibey"] = ModelHubAgentSupplyConfig.default("vibey", mode="hub")
+        vibey.models = [ModelHubBackendModelConfig(id=model_id)]
+        vibey.sources = ModelHubAgentSourcesConfig(order=[source.id])
+        vibey.routes[model_id] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(source.id, model_id),))
+        service = _service(
+            tmp_path, MemoryStore(config), adapter, now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        controller = SimpleNamespace(model_hub_runtime=ModelHubRuntimeRouter(service=service, turn_gateway=gateway))
+        # The Session row dispatch copied onto the Turn's context: the standard tier.
+        context = SimpleNamespace(platform_specific={"agent_session_target": {"id": "ses_fast", "metadata": {}}})
+
+        async def request(**named_tier) -> None:
+            launch = await resolve_model_hub_launch(
+                controller, "vibey", model_id,
+                process_scope="vibey:ses_fast", context=context, turn_id="turn_fast", **named_tier,
+            )
+            status, _body = await _post_turn(
+                launch,
+                endpoint="responses",
+                payload={"model": launch.runtime_model, "input": [], "stream": False},
+            )
+            assert status == 200
+
+        try:
+            # The Turn starts at the tier dispatch saw.
+            await request()
+            # Its Session moved to fast while it ran: the next request asks for it.
+            await request(speed="fast")
+            # A resolution that changes nothing (a retry, a failover) keeps the tier.
+            await request(speed="fast")
+            # Back to standard, the next request sends nothing extra.
+            await request(speed=None)
+            assert [sent.get("service_tier") for sent in adapter.requests] == [None, "priority", "priority", None]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def _responses_sse(service_tier: str) -> bytes:
     """A served Responses stream whose completed response names the tier it ran at."""
 

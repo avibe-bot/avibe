@@ -58,6 +58,27 @@ def session_speed(metadata: Any) -> str | None:
         return None
     return SESSION_SPEED_FAST if metadata.get(SESSION_SPEED_METADATA_KEY) == SESSION_SPEED_FAST else None
 
+
+def session_route_settings(conn: Connection, session_id: str) -> dict[str, Any] | None:
+    """A Session's own model, reasoning effort, and metadata, as dispatch copies them onto a turn's context.
+
+    One read by primary key, for a backend that follows its Session while a turn
+    runs. None when the row is gone.
+    """
+
+    row = conn.execute(
+        select(agent_sessions.c.model, agent_sessions.c.reasoning_effort, agent_sessions.c.metadata_json)
+        .where(agent_sessions.c.id == str(session_id))
+    ).first()
+    if row is None:
+        return None
+    return {
+        "model": row.model,
+        "reasoning_effort": row.reasoning_effort,
+        "metadata": decode_metadata_object(row.metadata_json),
+    }
+
+
 logger = logging.getLogger(__name__)
 
 

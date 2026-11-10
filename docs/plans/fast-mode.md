@@ -38,9 +38,15 @@ starts with the choice the user made last.
   those surfaces show no mark, so they never pay more unseen.
 - Dispatch copies the Session row onto the turn's context. `resolve_model_hub_launch`
   reads the tier from there and passes it to the Hub router, which records it on
-  the gateway turn the launch prepares (`TurnTrace.speed`). The turn keeps the
-  first value it is given, like its hosted tools, so a change applies from the
-  next turn.
+  the gateway turn the launch prepares (`TurnTrace.speed`). Each resolution names
+  the tier it asks for, and the turn's next requests run at the latest one.
+- A Claude Code or Codex turn resolves once, so it keeps the tier it started
+  with and a change applies from the next turn. A Vibey turn resolves again for
+  every model request and names the tier its Session asks for by then
+  (`avibe-owned-model-selection.md`), so a change reaches its next request. A
+  resolution that changes nothing, such as a retry or a failover, names the
+  same tier and keeps it. Hosted tools are different: the turn keeps the first
+  set it is given.
 
 ### Where the tier is asked for
 
@@ -150,9 +156,10 @@ without losing a count. Pricing details: `docs/plans/model-hub-capability-model.
 - Scenario tests: `MH-FAST-001` (a fast Session's turn reaches the hop that
   offers the tier, and only that hop), `MH-FAST-002` (a refused tier is served
   at the standard tier, and its Source stays routable), `MH-FAST-003` (the
-  menu marks the models that would run fast), and `MH-FAST-004` (a relay is
+  menu marks the models that would run fast), `MH-FAST-004` (a relay is
   asked too, and its buffered or streamed responses decide whether the menu
-  says the tier ran).
+  says the tier ran), and `MH-FAST-005` (a running Vibey turn's next request
+  runs at the tier its Session names now).
 - Units: the served tier each protocol reports, streamed and buffered
   (`tests/test_model_hub_served_tier.py`), and the observation record.
 - Fast-tier usage (`tests/test_model_hub_fast_usage.py`): fast rates, rows,

@@ -31,7 +31,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    display_name_for_backend,
+    is_builtin_backend,
+    is_native_cli_backend,
+)
 from core.caller_context import (
     caller_context_from_env,
     caller_resource_user_context,
@@ -9067,6 +9073,15 @@ def _session_route(payload: dict, agent_store) -> tuple[Any, str, dict]:
     return agent, backend, current
 
 
+def _route_applies_from(backend: str) -> str:
+    """When a Session's model, effort, or speed change reaches a Turn that is already running.
+
+    Vibey resolves its route again for every model request, so its running Turn takes the change at the next
+    one. A native CLI is given its model when a Turn starts, so its running Turn keeps what it started with.
+    """
+    return "next_request" if is_builtin_backend(backend) else "next_turn"
+
+
 def _session_turn_running(conn, session_id: str, payload: dict) -> bool:
     from sqlalchemy import select
 
@@ -9229,7 +9244,11 @@ def cmd_session_models(args):
         _agent, backend, current = _session_route(payload, _agent_store(read_only=True))
         current["turn_running"] = turn_running
         menu = _route_menu(backend, hub_agent_reader=_remote_hub_agent_reader(), help_command=help_command)
-        notes = ["Changes apply from the next Turn; a running Turn keeps its model, effort, and speed."]
+        notes = [
+            "Changes apply from the running Turn's next model request; there is no need to wait for it or stop it."
+            if _route_applies_from(backend) == "next_request"
+            else "Changes apply from the next Turn; a running Turn keeps its model, effort, and speed."
+        ]
         expected_vendor = _NATIVE_BACKEND_VENDORS.get(backend)
         if expected_vendor:
             notes.append(
@@ -9372,7 +9391,7 @@ def _session_update(args, invocation: _ServiceInvocation):
                 )
                 updates.update(writes)
                 route_fields = {
-                    "applies_from": "next_turn",
+                    "applies_from": _route_applies_from(backend),
                     "turn_running": _session_turn_running(conn, session_id, previous_session),
                 }
                 if notes:
@@ -19498,7 +19517,8 @@ def build_parser():
         help="Update a session's title, visibility, scope, model, reasoning effort, or speed",
         description=(
             "Update one active Session. Moving scope never changes its stored working directory. "
-            "A model, effort, or speed change applies from the Session's next Turn; "
+            "A model, effort, or speed change reaches a running Vibey Turn at its next model request, and a "
+            "Claude Code, Codex, or OpenCode Session at its next Turn (the reply's `applies_from`); "
             "`vibe session models` lists the values it accepts."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -19533,10 +19553,10 @@ def build_parser():
         help="Move to an existing scopes.id, or pass 'none' to make the Session standalone.",
     )
     session_update_parser.add_argument(
-        "--model", help="Model for the Session's next Turns ('vibe session models')"
+        "--model", help="Model for the Session from now on ('vibe session models')"
     )
     session_update_parser.add_argument(
-        "--reasoning-effort", metavar="EFFORT", help="Reasoning effort for the Session's next Turns"
+        "--reasoning-effort", metavar="EFFORT", help="Reasoning effort for the Session from now on"
     )
     session_update_parser.add_argument(
         "--speed", choices=SESSION_SPEED_CHOICES, help="fast: the vendor's faster, pricier tier; standard: the default"
