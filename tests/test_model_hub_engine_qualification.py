@@ -1006,12 +1006,14 @@ class RecordedEnvironment:
 
 
 def test_the_recorder_logs_every_product_module_a_process_imports_from_inside_that_process(tmp_path) -> None:
-    import sys
-
     recorded = RecordedEnvironment(tmp_path)
     site, checkout = recorded.site, recorded.checkout
 
-    recorded.run("import vibe.handlers.deep, json, collections; assert vibe.handlers.deep.VALUE == 7")
+    # The child says which environment it runs in. Started with ``-S`` from a
+    # virtual environment, that is not the environment these tests run in.
+    child_prefix = recorded.run(
+        "import vibe.handlers.deep, json, collections, sys; assert vibe.handlers.deep.VALUE == 7; print(sys.prefix)"
+    ).strip()
     recorded.run("import core.leak", checkout)
     # A test that puts a checkout on the path and imports the package again.
     recorded.run(f"import core, sys; del sys.modules['core']; sys.path.insert(0, {str(checkout)!r}); import core.leak")
@@ -1033,7 +1035,9 @@ def test_the_recorder_logs_every_product_module_a_process_imports_from_inside_th
     # The second file a module was found in is recorded too, and judged.
     assert found_again.modules["core"] == (str(site / "core/__init__.py"), str(checkout / "core/__init__.py"))
     assert clean.command[1:3] == ("-S", "-c") and Path(clean.cwd).resolve() == tmp_path.resolve()
-    assert clean.script is None and not clean.is_test_runner and clean.prefix == sys.prefix
+    assert clean.script is None and not clean.is_test_runner
+    # The prefix is recorded from inside the process, so it is that process's own.
+    assert child_prefix and clean.prefix == child_prefix
     # Read from the installed metadata's header, without the metadata library.
     assert {process.distribution_version for process in processes} == {"3.2.6"}
     problems = recorded.problems()
