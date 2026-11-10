@@ -51,6 +51,16 @@ unchanged.
    a new desktop session exists restarts itself once through step 2. This waits
    until step 2 has been verified from a session that really ended.
 
+**Replacement at the next desktop login (macOS), built.** A service left in
+another login session is replaced by whatever starts Avibe in the new desktop
+session. For a CLI install that is the opt-in `vibe autostart` login entry
+(`vibe/login_autostart.py`, decided in `macos-stale-session-auto-recovery.md`).
+Its desktop counterpart is the app's own launch: opening the app replaces the
+app's own Runtime instead of adopting it (`desktop/README.md`, step 3). Both
+act on one decision, `service_outside_desktop_session`: the service reports an
+ended login session, or its audit session is known to differ from the desktop
+session's; anything inconclusive is left alone.
+
 Rejected: only warning or refusing (a remote restart would never work);
 `launchctl asuser` (keeps the caller's `PATH`, and is not known to cross
 sessions without root); a resident LaunchAgent (a second lifecycle owner, which
@@ -67,12 +77,20 @@ no gain).
 - Step 2 from an ended session needs one real log-out and log-in on a Mac.
 - A service started by launchd is no longer attributed to the terminal for
   macOS privacy permissions (folders, screen recording); check for new prompts.
+- The desktop app's replacement needs a packaged build and one real log-out and
+  log-in: open the app, log out and in, and open it again. The Workbench opens
+  with no stale-session banner, and the app's `bootstrap.log` (in its local
+  data directory, `~/Library/Application Support/bot.avibe.desktop/`) has an
+  `endpoint.query` line carrying `replace_runtime="true"` with the reason,
+  followed by a `runtime.start` line.
 
 ## Todo
 
 - [x] Step 1: login-shell `PATH` at Runtime start.
 - [ ] SSH probe result recorded here.
 - [ ] Steps 2 and 3.
+- [x] Replacement at the next desktop login: `vibe autostart` for CLI installs,
+      the app's launch for the desktop app.
 - [ ] Log-out/log-in verification, then step 4.
 - [ ] Update the stale-session guidance in the `use-avibe` playbook and the
       Doctor action text once any restart repairs it.
