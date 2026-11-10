@@ -1004,6 +1004,12 @@ def test_replaced_shared_key_keeps_source_identity_and_reaches_upstream_once(
         )
 
 
+# The engine's Claude executor adds 1-30 s of fuzz to an Anthropic reset and,
+# since CPA v8.0.63, reports that cooldown as its own Retry-After, rounded up to
+# whole seconds; the engine itself keeps the Source refused until then.
+_ENGINE_CLAUDE_RETRY_FUZZ = timedelta(seconds=31)
+
+
 def _assert_probe_cooldown_and_next_request_selection(
     *,
     app,
@@ -1030,7 +1036,7 @@ def _assert_probe_cooldown_and_next_request_selection(
     assert first_state["detail_key"] == expected_detail
     retry_at = datetime.fromisoformat(first_state["retry_at"])
     assert before_probe + timedelta(seconds=expected_delay) <= retry_at
-    assert retry_at <= after_probe + timedelta(seconds=expected_delay)
+    assert retry_at <= after_probe + timedelta(seconds=expected_delay) + _ENGINE_CLAUDE_RETRY_FUZZ
 
     next_probe = _probe(app)
     next_body = next_probe.json()

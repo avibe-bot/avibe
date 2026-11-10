@@ -102,6 +102,7 @@ OPENCODE_V4_S3_PASSTHROUGH_FIXTURES = {
             ],
             "reasoning": {"effort": "high", "summary": "auto"},
             "prompt_cache_key": "cache-fixture",
+            "max_output_tokens": 128,
             "instructions": "",
             "include": ["reasoning.encrypted_content"],
             "store": False,
@@ -112,7 +113,8 @@ OPENCODE_V4_S3_PASSTHROUGH_FIXTURES = {
             "added": {
                 "instructions": "",
             },
-            "removed": ["max_output_tokens"],
+            # Since CPA v8.0.63 the Codex executor keeps max_output_tokens.
+            "removed": [],
             "changed": {
                 "model": ["menu-model", "gpt-5"],
             },
