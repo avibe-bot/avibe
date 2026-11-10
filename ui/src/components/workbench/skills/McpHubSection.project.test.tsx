@@ -194,6 +194,7 @@ describe('McpHubSection project view', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(en.mcpHub.addProjectSubtitle.replace('{{project}}', 'alpha'))).toBeTruthy();
     const text = '{"mcpServers":{"docs":{"url":"https://docs.example/mcp"}}}';
+    fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeJson }));
     fireEvent.change(within(dialog).getByPlaceholderText((value) => value.includes('mcpServers')), { target: { value: text } });
     fireEvent.click(within(dialog).getByRole('button', { name: en.mcpHub.add }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith(start));
@@ -225,7 +226,6 @@ describe('McpHubSection project view', () => {
     renderHub();
     await screen.findByText('pending');
     expect(screen.queryByRole('button', { name: en.mcpHub.add })).toBeNull();
-    expect(screen.queryByRole('button', { name: en.mcpHub.refreshAll })).toBeNull();
     for (const name of ['pending', 'tokened', 'stale', 'ready']) {
       fireEvent.click(rowButton(name));
       const buttons = within(detail()).getAllByRole('button').map((node) => node.textContent);

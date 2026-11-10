@@ -162,7 +162,6 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
           ) : null}
         </div>
       ) : null}
-      <p className="text-[11px] text-muted">{t('mcpHub.form.hint')}</p>
     </div>
   );
 }
