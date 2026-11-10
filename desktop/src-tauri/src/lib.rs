@@ -2465,6 +2465,7 @@ pub fn run() {
             pet::pet_set_voice_mode,
             updater::desktop_remote_install_allowed,
             updater::desktop_remote_install_set,
+            updater::desktop_update_prereleases_set,
             updater::desktop_update_remote_decline,
             pet::pet_ready,
             pet::pet_context_menu,

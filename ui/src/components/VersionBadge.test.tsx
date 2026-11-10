@@ -14,6 +14,7 @@ import {
 const api = vi.hoisted(() => ({
   getVersion: vi.fn<() => Promise<Partial<VersionInfo> & Pick<VersionInfo, 'current' | 'latest' | 'has_update'>>>(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
   getConfig: vi.fn(async () => ({ update: { auto_update: true } })),
+  mutateConfig: vi.fn(async () => ({})),
   requestDesktopUpdate: vi.fn<(...args: unknown[]) => Promise<DesktopRemoteUpdateResult>>(),
   doUpgrade: vi.fn<(...args: unknown[]) => Promise<UpgradeResult>>(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
 }));
@@ -692,5 +693,59 @@ describe('remote desktop update contract', () => {
     await openBrowserPopup('v9.9.9');
     expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
     expect(api.getConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('pre-release updates', () => {
+  const prereleaseSwitch = () => screen.findByRole('switch', { name: i18n.t('dashboard.prereleaseUpdates') });
+
+  it('saves the Runtime setting, rechecks, and offers the release candidate with its notes', async () => {
+    api.getConfig.mockResolvedValueOnce({ update: { auto_update: true, prereleases: false } });
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.5', latest: '3.2.5', has_update: false });
+    await openBrowserPopup('v3.2.5');
+    const toggle = await prereleaseSwitch();
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.5', latest: '3.2.6rc2', has_update: true });
+    fireEvent.click(toggle);
+    await vi.waitFor(() => expect(api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['update', 'prereleases'], value: true },
+    ]));
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenLastCalledWith({ cache: false }));
+    expect(await screen.findByText(i18n.t('dashboard.prereleaseBadge'))).toBeTruthy();
+    const notes = screen.getByRole('link', { name: i18n.t('dashboard.releaseNotesFor', { version: '3.2.6rc2' }) });
+    expect(notes.getAttribute('href')).toBe('https://github.com/avibe-bot/avibe/releases/tag/gh-v3.2.6rc2');
+    expect((await prereleaseSwitch()).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeTruthy();
+  });
+
+  it('names the older stable release while running a pre-release with the switch off', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.6rc2', latest: '3.2.5', has_update: false });
+    await openBrowserPopup('v3.2.6rc2');
+    expect(await screen.findByText(i18n.t('dashboard.awaitingStableRelease'))).toBeTruthy();
+    expect(screen.getByText(i18n.t('dashboard.latestStableVersion'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.upToDate'))).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
+  });
+
+  it('sets the desktop app channel in the shell instead of the Runtime config', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') {
+        return { phase: 'current', latest: '3.2.5', channel: 'stable', prereleases: false, skippedVersion: null, interactive: false };
+      }
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.5', '3.2.5', null, true);
+    fireEvent.click(await screen.findByTitle('v3.2.5'));
+    fireEvent.click(await prereleaseSwitch());
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_prereleases_set', { enabled: true }));
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it('hides the switch under a desktop shell that predates it', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
+    fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
+    expect(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: i18n.t('dashboard.prereleaseUpdates') })).toBeNull();
   });
 });

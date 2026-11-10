@@ -19,6 +19,7 @@ fn main() {
         "desktop_update_check",
         "desktop_update_install",
         "desktop_update_skip",
+        "desktop_update_prereleases_set",
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",

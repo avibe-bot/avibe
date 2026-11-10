@@ -183,6 +183,8 @@ export type DesktopUpdateState = {
   phase: DesktopUpdatePhase;
   latest: string | null;
   channel: 'stable' | 'test';
+  /** Whether the shell offers pre-releases too; absent from shells without the Workbench switch. */
+  prereleases?: boolean;
   skippedVersion: string | null;
   interactive: boolean;
   remoteInstallAllowed?: boolean;
@@ -229,6 +231,8 @@ export type DesktopUpdateShellActions = {
   install: () => Promise<void>;
   skip: () => Promise<void>;
   declineRemoteRequest: () => Promise<void>;
+  /** Offer pre-releases (the shell's `test` channel) as well as stable releases. */
+  setPrereleases: (enabled: boolean) => Promise<void>;
 };
 
 export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
@@ -240,6 +244,7 @@ export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
     install: async () => { await invoke('desktop_update_install'); },
     skip: async () => { await invoke('desktop_update_skip'); },
     declineRemoteRequest: async () => { await invoke('desktop_update_remote_decline'); },
+    setPrereleases: async (enabled) => { await invoke('desktop_update_prereleases_set', { enabled }); },
   };
 }
 
