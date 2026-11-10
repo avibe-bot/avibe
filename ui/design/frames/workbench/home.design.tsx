@@ -23,6 +23,11 @@ const fixtures = workbenchFixtures({ ...agentsApi(), ...homeFactsApi({ model: tr
 // Two Bots at work: "2 working" lists them to pick from.
 const busy = { ...fixtures, botStatus: { ses_main: 'running' as const, ses_pm: 'running' as const } };
 const openBusy = ['main >> text=/^2 (位在忙|working)$/'];
+// What the shell says above every page when the service is not in the user's desktop session.
+const withLoginSession = (state: 'outside_gui_session' | 'stale_login_session') => ({
+  ...fixtures,
+  api: { ...fixtures.api, '/api/macos/login-session': { ok: true, state } },
+});
 
 const designFrames = frames([
   {
@@ -65,6 +70,36 @@ const designFrames = frames([
     route: '/',
     fixtures: busy,
     click: openBusy,
+    render: home,
+  },
+  {
+    name: 'desktop-outside-session',
+    title: '工作台 · 桌面 · 服务运行在桌面会话之外：钥匙串凭据不可用（警告）',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: '/',
+    fixtures: withLoginSession('outside_gui_session'),
+    render: home,
+  },
+  {
+    name: 'phone-outside-session',
+    title: '工作台 · 手机 · 服务运行在桌面会话之外',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/',
+    fixtures: withLoginSession('outside_gui_session'),
+    render: home,
+  },
+  {
+    name: 'desktop-stale-session',
+    title: '工作台 · 桌面 · 服务所在的登录会话已结束（错误）',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route: '/',
+    fixtures: withLoginSession('stale_login_session'),
     render: home,
   },
 ]);

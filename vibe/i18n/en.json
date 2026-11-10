@@ -11,6 +11,7 @@
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
     "staleLoginSession": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
+    "outsideGuiSession": "Avibe is running outside your desktop session, so credentials kept in the Keychain (GitHub CLI, Vault) are unavailable. Restart Avibe from a terminal on this Mac's desktop.",
     "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
     "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Open Models and click Retry, then choose a model.",
     "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
@@ -1436,6 +1437,7 @@
       "loginSessionLocalFallback": "No running Avibe service was found; macOS login-session status was not used as service health",
       "loginSessionUnknown": "The macOS login session could not be verified",
       "noGuiSession": "No desktop GUI session is available; this is expected for headless or SSH use",
+      "outsideGuiSession": "Avibe is running outside your desktop session, so credentials kept in the Keychain (GitHub CLI, Vault) are unavailable",
       "staleLoginSession": "Avibe is still running in a macOS login session that has ended",
       "serviceGenerationBehind": "The running service is Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration})",
       "cliNotUvTool": "Active vibe executable is not the uv tool installation",
@@ -1525,6 +1527,7 @@
       "splitLaunchers": "Run `{repairCommand}` to point every launcher at Avibe {version}.",
       "splitLaunchersTied": "These installs tie as the last activation, so the repair cannot choose one: {launchers}. Run the Avibe installer again; its new install moves every launcher.",
       "staleLoginSession": "Open Terminal on the Mac's current desktop and run `vibe restart`, then try again from Avibe. Do not retry the failed operation.",
+      "outsideGuiSession": "Open Terminal on the Mac's desktop and run `vibe restart`.",
       "serviceGenerationBehind": "Run `{restartCommand}` to run the last activated install.",
       "cliNotUvTool": "uv tool package-integrity checks are skipped for this executable.",
       "cliEditable": "Reinstall Avibe from a normal wheel. Do not use 'uv tool install --editable .' for the live local CLI.",

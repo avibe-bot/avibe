@@ -424,6 +424,13 @@ exit 77, agent frame `code`), and only `avault key authorize` may show the dialo
 - **One error.** The Vault API and the `vibe vault` CLI report
   `avault_authorization_required`; the CLI hint tells an Agent to ask the user and
   not retry or run avault itself.
+- **Outside the desktop session.** When the user has a desktop session and the
+  process runs in another audit session (`outside_gui_session`, for example a
+  service restarted over SSH), avault reports the same refusal and the dialog
+  cannot appear there. The refusal keeps its delivery accounting but is reported
+  as `outside_gui_session` with a restart from the Mac's desktop, and is not
+  recorded as an authorization the user owes. `avault key authorize` from such a
+  process reports `no_gui_session`.
 - **Shared record.** `vibe/avault_authorization.py` keeps one "authorization
   required" record under the state directory for every process; any successful
   master-key read clears it. The Vault page, Settings → Dependencies

@@ -2239,7 +2239,7 @@ export type AvaultAuthorizationStatus = {
 
 export type MacOSLoginSessionStatus = {
   ok: boolean;
-  state: 'healthy' | 'stale_login_session' | 'no_gui_session' | 'unknown' | 'not_applicable';
+  state: 'healthy' | 'stale_login_session' | 'no_gui_session' | 'outside_gui_session' | 'unknown' | 'not_applicable';
 };
 
 export type DependenciesResult = {

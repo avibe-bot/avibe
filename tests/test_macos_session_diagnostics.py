@@ -170,18 +170,34 @@ def test_stale_login_session_uses_directory_services_failure_from_recorded_case(
     assert login_session_state(captured) == "stale_login_session"
 
 
-def test_login_session_classifier_does_not_flag_normal_session_shapes() -> None:
-    # Fast User Switching, lock/unlock, VNC, and sleep/wake can change the
-    # foreground user or GUI ASID without invalidating this process's login.
-    normal = [
-        context(console_user="other-user"),  # Fast User Switching
-        context(),  # lock/unlock
-        context(),  # VNC
-        context(gui_asid=120002),  # sleep/wake recreation
-    ]
-    assert [login_session_state(item) for item in normal] == ["healthy"] * 4
-    assert login_session_state(context(gui_available=False, gui_error="absent")) == "no_gui_session"
-    assert login_session_state(context(gui_asid=120002)) == "healthy"
+def test_login_session_classifier_separates_session_shapes() -> None:
+    shapes = {
+        # These change the foreground user or the screen, not this process's session.
+        "fast user switching": (context(console_user="other-user"), "healthy"),
+        "lock/unlock, VNC, sleep/wake": (context(), "healthy"),
+        "no desktop login": (context(gui_asid=None, gui_available=False, gui_error="absent"), "no_gui_session"),
+        "desktop domain unreadable": (
+            context(gui_asid=None, gui_available=None, gui_error="command_failed"),
+            "unknown",
+        ),
+        # 2026-11-10: a restart over SSH put the service in audit session 106269
+        # while the user's desktop session was 105819; the Keychain was unreachable.
+        "started outside the desktop session": (
+            context(service_asid=106269, gui_asid=105819),
+            "outside_gui_session",
+        ),
+        # A mismatch needs both IDs; an unread one proves nothing.
+        "service audit session unread": (context(service_asid=None, service_error="parse_error"), "healthy"),
+        # An ended login is the stronger finding: nothing in that session works.
+        "ended login with a new desktop session": (
+            context(gui_asid=120002, service_error="user_lookup_failed"),
+            "stale_login_session",
+        ),
+    }
+
+    assert {name: login_session_state(shape) for name, (shape, _state) in shapes.items()} == {
+        name: state for name, (_shape, state) in shapes.items()
+    }
 
 
 def test_launchctl_snapshot_parsing_uses_security_context_fixture() -> None:
@@ -310,7 +326,10 @@ def test_asid_mismatch_transition_is_logged(caplog) -> None:
     transition = event_payloads(caplog)[-1]
     assert transition["reason"] == ["gui_domain_change", "asid_match_change"]
     assert transition["asid_match"] is False
-    assert transition["login_session_state"] == "healthy"
+    assert transition["login_session_state"] == "outside_gui_session"
+    assert caplog.records[-1].levelno == logging.WARNING
+    # What the service's health identity reports to Doctor and the CLI.
+    assert monitor.current_state == "outside_gui_session"
 
 
 def test_dns_failure_is_deduplicated_until_recovery(caplog) -> None:

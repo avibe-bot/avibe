@@ -385,23 +385,34 @@ def _retyped_placement_refusal(
 
 
 STALE_LOGIN_SESSION_CODE = "stale_login_session"
+OUTSIDE_GUI_SESSION_CODE = "outside_gui_session"
 AVAULT_AUTHORIZATION_REQUIRED_CODE = "avault_authorization_required"
 
-
-def _is_stale_login_session(exc: Exception) -> bool:
-    return getattr(exc, "code", None) == STALE_LOGIN_SESSION_CODE
-
-
-def _stale_login_session_cli_error(help_command: str | None) -> TaskCliError:
-    return TaskCliError(
+# (message, hint) for a failure whose cause is the macOS session Avibe runs in.
+# A restart from inside Avibe keeps that session, so the step goes to the user.
+_LOGIN_SESSION_CLI_ERRORS = {
+    STALE_LOGIN_SESSION_CODE: (
         "Avibe is still running in a macOS login session that has ended",
-        code=STALE_LOGIN_SESSION_CODE,
-        hint=(
-            "Do not retry. Ask the user to open Terminal on the Mac's current desktop, run `vibe restart`, "
-            "then try again from Avibe."
-        ),
-        help_command=help_command,
-    )
+        "Do not retry. Ask the user to open Terminal on the Mac's current desktop, run `vibe restart`, "
+        "then try again from Avibe.",
+    ),
+    OUTSIDE_GUI_SESSION_CODE: (
+        "Avibe is running outside the user's desktop session, so credentials kept in the macOS Keychain "
+        "are unavailable",
+        "Do not retry, and do not ask for an avault authorization. Ask the user to open Terminal on the "
+        "Mac's desktop, run `vibe restart`, then try again from Avibe.",
+    ),
+}
+
+
+def _login_session_code(exc: Exception) -> str | None:
+    code = getattr(exc, "code", None)
+    return code if code in _LOGIN_SESSION_CLI_ERRORS else None
+
+
+def _login_session_cli_error(code: str, help_command: str | None) -> TaskCliError:
+    message, hint = _LOGIN_SESSION_CLI_ERRORS[code]
+    return TaskCliError(message, code=code, hint=hint, help_command=help_command)
 
 
 def _is_avault_authorization_required(exc: Exception) -> bool:
@@ -429,8 +440,9 @@ def _avault_authorization_required_cli_error(help_command: str | None) -> TaskCl
 
 
 def _avault_cli_error(exc: Exception, message: str, *, code: str = "avault_failed", help_command: str | None = None) -> TaskCliError:
-    if _is_stale_login_session(exc):
-        code = STALE_LOGIN_SESSION_CODE
+    session_code = _login_session_code(exc)
+    if session_code:
+        code = session_code
     elif _is_avault_authorization_required(exc):
         code = AVAULT_AUTHORIZATION_REQUIRED_CODE
     return TaskCliError(message, code=code, help_command=help_command)
@@ -453,8 +465,9 @@ def _task_error_payload(exc: Exception, *, help_command: str | None = None) -> d
 
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
-    if _is_stale_login_session(exc):
-        exc = _stale_login_session_cli_error(getattr(exc, "help_command", None) or help_command)
+    session_code = _login_session_code(exc)
+    if session_code:
+        exc = _login_session_cli_error(session_code, getattr(exc, "help_command", None) or help_command)
     elif _is_avault_authorization_required(exc):
         exc = _avault_authorization_required_cli_error(getattr(exc, "help_command", None) or help_command)
     from storage.resource_access_service import (
@@ -13841,6 +13854,13 @@ def _macos_login_session_doctor_items(*, language: str = "en") -> list[dict]:
             "status": "pass",
             "code": "no_gui_session",
             "message": i18n_t("doctor.item.noGuiSession", language),
+        }]
+    if state == "outside_gui_session":
+        return [{
+            "status": "warn",
+            "code": "outside_gui_session",
+            "message": i18n_t("doctor.item.outsideGuiSession", language),
+            "action": i18n_t("doctor.action.outsideGuiSession", language),
         }]
     if state == "unknown":
         return [{
