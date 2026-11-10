@@ -167,17 +167,24 @@ def test_opaque_payloads_go_back_only_to_the_source_identity_that_served_them(se
 _THINKER = Origin("openai", "openai_responses", "gpt-test")
 
 
+_FABLE_5_1 = Origin("anthropic", "anthropic", "claude-fable-5-1")
+_FABLE_5_2 = Origin("anthropic", "anthropic", "claude-fable-5-2")
+
+
 @pytest.mark.parametrize(
-    "target",
+    ("thinker", "target"),
     [
-        Origin("anthropic", "anthropic", "claude-test"),
-        Origin("openai", "openai_chat", "gpt-test"),
-        Origin("openai", "openai_responses", "gpt-other"),
-        _THINKER,
+        (_THINKER, Origin("anthropic", "anthropic", "claude-test")),
+        (_THINKER, Origin("openai", "openai_chat", "gpt-test")),
+        (_THINKER, Origin("openai", "openai_responses", "gpt-other")),
+        (_THINKER, _THINKER),
+        (_FABLE_5_1, _FABLE_5_2),
+        (_FABLE_5_2, _FABLE_5_1),
+        (_FABLE_5_2, _FABLE_5_2),
     ],
-    ids=["to-anthropic", "to-chat", "to-another-model", "same-origin"],
+    ids=["to-anthropic", "to-chat", "to-another-model", "same-origin", "fable-upgrade", "fable-downgrade", "same-fable"],
 )
-def test_thinking_goes_back_only_to_the_origin_that_thought_it(target: Origin) -> None:
+def test_thinking_goes_back_only_to_the_origin_that_thought_it(thinker: Origin, target: Origin) -> None:
     """cross-provider.md: thinking is a model's private reasoning, not something the assistant said. Another origin
     gets none of it, signed, unsigned or redacted, and never as assistant text (Anthropic refuses such requests as
     reasoning extraction); everything the assistant said or did still goes. A response whose only content was that
@@ -190,30 +197,30 @@ def test_thinking_goes_back_only_to_the_origin_that_thought_it(target: Origin) -
     result = ToolResultMessage("call_1", "read", (TextBlock("contents"),))
     history = (
         UserMessage((TextBlock("go"),)),
-        AssistantMessage((signed, ThinkingBlock("unsigned plan"), redacted, TextBlock("reading"), call), _THINKER, "tool_use"),
+        AssistantMessage((signed, ThinkingBlock("unsigned plan"), redacted, TextBlock("reading"), call), thinker, "tool_use"),
         result,
-        AssistantMessage((ThinkingBlock("only thought", "sig-only"), ThinkingBlock("more thought")), _THINKER, "stop"),
+        AssistantMessage((ThinkingBlock("only thought", "sig-only"), ThinkingBlock("more thought")), thinker, "stop"),
         UserMessage((TextBlock("and then?"),)),
-        AssistantMessage((), _THINKER, "refusal"),
+        AssistantMessage((), thinker, "refusal"),
         UserMessage((TextBlock("please"),)),
     )
 
     sent = transform_messages(history, target).messages
 
-    if target == _THINKER:
+    if target == thinker:
         assert sent == (
             history[0],
             AssistantMessage(
-                (signed, TextBlock("unsigned plan"), redacted, TextBlock("reading"), call), _THINKER, "tool_use"
+                (signed, TextBlock("unsigned plan"), redacted, TextBlock("reading"), call), thinker, "tool_use"
             ),
             result,
-            AssistantMessage((ThinkingBlock("only thought", "sig-only"), TextBlock("more thought")), _THINKER, "stop"),
+            AssistantMessage((ThinkingBlock("only thought", "sig-only"), TextBlock("more thought")), thinker, "stop"),
             *history[4:],
         )
         return
     assert sent == (
         history[0],
-        AssistantMessage((TextBlock("reading"), call), _THINKER, "tool_use"),
+        AssistantMessage((TextBlock("reading"), call), thinker, "tool_use"),
         result,
         *history[4:],
     )

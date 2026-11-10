@@ -2700,15 +2700,26 @@ def test_openai_payloads_forward_explicit_none_reasoning_effort(
         ("claude-opus-4-7", "xhigh", "xhigh"),
         ("claude-haiku-5-5", "xhigh", "xhigh"),
         ("claude-opus-4-6", "max", "max"),
+        ("claude-fable-5-2", "low", "low"),
+        ("claude-fable-5-2", "medium", "medium"),
+        ("claude-fable-5-2", "high", "high"),
+        ("claude-fable-5-2", "xhigh", "xhigh"),
+        ("claude-fable-5-2", "max", "max"),
+        ("claude-fable-5-2", None, None),
         # Anthropic has no minimal level.
         ("claude-opus-5", "minimal", "low"),
     ],
 )
-def test_anthropic_sends_the_declared_effort_as_given(model_id: str, effort: str, sent: str) -> None:
+def test_anthropic_sends_the_declared_effort_as_given(model_id: str, effort: str | None, sent: str | None) -> None:
     payload = build_messages_payload(_request("anthropic", model_id=model_id, reasoning_effort=effort), ())
 
-    assert payload["thinking"] == {"type": "adaptive"}
-    assert payload["output_config"] == {"effort": sent}
+    if sent is None:
+        # Fable 5.2 defaults to always-on adaptive thinking when the parameter is omitted.
+        assert "thinking" not in payload
+        assert "output_config" not in payload
+    else:
+        assert payload["thinking"] == {"type": "adaptive"}
+        assert payload["output_config"] == {"effort": sent}
 
 
 @pytest.mark.asyncio

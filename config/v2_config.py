@@ -181,6 +181,7 @@ MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
 MODEL_HUB_BACKENDS = AGENT_BACKENDS
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
+    "fable": "fable",
     "opus": "opus",
     "opus[1m]": "opus",
     "sonnet": "sonnet",
