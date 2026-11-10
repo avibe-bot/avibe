@@ -492,6 +492,8 @@ _VIEWER_HTTP_MUTATION_RULES = (
     ("PUT", re.compile(r"^/api/home/preferences$")),
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),
     ("DELETE", re.compile(r"^/api/terminal/[^/]+$")),
+    # Transport bootstrap for any signed-in remote user; it grants no access.
+    ("POST", re.compile(r"^/api/direct/rendezvous$")),
 )
 
 # Pairing identity, member set, and ownership stay Owner-only. Writes under

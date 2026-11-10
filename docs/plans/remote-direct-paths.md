@@ -97,7 +97,7 @@ Use iroh's stable default path selector. It may race direct paths and prefer a l
 
 - Pin and qualify iroh core/FFI versions; current evidence is core 1.4.1 and FFI 1.2.0.
 - Build the Swift package for iOS 17.5 with iroh's private Apple datapath excluded. Run the internal TestFlight archive/signing and artifact checks; no public App Store claim is made.
-- Define and test the authenticated rendezvous payload, generation/revocation semantics, and explicit peer identity verification over the existing Cloudflare path.
+- Define and test the authenticated rendezvous payload, generation/revocation semantics, and explicit peer identity verification over the existing Cloudflare path. Contract: [`remote-direct-rendezvous.md`](remote-direct-rendezvous.md).
 - Define the instance TLS certificate lifecycle: hostname-scoped DNS-01, local key generation/storage, renewal, rotation, hostname retirement, and failure-safe fallback.
 - Resolve Let's Encrypt scale limits before choosing an issuance fleet model. The current evidence is a shared `avibe.bot` registered-domain limit of 50 new certificates per 7 days, with renewal/ARI behavior and quota increase requests to be evaluated. Do not change the Public Suffix List as an incidental quota workaround.
 - Write wire-level tests for strict SNI/Host ingress, forwarding-header stripping, remote-auth parity, CONNECT authority checks, and no local-owner escalation.
