@@ -9836,6 +9836,24 @@ class AvaultAuthorizationRequiredBeforeHandoffError(AvaultAuthorizationRequiredE
     """avault could not load the master key, so nothing was decrypted, delivered, or signed."""
 
 
+class AvaultOutsideGuiSessionError(AvaultAuthorizationRequiredError):
+    """The Keychain refused avault because Avibe runs outside the user's desktop session.
+
+    avault reports this as the same refusal as a missing authorization, so it is
+    one for delivery accounting. Authorizing cannot help from that session,
+    though: the fix is a restart inside the desktop session, so it carries its
+    own code and is never recorded as an authorization the user owes.
+    """
+
+    code = "outside_gui_session"
+
+
+class AvaultOutsideGuiSessionBeforeHandoffError(
+    AvaultOutsideGuiSessionError, AvaultAuthorizationRequiredBeforeHandoffError
+):
+    """The Keychain was unreachable, so nothing was decrypted, delivered, or signed."""
+
+
 # One-shot exit status for keychain_authorization_required (avault 0.1.8+, EX_NOPERM).
 _AVAULT_EXIT_AUTHORIZATION_REQUIRED = 77
 # ``avault key authorize`` waits for a person to reach the Mac and answer the dialog.
@@ -9847,7 +9865,12 @@ def _avault_authorization_required(
     detail: str | None = None,
     *,
     before_handoff: bool = True,
+    session_state: str | None = None,
 ) -> AvaultAuthorizationRequiredError:
+    """The error for avault's ``keychain_authorization_required``, by this process's session."""
+    if (session_state or macos_login_session_state()) == "outside_gui_session":
+        error = AvaultOutsideGuiSessionBeforeHandoffError if before_handoff else AvaultOutsideGuiSessionError
+        return error(backend_t("errors.outsideGuiSession"))
     avault_authorization.record_authorization_required()
     error = AvaultAuthorizationRequiredBeforeHandoffError if before_handoff else AvaultAuthorizationRequiredError
     return error(detail or "avault needs a one-time macOS Keychain authorization on the Mac running Avibe")
@@ -9924,7 +9947,11 @@ def _run_avault(
         raise AvaultPreHandoffError("avault binary not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
-    if proc.returncode != 0 and macos_login_session_state() == "stale_login_session":
+    if proc.returncode == 0:
+        avault_authorization.clear_authorization_required()
+        return proc
+    session_state = macos_login_session_state()
+    if session_state == "stale_login_session":
         error = (
             AvaultStaleLoginSessionBeforeHandoffError
             if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED
@@ -9932,9 +9959,7 @@ def _run_avault(
         )
         raise error(backend_t("errors.staleLoginSession"))
     if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED:
-        raise _avault_authorization_required(_avault_detail(proc))
-    if proc.returncode == 0:
-        avault_authorization.clear_authorization_required()
+        raise _avault_authorization_required(_avault_detail(proc), session_state=session_state)
     return proc
 
 
@@ -9944,7 +9969,8 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
 
     if isinstance(exc, AvaultStaleLoginSessionError):
         raise
-    if macos_login_session_state() == "stale_login_session":
+    session_state = macos_login_session_state()
+    if session_state == "stale_login_session":
         error = (
             AvaultStaleLoginSessionBeforeHandoffError
             if isinstance(exc, AvaultAgentAuthorizationRequiredError) or _avault_agent_error_is_absent(str(exc))
@@ -9952,7 +9978,7 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
         )
         raise error(backend_t("errors.staleLoginSession")) from exc
     if isinstance(exc, AvaultAgentAuthorizationRequiredError):
-        raise _avault_authorization_required(str(exc)) from exc
+        raise _avault_authorization_required(str(exc), session_state=session_state) from exc
 
 
 def _avault_supports_keychain_authorization(path: str | None) -> bool:
@@ -10528,7 +10554,13 @@ def macos_login_session_state(*, service_pid: int | None = None) -> str:
                 from vibe.internal_client import health_identity_sync
 
                 service_state = (health_identity_sync() or {}).get("macos_login_session_state")
-                if service_state in {"healthy", "stale_login_session", "no_gui_session", "unknown"}:
+                if service_state in {
+                    "healthy",
+                    "stale_login_session",
+                    "no_gui_session",
+                    "outside_gui_session",
+                    "unknown",
+                }:
                     return service_state
             except Exception:  # noqa: BLE001 - diagnostics must never block a Vault call
                 pass
@@ -10554,7 +10586,7 @@ def _process_cannot_show_macos_dialogs() -> bool:
     SSH-launched process so the user receives the only recovery that can work.
     """
     state = macos_login_session_state()
-    return state in {"stale_login_session", "no_gui_session"}
+    return state in {"stale_login_session", "no_gui_session", "outside_gui_session"}
 
 
 def get_avault_authorization_status() -> dict:
