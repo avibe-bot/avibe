@@ -270,6 +270,8 @@ invoked from Rust, never from the WebView.
 shell-privileged the same way the tray is: the Workbench page cannot
 trigger them. `shell_boundaries.rs` gains an assertion that the
 notification path does not grant any `remote` capability.
+The later Workbench Settings switch adds scoped preference commands on the
+local Runtime origin; it does not change this shell-owned delivery boundary.
 
 ### Click
 

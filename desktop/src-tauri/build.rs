@@ -25,6 +25,8 @@ fn main() {
         "pet_reset_shortcuts",
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
+        "desktop_notifications_state",
+        "desktop_notifications_set_enabled",
         "desktop_remote_install_allowed",
         "desktop_remote_install_set",
         "desktop_update_remote_decline",

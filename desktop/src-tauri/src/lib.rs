@@ -1731,6 +1731,7 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
+        .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
@@ -1782,6 +1783,12 @@ fn start_bootstrap_when_shell_url_ready(
 /// WebView2 runs initialization scripts in subframes too, hence the frame check.
 const DESKTOP_SHELL_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });";
+
+/// Tells the Workbench that the shell exposes the native desktop notification
+/// preference commands. Older shells keep the menu-bar hint without rendering
+/// a switch that cannot persist.
+const DESKTOP_NOTIFICATIONS_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_NOTIFICATIONS__', { value: true });";
 
 /// Tells the Workbench that this shell can create standalone native app windows.
 /// App windows deliberately do not receive this marker or any shell command
@@ -2323,11 +2330,7 @@ pub fn run() {
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
                 notifications::MENU_ID => {
-                    let notifications = app.state::<notifications::Notifications>();
-                    notifications.toggle();
-                    if let Some(menus) = app.try_state::<NativeMenus>() {
-                        let _ = menus.notifications.set_checked(notifications.enabled());
-                    }
+                    notifications::toggle(app);
                 }
                 pet::MENU_ID => pet::toggle(app),
                 pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
@@ -2463,6 +2466,8 @@ pub fn run() {
             pet::pet_set_shortcut,
             pet::pet_reset_shortcuts,
             pet::pet_set_voice_mode,
+            notifications::desktop_notifications_state,
+            notifications::desktop_notifications_set_enabled,
             updater::desktop_remote_install_allowed,
             updater::desktop_remote_install_set,
             updater::desktop_update_remote_decline,
