@@ -82,7 +82,9 @@ runs:
         cat "$WORK/provenance.json"
 
     # Loopback only, as in the release E2E. A failing run still leaves its
-    # report; the caller decides what a failure means.
+    # report; the caller decides what a failure means. A module that cannot be
+    # collected is an error in that report, and the rest of the selection still
+    # runs, so one such module does not hide every other result.
     - name: Run the Model Hub E2E through the released wheel
       id: e2e
       continue-on-error: true
@@ -95,7 +97,7 @@ runs:
         mkdir -p "$WORK/junit"
         cd "$WORK/harness"
         bash "$GITHUB_WORKSPACE/scripts/ci_loopback_only.sh" "$WORK/venv/bin/python" -m pytest \
-          -m e2e_model_hub tests/e2e \
+          -m e2e_model_hub tests/e2e --continue-on-collection-errors \
           -p no:cacheprovider -ra --basetemp="$WORK/e2e-tmp" \
           --junitxml="$WORK/junit/junit.xml" 2>&1 | tee "$WORK/pytest.log"
 
