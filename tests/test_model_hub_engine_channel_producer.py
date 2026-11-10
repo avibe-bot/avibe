@@ -219,6 +219,8 @@ def _recording_avault(tmp_path) -> Path:
 def test_while_avibe_ships_no_key_every_producer_step_stops_before_it_does_anything(
     tmp_path, monkeypatch, capsys, arguments
 ) -> None:
+    """MH-ENGINE-CHANNEL-009: an uncommissioned channel signs and publishes nothing."""
+
     avault = _recording_avault(tmp_path)
     (tmp_path / "envelope.json").write_text("{}")
     values = {"avault": str(avault), "envelope": str(tmp_path / "envelope.json"), "output": str(tmp_path / "out")}
@@ -344,6 +346,8 @@ def _commissioned(tmp_path, monkeypatch, signer: Signer) -> None:
 
 
 def test_authorization_reads_protection_and_approval_from_github_for_this_run(tmp_path, monkeypatch) -> None:
+    """MH-ENGINE-CHANNEL-009: a privileged step needs the reviewed run, a protected environment, and its approval."""
+
     _commissioned(tmp_path, monkeypatch, Signer())
     base = f"/repos/avibe-bot/avibe/environments/{producer.SIGNER_ENVIRONMENT}"
     answers = {
@@ -472,6 +476,8 @@ def test_a_first_publication_writes_only_where_no_object_exists() -> None:
 
 
 def test_a_writer_that_lost_a_race_does_not_overwrite_the_winner() -> None:
+    """MH-ENGINE-CHANNEL-008: of two racing writers, only the conditional write that still matches wins."""
+
     signer = Signer()
     current = _current()
     bucket = FakeBucket(_stored(signer, current))
@@ -489,6 +495,8 @@ def test_a_writer_that_lost_a_race_does_not_overwrite_the_winner() -> None:
 
 
 def test_a_stale_writer_cannot_undo_a_newer_index_or_drop_its_withdrawal() -> None:
+    """MH-ENGINE-CHANNEL-008: a stale writer cannot put back an older index or drop a withdrawal."""
+
     signer = Signer()
     old = _current()
     withdrawn = channel.parse_payload(

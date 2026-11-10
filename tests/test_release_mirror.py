@@ -497,7 +497,7 @@ def test_pinned_manifest_archives_download_from_the_mirrored_release(repository)
 
 
 def test_the_mirror_never_writes_or_deletes_the_signed_engine_channel_index(monkeypatch, tmp_path):
-    """The engine channel index has its own writer (scripts/model_hub_engine_channel.py).
+    """MH-ENGINE-CHANNEL-008: the engine channel index has its own writer (scripts/model_hub_engine_channel.py).
     A mirror run that copied or deleted it could put back an older signed index or drop a
     withdrawal, so no plan names it and the bucket client refuses it outright."""
     from scripts import model_hub_engine_channel

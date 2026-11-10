@@ -252,6 +252,8 @@ def _change(kind: str, match: dict, **fields):
     ],
 )
 def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tmp_path, mutate, blocked) -> None:
+    """MH-ENGINE-CHANNEL-010: every evidence class must be present for the candidate's exact bytes."""
+
     candidate = qualification.load_candidate(_record(tmp_path))
     evidence = copy.deepcopy(_evidence(candidate))
     assert _problems(candidate, evidence) == []
@@ -401,6 +403,8 @@ def _job(name: str, conclusion: str | None):
     ],
 )
 def test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself(tmp_path, alter) -> None:
+    """MH-ENGINE-CHANNEL-010: a receipt qualifies only when GitHub confirms the run that produced it."""
+
     candidate = qualification.load_candidate(_record(tmp_path))
     github = GitHub()
     github.releases["3.2.8"] = github._release("3.2.8")

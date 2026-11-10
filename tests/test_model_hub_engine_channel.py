@@ -92,6 +92,8 @@ def test_an_avibe_that_ships_no_key_never_reaches_the_verifier(signer) -> None:
 
 
 def test_the_key_comes_from_the_shipped_roots_never_from_the_index(signer) -> None:
+    """MH-ENGINE-CHANNEL-001: only a key shipped in Avibe can authenticate an index."""
+
     other = Signer()
     verifier = LocalVerifier()
 
@@ -366,6 +368,8 @@ def _history(signer: Signer) -> dict[str, bytes]:
 def test_an_index_that_goes_back_or_rewrites_history_is_refused_and_leaves_state_untouched(
     tmp_path, signer, name, reason
 ) -> None:
+    """MH-ENGINE-CHANNEL-002: replay, equivocation and rewritten history are refused without changing state."""
+
     store = channel.ChannelStateStore(tmp_path / "channel")
     history = _history(signer)
     _accept(store, signer, history["base"])
@@ -530,6 +534,8 @@ LISTED = [("v8.0.63", 1, "3.2.6"), ("v8.0.63", 2, "3.2.6"), ("v8.0.63", 3, "3.2.
 def test_ordinary_selection_only_moves_forward_to_the_newest_release_this_avibe_may_run(
     overrides, action, target, reason
 ) -> None:
+    """MH-ENGINE-CHANNEL-003: selection honors the minimum Avibe, the host, and forward-only movement."""
+
     resolution = _resolve(_payload(LISTED), **overrides)
 
     assert (resolution.action, resolution.reason) == (action, reason)
@@ -591,6 +597,8 @@ def test_a_release_that_is_no_longer_listed_is_not_a_withdrawal() -> None:
 def test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_a_safe_fallback(
     revoked, overrides, action, target
 ) -> None:
+    """MH-ENGINE-CHANNEL-004: a withdrawal is the only way back, and an unsafe fallback blocks."""
+
     resolution = _resolve(_payload(LISTED[:3], revoked), **overrides)
 
     assert resolution.action is action
@@ -644,6 +652,8 @@ def _verifier(script: Path | None, **options) -> channel.AvaultVerifier:
 
 @posix_only
 def test_only_exit_zero_with_a_true_boolean_verifies(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-007: verification runs avault's two keyless verbs and nothing else."""
+
     script = _fake_avault(tmp_path)
 
     _verifier(script, environ={**os.environ, "AVAULT_STORE": "file-passphrase", "AVAULT_HOME": "/nowhere"}).verify(
@@ -679,6 +689,8 @@ def test_only_exit_zero_with_a_true_boolean_verifies(tmp_path) -> None:
     ],
 )
 def test_every_other_answer_fails_closed(tmp_path, verify, reason) -> None:
+    """MH-ENGINE-CHANNEL-007: any answer but exit 0 with a true boolean is a failed verification."""
+
     script = _fake_avault(tmp_path, verify=verify)
 
     assert _reason(lambda: _verifier(script).verify(**REQUEST)) == reason

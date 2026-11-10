@@ -72,6 +72,7 @@ def _index(signer: Signer, sequence: int = 1, *, revoked: list | None = None) ->
 
 
 def test_this_avibe_ships_no_channel_key_so_the_channel_is_off(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-005: without a shipped key there is no request, no verifier call, no selection."""
     # Commissioning the channel is a reviewed change to this document; until
     # then nothing downloads, verifies, or selects.
     assert json.loads(engine_channel.SHIPPED_TRUST_ROOTS_PATH.read_text(encoding="utf-8")) == {
@@ -128,6 +129,8 @@ def test_a_refresh_records_the_index_and_resolves_without_touching_the_installed
     ],
 )
 def test_an_engine_manifest_override_opts_out_of_the_channel(tmp_path, override) -> None:
+    """MH-ENGINE-CHANNEL-006: a manifest override names the engine by itself."""
+
     signer = Signer()
     manager = EngineRuntimeManager(runtime_dir=tmp_path / "engine", **override(tmp_path))
     channel, fetch = _channel(tmp_path, signer, _index(signer), manager=manager)
@@ -152,6 +155,8 @@ def test_the_test_harness_manifest_environment_override_also_opts_out(tmp_path, 
 
 
 def test_offline_mode_uses_no_network_and_keeps_recorded_withdrawals_in_force(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-006: offline mode adopts nothing and still applies a recorded withdrawal."""
+
     signer = Signer()
     online, _ = _channel(tmp_path, signer, _index(signer, 2, revoked=[tombstone(NEWER, f"model-hub-engine-{VERSION}-{int(BUILD) + 2}")]))
     assert online.refresh().state == "accepted"
