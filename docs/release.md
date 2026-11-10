@@ -197,6 +197,32 @@ no engine promoted, until their producing jobs exist. No engine may declare a
 minimum below 3.2.6, the first Avibe that reads the channel, so the first
 promotion also waits for the stable 3.2.6 artifacts.
 
+Evidence counts only under the job that produces its class. The receipt job
+reads each class from the artifact named for its job, refuses any document
+that job does not produce and any artifact named for no job, and records the
+job on what it accepts. A class with no producing job is accepted from
+nowhere, whatever a job uploads. The finalizer applies the same rule, so a
+receipt that carries all six classes is refused when it is made and when it
+is checked, until both missing producers exist.
+
+That rule is an allowlist by artifact name and document shape. It does not
+authenticate which job uploaded an artifact.
+
+**Containing the candidate is unfinished.** The smoke, hosted-wire and
+released-Avibe jobs execute the candidate as the user that writes their
+evidence, beside the run's artifact credential. A candidate that attacks its
+runner can make such a job report anything about itself and could replace an
+artifact another job uploaded. What stands against that today is the review
+of the candidate's record and of the pinned source, which the `build` job
+compiles without running it and must reproduce to the reviewed digests.
+
+This is qualification engineering owed in this repository, not an
+owner-held step, and there is no switch that waives it. The change that
+gives the last evidence class a producer does not merge before the
+containment is implemented, reviewed independently and exercised. The first
+usable receipt, the first promotion and commissioning all wait for it. What
+the containment must show is in `docs/plans/model-hub-engine-channel.md`.
+
 The released-Avibe job installs the published stable wheel into its own
 environment and runs **that release tag's own tests** from a directory that
 holds no product package. The service starts from the wheel's own entry
@@ -296,6 +322,9 @@ and the public URL serves those same bytes. The object is cached for 60
 seconds, so the workflow waits for the public URL instead of purging it.
 
 ### Commissioning (owner-held, not done)
+
+Commissioning also waits for the containment of candidate execution
+described under qualification above. That is engineering in this repository.
 
 Nothing below exists yet, and this repository creates none of it:
 

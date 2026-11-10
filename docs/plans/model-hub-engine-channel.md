@@ -515,14 +515,19 @@ needs a candidate. The released-Avibe job has not run for qualification: it
 needs published 3.2.6 artifacts. Its steps are rehearsed in pull-request CI
 against a pinned 3.2.6 release candidate. `backward_state` and `lifecycle`
 have no producer until steps 3 and 4, so no receipt can be produced before
-then.
+then. That holds whatever a job uploads: evidence counts only under the job
+that produces its class, read from the artifact named for that job, and a
+class with no job is accepted from nowhere, when a receipt is made and when
+the finalizer checks one. This is an allowlist by artifact name and document
+shape; it does not authenticate the uploading job. Jobs that execute the
+candidate are not contained. That is unfinished work, listed below.
 
 **Not in this step.** Adoption, activation, scheduling, recovery, the
 effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
 and public documentation (step 4); and all commissioning, including whether
 renewals run unattended.
 
-**Obligations this step hands to step 3.** The client contract returns
+**Obligations this step hands to steps 3 and 4.** The client contract returns
 decisions; these are what a lifecycle that acts on them must hold.
 
 - `keep` means "no channel change is authorized". It is not a statement that
@@ -541,3 +546,36 @@ decisions; these are what a lifecycle that acts on them must hold.
   flush on POSIX, tested native write-through on Windows, with crash recovery
   tested by injected failure. The current write path does not meet that bar,
   and a platform that cannot meet it blocks automatic activation.
+
+**Containment of candidate execution, owed before every evidence class has a
+producer.** Qualification runs the candidate in the smoke, hosted-wire and
+released-Avibe jobs, and steps 3 and 4 add the backward-state and lifecycle
+producers, which run it too. Today the candidate runs as the user that writes
+each job's evidence, beside the run's artifact credential, so a candidate
+that attacks its runner can make those jobs report anything and could replace
+another job's artifact. Step 2 only guarantees that no receipt can be
+completed: the two missing classes have no producer, and nothing accepts them
+from anywhere.
+
+- The change that gives the last evidence class a producer does not merge
+  until the containment is implemented, reviewed independently and exercised.
+  The first usable receipt, the first promotion and commissioning stay
+  blocked until then. No flag or manual waiver may bypass it.
+- The design names three things: the trusted collector and receipt
+  authority, the untrusted engine with every process it starts, and the
+  operating-system boundary between them on each of the six platforms.
+- The new producers use the same protected collection boundary as the
+  existing ones. Step 4 cannot close qualification without it.
+- The candidate gets only the read-only inputs and the writable test state
+  it needs, with loopback fixtures.
+- Tests show that the candidate cannot alter the collector's code, the
+  manifests, the reports or the workflow's command files; cannot obtain the
+  runner's or the run's artifact credentials; cannot tamper with the trusted
+  collector's processes; and cannot persist into the trusted upload phase.
+- Missing privileges or a platform without the containment fail closed.
+- A separate working directory, a cleared child environment, a subprocess of
+  the same user, or a container label is not that proof by itself.
+- The boundary can be rehearsed before a candidate or a stable release
+  exists, with the packaged engine and test-owned negative probes. As with
+  the released-wheel rehearsal, such runs produce no qualification receipt.
+  They extract no real credential and write nowhere outside the run.

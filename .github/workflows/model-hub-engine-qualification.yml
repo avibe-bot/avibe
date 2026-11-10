@@ -9,7 +9,9 @@ name: Qualify Model Hub engine candidate
 #
 # Two evidence classes have no producing job yet: backward-state round trips
 # and lifecycle/rollback, which arrive with the engine lifecycle work. `receipt`
-# requires them, so this workflow cannot produce a receipt until they exist.
+# requires them and accepts each class only from the artifact named for the
+# job that produces it (EVIDENCE_PRODUCERS), so this workflow cannot produce a
+# receipt until they exist, whatever any job uploads.
 # The released-Avibe E2E job needs the published stable wheel of the candidate's
 # minimum Avibe, which is 3.2.6 at the earliest.
 
@@ -434,11 +436,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      # One directory per artifact, named after it. The receipt takes each
+      # evidence class only from the artifact named for the job that produces
+      # it, and stops on anything else. The name is all that ties an artifact
+      # to a job here: which job uploaded it is not authenticated.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           pattern: qualification-evidence-*
           path: ${{ runner.temp }}/evidence
-          merge-multiple: true
+          merge-multiple: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:

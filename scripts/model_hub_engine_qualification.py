@@ -26,6 +26,22 @@ The last two have no producing job yet; they arrive with the engine lifecycle
 work. They are required all the same, so no complete receipt can exist until
 they do.
 
+Evidence counts only under the job that produces its class
+(``EVIDENCE_PRODUCERS``). ``receipt`` reads each class from the artifact
+named for its job, refuses any document that job does not produce, and
+records the job on what it accepts. A class with no producing job is
+therefore accepted from nowhere, whatever a job uploads, both when a receipt
+is made and when the finalizer checks one.
+
+That is an allowlist by artifact name and document shape. It is not proof of
+which job uploaded an artifact: the receipt does not authenticate the
+uploading job. Several jobs execute the candidate, as the user that writes
+their evidence and beside the run's artifact credential. A candidate that
+attacks its runner can make such a job say anything about itself and could
+replace an artifact another job uploaded. Containing candidate execution is
+unfinished qualification work, owed before every evidence class has a
+producer (docs/plans/model-hub-engine-channel.md).
+
 The finalizer does not take a receipt on trust. ``verify_receipt`` re-reads
 the producing run from GitHub: the workflow file, the default-branch commit,
 the attempt, and every job's conclusion. It then requires the receipt to name
@@ -80,15 +96,68 @@ E2E_SELECTION = ["-m", "e2e_model_hub", "tests/e2e"]
 E2E_PROVENANCE_FIELDS = ("tests_commit", "tests_sha256", "dependencies_sha256", "python", "node", "agent_clis")
 RELEASED_E2E_ACTION = ".github/actions/model-hub-released-e2e/action.yml"
 ORIGINS_MODULE = "scripts/model_hub_engine_qualification_origins.py"
+EVIDENCE_ARTIFACT_PREFIX = "qualification-evidence-"
+
+
+@dataclass(frozen=True)
+class EvidenceProducer:
+    """The one job that may supply an evidence class, and the artifact it uploads."""
+
+    #: The job, by the name GitHub reports.
+    job: str
+    artifact: str
+    evidence_class: str
+    #: The field that tells one document of this class from another: the
+    #: platform, the role, or the baseline. ``None`` when the class has one document.
+    subject: str | None = None
+    #: The one value of that field this job writes. ``None`` when the job
+    #: writes one document for each value, as hosted-wire does per baseline.
+    value: str | None = None
+
+    @property
+    def single(self) -> bool:
+        return self.subject is None or self.value is not None
+
+    def produces(self, document: Mapping[str, Any]) -> bool:
+        """Whether ``document`` is of this job's class and about what this job is about."""
+
+        if document.get("class") != self.evidence_class:
+            return False
+        if self.subject is None:
+            return True
+        about = document.get(self.subject)
+        return isinstance(about, str) and bool(about) and (self.value is None or about == self.value)
+
+
+#: Who may say what. ``backward_state`` and ``lifecycle`` are absent: no job
+#: produces them yet, so no document of either class is accepted from anywhere.
+EVIDENCE_PRODUCERS: tuple[EvidenceProducer, ...] = (
+    EvidenceProducer("build", f"{EVIDENCE_ARTIFACT_PREFIX}build", "build"),
+    *(
+        EvidenceProducer(
+            f"platform-smoke ({platform})",
+            f"{EVIDENCE_ARTIFACT_PREFIX}platform-smoke-{platform}",
+            "platform_smoke",
+            "platform",
+            platform,
+        )
+        for platform in sorted(EXPECTED_PLATFORMS)
+    ),
+    *(
+        EvidenceProducer(
+            f"released-avibe-e2e ({role})",
+            f"{EVIDENCE_ARTIFACT_PREFIX}released-avibe-e2e-{role}",
+            "released_avibe_e2e",
+            "role",
+            role,
+        )
+        for role in AVIBE_ROLES
+    ),
+    EvidenceProducer("hosted-wire", f"{EVIDENCE_ARTIFACT_PREFIX}hosted-wire", "hosted_wire", "baseline_tag"),
+)
 #: Every job of the qualification workflow, by the name GitHub reports. All
 #: must have succeeded in the receipt's run attempt; none may be skipped.
-REQUIRED_JOBS = (
-    "build",
-    *(f"platform-smoke ({platform})" for platform in sorted(EXPECTED_PLATFORMS)),
-    *(f"released-avibe-e2e ({role})" for role in AVIBE_ROLES),
-    "hosted-wire",
-    "receipt",
-)
+REQUIRED_JOBS = (*(producer.job for producer in EVIDENCE_PRODUCERS), "receipt")
 #: The code that decides whether a candidate qualifies. A receipt binds the
 #: digest of these files, so evidence from an older harness does not qualify
 #: under a newer one. Everything else a run used is bound by the commit and the
@@ -538,10 +607,36 @@ def evidence_problems(
     """
 
     by_class: dict[str, list[dict[str, Any]]] = {}
-    for item in evidence:
-        if isinstance(item, dict) and isinstance(item.get("class"), str):
-            by_class.setdefault(item["class"], []).append(item)
     problems: list[str] = []
+    counted: set[tuple[str, Any]] = set()
+    for item in evidence:
+        kind = item.get("class") if isinstance(item, dict) else None
+        if not isinstance(kind, str):
+            problems.append("evidence: a document names no class")
+            continue
+        # A document counts only under the job that produces its class, and
+        # once for what it is about. What it is about is the one field its
+        # class is told apart by, never whichever field happens to be there.
+        if not any(producer.evidence_class == kind for producer in EVIDENCE_PRODUCERS):
+            problems.append(f"{kind}: no qualification job produces this evidence")
+            continue
+        producer = next(
+            (
+                producer
+                for producer in EVIDENCE_PRODUCERS
+                if producer.produces(item) and producer.job == item.get("producer")
+            ),
+            None,
+        )
+        if producer is None:
+            problems.append(f"{kind}: a document is not recorded under the job that produces this evidence")
+            continue
+        about = item.get(producer.subject) if producer.subject is not None else None
+        if (kind, about) in counted:
+            problems.append(f"{kind}: more than one document about {about or 'the candidate'}")
+            continue
+        counted.add((kind, about))
+        by_class.setdefault(kind, []).append(item)
 
     def bound(item: Mapping[str, Any]) -> bool:
         return item.get("manifest_sha256") == candidate.manifest_sha256
@@ -1019,8 +1114,39 @@ def _load_released(path: Path) -> ReleasedAvibe:
         raise QualificationError(f"{path.name} is not a released Avibe record") from exc
 
 
-def _collect(directory: Path) -> list[Any]:
-    return [_read_json(path) for path in sorted(directory.rglob("*.json")) if path.is_file() and not path.is_symlink()]
+def collect_evidence(directory: Path) -> list[dict[str, Any]]:
+    """Read each producing job's evidence from the artifact that job uploaded.
+
+    ``directory`` holds one subdirectory per downloaded artifact, named after
+    it. Anything that is not a producer's artifact, and any document that the
+    artifact's job does not produce, stops the receipt: a run that holds
+    evidence for a class with no job, or one job's evidence in another job's
+    artifact, is not a run to believe. Each accepted document is recorded
+    with the job its artifact is named for. The name is all that ties an
+    artifact to a job; who uploaded it is not checked.
+    """
+
+    by_artifact = {producer.artifact: producer for producer in EVIDENCE_PRODUCERS}
+    entries = sorted(directory.iterdir()) if directory.is_dir() else []
+    evidence: list[dict[str, Any]] = []
+    for entry in entries:
+        producer = by_artifact.get(entry.name)
+        if producer is None or entry.is_symlink() or not entry.is_dir():
+            raise QualificationError(f"{entry.name} is not the evidence of any qualification job")
+        files = sorted(entry.iterdir())
+        if any(path.is_symlink() or not path.is_file() or path.suffix != ".json" for path in files):
+            raise QualificationError(f"{producer.job} uploaded something that is not an evidence document")
+        documents = [_read_json(path) for path in files]
+        for document in documents:
+            if not isinstance(document, dict) or "producer" in document or not producer.produces(document):
+                raise QualificationError(f"{producer.job} uploaded evidence that it does not produce")
+        if producer.single and len(documents) != 1:
+            raise QualificationError(f"{producer.job} uploaded {len(documents)} evidence documents, not one")
+        about = [document[producer.subject] for document in documents] if producer.subject is not None else []
+        if len(set(about)) != len(about):
+            raise QualificationError(f"{producer.job} uploaded more than one document about the same {producer.subject}")
+        evidence += [{**document, "producer": producer.job} for document in documents]
+    return evidence
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1189,7 +1315,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "receipt":
                 result = build_receipt(
                     candidate,
-                    _collect(args.evidence_dir),
+                    collect_evidence(args.evidence_dir),
                     baselines=baselines,
                     avibe={role: _load_released(args.released_dir / f"{role}.json") for role in AVIBE_ROLES},
                     run_id=args.run_id,

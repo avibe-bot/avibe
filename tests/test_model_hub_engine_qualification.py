@@ -71,13 +71,42 @@ PROVENANCE = {
 BASELINES = {BASELINE: BASELINE_DIGEST}
 
 
+# The two evidence classes the receipt requires and no job produces yet, as their jobs might be bound.
+FUTURE_PRODUCERS = (
+    qualification.EvidenceProducer(
+        "backward-state", "qualification-evidence-backward-state", "backward_state", "baseline_tag"
+    ),
+    qualification.EvidenceProducer("lifecycle", "qualification-evidence-lifecycle", "lifecycle"),
+)
+
+
+@pytest.fixture
+def every_class_has_a_producer(monkeypatch) -> None:
+    """The workflow as it will be once backward-state and lifecycle evidence have jobs.
+
+    For tests only. Production has no producer for either class, and nothing switches one on.
+    """
+
+    monkeypatch.setattr(
+        qualification, "EVIDENCE_PRODUCERS", (*qualification.EVIDENCE_PRODUCERS, *FUTURE_PRODUCERS)
+    )
+
+
+complete = pytest.mark.usefixtures("every_class_has_a_producer")
+
+
 def _evidence(candidate: qualification.Candidate) -> list[dict]:
+    """Passing evidence of every class, each document recorded with the job it came from."""
+
     bound = {"manifest_sha256": candidate.manifest_sha256}
-    documents = [{"class": "build", **bound, "assets": candidate.identity()["assets"], "reproduced": True}]
+    documents = [
+        {"class": "build", **bound, "assets": candidate.identity()["assets"], "reproduced": True, "producer": "build"}
+    ]
     for archive in candidate.spec.archives:
         documents.append(
             {
                 "class": "platform_smoke", **bound, "platform": archive.platform,
+                "producer": f"platform-smoke ({archive.platform})",
                 "archive_sha256": archive.sha256, "binary_sha256": archive.binary_sha256,
                 "reported_version": candidate.spec.version, "health": "ok",
             }
@@ -85,23 +114,24 @@ def _evidence(candidate: qualification.Candidate) -> list[dict]:
     documents.append(
         {
             "class": "hosted_wire", **bound, "baseline_tag": BASELINE, "baseline_manifest_sha256": BASELINE_DIGEST,
-            "cases": ["web_search"], "differences": {},
+            "cases": ["web_search"], "differences": {}, "producer": "hosted-wire",
         }
     )
     documents.append(
         {"class": "backward_state", **bound, "baseline_tag": BASELINE, "baseline_manifest_sha256": BASELINE_DIGEST,
-         "result": "pass"}
+         "result": "pass", "producer": "backward-state"}
     )
     for role, released in AVIBE.items():
         documents.append(
             {
                 "class": "released_avibe_e2e", **bound, "role": role, "avibe": released.identity(),
+                "producer": f"released-avibe-e2e ({role})",
                 "imports_from_wheel": True, "selection": ["-m", "e2e_model_hub", "tests/e2e"],
                 "provenance": dict(PROVENANCE),
                 "junit": {"tests": 212, "failed": 0, "skipped": 0}, "scenario_evidence": "pass",
             }
         )
-    documents.append({"class": "lifecycle", **bound, "result": "pass"})
+    documents.append({"class": "lifecycle", **bound, "result": "pass", "producer": "lifecycle"})
     return documents
 
 
@@ -173,6 +203,7 @@ def test_no_candidate_is_recorded_before_one_is_reviewed() -> None:
 # ----- evidence --------------------------------------------------------------
 
 
+@complete
 def test_complete_evidence_for_the_exact_bytes_makes_a_receipt(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
 
@@ -219,6 +250,226 @@ def _change(kind: str, match: dict, **fields):
 
 
 @pytest.mark.parametrize(
+    "claimed_by", [None, "platform-smoke (linux-amd64)", "hosted-wire", "lifecycle", "receipt"],
+)
+def test_no_job_can_supply_the_evidence_classes_that_have_no_producer(tmp_path, claimed_by) -> None:
+    """MH-ENGINE-CHANNEL-010: no job name makes a class count that has no producing job."""
+
+    candidate = qualification.load_candidate(_record(tmp_path))
+    evidence = _evidence(candidate)
+    # Passing documents for both missing classes, said to come from any job at all.
+    for item in evidence:
+        if item["class"] in {"backward_state", "lifecycle"}:
+            item.pop("producer")
+            if claimed_by is not None:
+                item["producer"] = claimed_by
+
+    problems = _problems(candidate, evidence)
+
+    assert sorted({problem.split(":")[0] for problem in problems}) == ["backward_state", "lifecycle"]
+    assert sum("no qualification job produces this evidence" in problem for problem in problems) == 2
+    with pytest.raises(QualificationError, match="not qualified"):
+        qualification.build_receipt(
+            candidate, evidence, baselines=BASELINES, avibe=AVIBE,
+            run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
+        )
+
+
+def _claim(kind: str, match: dict, producer: str | None):
+    def apply(evidence: list[dict]) -> None:
+        for item in evidence:
+            if item["class"] == kind and all(item.get(key) == value for key, value in match.items()):
+                item.pop("producer")
+                if producer is not None:
+                    item["producer"] = producer
+    return apply
+
+
+def _repeat(kind: str, match: dict, **fields):
+    def apply(evidence: list[dict]) -> None:
+        (item,) = [
+            item for item in evidence
+            if item["class"] == kind and all(item.get(key) == value for key, value in match.items())
+        ]
+        evidence.append({**item, **fields})
+    return apply
+
+
+@complete
+@pytest.mark.parametrize(
+    ("mutate", "refused"),
+    [
+        # A document that names no job, or a job that produces another class or another leg.
+        (_claim("build", {}, None), "build"),
+        (_claim("build", {}, "platform-smoke (linux-amd64)"), "build"),
+        (_claim("lifecycle", {}, "platform-smoke (linux-amd64)"), "lifecycle"),
+        (_claim("backward_state", {}, "hosted-wire"), "backward_state"),
+        (_claim("platform_smoke", {"platform": "windows-arm64"}, "platform-smoke (linux-amd64)"), "platform_smoke"),
+        (_claim("released_avibe_e2e", {"role": "current_stable"}, "released-avibe-e2e (minimum)"), "released_avibe_e2e"),
+        (_claim("hosted_wire", {}, "released-avibe-e2e (minimum)"), "hosted_wire"),
+        # A second document about the same thing never replaces the first.
+        (_repeat("platform_smoke", {"platform": "linux-amd64"}, health="ok"), "platform_smoke"),
+        (_repeat("released_avibe_e2e", {"role": "minimum"}, junit={"tests": 1, "failed": 0, "skipped": 0}), "released_avibe_e2e"),
+        (_repeat("hosted_wire", {}, differences={}), "hosted_wire"),
+        # What a document is about is its class's own field. Another field does not make it a different document.
+        (_repeat("hosted_wire", {}, platform="unused-extra-field"), "hosted_wire"),
+        (_repeat("platform_smoke", {"platform": "linux-amd64"}, role="minimum", baseline_tag=BASELINE), "platform_smoke"),
+        (_repeat("released_avibe_e2e", {"role": "minimum"}, platform="linux-amd64"), "released_avibe_e2e"),
+        (_repeat("build", {}, platform="linux-amd64"), "build"),
+        (_repeat("lifecycle", {}, role="minimum"), "lifecycle"),
+        # And a document that does not say what it is about is recorded under no job.
+        (_change("hosted_wire", {}, baseline_tag=None), "hosted_wire"),
+        (_change("hosted_wire", {}, baseline_tag=["model-hub-engine-v8.0.63-1"]), "hosted_wire"),
+    ],
+)
+def test_evidence_counts_only_under_the_job_that_produces_its_class_and_only_once(tmp_path, mutate, refused) -> None:
+    """MH-ENGINE-CHANNEL-010: evidence counts only under the job that produces its class."""
+
+    candidate = qualification.load_candidate(_record(tmp_path))
+    evidence = copy.deepcopy(_evidence(candidate))
+    assert _problems(candidate, evidence) == []
+
+    mutate(evidence)
+
+    assert {problem.split(":")[0] for problem in _problems(candidate, evidence)} == {refused}
+
+
+@complete
+def test_a_later_passing_report_cannot_replace_a_failing_one_about_the_same_baseline(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path))
+    evidence = _evidence(candidate)
+    _change("hosted_wire", {}, differences={"web_search": ["upstream header set"]})(evidence)
+    # The same baseline again, passing, and told apart only by a field hosted-wire evidence does not have.
+    _repeat("hosted_wire", {}, differences={}, platform="unused-extra-field")(evidence)
+
+    problems = _problems(candidate, evidence)
+
+    assert {problem.split(":")[0] for problem in problems} == {"hosted_wire"}
+    assert any("more than one document about" in problem for problem in problems)
+    assert any("differs from" in problem and "no reviewed reason" in problem for problem in problems)
+
+
+def test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked(
+    tmp_path, monkeypatch
+) -> None:
+    """MH-ENGINE-CHANNEL-010: no complete receipt exists today, whoever assembles one."""
+
+    candidate = qualification.load_candidate(_record(tmp_path))
+    with monkeypatch.context() as patch:
+        # A receipt as it could only be made once both missing classes have producers.
+        patch.setattr(qualification, "EVIDENCE_PRODUCERS", (*qualification.EVIDENCE_PRODUCERS, *FUTURE_PRODUCERS))
+        assembled = _receipt(candidate)
+        _verify(candidate, assembled, GitHub())
+
+    with pytest.raises(QualificationError, match="no qualification job produces this evidence"):
+        qualification.build_receipt(
+            candidate, assembled["evidence"], baselines=BASELINES, avibe=AVIBE,
+            run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
+        )
+    # The finalizer refuses it too, although GitHub confirms the run and every job in it.
+    with pytest.raises(QualificationError, match="backward_state: no qualification job produces this evidence"):
+        _verify(candidate, assembled, GitHub())
+
+
+def _artifacts(root: Path, candidate) -> Path:
+    """What the receipt job downloads: one directory per producing job's artifact."""
+
+    for item in _evidence(candidate):
+        (producer,) = [
+            producer for producer in qualification.EVIDENCE_PRODUCERS
+            if producer.job == item["producer"]
+        ] or [None]
+        if producer is None:
+            continue
+        directory = root / producer.artifact
+        directory.mkdir(parents=True, exist_ok=True)
+        name = item.get("platform") or item.get("role") or item.get("baseline_tag") or "build"
+        (directory / f"{name}.json").write_text(
+            json.dumps({key: value for key, value in item.items() if key != "producer"})
+        )
+    return root
+
+
+def test_the_receipt_reads_each_jobs_evidence_from_that_jobs_own_artifact(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path / "records"))
+    evidence = _artifacts(tmp_path / "evidence", candidate)
+
+    collected = qualification.collect_evidence(evidence)
+
+    today = [item for item in _evidence(candidate) if item["class"] not in {"backward_state", "lifecycle"}]
+    key = lambda item: json.dumps(item, sort_keys=True)  # noqa: E731
+    assert sorted(collected, key=key) == sorted(today, key=key)
+    # The hosted-wire job writes one document per baseline, or none when there is no baseline.
+    wire = evidence / "qualification-evidence-hosted-wire"
+    (wire / "other.json").write_text(
+        json.dumps({"class": "hosted_wire", "baseline_tag": "model-hub-engine-v8.0.60-4", "cases": ["web_search"]})
+    )
+    assert len(qualification.collect_evidence(evidence)) == len(today) + 1
+    for path in wire.iterdir():
+        path.unlink()
+    wire.rmdir()
+    assert len(qualification.collect_evidence(evidence)) == len(today) - 1
+    assert qualification.collect_evidence(tmp_path / "absent") == []
+
+
+def _smoke(evidence: Path) -> Path:
+    return evidence / "qualification-evidence-platform-smoke-linux-amd64"
+
+
+@pytest.mark.parametrize(
+    ("upload", "message"),
+    [
+        # A candidate under test writes passing documents for the classes no job produces, beside its own.
+        (lambda e: (_smoke(e) / "lifecycle.json").write_text(json.dumps({"class": "lifecycle", "result": "pass"})),
+         r"platform-smoke \(linux-amd64\) uploaded evidence that it does not produce"),
+        (lambda e: (_smoke(e) / "state.json").write_text(json.dumps({"class": "backward_state", "result": "pass"})),
+         "uploaded evidence that it does not produce"),
+        # Or for another job, another leg, or under a name it gives itself.
+        (lambda e: (_smoke(e) / "e2e.json").write_text(json.dumps({"class": "released_avibe_e2e", "role": "minimum"})),
+         "uploaded evidence that it does not produce"),
+        (lambda e: (_smoke(e) / "linux-amd64.json").write_text(
+            json.dumps({"class": "platform_smoke", "platform": "darwin-arm64", "health": "ok"})),
+         "uploaded evidence that it does not produce"),
+        (lambda e: (_smoke(e) / "linux-amd64.json").write_text(
+            json.dumps({"class": "platform_smoke", "platform": "linux-amd64", "producer": "build"})),
+         "uploaded evidence that it does not produce"),
+        (lambda e: (_smoke(e) / "again.json").write_text((_smoke(e) / "linux-amd64.json").read_text()),
+         "uploaded 2 evidence documents, not one"),
+        # A second hosted-wire report about a baseline it already reported on, whatever else it carries.
+        (lambda e: (e / "qualification-evidence-hosted-wire" / "again.json").write_text(
+            json.dumps({"class": "hosted_wire", "baseline_tag": BASELINE, "platform": "unused-extra-field"})),
+         "hosted-wire uploaded more than one document about the same baseline_tag"),
+        (lambda e: (e / "qualification-evidence-hosted-wire" / "nameless.json").write_text(
+            json.dumps({"class": "hosted_wire", "cases": ["web_search"]})),
+         "hosted-wire uploaded evidence that it does not produce"),
+        (lambda e: (_smoke(e) / "notes.txt").write_text("x"), "not an evidence document"),
+        (lambda e: (_smoke(e) / "nested").mkdir(), "not an evidence document"),
+        (lambda e: (_smoke(e) / "linux-amd64.json").write_text("[]"), "uploaded evidence that it does not produce"),
+        # An artifact named for no job.
+        (lambda e: _write(e / "qualification-evidence-lifecycle" / "lifecycle.json", {"class": "lifecycle"}),
+         "qualification-evidence-lifecycle is not the evidence of any qualification job"),
+        (lambda e: (e / "lifecycle.json").write_text(json.dumps({"class": "lifecycle"})),
+         "lifecycle.json is not the evidence of any qualification job"),
+    ],
+)
+def test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt(tmp_path, upload, message) -> None:
+    """MH-ENGINE-CHANNEL-010: an artifact may hold only the evidence of the job it is named for."""
+
+    candidate = qualification.load_candidate(_record(tmp_path / "records"))
+    evidence = _artifacts(tmp_path / "evidence", candidate)
+    upload(evidence)
+
+    with pytest.raises(QualificationError, match=message):
+        qualification.collect_evidence(evidence)
+
+
+def _write(path: Path, document: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document))
+
+
+@complete
+@pytest.mark.parametrize(
     ("mutate", "blocked"),
     [
         (_drop("build"), "build"),
@@ -263,6 +514,7 @@ def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tm
     assert {problem.split(":")[0] for problem in _problems(candidate, evidence)} == {blocked}
 
 
+@complete
 def test_every_baseline_and_both_avibe_releases_must_be_covered(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
     evidence = _evidence(candidate)
@@ -279,6 +531,7 @@ def test_every_baseline_and_both_avibe_releases_must_be_covered(tmp_path) -> Non
     assert _problems(candidate, evidence, avibe={"minimum": AVIBE["minimum"]}) != []
 
 
+@complete
 def test_a_hosted_wire_difference_qualifies_only_with_a_reviewed_reason_in_the_record(tmp_path) -> None:
     reviewed = qualification.load_candidate(
         _record(tmp_path, hosted_wire_changes={BASELINE: "upstream now forwards the citation header"})
@@ -350,6 +603,7 @@ def _verify(candidate, receipt, github, **overrides) -> None:
     )
 
 
+@complete
 def test_a_receipt_is_accepted_when_github_confirms_its_run_and_nothing_has_moved_since(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
 
@@ -364,6 +618,7 @@ def _job(name: str, conclusion: str | None):
     return apply
 
 
+@complete
 @pytest.mark.parametrize(
     "alter",
     [
@@ -414,6 +669,7 @@ def test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_its
         _verify(candidate, _receipt(candidate), github)
 
 
+@complete
 @pytest.mark.parametrize(
     "forge",
     [
@@ -437,6 +693,7 @@ def test_a_receipt_that_was_edited_or_fabricated_is_refused(tmp_path, forge) -> 
         _verify(candidate, receipt, GitHub())
 
 
+@complete
 def test_a_receipt_stops_qualifying_when_the_record_harness_or_baselines_change(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path / "reviewed"))
     receipt = _receipt(candidate)
@@ -678,7 +935,7 @@ def test_a_rehearsal_is_described_in_full_and_can_never_be_read_as_evidence(tmp_
     # No receipt can be built from it, alone or dressed up: it binds no candidate and names no role.
     assert "manifest_sha256" not in record and "role" not in record
     assert {problem.split(":")[0] for problem in _problems(candidate, [record])} == {
-        "build", "platform_smoke", "hosted_wire", "backward_state", "released_avibe_e2e", "lifecycle",
+        "rehearsal", "build", "platform_smoke", "hosted_wire", "backward_state", "released_avibe_e2e", "lifecycle",
     }
     disguised = {**record, "class": "released_avibe_e2e", "role": "minimum"}
     assert any(problem.startswith("released_avibe_e2e") for problem in _problems(candidate, [disguised]))
@@ -1115,20 +1372,51 @@ def _workflow() -> dict:
     return yaml.safe_load((ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8"))
 
 
+def _legs(job: dict) -> list[dict]:
+    matrix = (job.get("strategy") or {}).get("matrix")
+    return [{}] if not matrix else matrix.get("include") or [{"role": role} for role in matrix["role"]]
+
+
+def _expand(text: str, leg: dict) -> str:
+    for key, value in leg.items():
+        text = text.replace("${{ matrix.%s }}" % key, value)
+    return text
+
+
 def test_the_required_jobs_are_exactly_the_jobs_the_qualification_workflow_runs() -> None:
-    names = []
-    for job in _workflow()["jobs"].values():
-        matrix = (job.get("strategy") or {}).get("matrix")
-        legs = [{}] if not matrix else matrix.get("include") or [{"role": role} for role in matrix["role"]]
-        for leg in legs:
-            name = job["name"]
-            for key, value in leg.items():
-                name = name.replace("${{ matrix.%s }}" % key, value)
-            names.append(name)
+    names = [_expand(job["name"], leg) for job in _workflow()["jobs"].values() for leg in _legs(job)]
 
     assert sorted(names) == sorted(qualification.REQUIRED_JOBS)
     smoke = _workflow()["jobs"]["platform-smoke"]["strategy"]["matrix"]["include"]
     assert {leg["platform"] for leg in smoke} == EXPECTED_PLATFORMS
+
+
+def test_each_job_uploads_its_evidence_under_the_artifact_name_the_receipt_reads_its_class_from() -> None:
+    """MH-ENGINE-CHANNEL-010: the workflow and the receipt agree on which artifact holds which evidence."""
+
+    jobs = _workflow()["jobs"]
+    uploads = [
+        (_expand(job["name"], leg), _expand(step["with"]["name"], leg), step["with"])
+        for job in jobs.values() for leg in _legs(job) for step in job["steps"]
+        if "upload-artifact" in step.get("uses", "")
+    ]
+
+    assert {
+        artifact: job for job, artifact, _options in uploads
+        if artifact.startswith(qualification.EVIDENCE_ARTIFACT_PREFIX)
+    } == {producer.artifact: producer.job for producer in qualification.EVIDENCE_PRODUCERS}
+    # No step of this workflow asks to replace an artifact that already exists.
+    assert all("overwrite" not in options for _job, _artifact, options in uploads)
+    # The receipt keeps the artifacts apart, so each document is read from the artifact named for its job.
+    (evidence,) = [
+        step["with"] for step in jobs["receipt"]["steps"]
+        if "download-artifact" in step.get("uses", "") and "evidence" in step["with"]["path"]
+    ]
+    assert evidence == {
+        "pattern": f"{qualification.EVIDENCE_ARTIFACT_PREFIX}*",
+        "path": "${{ runner.temp }}/evidence",
+        "merge-multiple": False,
+    }
 
 
 def test_qualification_is_secret_free_default_branch_only_and_never_publishes() -> None:

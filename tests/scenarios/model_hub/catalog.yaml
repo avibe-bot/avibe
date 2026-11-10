@@ -2909,7 +2909,7 @@ scenarios:
       - tests/test_model_hub_engine_channel_producer.py::test_a_missing_damaged_or_mismatched_ledger_stops_every_routine_operation
       - tests/test_model_hub_engine_channel_producer.py::test_authorization_reads_protection_and_approval_from_github_for_this_run
   - id: MH-ENGINE-CHANNEL-010
-    name: An engine candidate qualifies only with every evidence class for its exact bytes, from a qualification run that GitHub confirms, in which every process imported Avibe from the released wheel
+    name: An engine candidate qualifies only with every evidence class for its exact bytes, each accepted only under the job that produces it, from a qualification run that GitHub confirms, in which every process imported Avibe from the released wheel
     status: partial
     kind: gate
     layer: unit
@@ -2919,6 +2919,9 @@ scenarios:
       - tests/test_model_hub_engine_qualification.py::test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself
       - tests/test_model_hub_engine_qualification.py::test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence_nor_a_clean_rehearsal
       - tests/test_model_hub_engine_qualification.py::test_a_log_that_never_catches_up_is_refused_although_what_it_holds_reads_as_complete
+      - tests/test_model_hub_engine_qualification.py::test_no_job_can_supply_the_evidence_classes_that_have_no_producer
+      - tests/test_model_hub_engine_qualification.py::test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt
+      - tests/test_model_hub_engine_qualification.py::test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked
   - id: MH-ENGINE-CHANNEL-011
     name: Every engine release the channel lists, withdrawn ones and rollback targets included, stays under the release guard, which restores lost assets from a backup that still verifies and never overwrites published bytes
     status: covered
