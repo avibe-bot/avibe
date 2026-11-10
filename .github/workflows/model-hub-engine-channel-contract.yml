@@ -1,0 +1,182 @@
+name: Model Hub engine channel contract
+
+# Two checks of the engine channel that need a real binary, which the unit
+# shards may not download. No secret is used.
+#
+# `published-verifier` runs Avibe's signature check against the published avault
+# verifier on each desktop platform: avault's shared `verify` vectors and an
+# index signed in the test.
+#
+# `smoke-harness` runs the qualification workflow's per-platform smoke producer
+# on all six engine platforms, against the engine release Avibe already
+# packages. It shows the producer works; it qualifies nothing.
+
+on:
+  pull_request:
+    paths:
+      - "core/model_hub_engine_channel.py"
+      - "core/model_hub_engine_manifest.py"
+      - "scripts/ci_avault_verifier.py"
+      - "scripts/release_asset_download.py"
+      - "tests/engine_channel_support.py"
+      - "tests/fixtures/avault/**"
+      - "tests/test_model_hub_engine_channel.py"
+      - "tests/test_model_hub_engine_channel_avault.py"
+      - "scripts/model_hub_engine_qualification.py"
+      - "scripts/model_hub_engine_release_guard.py"
+      - ".github/workflows/model-hub-engine-channel-contract.yml"
+  push:
+    branches: [master]
+    paths:
+      - "core/model_hub_engine_channel.py"
+      - "core/model_hub_engine_manifest.py"
+      - "scripts/ci_avault_verifier.py"
+      - "scripts/release_asset_download.py"
+      - "tests/engine_channel_support.py"
+      - "tests/fixtures/avault/**"
+      - "tests/test_model_hub_engine_channel.py"
+      - "tests/test_model_hub_engine_channel_avault.py"
+      - "scripts/model_hub_engine_qualification.py"
+      - "scripts/model_hub_engine_release_guard.py"
+      - ".github/workflows/model-hub-engine-channel-contract.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-hub-engine-channel-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  published-verifier:
+    name: published-verifier (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Prepare hermetic UI asset placeholder
+        shell: bash
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test dependencies
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv pip install --system -e . --group dev
+
+      # avault 0.1.10, pinned by the digest its release manifest published.
+      - name: Fetch the published avault verifier
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          verifier="$(python scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
+          echo "AVIBE_TEST_AVAULT_VERIFIER=$verifier" >> "$GITHUB_ENV"
+
+      - name: Run the channel contract against the published verifier
+        shell: bash
+        env:
+          AVIBE_REQUIRE_AVAULT_VERIFIER: "1"
+        run: |
+          python -m pytest tests/test_model_hub_engine_channel_avault.py tests/test_model_hub_engine_channel.py \
+            -p no:cacheprovider -q -ra
+
+  smoke-harness:
+    name: smoke-harness (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {platform: darwin-arm64, runner: macos-15}
+          - {platform: darwin-x64, runner: macos-15-intel}
+          - {platform: linux-amd64, runner: ubuntu-latest}
+          - {platform: linux-arm64, runner: ubuntu-24.04-arm}
+          - {platform: windows-amd64, runner: windows-latest}
+          - {platform: windows-arm64, runner: windows-11-arm}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Prepare hermetic UI asset placeholder
+        shell: bash
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv pip install --system -e .
+
+      - name: Fetch the packaged engine release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/model_hub_engine_release_guard.py fetch --output-dir "$RUNNER_TEMP/engine-assets"
+
+      # A stand-in record around the packaged engine's manifest, only so the
+      # producer has something to run on. It is written to the runner's
+      # temporary directory and is not a candidate.
+      - name: Write a stand-in record for the packaged engine
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import hashlib, json, os, pathlib
+
+          manifest = pathlib.Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_bytes()
+          tag = json.loads(manifest)["asset_release_tag"]
+          record = pathlib.Path(os.environ["RUNNER_TEMP"]) / "stand-in" / tag
+          record.mkdir(parents=True)
+          (record / "model-hub-engine-manifest.json").write_bytes(manifest)
+          (record / "candidate.json").write_text(json.dumps({
+              "schema_version": 1,
+              "asset_release_tag": tag,
+              "min_avibe_version": "3.2.6",
+              "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+          }), encoding="utf-8")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"STAND_IN_RECORD={record.as_posix()}\n")
+          EOF
+
+      - name: Run the smoke producer on this platform
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          export AVIBE_HOME="$RUNNER_TEMP/avibe-home"
+          python scripts/model_hub_engine_qualification.py evidence-smoke \
+            --candidate-dir "$STAND_IN_RECORD" \
+            --asset-dir "$RUNNER_TEMP/engine-assets" \
+            --work-dir "$RUNNER_TEMP/smoke" \
+            --output "$RUNNER_TEMP/smoke-evidence.json"
+          python - "$RUNNER_TEMP/smoke-evidence.json" <<'EOF'
+          import json, os, sys
+
+          evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(json.dumps(evidence, indent=2))
+          if evidence["platform"] != os.environ["PLATFORM"] or evidence["health"] != "ok":
+              raise SystemExit(f"expected a healthy {os.environ['PLATFORM']} engine")
+          EOF

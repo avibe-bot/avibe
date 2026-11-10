@@ -1,0 +1,496 @@
+name: Qualify Model Hub engine candidate
+
+# Qualifies one reviewed engine candidate record for the signed engine channel
+# (docs/plans/model-hub-engine-channel.md, docs/release.md). It holds no secret
+# and publishes nothing: each job writes one evidence document about the exact
+# candidate bytes, and `receipt` joins them. The finalizer later re-reads this
+# run from GitHub before it promotes anything, so the job names below are part
+# of the contract (REQUIRED_JOBS in scripts/model_hub_engine_qualification.py).
+#
+# Two evidence classes have no producing job yet: backward-state round trips
+# and lifecycle/rollback, which arrive with the engine lifecycle work. `receipt`
+# requires them, so this workflow cannot produce a receipt until they exist.
+# The released-Avibe E2E job needs the published stable wheel of the candidate's
+# minimum Avibe, which is 3.2.6 at the earliest.
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_release_tag:
+        description: "Candidate record under patches/model-hub-engine-candidates/"
+        required: true
+        type: string
+      first_publication:
+        description: "The channel has never published an index"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-hub-engine-qualification-${{ inputs.asset_release_tag }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  ASSET_RELEASE_TAG: ${{ inputs.asset_release_tag }}
+
+jobs:
+  build:
+    name: build
+    if: github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Validate the reviewed candidate record
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! [[ "$ASSET_RELEASE_TAG" =~ ^model-hub-engine-v[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]]; then
+            echo "::error::not an engine release tag"
+            exit 1
+          fi
+          candidate_dir="patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
+          python3 scripts/model_hub_engine_qualification.py candidate --candidate-dir "$candidate_dir"
+          raw_go_version="$(
+            python3 scripts/model_hub_engine_release_guard.py \
+              --manifest "$candidate_dir/model-hub-engine-manifest.json" go-version
+          )"
+          printf 'go_version=%s\n' "${raw_go_version#go}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ steps.candidate.outputs.go_version }}
+
+      # Strict mode: the rebuilt bytes must equal the digests the record pins.
+      - name: Rebuild the pinned source and require the reviewed digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
+          python3 scripts/model_hub_engine_release_guard.py \
+            --manifest "$candidate_dir/model-hub-engine-manifest.json" \
+            fetch-source --output-dir "$RUNNER_TEMP/candidate-assets"
+          python3 scripts/model_hub_engine_qualification.py evidence-build \
+            --candidate-dir "$candidate_dir" \
+            --asset-dir "$RUNNER_TEMP/candidate-assets" \
+            --output "$RUNNER_TEMP/evidence/build.json"
+
+      - name: Upload the candidate assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: model-hub-engine-candidate-assets
+          path: ${{ runner.temp }}/candidate-assets
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload build evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qualification-evidence-build
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  # Each archive starts on its own platform, from an isolated runtime and state
+  # directory, and must pass the health check Avibe itself applies.
+  platform-smoke:
+    name: platform-smoke (${{ matrix.platform }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {platform: darwin-arm64, runner: macos-15}
+          - {platform: darwin-x64, runner: macos-15-intel}
+          - {platform: linux-amd64, runner: ubuntu-latest}
+          - {platform: linux-arm64, runner: ubuntu-24.04-arm}
+          - {platform: windows-amd64, runner: windows-latest}
+          - {platform: windows-arm64, runner: windows-11-arm}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Prepare hermetic UI asset placeholder
+        shell: bash
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv pip install --system -e .
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: model-hub-engine-candidate-assets
+          path: ${{ runner.temp }}/candidate-assets
+
+      - name: Start the candidate and require Avibe's health check
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          export AVIBE_HOME="$RUNNER_TEMP/avibe-home"
+          python scripts/model_hub_engine_qualification.py evidence-smoke \
+            --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
+            --asset-dir "$RUNNER_TEMP/candidate-assets" \
+            --work-dir "$RUNNER_TEMP/smoke" \
+            --output "$RUNNER_TEMP/evidence/platform-smoke-$PLATFORM.json"
+          python - "$RUNNER_TEMP/evidence/platform-smoke-$PLATFORM.json" <<'EOF'
+          import json, os, sys
+          evidence = json.load(open(sys.argv[1], encoding="utf-8"))
+          if evidence["platform"] != os.environ["PLATFORM"]:
+              raise SystemExit(f"this runner is {evidence['platform']}, not {os.environ['PLATFORM']}")
+          EOF
+
+      - name: Upload smoke evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qualification-evidence-platform-smoke-${{ matrix.platform }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  # The whole hermetic Model Hub E2E, driven through the released wheel of the
+  # minimum Avibe and of the current stable Avibe. The tests are that release's
+  # own, laid out where no product package can be imported from, so a test that
+  # imports Avibe gets the wheel, and the service starts from the wheel's own
+  # entry script. The run records where it imported from. Not yet exercised: it
+  # needs a published stable Avibe whose E2E suite runs from this layout.
+  released-avibe-e2e:
+    name: released-avibe-e2e (${{ matrix.role }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [minimum, current_stable]
+    env:
+      ROLE: ${{ matrix.role }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+
+      - name: Resolve and download the released wheel
+        id: released
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/released"
+          mkdir -p "$work/record"
+          python3 scripts/model_hub_engine_qualification.py released-avibe \
+            --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
+            --role "$ROLE" --output "$work/record/$ROLE.json"
+          python3 - "$work" <<'EOF'
+          import hashlib, json, os, pathlib, sys
+          from scripts.release_asset_download import download_to_path
+
+          work = pathlib.Path(sys.argv[1])
+          released = json.loads((work / "record" / f"{os.environ['ROLE']}.json").read_text(encoding="utf-8"))
+          wheel = work / released["wheel_name"]
+          download_to_path(released["wheel_url"], wheel, max_bytes=released["wheel_size"])
+          if hashlib.sha256(wheel.read_bytes()).hexdigest() != released["wheel_sha256"]:
+              raise SystemExit(f"{wheel.name} is not the wheel GitHub published")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"tag={released['tag']}\nwheel={work / released['wheel_name']}\n")
+          EOF
+          python3 scripts/model_hub_engine_qualification.py bundled-manifest \
+            --wheel "$work/$(jq -er .wheel_name "$work/record/$ROLE.json")" \
+            --output "$work/record/bundled-manifest-$ROLE.json"
+
+      - name: Check out that release's own tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ steps.released.outputs.tag }}
+          path: released-src
+          persist-credentials: false
+
+      - name: Install the released wheel into its own environment
+        shell: bash
+        env:
+          WHEEL: ${{ steps.released.outputs.wheel }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/released"
+          python3 scripts/model_hub_engine_qualification.py prepare-harness \
+            --source released-src --wheel "$WHEEL" --output "$work/harness"
+          uv venv "$work/venv" --python 3.12
+          uv pip install --python "$work/venv/bin/python" "$WHEEL"
+          uv pip install --python "$work/venv/bin/python" --group released-src/pyproject.toml:dev
+          mkdir -p "$work/plugin"
+          cp scripts/model_hub_engine_qualification_plugin.py "$work/plugin/"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+
+      - name: Install agent CLIs
+        run: |
+          npm install -g @openai/codex opencode-ai
+          codex --version
+          opencode --version
+
+      # What this run was made of: the tag commit its tests came from, the
+      # resolved dependency set, and the toolchain.
+      - name: Record the run's provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/released"
+          uv pip freeze --python "$work/venv/bin/python" > "$work/dependencies.txt"
+          jq -n \
+            --arg tests_commit "$(git -C released-src rev-parse HEAD)" \
+            --arg dependencies_sha256 "$(sha256sum "$work/dependencies.txt" | cut -d' ' -f1)" \
+            --arg python "$("$work/venv/bin/python" --version)" \
+            --arg node "$(node --version)" \
+            --arg codex "$(codex --version)" \
+            --arg opencode "$(opencode --version)" \
+            '$ARGS.named' > "$work/provenance.json"
+          cat "$work/provenance.json"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: model-hub-engine-candidate-assets
+          path: ${{ runner.temp }}/candidate-assets
+
+      - name: Point the released Avibe at the exact candidate bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/model_hub_engine_qualification.py evidence-build \
+            --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
+            --asset-dir "$RUNNER_TEMP/candidate-assets" \
+            --output "$RUNNER_TEMP/released/verified-assets.json"
+          python3 - <<'EOF'
+          import json, os, pathlib
+
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          candidate = pathlib.Path("patches/model-hub-engine-candidates") / os.environ["ASSET_RELEASE_TAG"]
+          manifest = json.loads((candidate / "model-hub-engine-manifest.json").read_text(encoding="utf-8"))
+          (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
+          asset["url"] = (root / "candidate-assets" / asset["url"].rsplit("/", 1)[1]).as_uri()
+          (root / "released" / "offline-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+          EOF
+          echo "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=$RUNNER_TEMP/released/offline-manifest.json" >> "$GITHUB_ENV"
+
+      # `shell: bash` runs with pipefail, so a failing pytest is not hidden by tee.
+      - name: Run the Model Hub E2E through the released wheel
+        id: e2e
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/released"
+          mkdir -p "$work/junit"
+          cd "$work/harness"
+          PYTHONPATH="$work/plugin" AVIBE_QUALIFICATION_ORIGINS="$work/origins.json" \
+            bash "$GITHUB_WORKSPACE/scripts/ci_loopback_only.sh" "$work/venv/bin/python" -m pytest \
+            -p model_hub_engine_qualification_plugin -m e2e_model_hub tests/e2e \
+            -p no:cacheprovider -ra --basetemp="$RUNNER_TEMP/e2e" \
+            --junitxml="$work/junit/junit.xml" 2>&1 | tee "$work/pytest.log"
+
+      # That release's own scenario-evidence gate, over the one selection above.
+      - name: Require that release's scenario evidence
+        id: scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/released"
+          cd "$work/harness"
+          mkdir -p .github/workflows
+          printf '%s\n' 'jobs:' '  e2e:' '    steps:' \
+            '      - run: python -m pytest -m e2e_model_hub tests/e2e' > .github/workflows/model-hub-e2e.yml
+          PYTHONPATH="$work/harness" "$work/venv/bin/python" scripts/ci_scenario_evidence.py \
+            --release "$work/junit" --workflow .github/workflows/model-hub-e2e.yml \
+            --pytest-root . --pytest-command-index 0
+
+      - name: Record the run as evidence
+        shell: bash
+        env:
+          WHEEL: ${{ steps.released.outputs.wheel }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/released"
+          python3 scripts/model_hub_engine_qualification.py evidence-released-e2e \
+            --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
+            --role "$ROLE" --released "$work/record/$ROLE.json" --wheel "$WHEEL" \
+            --environment "$work/venv" --origins "$work/origins.json" \
+            --junit "$work/junit/junit.xml" --scenario-evidence pass \
+            --provenance "$work/provenance.json" \
+            --output "$RUNNER_TEMP/evidence/released-avibe-e2e-$ROLE.json"
+
+      - name: Upload the released Avibe record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qualification-released-${{ matrix.role }}
+          path: ${{ runner.temp }}/released/record
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload E2E evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qualification-evidence-released-avibe-e2e-${{ matrix.role }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  # The hosted passthrough, compared with every engine a machine may be running
+  # when the candidate arrives: each release the signed index still lists, and
+  # the engine each qualifying Avibe release bundles.
+  hosted-wire:
+    name: hosted-wire
+    needs: [build, released-avibe-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Prepare hermetic UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv pip install --system -e . --group dev
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: model-hub-engine-candidate-assets
+          path: ${{ runner.temp }}/candidate-assets
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          pattern: qualification-released-*
+          path: ${{ runner.temp }}/released
+          merge-multiple: true
+
+      - name: List the baseline engines
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FIRST_PUBLICATION: ${{ inputs.first_publication }}
+        run: |
+          set -euo pipefail
+          avault="$(python scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
+          args=(--avault "$avault" --output-dir "$RUNNER_TEMP/baselines")
+          for manifest in "$RUNNER_TEMP"/released/bundled-manifest-*.json; do
+            args+=(--bundled "$manifest")
+          done
+          if [ "$FIRST_PUBLICATION" = "true" ]; then
+            args+=(--first-publication)
+          fi
+          python scripts/model_hub_engine_channel.py baselines "${args[@]}"
+
+      - name: Compare the hosted passthrough with every baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_dir="patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
+          for baseline in "$RUNNER_TEMP"/baselines/manifests/*.json; do
+            tag="$(basename "$baseline" .json)"
+            if [ "$tag" = "$ASSET_RELEASE_TAG" ]; then
+              continue
+            fi
+            python scripts/model_hub_hosted_wire_gate.py \
+              --base-manifest "$baseline" \
+              --head-manifest "$candidate_dir/model-hub-engine-manifest.json" \
+              --head-assets "$RUNNER_TEMP/candidate-assets" \
+              --evidence-output "$RUNNER_TEMP/evidence/hosted-wire-$tag.json" \
+              --work-dir "$RUNNER_TEMP/hosted-wire/$tag" \
+              --loopback-only
+          done
+          mkdir -p "$RUNNER_TEMP/evidence"
+
+      - name: Upload the baseline list
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qualification-baselines
+          path: ${{ runner.temp }}/baselines/baselines.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload hosted-wire evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: qualification-evidence-hosted-wire
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Joins the evidence. It fails unless every class is present for these exact
+  # bytes, including the classes that have no producing job yet.
+  receipt:
+    name: receipt
+    needs: [build, platform-smoke, released-avibe-e2e, hosted-wire]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          pattern: qualification-evidence-*
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          pattern: qualification-released-*
+          path: ${{ runner.temp }}/released
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: qualification-baselines
+          path: ${{ runner.temp }}/baselines
+
+      - name: Join the evidence into a receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 scripts/model_hub_engine_qualification.py receipt \
+            --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
+            --evidence-dir "$RUNNER_TEMP/evidence" \
+            --released-dir "$RUNNER_TEMP/released" \
+            --baselines "$RUNNER_TEMP/baselines/baselines.json" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --head-sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/receipt/receipt.json"
+
+      - name: Upload the receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: model-hub-engine-qualification-receipt
+          path: ${{ runner.temp }}/receipt/receipt.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,8 +1,12 @@
 # Independent Model Hub engine channel
 
-**Status:** proposal for owner approval; target Avibe **3.2.6**. No implementation,
-publication, or rollout is authorized by this note. No related PR merges before
-stable 3.2.5 is published; each implementation PR also needs owner merge approval.
+**Status:** design approved by the owner, with minimum-only compatibility;
+target Avibe **3.2.6**. Delivery is four PRs (section 6), each needing owner
+merge approval. Step 1 shipped as avault 0.1.10. Step 2, the channel contract
+and its producer, is described under "Step 2 as built" at the end. Steps 3 and
+4 are not built: **no installed Avibe adopts an engine from the channel, and
+the channel is not commissioned.** This note authorizes no publication, key
+creation, or rollout.
 
 ## Outcome and current gap
 
@@ -379,3 +383,110 @@ manual version pinning, remote workspace proxying, OS package self-update,
 rebuilding other managed dependencies around this channel, credential migrations,
 full TUF/delegated online key rotation, and a guarantee that local health checks
 can detect every provider-side behavioral regression.
+
+## Step 2 as built
+
+What the second PR adds, where it lives, and where it settles a detail the
+sections above left open. Release-side procedure is in `docs/release.md`.
+
+**Code.**
+
+- `core/model_hub_engine_manifest.py`: the strict six-asset manifest schema,
+  moved out of the release guard so clients and publication share one
+  validator. It now also rejects a repeated field.
+- `core/model_hub_engine_channel.py`: envelope and payload parsing, the fixed
+  domain digest, shipped trust roots, the keyless avault verifier, anti-replay
+  state, and selection.
+- `vibe/model_hub_runtime/engine_channel.py`: `EngineChannel`, this machine's
+  view of the channel over the engine installer. Nothing in Avibe calls it yet.
+- `scripts/model_hub_engine_channel.py` and
+  `scripts/model_hub_engine_qualification.py`, with the workflows
+  `Publish Model Hub engine channel` and `Qualify Model Hub engine candidate`.
+
+**Uncommissioned by default.** `engine_channel_roots.json` ships with no root.
+A client with no root makes no channel request and runs no verifier; every
+publication step stops before the network, the bucket, or avault.
+
+**Wire details fixed by the client.**
+
+- The envelope has exactly `schema_version`, `key_id`, `payload`, `signature`.
+  `signature` is lowercase hex. `payload` and each `manifest_base64` are
+  standard padded base64 with a single encoding of their bytes.
+- The payload is parsed only after its signature verifies, so unauthenticated
+  bytes never reach the manifest parser.
+- Every object has exactly its listed fields; a repeated field is an error.
+- Bounds: envelope 2 MiB, payload 1.5 MiB, manifest 16 KiB, 64 releases, 256
+  withdrawals, a 512-character reason, sequence below 2^53.
+- `expires_at` is at most seven days after `issued_at`. A payload dated more
+  than ten minutes ahead of the local clock is not yet valid.
+- `min_avibe_version` is a plain `X.Y.Z`. Every `rollback_to` must name a
+  release the same payload carries.
+
+**Verifier.** Two bounded processes per check: `avault version`, then
+`avault verify`. The binary comes from Avibe's read-only path lookup. The
+caller never installs or upgrades avault, selects no store, and removes
+`AVAULT_*` from the child's environment. Only exit 0 with `{"valid": true}`
+verifies. Until the managed avault pin reaches 0.1.10 (#3517), a managed
+install reports the verifier as too old and the channel stays closed.
+
+**Recorded state.** `<engine runtime dir>/channel/state.json`, separate from
+the install claim. It holds the highest accepted sequence, that payload's
+digest, the accepted envelope, every withdrawal, and the minimum and manifest
+digest of every release ever listed. A release that stops being listed keeps
+its recorded identity, so it cannot come back with other bytes. Acceptance
+runs under a cross-process lock against the file's current contents. A
+rejected index changes nothing. Damaged state fails closed; it is never
+treated as a fresh start. On read the stored envelope is authenticated again,
+and an expired one is returned marked not fresh.
+
+**Selection.** `resolve` returns one of four actions.
+
+| Action | When |
+| --- | --- |
+| `keep` | Nothing newer is eligible, the index is stale, routine updates are off, or this installation is outside the channel. |
+| `adopt` | A listed release is newer than the engine in effect, not below the bundled one, not withdrawn or quarantined, has an asset for this host, and its minimum is met. The newest such release wins. |
+| `withdraw` | The engine in effect was withdrawn and its fallback is usable. This may go below the bundled engine and applies with routine updates off. |
+| `blocked` | The engine in effect was withdrawn and nothing safe can replace it. |
+
+Three points go beyond section 4. A fallback that was itself withdrawn later
+is followed to the next one, and a loop ends in `blocked`. When no fallback is
+usable but a newer eligible release exists, that release is adopted, since
+moving forward is always allowed. A stale index, or offline mode, still
+applies a recorded withdrawal but authorizes no download, so the fallback
+must already be on the machine.
+
+An Avibe build that names no published release (a source checkout, a dev or
+local version) takes no channel action at all, withdrawal included. A manifest
+override opts out the same way.
+
+**Publication.** The signed index published now is the desired state. Each
+run plans its successor from it and adds at most one entry; the writer refuses
+anything that is not the direct successor of what the bucket holds. Recovery
+and first publication are covered in `docs/release.md`.
+
+**Qualification status.** The receipt requires six evidence classes. Four have
+producing jobs. `build` reuses the release guard's strict rebuild, which
+already publishes the packaged engine. The per-platform smoke producer runs in
+pull-request CI on all six platforms against the packaged engine, which shows
+the producer works and qualifies nothing. The hosted-wire and released-Avibe
+jobs have not run: they need a candidate, and the second needs published 3.2.6
+artifacts. `backward_state` and `lifecycle` have no producer until steps 3 and
+4, so no receipt can be produced before then.
+
+The released-Avibe job is the least proven part. Today's E2E harness starts
+the service as `main.py` from the repository root and was written for a source
+checkout. The job runs the release's own tests from a directory that holds no
+product package, supplies the wheel's own entry script as `main.py`, and
+refuses a run whose imports did not come from the wheel. Whether the 3.2.6
+suite passes from that layout is unknown until it is run; rehearse it before
+3.2.6 is tagged, while its tests can still be changed.
+
+**Still required before a first promotion**, beyond steps 3 and 4 and
+commissioning: the engine release guard's scheduled verification, backup and
+recovery covers only the packaged engine. It must cover every release the
+index lists, withdrawn ones and rollback targets included. That is not built
+here, because no listed release exists to exercise it against.
+
+**Not in this step.** Adoption, activation, scheduling, recovery, the
+effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
+and public documentation (step 4); and all commissioning.

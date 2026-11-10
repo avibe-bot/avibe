@@ -1,0 +1,909 @@
+#!/usr/bin/env python3
+"""Qualify a Model Hub engine candidate, and check that qualification later.
+
+A candidate is a reviewed record, separate from the engine Avibe packages:
+``patches/model-hub-engine-candidates/<asset_release_tag>/`` holds the exact
+``model-hub-engine-manifest.json`` to publish and a ``candidate.json`` naming
+the minimum Avibe version that may run it. Reviewing the record does not
+schedule the engine for any Avibe release.
+
+Qualification runs in ``.github/workflows/model-hub-engine-qualification.yml``
+on the default branch, with no secret. Each job writes one evidence document;
+the last job joins them into a receipt. A receipt is complete only when every
+evidence class below is present for these exact candidate bytes:
+
+- ``build``: the pinned source rebuilt to the reviewed digests;
+- ``platform_smoke``: each of the six archives started and passed Avibe's
+  health check on its own platform;
+- ``hosted_wire``: the hosted passthrough compared with every baseline engine;
+- ``released_avibe_e2e``: the full hermetic Model Hub E2E driven through the
+  released wheel of the minimum and of the current stable Avibe;
+- ``backward_state``: state written by the candidate read back by every
+  baseline engine;
+- ``lifecycle``: activation, rollback and recovery of the candidate.
+
+The last two have no producing job yet; they arrive with the engine lifecycle
+work. They are required all the same, so no complete receipt can exist until
+they do.
+
+The finalizer does not take a receipt on trust. ``verify_receipt`` re-reads
+the producing run from GitHub: the workflow file, the default-branch commit,
+the attempt, and every job's conclusion. It then requires the receipt to name
+the reviewed candidate, the harness as it is reviewed now, the Avibe wheels as
+GitHub serves them now, and every baseline the index lists now.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+from xml.etree import ElementTree
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core import model_hub_engine_channel as channel  # noqa: E402
+from core.model_hub_engine_manifest import (  # noqa: E402
+    EXPECTED_PLATFORMS,
+    OWNED_RELEASE_ROOT,
+    SHA256_RE,
+    EngineManifestError,
+    ReleaseSpec,
+    parse_release_manifest,
+)
+
+REPOSITORY = channel.CHANNEL_REPOSITORY
+DEFAULT_BRANCH = "master"
+CANDIDATES_DIR = REPO_ROOT / "patches" / "model-hub-engine-candidates"
+CANDIDATE_FILE = "candidate.json"
+MANIFEST_FILE = "model-hub-engine-manifest.json"
+PACKAGED_MANIFEST = "vibe/model_hub_runtime/cliproxyapi_manifest.json"
+WHEEL_SERVICE_ENTRY = "vibe/service_main.py"
+QUALIFICATION_WORKFLOW_PATH = ".github/workflows/model-hub-engine-qualification.yml"
+MIRROR_RELEASE_ROOT = "https://dl.avibe.bot/releases"
+RECEIPT_ARTIFACT = "model-hub-engine-qualification-receipt"
+ASSETS_ARTIFACT = "model-hub-engine-candidate-assets"
+AVIBE_ROLES = ("minimum", "current_stable")
+E2E_SELECTION = ["-m", "e2e_model_hub", "tests/e2e"]
+#: What a released-Avibe run records about itself: the tag commit its tests
+#: came from, the digest of its resolved dependency set, and its toolchain.
+E2E_PROVENANCE_FIELDS = ("tests_commit", "dependencies_sha256", "python", "node", "codex", "opencode")
+#: Every job of the qualification workflow, by the name GitHub reports. All
+#: must have succeeded in the receipt's run attempt; none may be skipped.
+REQUIRED_JOBS = (
+    "build",
+    *(f"platform-smoke ({platform})" for platform in sorted(EXPECTED_PLATFORMS)),
+    *(f"released-avibe-e2e ({role})" for role in AVIBE_ROLES),
+    "hosted-wire",
+    "receipt",
+)
+#: The code that decides whether a candidate qualifies. A receipt binds the
+#: digest of these files, so evidence from an older harness does not qualify
+#: under a newer one. Everything else a run used is bound by the commit and the
+#: release tag the receipt records.
+HARNESS_FILES = (
+    QUALIFICATION_WORKFLOW_PATH,
+    "core/model_hub_engine_channel.py",
+    "core/model_hub_engine_manifest.py",
+    "scripts/build_model_hub_engine.py",
+    "scripts/ci_avault_verifier.py",
+    "scripts/ci_loopback_only.sh",
+    "scripts/model_hub_engine_channel.py",
+    "scripts/model_hub_engine_qualification.py",
+    "scripts/model_hub_engine_qualification_plugin.py",
+    "scripts/model_hub_engine_release_guard.py",
+    "scripts/model_hub_hosted_wire_gate.py",
+    "scripts/release_asset_download.py",
+    "tests/e2e/test_model_hub_engine_hosted_passthrough.py",
+)
+#: Packages a released wheel provides. A harness directory must hold none of
+#: them, so a test that imports one gets the wheel's, not a checkout's.
+PRODUCT_PACKAGES = ("vibe", "core", "config", "modules", "storage")
+
+_STABLE_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+
+
+class QualificationError(RuntimeError):
+    """Raised when a candidate, its evidence, or its receipt cannot be accepted."""
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return channel.strict_json(path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise QualificationError(f"{path.name} cannot be read: {exc}") from exc
+
+
+# ----- the reviewed candidate record -----------------------------------------
+
+
+@dataclass(frozen=True)
+class Candidate:
+    asset_release_tag: str
+    min_avibe_version: str
+    manifest_bytes: bytes
+    manifest_sha256: str
+    spec: ReleaseSpec
+    #: Owner-reviewed reasons for a hosted passthrough that differs, by baseline tag.
+    hosted_wire_changes: Mapping[str, str]
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "asset_release_tag": self.asset_release_tag,
+            "min_avibe_version": self.min_avibe_version,
+            "manifest_sha256": self.manifest_sha256,
+            "assets": [
+                {
+                    "platform": archive.platform,
+                    "sha256": archive.sha256,
+                    "size_bytes": archive.size,
+                    "binary_sha256": archive.binary_sha256,
+                }
+                for archive in self.spec.archives
+            ],
+        }
+
+
+def load_candidate(directory: Path) -> Candidate:
+    """Read one reviewed candidate record; reject anything that is not exactly one."""
+
+    if directory.is_symlink() or not directory.is_dir():
+        raise QualificationError("the candidate record is not a directory")
+    entries = sorted(directory.iterdir())
+    if any(path.is_symlink() or not path.is_file() for path in entries) or {path.name for path in entries} != {
+        CANDIDATE_FILE,
+        MANIFEST_FILE,
+    }:
+        raise QualificationError(f"a candidate record holds exactly {CANDIDATE_FILE} and {MANIFEST_FILE}")
+    record = _read_json(directory / CANDIDATE_FILE)
+    fields = {"schema_version", "asset_release_tag", "min_avibe_version", "manifest_sha256"}
+    if not isinstance(record, dict) or not fields <= set(record) <= fields | {"hosted_wire_changes"}:
+        raise QualificationError(f"{CANDIDATE_FILE} has the wrong fields")
+    if type(record["schema_version"]) is not int or record["schema_version"] != 1:
+        raise QualificationError(f"{CANDIDATE_FILE} schema_version must be 1")
+    try:
+        minimum = channel.stable_version(record["min_avibe_version"], "min_avibe_version")
+    except ValueError as exc:
+        raise QualificationError(str(exc)) from exc
+    if minimum < channel.FIRST_CHANNEL_AVIBE_VERSION:
+        first = ".".join(str(part) for part in channel.FIRST_CHANNEL_AVIBE_VERSION)
+        raise QualificationError(f"no Avibe before {first} reads the channel; the minimum cannot be lower")
+
+    manifest_bytes = (directory / MANIFEST_FILE).read_bytes()
+    if len(manifest_bytes) > channel.MAX_MANIFEST_BYTES:
+        raise QualificationError("the candidate manifest is larger than the channel carries")
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    if record["manifest_sha256"] != digest:
+        raise QualificationError("manifest_sha256 does not match the candidate manifest bytes")
+    try:
+        spec = parse_release_manifest(manifest_bytes)
+    except EngineManifestError as exc:
+        raise QualificationError(f"the candidate manifest is invalid: {exc}") from exc
+    if not (spec.asset_release_tag == record["asset_release_tag"] == directory.name):
+        raise QualificationError("the record's directory, tag and manifest name different releases")
+
+    changes = record.get("hosted_wire_changes", {})
+    if not isinstance(changes, dict) or any(
+        not isinstance(tag, str) or not isinstance(reason, str) or not reason.strip() for tag, reason in changes.items()
+    ):
+        raise QualificationError("hosted_wire_changes maps a baseline release to its reviewed reason")
+    return Candidate(
+        asset_release_tag=spec.asset_release_tag,
+        min_avibe_version=record["min_avibe_version"],
+        manifest_bytes=manifest_bytes,
+        manifest_sha256=digest,
+        spec=spec,
+        hosted_wire_changes=dict(changes),
+    )
+
+
+def harness_digest(root: Path = REPO_ROOT) -> str:
+    """One digest over the files that decide whether a candidate qualifies."""
+
+    digest = hashlib.sha256()
+    for name in sorted(HARNESS_FILES):
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise QualificationError(f"the qualification harness is missing {name}")
+        digest.update(f"{name}\0{_sha256(path)}\n".encode())
+    return digest.hexdigest()
+
+
+# ----- released Avibe artifacts ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReleasedAvibe:
+    version: str
+    tag: str
+    wheel_name: str
+    wheel_url: str
+    wheel_sha256: str
+    wheel_size: int
+
+    def identity(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "tag": self.tag,
+            "wheel": {"name": self.wheel_name, "sha256": self.wheel_sha256, "size_bytes": self.wheel_size},
+        }
+
+
+def current_stable_avibe(api: Callable[[str], Any]) -> str:
+    """The highest published stable ``vX.Y.Z`` Avibe release."""
+
+    releases = api(f"/repos/{REPOSITORY}/releases?per_page=100")
+    versions = []
+    for release in releases if isinstance(releases, list) else []:
+        if not isinstance(release, dict) or release.get("draft") is not False or release.get("prerelease") is not False:
+            continue
+        match = _STABLE_TAG_RE.fullmatch(str(release.get("tag_name")))
+        if match is not None:
+            versions.append(tuple(int(part) for part in match.groups()))
+    if not versions:
+        raise QualificationError("GitHub lists no published stable Avibe release")
+    return ".".join(str(part) for part in max(versions))
+
+
+def resolve_released_avibe(version: str, api: Callable[[str], Any]) -> ReleasedAvibe:
+    """Name the immutable wheel of a published stable Avibe release.
+
+    A draft, a pre-release, a missing wheel, or a wheel GitHub gives no digest
+    for is not a released artifact, and nothing else stands in for one.
+    """
+
+    try:
+        channel.stable_version(version)
+    except ValueError as exc:
+        raise QualificationError(str(exc)) from exc
+    tag = f"v{version}"
+    release = api(f"/repos/{REPOSITORY}/releases/tags/{tag}")
+    if not isinstance(release, dict) or release.get("tag_name") != tag:
+        raise QualificationError(f"Avibe {version} has no published release")
+    if release.get("draft") is not False or release.get("prerelease") is not False:
+        raise QualificationError(f"Avibe {version} is not a published stable release")
+    name = f"avibe_os-{version}-py3-none-any.whl"
+    assets = [asset for asset in release.get("assets") or [] if isinstance(asset, dict) and asset.get("name") == name]
+    if len(assets) != 1:
+        raise QualificationError(f"the Avibe {version} release has no single {name}")
+    asset = assets[0]
+    digest, size, url = str(asset.get("digest") or ""), asset.get("size"), asset.get("browser_download_url")
+    if not digest.startswith("sha256:") or SHA256_RE.fullmatch(digest.removeprefix("sha256:")) is None:
+        raise QualificationError(f"GitHub records no SHA-256 for {name}")
+    if type(size) is not int or size <= 0 or url != f"{OWNED_RELEASE_ROOT}/{tag}/{name}":
+        raise QualificationError(f"{name} is not an asset of the Avibe-owned release")
+    return ReleasedAvibe(
+        version=version, tag=tag, wheel_name=name, wheel_url=url,
+        wheel_sha256=digest.removeprefix("sha256:"), wheel_size=size,
+    )
+
+
+def bundled_engine_manifest(wheel: Path) -> bytes:
+    """The engine manifest a released wheel packages: one qualification baseline."""
+
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            return archive.read(PACKAGED_MANIFEST)
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise QualificationError(f"{wheel.name} packages no engine manifest") from exc
+
+
+def prepare_harness(source: Path, wheel: Path, output: Path) -> None:
+    """Lay out a released tag's tests where no product package can be imported from.
+
+    Only the tests, the scripts they call and the pytest configuration are
+    copied from the tag. The E2E harness starts the service as ``main.py`` in
+    its working directory; that file is taken from the wheel, where it ships as
+    ``vibe/service_main.py``. With no product package beside the tests,
+    ``import vibe`` resolves to the installed wheel or fails.
+    """
+
+    import shutil
+
+    if output.exists():
+        raise QualificationError("the harness directory already exists")
+    output.mkdir(parents=True)
+    for name in ("tests", "scripts"):
+        if not (source / name).is_dir():
+            raise QualificationError(f"the released source has no {name} directory")
+        shutil.copytree(source / name, output / name, symlinks=False)
+    shutil.copy2(source / "pyproject.toml", output / "pyproject.toml")
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            (output / "main.py").write_bytes(archive.read(WHEEL_SERVICE_ENTRY))
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise QualificationError(f"{wheel.name} ships no service entry script") from exc
+    present = [name for name in PRODUCT_PACKAGES if (output / name).exists()]
+    if present:
+        raise QualificationError(f"the harness directory shadows product packages: {present}")
+
+
+def wheel_origin_problems(origins: Any, *, released: ReleasedAvibe, environment: Path) -> list[str]:
+    """Why a test run did not import Avibe from the released wheel's environment."""
+
+    if not isinstance(origins, dict):
+        return ["the run recorded no import origins"]
+    problems = []
+    root = environment.resolve()
+    modules = origins.get("modules")
+    for name in PRODUCT_PACKAGES:
+        origin = modules.get(name) if isinstance(modules, dict) else None
+        if not isinstance(origin, str) or root not in Path(origin).resolve().parents:
+            problems.append(f"{name} was imported from {origin!r}, not from the released wheel's environment")
+    for field in ("distribution_version", "vibe_version"):
+        if origins.get(field) != released.version:
+            problems.append(f"{field} is {origins.get(field)!r}, not {released.version}")
+    return problems
+
+
+def junit_summary(report: Path) -> dict[str, int]:
+    """Count a JUnit report. Strict ``xfail`` cases count as run, not as failures."""
+
+    try:
+        cases = list(ElementTree.parse(report).getroot().iter("testcase"))
+    except (OSError, ElementTree.ParseError) as exc:
+        raise QualificationError("the test run left no readable report") from exc
+    failed = sum(1 for case in cases if case.find("failure") is not None or case.find("error") is not None)
+    skipped = sum(
+        1 for case in cases if (node := case.find("skipped")) is not None and node.get("type") != "pytest.xfail"
+    )
+    return {"tests": len(cases), "failed": failed, "skipped": skipped}
+
+
+# ----- evidence and receipts -------------------------------------------------
+
+
+def evidence_problems(
+    candidate: Candidate,
+    evidence: Sequence[Any],
+    *,
+    baselines: Mapping[str, str],
+    avibe: Mapping[str, ReleasedAvibe],
+) -> list[str]:
+    """Everything that keeps ``evidence`` from qualifying ``candidate``.
+
+    ``baselines`` maps each engine release the candidate must be compared with
+    to its manifest digest. ``avibe`` maps each role to the released Avibe it
+    must have been driven through.
+    """
+
+    by_class: dict[str, list[dict[str, Any]]] = {}
+    for item in evidence:
+        if isinstance(item, dict) and isinstance(item.get("class"), str):
+            by_class.setdefault(item["class"], []).append(item)
+    problems: list[str] = []
+
+    def bound(item: Mapping[str, Any]) -> bool:
+        return item.get("manifest_sha256") == candidate.manifest_sha256
+
+    builds = by_class.get("build", [])
+    if len(builds) != 1 or not bound(builds[0]) or builds[0].get("reproduced") is not True or (
+        builds[0].get("assets") != candidate.identity()["assets"]
+    ):
+        problems.append("build: no rebuild reproduced the reviewed manifest and its six assets")
+
+    smokes = {item.get("platform"): item for item in by_class.get("platform_smoke", [])}
+    for archive in candidate.spec.archives:
+        item = smokes.get(archive.platform)
+        if (
+            item is None
+            or not bound(item)
+            or item.get("archive_sha256") != archive.sha256
+            or item.get("binary_sha256") != archive.binary_sha256
+            or item.get("reported_version") != candidate.spec.version
+            or item.get("health") != "ok"
+        ):
+            problems.append(f"platform_smoke: {archive.platform} did not start and pass health from the reviewed archive")
+
+    compared = {tag: digest for tag, digest in baselines.items() if tag != candidate.asset_release_tag}
+    wires = {item.get("baseline_tag"): item for item in by_class.get("hosted_wire", [])}
+    states = {item.get("baseline_tag"): item for item in by_class.get("backward_state", [])}
+    for tag, digest in sorted(compared.items()):
+        wire = wires.get(tag)
+        if wire is None or not bound(wire) or wire.get("baseline_manifest_sha256") != digest or not wire.get("cases"):
+            problems.append(f"hosted_wire: the candidate was not compared with {tag}")
+        elif wire.get("differences") and tag not in candidate.hosted_wire_changes:
+            problems.append(f"hosted_wire: the passthrough differs from {tag} and the record gives no reviewed reason")
+        state = states.get(tag)
+        if (
+            state is None
+            or not bound(state)
+            or state.get("baseline_manifest_sha256") != digest
+            or state.get("result") != "pass"
+        ):
+            problems.append(f"backward_state: state written by the candidate was not read back by {tag}")
+
+    runs = {item.get("role"): item for item in by_class.get("released_avibe_e2e", [])}
+    for role in AVIBE_ROLES:
+        released, item = avibe.get(role), runs.get(role)
+        if released is None:
+            problems.append(f"released_avibe_e2e: the {role} Avibe release is unknown")
+            continue
+        junit = item.get("junit") if item is not None else None
+        provenance = item.get("provenance") if item is not None else None
+        if (
+            item is None
+            or not bound(item)
+            or not isinstance(provenance, dict)
+            or any(not isinstance(provenance.get(field), str) or not provenance[field] for field in E2E_PROVENANCE_FIELDS)
+            or item.get("avibe") != released.identity()
+            or item.get("imports_from_wheel") is not True
+            or item.get("selection") != E2E_SELECTION
+            or item.get("scenario_evidence") != "pass"
+            or not isinstance(junit, dict)
+            or not junit.get("tests")
+            or junit.get("failed") != 0
+        ):
+            problems.append(
+                f"released_avibe_e2e: the Model Hub E2E did not pass through the released Avibe {released.version} wheel"
+            )
+    if role_versions := {role: avibe[role].version for role in AVIBE_ROLES if role in avibe}:
+        if role_versions.get("minimum") != candidate.min_avibe_version:
+            problems.append("released_avibe_e2e: the minimum role is not the candidate's minimum Avibe")
+
+    lifecycles = by_class.get("lifecycle", [])
+    if len(lifecycles) != 1 or not bound(lifecycles[0]) or lifecycles[0].get("result") != "pass":
+        problems.append("lifecycle: activation, rollback and recovery of the candidate were not exercised")
+    return problems
+
+
+def build_receipt(
+    candidate: Candidate,
+    evidence: Sequence[Any],
+    *,
+    baselines: Mapping[str, str],
+    avibe: Mapping[str, ReleasedAvibe],
+    run_id: int,
+    run_attempt: int,
+    head_sha: str,
+    harness_sha256: str,
+) -> dict[str, Any]:
+    problems = evidence_problems(candidate, evidence, baselines=baselines, avibe=avibe)
+    if problems:
+        raise QualificationError("the candidate is not qualified: " + "; ".join(problems))
+    return {
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "workflow_path": QUALIFICATION_WORKFLOW_PATH,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "head_sha": head_sha,
+        "harness_sha256": harness_sha256,
+        "candidate": candidate.identity(),
+        "baselines": dict(sorted(baselines.items())),
+        "avibe": {role: avibe[role].identity() for role in AVIBE_ROLES},
+        "evidence": list(evidence),
+    }
+
+
+def run_identity_problems(receipt: Mapping[str, Any], *, api: Callable[[str], Any]) -> list[str]:
+    """Why GitHub does not confirm that the receipt's run produced a qualification.
+
+    Everything here is read from GitHub by run id. A receipt's own claims
+    about its run are only compared with that, never believed.
+    """
+
+    run_id, attempt = receipt.get("run_id"), receipt.get("run_attempt")
+    if type(run_id) is not int or type(attempt) is not int:
+        return ["the receipt names no run"]
+    run = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}")
+    if not isinstance(run, dict):
+        return ["GitHub has no such qualification run"]
+    head_sha = run.get("head_sha")
+    expected = {
+        "id": run_id,
+        "run_attempt": attempt,
+        "path": QUALIFICATION_WORKFLOW_PATH,
+        "event": "workflow_dispatch",
+        "head_branch": DEFAULT_BRANCH,
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": receipt.get("head_sha"),
+    }
+    problems = [
+        f"the run's {field} is {run.get(field)!r}, not {value!r}" for field, value in expected.items() if run.get(field) != value
+    ]
+    for field in ("repository", "head_repository"):
+        if (run.get(field) or {}).get("full_name") != REPOSITORY:
+            problems.append(f"the run's {field} is not {REPOSITORY}")
+    if not isinstance(head_sha, str) or _COMMIT_RE.fullmatch(head_sha) is None:
+        return problems + ["the run names no commit"]
+
+    # A branch or tag may be named like the default branch; the commit decides.
+    comparison = api(f"/repos/{REPOSITORY}/compare/{head_sha}...{DEFAULT_BRANCH}")
+    if not isinstance(comparison, dict) or comparison.get("status") not in {"ahead", "identical"}:
+        problems.append(f"the run's commit is not on {DEFAULT_BRANCH}")
+
+    listing = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+    jobs = listing.get("jobs") if isinstance(listing, dict) else None
+    if not isinstance(jobs, list) or not isinstance(listing.get("total_count"), int) or listing["total_count"] != len(jobs):
+        return problems + ["the run's jobs cannot be read completely"]
+    conclusions = {job.get("name"): job.get("conclusion") for job in jobs if isinstance(job, dict)}
+    for name in REQUIRED_JOBS:
+        if conclusions.get(name) != "success":
+            problems.append(f"job {name!r} concluded {conclusions.get(name)!r}, not 'success'")
+    for name, conclusion in sorted((str(name), conclusion) for name, conclusion in conclusions.items()):
+        if name not in REQUIRED_JOBS and conclusion != "success":
+            problems.append(f"job {name!r} concluded {conclusion!r}")
+    return problems
+
+
+def verify_receipt(
+    receipt: Any,
+    *,
+    candidate: Candidate,
+    api: Callable[[str], Any],
+    harness_sha256: str,
+    baselines: Mapping[str, str],
+) -> None:
+    """Stop unless ``receipt`` qualifies ``candidate`` for promotion right now.
+
+    ``baselines`` is what the index lists now, plus what the Avibe releases
+    bundle. The Avibe releases themselves are resolved again from GitHub, so a
+    receipt made against a wheel that has since changed, or before a newer
+    stable release, no longer qualifies.
+    """
+
+    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+        raise QualificationError("the receipt has an unknown shape")
+    problems = run_identity_problems(receipt, api=api)
+    if receipt.get("repository") != REPOSITORY or receipt.get("workflow_path") != QUALIFICATION_WORKFLOW_PATH:
+        problems.append("the receipt is for another repository or workflow")
+    if receipt.get("candidate") != candidate.identity():
+        problems.append("the receipt is for other candidate bytes than the reviewed record")
+    if receipt.get("harness_sha256") != harness_sha256:
+        problems.append("the receipt was produced by a different qualification harness than the reviewed one")
+    avibe = {
+        "minimum": resolve_released_avibe(candidate.min_avibe_version, api),
+        "current_stable": resolve_released_avibe(current_stable_avibe(api), api),
+    }
+    evidence = receipt.get("evidence")
+    problems += evidence_problems(
+        candidate, evidence if isinstance(evidence, list) else [], baselines=baselines, avibe=avibe
+    )
+    if problems:
+        raise QualificationError("the receipt does not qualify the candidate: " + "; ".join(problems))
+
+
+# ----- evidence producers ----------------------------------------------------
+
+
+def _guard():
+    try:
+        from scripts import model_hub_engine_release_guard as guard
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        import model_hub_engine_release_guard as guard
+    return guard
+
+
+def verified_assets(candidate_dir: Path, asset_dir: Path) -> Candidate:
+    """Require ``asset_dir`` to be exactly the candidate's publishable asset set."""
+
+    candidate = load_candidate(candidate_dir)
+    guard = _guard()
+    try:
+        guard.verify_release_assets(candidate_dir / MANIFEST_FILE, asset_dir)
+    except guard.ReleaseGuardError as exc:
+        raise QualificationError(f"the assets are not the reviewed candidate: {exc}") from exc
+    return candidate
+
+
+def require_published(candidate_dir: Path, work: Path) -> None:
+    """Require the release and its mirror to serve exactly the candidate's asset set.
+
+    Clients try the mirror first and fall back to the release, checking the
+    same pinned digests either way, so both must hold every byte before an
+    index may name the release.
+    """
+
+    candidate = load_candidate(candidate_dir)
+    guard = _guard()
+    manifest = candidate_dir / MANIFEST_FILE
+    sizes = {archive.name: archive.size for archive in candidate.spec.archives}
+    try:
+        guard.fetch_release_assets(manifest, work / "release")
+        mirror = work / "mirror"
+        mirror.mkdir(parents=True)
+        for name in sorted(candidate.spec.expected_asset_names):
+            guard._download(
+                f"{MIRROR_RELEASE_ROOT}/{candidate.asset_release_tag}/{name}",
+                mirror / name,
+                max_bytes=sizes.get(name, channel.MAX_MANIFEST_BYTES),
+            )
+        guard.verify_release_assets(manifest, mirror)
+    except guard.ReleaseGuardError as exc:
+        raise QualificationError(f"the release is not fully published and mirrored: {exc}") from exc
+
+
+def build_evidence(candidate_dir: Path, asset_dir: Path) -> dict[str, Any]:
+    candidate = verified_assets(candidate_dir, asset_dir)
+    return {
+        "class": "build",
+        "manifest_sha256": candidate.manifest_sha256,
+        "assets": candidate.identity()["assets"],
+        "reproduced": True,
+    }
+
+
+def platform_smoke_evidence(candidate_dir: Path, asset_dir: Path, work: Path) -> dict[str, Any]:
+    """Install this host's archive from disk, start it, and require Avibe's health check.
+
+    The engine runs from an isolated runtime and state directory on loopback,
+    with no source configured and no credential. Installing verifies the
+    archive and binary digests and that the binary reports the manifest's
+    version; the supervisor's start is the health check Avibe applies.
+    """
+
+    candidate = verified_assets(candidate_dir, asset_dir)
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+    from vibe.model_hub_runtime.state import EngineStateStore
+    from vibe.model_hub_runtime.supervisor import EngineSupervisor
+
+    work.mkdir(parents=True, exist_ok=True)
+    probe = EngineRuntimeManager(runtime_dir=work / "probe", offline=True)
+    archive = candidate.spec.archive_for(probe.host_platform())
+    if archive is None:
+        raise QualificationError("the candidate has no asset for this host")
+    manifest = json.loads(candidate.manifest_bytes)
+    for asset in manifest["assets"]:
+        if asset["platform"] == archive.platform:
+            # The one archive this host installs, read from the verified directory.
+            asset["url"] = (asset_dir.resolve() / archive.name).as_uri()
+    local_manifest = work / "local-manifest.json"
+    local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+    manager = EngineRuntimeManager(runtime_dir=work / "engine", manifest_path=local_manifest, offline=False)
+    installed = manager.ensure()
+    if not installed.get("ok") or installed.get("platform") != archive.platform:
+        raise QualificationError(f"the candidate did not install: {installed.get('reason')}")
+    supervisor = EngineSupervisor(installer=manager, state_store=EngineStateStore(work / "state"))
+    try:
+        supervisor.ensure_running()
+    except Exception as exc:  # noqa: BLE001 - any start failure is a failed smoke
+        raise QualificationError(f"the candidate did not start and pass health: {exc}") from exc
+    finally:
+        supervisor.stop()
+    return {
+        "class": "platform_smoke",
+        "manifest_sha256": candidate.manifest_sha256,
+        "platform": archive.platform,
+        "archive_sha256": archive.sha256,
+        "binary_sha256": archive.binary_sha256,
+        "reported_version": installed.get("version"),
+        "health": "ok",
+    }
+
+
+def released_e2e_evidence(
+    candidate: Candidate,
+    *,
+    role: str,
+    released: ReleasedAvibe,
+    wheel: Path,
+    environment: Path,
+    origins: Any,
+    junit: Path,
+    scenario_evidence_passed: bool,
+    provenance: Any,
+) -> dict[str, Any]:
+    if role not in AVIBE_ROLES:
+        raise QualificationError(f"unknown Avibe role {role}")
+    if not isinstance(provenance, dict) or any(
+        not isinstance(provenance.get(field), str) or not provenance[field] for field in E2E_PROVENANCE_FIELDS
+    ):
+        raise QualificationError(f"the run must record {', '.join(E2E_PROVENANCE_FIELDS)}")
+    if not wheel.is_file() or wheel.stat().st_size != released.wheel_size or _sha256(wheel) != released.wheel_sha256:
+        raise QualificationError(f"{wheel.name} is not the wheel GitHub published for Avibe {released.version}")
+    problems = wheel_origin_problems(origins, released=released, environment=environment)
+    if problems:
+        raise QualificationError("the run did not test the released wheel: " + "; ".join(problems))
+    return {
+        "class": "released_avibe_e2e",
+        "manifest_sha256": candidate.manifest_sha256,
+        "role": role,
+        "avibe": released.identity(),
+        "imports_from_wheel": True,
+        "provenance": {field: provenance[field] for field in E2E_PROVENANCE_FIELDS},
+        "selection": E2E_SELECTION,
+        "junit": junit_summary(junit),
+        "scenario_evidence": "pass" if scenario_evidence_passed else "fail",
+    }
+
+
+# ----- command line ----------------------------------------------------------
+
+
+def _api(token: str | None) -> Callable[[str], Any]:
+    try:
+        from scripts.model_hub_engine_channel import ProducerError, github_api
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        from model_hub_engine_channel import ProducerError, github_api
+
+    def call(path: str) -> Any:
+        try:
+            return github_api(path, token=token)
+        except ProducerError as exc:
+            raise QualificationError(str(exc)) from exc
+
+    return call
+
+
+def _load_released(path: Path) -> ReleasedAvibe:
+    record = _read_json(path)
+    try:
+        return ReleasedAvibe(**record)
+    except TypeError as exc:
+        raise QualificationError(f"{path.name} is not a released Avibe record") from exc
+
+
+def _collect(directory: Path) -> list[Any]:
+    return [_read_json(path) for path in sorted(directory.rglob("*.json")) if path.is_file() and not path.is_symlink()]
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    def command(name: str, help_text: str, *, candidate: bool = True) -> argparse.ArgumentParser:
+        sub = commands.add_parser(name, help=help_text)
+        if candidate:
+            sub.add_argument("--candidate-dir", type=Path, required=True)
+        return sub
+
+    command("candidate", "Validate a reviewed candidate record.")
+    command("harness-digest", "Print the digest of the qualification harness.", candidate=False)
+
+    build = command("evidence-build", "Record that a rebuild reproduced the reviewed assets.")
+    build.add_argument("--asset-dir", type=Path, required=True)
+    build.add_argument("--output", type=Path, required=True)
+
+    smoke = command("evidence-smoke", "Start this host's archive and record its health.")
+    smoke.add_argument("--asset-dir", type=Path, required=True)
+    smoke.add_argument("--work-dir", type=Path, required=True)
+    smoke.add_argument("--output", type=Path, required=True)
+
+    released = command("released-avibe", "Resolve a released Avibe wheel for one role.")
+    released.add_argument("--role", required=True, choices=AVIBE_ROLES)
+    released.add_argument("--output", type=Path, required=True)
+
+    bundled = command("bundled-manifest", "Extract the engine manifest a released wheel packages.", candidate=False)
+    bundled.add_argument("--wheel", type=Path, required=True)
+    bundled.add_argument("--output", type=Path, required=True)
+
+    harness = command("prepare-harness", "Lay out a released tag's tests without product packages.", candidate=False)
+    harness.add_argument("--source", type=Path, required=True)
+    harness.add_argument("--wheel", type=Path, required=True)
+    harness.add_argument("--output", type=Path, required=True)
+
+    e2e = command("evidence-released-e2e", "Record an E2E run driven through a released wheel.")
+    e2e.add_argument("--role", required=True, choices=AVIBE_ROLES)
+    e2e.add_argument("--released", type=Path, required=True)
+    e2e.add_argument("--wheel", type=Path, required=True)
+    e2e.add_argument("--environment", type=Path, required=True)
+    e2e.add_argument("--origins", type=Path, required=True)
+    e2e.add_argument("--junit", type=Path, required=True)
+    e2e.add_argument("--provenance", type=Path, required=True)
+    e2e.add_argument("--scenario-evidence", required=True, choices=["pass", "fail"])
+    e2e.add_argument("--output", type=Path, required=True)
+
+    available = command("availability", "Require the release and its mirror to serve the candidate.")
+    available.add_argument("--work-dir", type=Path, required=True)
+
+    for name, help_text in (
+        ("receipt", "Join a run's evidence into a receipt."),
+        ("verify-receipt", "Check a receipt against GitHub and the reviewed record."),
+    ):
+        sub = command(name, help_text)
+        sub.add_argument("--baselines", type=Path, required=True, help="JSON object: release tag to manifest SHA-256")
+        if name == "receipt":
+            sub.add_argument("--evidence-dir", type=Path, required=True)
+            sub.add_argument("--released-dir", type=Path, required=True)
+            sub.add_argument("--run-id", type=int, required=True)
+            sub.add_argument("--run-attempt", type=int, required=True)
+            sub.add_argument("--head-sha", required=True)
+            sub.add_argument("--output", type=Path, required=True)
+        else:
+            sub.add_argument("--receipt", type=Path, required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    import os
+
+    args = _build_parser().parse_args(argv)
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    try:
+        if args.command == "harness-digest":
+            print(harness_digest())
+            return 0
+        if args.command == "bundled-manifest":
+            args.output.write_bytes(bundled_engine_manifest(args.wheel))
+            return 0
+        if args.command == "prepare-harness":
+            prepare_harness(args.source, args.wheel, args.output)
+            return 0
+
+        candidate = load_candidate(args.candidate_dir)
+        result: Any = candidate.identity()
+        if args.command == "evidence-build":
+            result = build_evidence(args.candidate_dir, args.asset_dir)
+        elif args.command == "availability":
+            require_published(args.candidate_dir, args.work_dir)
+        elif args.command == "evidence-smoke":
+            result = platform_smoke_evidence(args.candidate_dir, args.asset_dir, args.work_dir)
+        elif args.command == "released-avibe":
+            api = _api(token)
+            version = candidate.min_avibe_version if args.role == "minimum" else current_stable_avibe(api)
+            result = resolve_released_avibe(version, api).__dict__
+        elif args.command == "evidence-released-e2e":
+            result = released_e2e_evidence(
+                candidate,
+                role=args.role,
+                released=_load_released(args.released),
+                wheel=args.wheel,
+                environment=args.environment,
+                origins=_read_json(args.origins),
+                junit=args.junit,
+                scenario_evidence_passed=args.scenario_evidence == "pass",
+                provenance=_read_json(args.provenance),
+            )
+        elif args.command in {"receipt", "verify-receipt"}:
+            baselines = _read_json(args.baselines)
+            if not isinstance(baselines, dict) or not all(
+                isinstance(tag, str) and isinstance(digest, str) for tag, digest in baselines.items()
+            ):
+                raise QualificationError("baselines maps a release tag to a manifest SHA-256")
+            if args.command == "receipt":
+                result = build_receipt(
+                    candidate,
+                    _collect(args.evidence_dir),
+                    baselines=baselines,
+                    avibe={role: _load_released(args.released_dir / f"{role}.json") for role in AVIBE_ROLES},
+                    run_id=args.run_id,
+                    run_attempt=args.run_attempt,
+                    head_sha=args.head_sha,
+                    harness_sha256=harness_digest(),
+                )
+            else:
+                verify_receipt(
+                    _read_json(args.receipt),
+                    candidate=candidate,
+                    api=_api(token),
+                    harness_sha256=harness_digest(),
+                    baselines=baselines,
+                )
+                result = {"ok": True, **candidate.identity()}
+        if getattr(args, "output", None) is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        else:
+            print(json.dumps(result, sort_keys=True))
+        return 0
+    except QualificationError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
