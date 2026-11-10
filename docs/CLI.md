@@ -54,8 +54,8 @@ and one output rule.
   the raw driver payload), `vibe vault run` passes through the output of the
   command it runs, and `vibe debug prompt export` prints its export document.
 - **Operator commands** for a person at a terminal print text. `version`,
-  `check-update`, `doctor`, `runtime`, `remote` subcommands, `screenshot`, and
-  `data retention` print the JSON envelope with `--json`. The service lifecycle
+  `check-update`, `doctor`, `runtime`, `remote` and `autostart` subcommands,
+  `screenshot`, and `data retention` print the JSON envelope with `--json`. The service lifecycle
   commands `start`, `stop`, `restart`, `upgrade`, and the guided `vibe remote`
   setup only print progress text and take no `--json`.
 - **Language.** CLI help, errors, hints, and notices are English, whatever the
@@ -247,6 +247,33 @@ also contains a `generation_downgrade` object with the running `version` and
 `generation`, the `activated_version` and `activated_generation`, and the
 `launcher` that selects the newer install. Restart through that launcher to run
 the new version.
+
+### `vibe autostart`
+
+Start Avibe at each desktop login on macOS. Off by default; for CLI installs.
+
+```bash
+vibe autostart on
+vibe autostart status
+vibe autostart off
+```
+
+**Behavior:**
+- `on` writes one per-user LaunchAgent, `~/Library/LaunchAgents/bot.avibe.autostart.plist`, and loads it into your desktop session. Loading runs it once, as a login does. Run over SSH, it still loads into your desktop session when you have one; with no desktop session open, it takes effect at the next desktop login. The file is the setting: there is no config key.
+- At each desktop login the agent runs once and exits:
+  - no Avibe is running: it starts Avibe as `vibe start --no-open-browser` does;
+  - Avibe already runs in this desktop session: it does nothing;
+  - Avibe outlived its login session or runs in another one (after a log-out and log-in, or a start over SSH): it restarts Avibe, which then runs in the desktop session and reaches the Keychain again;
+  - it cannot tell which session Avibe runs in, or the running Avibe belongs to the desktop app: it does nothing and writes the reason to `~/.avibe/logs/autostart.log`.
+- Nothing runs between logins. An Avibe you stopped with `vibe stop` stays stopped until the next desktop login, and nothing restarts an Avibe that exits.
+- launchd starts the agent with a minimal environment. Avibe still gets the `PATH` of your login shell, as described under `vibe start`; other variables your shell profile exports are not applied.
+- The agent runs the `vibe` launcher that upgrades keep on the current install, so `vibe upgrade` does not change it.
+- `off` unloads and removes that LaunchAgent and nothing else. A running Avibe keeps running. Uninstalling Avibe with the installer removes it too.
+- `status` reports whether launch at login is on, whether the agent is loaded in your desktop session, the launcher it runs, and the interpreter macOS attributes it to.
+- **Privacy permissions.** An Avibe started at login is not started by your terminal, so it has none of the permissions you granted the terminal, such as Full Disk Access. macOS attributes it to the Python interpreter that runs `vibe`. When workspaces are in protected folders (Desktop, Documents, Downloads) or on external volumes, add the interpreter that `vibe autostart status` names under System Settings > Privacy & Security > Full Disk Access. An upgrade that moves Avibe to another Python version changes that path; check `status` again afterwards.
+- Refused, with nothing changed: on Linux and Windows; inside a Runtime the desktop app manages, which has its own launch-at-login setting; when `AVIBE_HOME` names another home, because the agent starts the default home; and when `vibe` runs from inside an install generation or a virtual environment, which an upgrade replaces.
+
+Use `--json` on these subcommands for the JSON envelope.
 
 ### `vibe skill`
 

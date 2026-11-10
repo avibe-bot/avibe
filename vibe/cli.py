@@ -18545,7 +18545,8 @@ def build_parser():
         metavar="RUNTIME_ID",
         help="Stop only the processes the desktop Runtime with this id started.",
     )
-    start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    # Kept to one line: `vibe --help` has a byte budget (tests/test_vibe_cli.py).
+    start_parser = subparsers.add_parser("start", help="Start services if needed; running processes are kept")
     start_parser.add_argument(
         "--no-open-browser",
         dest="open_browser",
@@ -18984,6 +18985,31 @@ def build_parser():
         error_help_command="vibe remote stop --help",
     )
     _add_json_flag(remote_stop_parser)
+
+    autostart_parser = subparsers.add_parser(
+        "autostart",
+        help="Start Avibe at login (macOS)",
+        description=(
+            "Turn launch at login on or off for this CLI install on macOS, or report it. At each desktop login "
+            "Avibe starts, or replaces a service left over from another login session."
+        ),
+        error_help_command="vibe autostart --help",
+    )
+    autostart_subparsers = autostart_parser.add_subparsers(dest="autostart_command", metavar="{on,off,status}")
+    autostart_subparsers.required = True
+    for autostart_action, autostart_summary in (
+        ("on", "Install the per-user LaunchAgent and load it into the desktop session."),
+        ("off", "Unload and remove the LaunchAgent. A running Avibe keeps running."),
+        ("status", "Show whether launch at login is on, whether it is loaded, and what it runs."),
+    ):
+        _add_json_flag(
+            autostart_subparsers.add_parser(
+                autostart_action,
+                help=autostart_summary,
+                description=autostart_summary,
+                error_help_command=f"vibe autostart {autostart_action} --help",
+            )
+        )
 
     screenshot_parser = subparsers.add_parser(
         "screenshot",
@@ -20613,6 +20639,48 @@ def _dispatch_restart_supervisor(argv: list[str]) -> int:
     return restart_supervisor_main(argv)
 
 
+def _dispatch_login_start(argv: list[str]) -> int:
+    """Run the login entry the `vibe autostart on` LaunchAgent starts at each desktop login.
+
+    Not a command a person types. Its name is written into users' LaunchAgents,
+    so it stays accepted for as long as one of those files can exist.
+    """
+
+    from vibe import login_autostart
+
+    def start() -> int:
+        # Like bare `vibe`, a start launchd asked for is never refused, only
+        # told which newer install it is behind.
+        _generation_downgrade_blocks(None)
+        return cmd_start(open_browser=False)
+
+    return login_autostart.run_login_entry(start=start)
+
+
+def cmd_autostart(args) -> int:
+    """Turn launch at login on or off for a macOS CLI install, or report it."""
+
+    from vibe import login_autostart
+
+    action = args.autostart_command
+    run = {"on": login_autostart.enable, "off": login_autostart.disable, "status": login_autostart.status}[action]
+    try:
+        state = run()
+    except (login_autostart.AutostartError, OSError) as exc:
+        explained = isinstance(exc, login_autostart.AutostartError)
+        message = str(exc) if explained else f"Launch at login could not be changed: {exc}"
+        if args.json:
+            _print_task_error(TaskCliError(message, code=exc.code if explained else "autostart_failed"))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    if args.json:
+        _print_cli_payload(f"autostart_{action}", **state)
+    else:
+        print("\n".join(login_autostart.render(action, state)))
+    return 0
+
+
 def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     """Activate a Windows CLI upgrade after the parent launcher exits."""
     from vibe import runtime
@@ -20856,6 +20924,10 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    # Launch at login writes a login item on this machine, outside the instance.
+    ("autostart", "on"): "owner",
+    ("autostart", "off"): "owner",
+    ("autostart", "status"): "owner",
     # Projects mirror the Web surface: catalog reads are Viewer work, while
     # creating and editing the instance's Projects are Member work.
     ("project", "list"): "viewer",
@@ -20968,10 +21040,11 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("mcp-discover",): "owner",
 }
 
-#: Argv-level entry points the supervisor and the installer use. They are not
-#: parser leaves, and they are Owner work: an invocation that declares a remote
-#: caller must not reach them as an alternate entry.
-_INTERNAL_ACTIVATION_COMMANDS = ("__restart-supervisor", "__activate-upgrade", "__activate-install")
+#: Argv-level entry points the supervisor, the installer and the launch-at-login
+#: LaunchAgent use. They are not parser leaves, and they are Owner work: an
+#: invocation that declares a remote caller must not reach them as an alternate
+#: entry.
+_INTERNAL_ACTIVATION_COMMANDS = ("__restart-supervisor", "__activate-upgrade", "__activate-install", "__login-start")
 
 
 def _cli_invocation_authority(env: Optional[Mapping[str, str]] = None):
@@ -21127,6 +21200,8 @@ def main():
             sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
         if argv and argv[0] == "__activate-install":
             sys.exit(_dispatch_installer_activation(argv[1:]))
+        if argv and argv[0] == "__login-start":
+            sys.exit(_dispatch_login_start(argv[1:]))
         if argv and argv[0] == "mcp":
             from vibe import mcp_cli
 
@@ -21215,6 +21290,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if args.remote_command == "stop":
             sys.exit(cmd_remote_stop(args))
         parser.error("remote command is invalid")
+    if args.command == "autostart":
+        sys.exit(cmd_autostart(args))
     if args.command == "project":
         commands = {
             "list": cmd_project_list,
