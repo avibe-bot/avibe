@@ -629,8 +629,8 @@ def test_release_workflows_split_core_publication_from_desktop_stage():
     stage1 = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
     stage2 = yaml.safe_load((ROOT / ".github/workflows/desktop-release.yml").read_text())["jobs"]
     assert set(stage1) == {
-        "release-backstop", "resolve-show-runtime-ref", "show-runtime-bundles",
-        "build-assets", "release",
+        "release-backstop", "resolve-show-runtime-ref", "resolve-show-runtime-canonical",
+        "show-runtime-bundles", "build-assets", "release",
     }
     assert stage1["release"]["needs"] == ["release-backstop", "build-assets"]
     assert "Dispatch desktop Stage 2" in {

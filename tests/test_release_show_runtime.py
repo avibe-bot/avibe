@@ -30,7 +30,7 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
     # Windows must keep its default pwsh environment for the existing bundler.
     for owner in (workflow, job):
         assert "shell" not in owner.get("defaults", {}).get("run", {})
-    assert "shell" not in build
+    assert build["if"] == "steps.canonical.outputs.reused != 'true'"
     assert build["run"].splitlines() == [
         "npm ci",
         "npm run build",
@@ -41,12 +41,20 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
     assert export["shell"] == "bash"
     assert "npm" not in export["run"] and "tar " not in export["run"]
     assert steps.index(build) < steps.index(export) < steps.index(upload)
-    assert all(not step.get("if") and not step.get("continue-on-error") for step in (build, export, upload))
+    assert all(not step.get("continue-on-error") for step in (build, export, upload))
     assert set(upload["with"]["path"].splitlines()) == {
         "vibe-show-runtime-node-*.tgz",
         "show-runtime-ref-${{ matrix.artifact }}.txt",
         "show-router-${{ matrix.artifact }}.tsx",
+        "show-runtime-identity-${{ matrix.artifact }}.json",
     }
+    reuse = next(step for step in steps if step.get("name") == "Reuse trusted canonical Show Runtime bundle when identity matches")
+    assert reuse["id"] == "canonical"
+    assert "show_runtime_canonical.py verify" in reuse["run"]
+    assert "gh run download" in reuse["run"]
+    canonical, = [step for step in steps if step.get("name") == "Upload fresh canonical Show Runtime bundle"]
+    assert canonical["if"] == "steps.canonical.outputs.reused != 'true'"
+    assert canonical["with"]["retention-days"] == 30
     assert {entry["artifact"] for entry in job["strategy"]["matrix"]["include"]} == {
         "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64",
     }

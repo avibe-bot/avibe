@@ -60,6 +60,15 @@ core stage, preserves the exact tag/source binding, and attaches the verified
 signed desktop set to the same release. The updater and mirror each treat a
 partial desktop set as unavailable until Stage 2 completes.
 
+The two release workflows may reuse a canonical Show Runtime bundle set from a
+previous successful release run when every identity field matches: trusted
+producer workflow/run, resolved `package-lock.json` digest, Node/npm toolchain,
+platform, external Runtime ref, exported router digest, and archive digest. A
+missing or mismatched identity falls back to a native rebuild and publishes a
+new canonical set. This applies only to the unsigned Show Runtime archives and
+router; release-versioned wheels, desktop-private wheels, and signed assets are
+never reused.
+
 GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They
 must include an installable wheel containing `ui/dist` and
