@@ -102,16 +102,19 @@ A ready answer admits `client_endpoint_id` to the transport until `admitted_unti
 - Admission is bound to the session's subject, held in memory only, and bounded: eight client endpoints per subject, 256 in total, oldest dropped first.
 - It ends at `admitted_until`, when the instance endpoint key changes, and when the service restarts. A client that keeps using the direct path asks again before expiry.
 - Admission is not authorization. A user whose access is revoked may keep an admitted transport peer for up to 300 seconds, and every request inside it is still refused by the remote session check.
+- Same-origin page content, such as a Show Page a signed-in user opens, can call the endpoint with that user's session. It learns what that user may learn and can admit an endpoint ID of its choosing; the admitted peer still meets the ingress and the session check.
 
 ## 5. What the client must do
 
 1. Ask through Cloudflare first. The direct path does not exist until a ready answer arrives. Later refreshes may use either path; both reach the same instance behind the same public certificate.
-2. Accept a ready answer only if `version` is one it supports, `instance_id` and `hostname` match the instance the user selected, and `expires_at` is in the future.
-3. Dial `endpoint.id` with `alpn` at the listed addresses, using no public discovery. Reject a peer with any other identity.
-4. Tag every probe and transport decision with the account, instance, and `generation` it belongs to. Drop state tagged with a generation the latest answer no longer carries, and never let a late result for an old account, instance, or generation install a route.
-5. Ask again on expiry, on a network change, and when the direct path fails; fall back to Cloudflare at once in the meantime.
-6. Ignore fields and address kinds it does not know.
-7. Never treat the answer, an address in it, or a successful transport handshake as a login or as proof of anything about the user.
+2. Make the request from native code, over the account's own same-origin transport, and use only the answer that request returned. Do not accept an answer handed over by page content: Show Pages are same-origin with the Workbench and can reach the native bridge, so an Agent-authored page could supply a forged one.
+3. Accept a ready answer only if `version` is one it supports, `instance_id` and `hostname` match the instance the user selected, and `expires_at` is in the future.
+4. Probe only addresses it can check for itself: private IPv4 or unique-local IPv6 for `lan`, global unicast IPv6 for `ipv6`, at most eight per answer. The App holds the user's Local Network grant; an answer must not be able to point it at anything else.
+5. Dial `endpoint.id` with `alpn` at those addresses, using no public or multicast discovery. Reject a peer with any other identity.
+6. Tag every probe and transport decision with the account, instance, and `generation` it belongs to. Drop state tagged with a generation the latest answer no longer carries, and never let a late result for an old account, instance, or generation install a route.
+7. Ask again on expiry, on a network change, and when the direct path fails; fall back to Cloudflare at once in the meantime.
+8. Ignore fields and address kinds it does not know.
+9. Never treat the answer, an address in it, or a successful transport handshake as a login or as proof of anything about the user.
 
 ## 6. What the answer never contains
 
