@@ -2944,7 +2944,9 @@
       "pushTitle": "Push (browser or Home Screen app)",
       "pushHint": "Whether this browser receives pushes at all.",
       "desktopTitle": "Desktop app notifications",
-      "desktopHint": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications."
+      "desktopHint": "Vault approvals and finished background runs. This computer only; same switch as the menu bar.",
+      "desktopHintMenuBar": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications.",
+      "desktopSaveFailed": "Couldn't save the notification switch. Try again."
     }
   },
   "remoteAccess": {
@@ -3820,7 +3822,7 @@
       "moreUnreadInFull": "Some unread sessions aren't in this preview — open the full inbox.",
       "notifications": {
         "checking": "Checking notifications",
-        "unsupported": "Notifications unavailable",
+        "unsupported": "This browser can't receive push notifications",
         "localOnly": "Notifications unavailable for this account",
         "installFirst": "Add to Home Screen first",
         "enable": "Enable notifications",

@@ -9,12 +9,13 @@ use avibe_runtime_host::notifications::{
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_notification::NotificationExt;
 
-use crate::{native_catalog_for_locales, updater, MAIN_WINDOW};
+use crate::{native_catalog_for_locales, pet, updater, MAIN_WINDOW};
 
 pub const MENU_ID: &str = "notifications";
+pub const SETTINGS_EVENT: &str = "avibe:desktop-notifications";
 // The Runtime expires an unacknowledged request after ten seconds. This
 // fallback stays below that deadline while SSE remains the normal path.
 const REMOTE_REQUEST_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -122,13 +123,15 @@ impl Notifications {
         self.enabled.load(Ordering::SeqCst)
     }
 
-    pub fn toggle(&self) {
-        let enabled = !self.enabled();
-        if write_preference(&self.preference_path, enabled).is_ok() {
-            self.enabled.store(enabled, Ordering::SeqCst);
-        } else {
-            eprintln!("The desktop notification preference could not be saved.");
-        }
+    pub fn set_enabled(&self, enabled: bool) -> Result<bool, String> {
+        write_preference(&self.preference_path, enabled)
+            .map_err(|error| format!("The desktop notification preference could not be saved: {error}"))?;
+        self.enabled.store(enabled, Ordering::SeqCst);
+        Ok(enabled)
+    }
+
+    pub fn toggle(&self) -> Result<bool, String> {
+        self.set_enabled(!self.enabled())
     }
 
     pub fn start(&self, app: &AppHandle, origin: LoopbackOrigin) {
@@ -257,6 +260,68 @@ pub fn start(app: &AppHandle, origin: LoopbackOrigin) {
     app.state::<Notifications>().start(app, origin);
 }
 
+fn dispatch(window: &WebviewWindow, enabled: bool) {
+    let script = format!(
+        "window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}));",
+        serde_json::to_string(SETTINGS_EVENT).expect("event name JSON"),
+        serde_json::json!({ "enabled": enabled }),
+    );
+    let _ = window.eval(script);
+}
+
+fn notify_workbench(app: &AppHandle, enabled: bool) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW).filter(pet::is_workbench) {
+        dispatch(&window, enabled);
+    }
+}
+
+fn sync_native_menu(app: &AppHandle, enabled: bool) {
+    if let Some(menus) = app.try_state::<crate::NativeMenus>() {
+        if menus.notifications.set_checked(enabled).is_err() {
+            eprintln!("failed to refresh the desktop notification menu");
+        }
+    }
+}
+
+fn publish_enabled(app: &AppHandle, enabled: bool) {
+    sync_native_menu(app, enabled);
+    notify_workbench(app, enabled);
+}
+
+pub fn toggle(app: &AppHandle) {
+    let notifications = app.state::<Notifications>();
+    match notifications.toggle() {
+        Ok(enabled) => publish_enabled(app, enabled),
+        Err(error) => eprintln!("{error}"),
+    }
+}
+
+pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<bool, String> {
+    let saved = app.state::<Notifications>().set_enabled(enabled)?;
+    publish_enabled(app, saved);
+    Ok(saved)
+}
+
+fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
+    if pet::is_workbench(window) {
+        Ok(())
+    } else {
+        Err("This command is only available to the Avibe Workbench.".to_owned())
+    }
+}
+
+#[tauri::command]
+pub fn desktop_notifications_state(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
+    ensure_workbench(&window)?;
+    Ok(app.state::<Notifications>().enabled())
+}
+
+#[tauri::command]
+pub fn desktop_notifications_set_enabled(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
+    ensure_workbench(&window)?;
+    set_enabled(&app, enabled)
+}
+
 /// A stopped connection leaves no count it can vouch for. The clear queues
 /// behind any paint already dispatched, which the generation bump voids.
 pub fn stop(app: &AppHandle) {
@@ -304,11 +369,11 @@ mod tests {
         let path = directory.0.join("notifications.json");
         let state = Notifications::new(path.clone());
         assert!(state.enabled());
-        state.toggle();
+        state.set_enabled(false).unwrap();
         assert!(!state.enabled());
         let restarted = Notifications::new(path.clone());
         assert!(!restarted.enabled());
-        restarted.toggle();
+        restarted.set_enabled(true).unwrap();
         assert!(Notifications::new(path).enabled());
     }
 
@@ -321,7 +386,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let state = Notifications::new(path.clone());
         std::fs::create_dir(&path).unwrap();
-        state.toggle();
+        assert!(state.set_enabled(false).is_err());
         assert!(state.enabled());
         assert!(!path.with_extension("tmp").exists());
     }

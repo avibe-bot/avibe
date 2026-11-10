@@ -11,7 +11,14 @@ import { ToastProvider } from '../context/ToastProvider';
 import type { WorkbenchSession } from '../context/ApiContext';
 import en from '../i18n/en.json';
 import zh from '../i18n/zh.json';
-import { canConfigureDesktopPet, isDesktopShell, tryOpenDesktopAppWindow } from './desktopShell';
+import {
+  canConfigureDesktopNotifications,
+  canConfigureDesktopPet,
+  desktopNotificationsActions,
+  isDesktopShell,
+  listenDesktopNotifications,
+  tryOpenDesktopAppWindow,
+} from './desktopShell';
 
 vi.mock('../context/InstanceAuthorizationContext', async (original) => ({
   ...await original<typeof import('../context/InstanceAuthorizationContext')>(),
@@ -63,6 +70,7 @@ afterEach(() => {
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_DRAG__?: true }).__AVIBE_DESKTOP_DRAG__;
   delete (window as { __AVIBE_DESKTOP_PET_SETTINGS__?: true }).__AVIBE_DESKTOP_PET_SETTINGS__;
+  delete (window as { __AVIBE_DESKTOP_NOTIFICATIONS__?: true }).__AVIBE_DESKTOP_NOTIFICATIONS__;
   delete (window as { __AVIBE_DESKTOP_APP_WINDOWS__?: true }).__AVIBE_DESKTOP_APP_WINDOWS__;
   delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
@@ -123,6 +131,49 @@ describe('Desktop Mini settings capability', () => {
     }
     expect(isDesktopShell()).toBe(shell);
     expect(canConfigureDesktopPet()).toBe(settings);
+  });
+});
+
+describe('native desktop notification capability', () => {
+  it.each([
+    ['web', false, false],
+    ['older shell', true, false],
+    ['current shell', true, true],
+  ] as const)('probes the dedicated capability marker for %s', (_label, shell, notifications) => {
+    if (shell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    if (notifications) {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_NOTIFICATIONS__', { configurable: true, value: true });
+      Object.defineProperty(window, '__TAURI_INTERNALS__', {
+        configurable: true,
+        value: { invoke: vi.fn() },
+      });
+    }
+    expect(canConfigureDesktopNotifications()).toBe(notifications);
+    if (notifications) {
+      expect(desktopNotificationsActions()).not.toBeNull();
+    } else {
+      expect(desktopNotificationsActions()).toBeNull();
+    }
+  });
+
+  it('uses named IPC arguments and receives menu updates', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_NOTIFICATIONS__', { configurable: true, value: true });
+    const invoke = vi.fn(async (command: string) => command === 'desktop_notifications_state' ? false : true);
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+
+    const actions = desktopNotificationsActions();
+    if (!actions) throw new Error('desktop notification actions should be available');
+    await expect(actions.get()).resolves.toBe(false);
+    await expect(actions.set(true)).resolves.toBe(true);
+    expect(invoke).toHaveBeenNthCalledWith(1, 'desktop_notifications_state');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'desktop_notifications_set_enabled', { enabled: true });
+
+    const handler = vi.fn();
+    const stop = listenDesktopNotifications(handler);
+    window.dispatchEvent(new CustomEvent('avibe:desktop-notifications', { detail: { enabled: false } }));
+    expect(handler).toHaveBeenCalledWith(false);
+    stop();
   });
 });
 
