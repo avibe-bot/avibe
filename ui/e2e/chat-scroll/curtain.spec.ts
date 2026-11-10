@@ -75,22 +75,27 @@ for (const bar of ['on screen', 'below the screen'] as const) {
   cells.push({ host: 'group', source: 'inside', bar, phase: 'turned back', change: 'grows' });
 }
 
-/** Places the item matching `selector` (the first) `y` px below the transcript's top, once any older page the
- *  place asks for has come in (the scroller holds the reader through it, which is not what is watched here). */
+/** Places the item matching `selector` (the first) `y` px below the transcript's top, where no older page comes in
+ *  any more: an older page is fetched while the reader is within ChatPage's prefetch band of the loaded top
+ *  (olderPrefetchBand: eight screens, never less than 4000 px), and its landing (the scroller holding the reader
+ *  through it) is not what is watched here. So it places the item again until the reader is past that band, or
+ *  nothing older is left, however long the pages take to come in. */
 async function place(page: Page, selector: string, y: number) {
   const put = () => transcript(page).evaluate((scroller, [sel, at]) => {
     const el = scroller.querySelector(sel as string)!;
     scroller.scrollTop += el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - (at as number);
+    const band = Math.max(4000, scroller.clientHeight * 8);
+    const first = scroller.querySelector('[data-message-id]')?.getAttribute('data-message-id');
+    return { clear: scroller.scrollTop > band + 200 || first === 'msg_00000', first };
   }, [selector, y] as const);
-  const firstRow = () => transcript(page).locator('[data-message-id]').first().getAttribute('data-message-id');
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const loadedFrom = await firstRow();
-    await put();
-    await page.waitForTimeout(700);
-    if ((await firstRow()) === loadedFrom) break;
-  }
-  await put();
-  await page.waitForTimeout(400);
+  // A page asked for lands once the reader rests: place, and look again a moment later.
+  await expect.poll(async () => (await put()).clear, { timeout: 30_000, intervals: [900] }).toBe(true);
+  await page.waitForTimeout(600);
+  const placed = await put();
+  expect(placed.clear).toBe(true);
+  await page.waitForTimeout(600);
+  // Nothing came in since.
+  expect((await put()).first).toBe(placed.first);
 }
 
 /** `exact`: two takes in a row read the same (WebKit samples a running animation at each read: a take that spans
