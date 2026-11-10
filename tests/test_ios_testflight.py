@@ -88,13 +88,15 @@ def test_a_current_app_store_profile_for_this_app_is_accepted():
     testflight.check_profile(app_store_profile(), now=NOW)
 
 
-def test_profile_keychain_grants_accept_exact_or_covering_wildcards():
+def test_profile_keychain_grants_accept_required_coverage_and_extra_allowlist_entries():
     exact = app_store_profile()
+    exact["Entitlements"]["keychain-access-groups"].append("com.apple.token")
     testflight.check_profile(exact, now=NOW)
 
     wildcard = app_store_profile()
     wildcard["Entitlements"]["keychain-access-groups"] = [
-        f"{testflight.TEAM_ID}.*"
+        f"{testflight.TEAM_ID}.*",
+        "com.apple.token",
     ]
     testflight.check_profile(wildcard, now=NOW)
 
@@ -126,7 +128,7 @@ def test_profile_keychain_grants_reject_unrelated_malformed_or_insufficient_valu
     profile = app_store_profile()
     profile["Entitlements"]["keychain-access-groups"] = grants
 
-    with pytest.raises(testflight.TestFlightError, match="covering wildcards"):
+    with pytest.raises(testflight.TestFlightError, match="same-Team wildcard"):
         testflight.check_profile(profile, now=NOW)
 
 
@@ -160,7 +162,7 @@ def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
     profile["Entitlements"]["keychain-access-groups"] = [
         testflight.SHARED_KEYCHAIN_ACCESS_GROUP
     ]
-    with pytest.raises(testflight.TestFlightError, match="exactly"):
+    with pytest.raises(testflight.TestFlightError, match="same-Team wildcard"):
         testflight.check_profile(profile, now=NOW)
 
 
@@ -338,13 +340,14 @@ def test_a_notification_service_profile_has_shared_groups_but_no_apns():
         ],
         "get-task-allow": False,
     }
-    with pytest.raises(testflight.TestFlightError, match="exactly"):
-        testflight.check_profile(
-            profile,
-            bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
-            required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
-            now=NOW,
-        )
+    # The profile is an allowlist, so extra well-formed keychain grants are
+    # acceptable; the signed extension remains exact and rejects this set.
+    testflight.check_profile(
+        profile,
+        bundle_id=testflight.NOTIFICATION_SERVICE_BUNDLE_ID,
+        required_entitlements=testflight.NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+        now=NOW,
+    )
 
 
 def _write_extension(path: Path, bundle_id: str) -> None:
