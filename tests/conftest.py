@@ -649,6 +649,29 @@ def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch):
         yield pushed
 
 
+@pytest.fixture(autouse=True)
+def _no_login_shell_lookup(monkeypatch):
+    """Keep a Runtime start from running the developer's login shell.
+
+    ``runtime.start_service`` and ``runtime.start_ui`` ask the login shell for
+    its ``PATH``, which runs the developer's own startup files and makes the
+    environment a test sees depend on them. The lookup reports no ``PATH`` here,
+    so a start keeps the caller's. A test of the lookup drives ``resolve_with``
+    with a shell it wrote, or replaces ``login_shell_path`` itself. The answer
+    cached for the process does not cross test boundaries.
+    """
+
+    def stub(login_path) -> None:
+        login_path._runtime_path.cache_clear()  # noqa: SLF001
+        monkeypatch.setattr(login_path, "login_shell_path", lambda: login_path.LoginPath(None, "test"))
+
+    with _stubbed_for_this_test("vibe.login_path", stub):
+        yield
+    login_path = sys.modules.get("vibe.login_path")
+    if login_path is not None:
+        login_path._runtime_path.cache_clear()  # noqa: SLF001
+
+
 def _models_dev_unreachable(_previous: dict) -> dict:
     raise OSError("tests do not fetch models.dev")
 

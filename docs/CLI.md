@@ -188,6 +188,7 @@ vibe start --allow-downgrade
 - With `--no-open-browser`, keeps the service/UI lifecycle the same but does not launch a system browser window
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
 - Refuses to run an install older than the last activated one, for example an old `vibe` earlier on `PATH`. The error names both versions and the launcher to run instead; `--allow-downgrade` runs the older build on purpose. The desktop app only warns.
+- On macOS and Linux, `vibe start` and `vibe restart` give Avibe, and so every Agent Session, the `PATH` of your login shell when the caller's `PATH` lacks any of its entries, as it does over non-interactive SSH or from cron. A caller that already has every entry, such as a terminal, keeps its own `PATH` unchanged, and entries the caller put ahead of the system ones, such as a service unit's virtualenv, stay first. The login shell runs once per start as `$SHELL -l -i -c`, only `PATH` is read, and when it does not answer within 10 seconds Avibe starts with the caller's `PATH` and says so.
 - Started by the desktop app, reuses or replaces only a service and Web UI of that app's own Runtime. If another Avibe is running here, it exits with status 3, says so, and leaves that Avibe running.
 
 ### `vibe stop`

@@ -31,6 +31,7 @@ from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.process_isolation import fingerprint_process_marker, isolated_subprocess_kwargs, processes_carrying_marker
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
+from vibe.login_path import runtime_environment
 
 
 logger = logging.getLogger(__name__)
@@ -2391,7 +2392,7 @@ def _resolve_service_pid(
             "service_stdout.log",
             "service_stderr.log",
             env={
-                **os.environ,
+                **runtime_environment(),
                 "VIBE_DISABLE_STDOUT_LOGGING": "1",
                 SHUTDOWN_INTENT_ENV: "1",
             },
@@ -2881,6 +2882,7 @@ def start_ui(
         pid_path,
         "ui_stdout.log",
         "ui_stderr.log",
+        env=runtime_environment(),
         **spawn_kwargs,
     )
     if wait_for_ready and not wait_for_ui_server(host, port):
