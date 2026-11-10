@@ -596,6 +596,10 @@ SERVICE = {"core": "core/__init__.py", "vibe": "vibe/__init__.py"}
         (lambda run: run.log(404, [run.python, "-c", "pass"], {"config": [f"{_checkout(run)}/config"]}),
          "outside the released wheel"),
         (lambda run: run.log(404, [run.python, "-c", "pass"], {"modules": []}), "outside the released wheel"),
+        # Found inside the environment first, and again in a checkout later.
+        (lambda run: (run.origins / "202.jsonl").open("a").write(
+            json.dumps({"module": "core", "origin": f"{_checkout(run)}/core/__init__.py"}) + "\n"),
+         "such as core from"),
         # Another Avibe than the released one, or another interpreter than the environment's.
         (lambda run: run.log(202, [run.python, "main.py"], SERVICE, version="0.0.0.dev0"), "ran Avibe '0.0.0.dev0'"),
         (lambda run: run.log(101, ["/usr/bin/python3", "-m", "pytest"], {"vibe": "vibe/__init__.py"},
@@ -633,10 +637,20 @@ def test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence
     assert any(message in problem for problem in problems)
 
 
-def test_an_import_log_that_cannot_be_read_fails_the_run(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda log: log.write_text("not json\n"),
+        # Two processes in one log: the second one's imports would be judged by the first one's environment.
+        lambda log: log.write_text(log.read_text() + log.read_text().splitlines()[0] + "\n"),
+        lambda log: log.write_text("".join(line + "\n" for line in log.read_text().splitlines()[1:])),
+    ],
+    ids=["not-json", "two-process-records", "no-process-record"],
+)
+def test_an_import_log_that_cannot_be_read_fails_the_run(tmp_path, damage) -> None:
     candidate = qualification.load_candidate(_record(tmp_path / "records"))
     run = WheelRun(tmp_path / "run")
-    (run.origins / "101.jsonl").write_text("not json\n")
+    damage(run.origins / "101.jsonl")
 
     with pytest.raises(QualificationError, match="import log cannot be read"):
         run.evidence(candidate)
@@ -691,50 +705,155 @@ def test_the_rehearsal_command_fails_on_harness_problems_and_on_failing_tests_on
     capsys.readouterr()
 
 
-def test_the_recorder_logs_every_product_module_a_process_imports_from_inside_that_process(tmp_path) -> None:
-    import subprocess
-    import sys
+class RecordedEnvironment:
+    """A stand-in environment with the origin recorder installed, and a checkout beside it."""
 
-    environment = tmp_path / "venv"
-    site = environment / "lib" / "python3.12" / "site-packages"
-    for package in ("vibe/handlers", "core"):
-        (site / package).mkdir(parents=True)
-    (site / "vibe/__init__.py").write_text("")
-    (site / "vibe/handlers/__init__.py").write_text("")
-    (site / "vibe/handlers/deep.py").write_text("VALUE = 7\n")
-    (site / "core/__init__.py").write_text("")
-    qualification.install_origin_recorder(environment, tmp_path / "origins")
-    # A checkout that comes first on the path and shadows a product package.
-    checkout = tmp_path / "checkout"
-    (checkout / "core").mkdir(parents=True)
-    (checkout / "core/__init__.py").write_text("")
-    (checkout / "core/leak.py").write_text("")
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.environment = root / "venv"
+        self.site = self.environment / "lib" / "python3.12" / "site-packages"
+        for package in ("vibe/handlers", "core", "avibe_os-3.2.6.dist-info"):
+            (self.site / package).mkdir(parents=True)
+        (self.site / "vibe/__init__.py").write_text("")
+        (self.site / "vibe/handlers/__init__.py").write_text("")
+        (self.site / "vibe/handlers/deep.py").write_text("VALUE = 7\n")
+        (self.site / "core/__init__.py").write_text("")
+        (self.site / "avibe_os-3.2.6.dist-info/METADATA").write_text(
+            "Metadata-Version: 2.4\nName: avibe-os\nVersion: 3.2.6\n\nVersion: not a header\n"
+        )
+        self.origins = root / "origins"
+        qualification.install_origin_recorder(self.environment, self.origins)
+        # A checkout that shadows a product package once it is on the path.
+        self.checkout = root / "checkout"
+        (self.checkout / "core").mkdir(parents=True)
+        (self.checkout / "core/__init__.py").write_text("")
+        (self.checkout / "core/leak.py").write_text("")
 
-    def run(code: str, *paths: Path) -> None:
-        subprocess.run(
-            [sys.executable, "-S", "-c", f"import site; site.addsitedir({str(site)!r}); {code}"],
-            check=True, cwd=tmp_path, env={"PATH": os.environ["PATH"], "PYTHONPATH": os.pathsep.join(map(str, paths))},
+    def run(self, code: str, *paths: Path, site: Path | None = None) -> str:
+        import subprocess
+        import sys
+
+        return subprocess.run(
+            [sys.executable, "-S", "-c", f"import site; site.addsitedir({str(site or self.site)!r}); {code}"],
+            check=True, cwd=self.root, capture_output=True, text=True,
+            env={"PATH": os.environ["PATH"], "PYTHONPATH": os.pathsep.join(map(str, paths))},
+        ).stdout
+
+    def processes(self) -> list[qualification.ProcessOrigins]:
+        return qualification.read_origin_logs(self.origins)
+
+    def problems(self) -> list[str]:
+        return qualification.origin_problems(
+            self.processes(), environment=self.environment, version="3.2.6", harness=self.root / "harness"
         )
 
-    run("import vibe.handlers.deep, json, collections; assert vibe.handlers.deep.VALUE == 7")
-    run("import core.leak", checkout)
 
-    processes = qualification.read_origin_logs(tmp_path / "origins")
+def test_the_recorder_logs_every_product_module_a_process_imports_from_inside_that_process(tmp_path) -> None:
+    import sys
+
+    recorded = RecordedEnvironment(tmp_path)
+    site, checkout = recorded.site, recorded.checkout
+
+    recorded.run("import vibe.handlers.deep, json, collections; assert vibe.handlers.deep.VALUE == 7")
+    recorded.run("import core.leak", checkout)
+    # A test that puts a checkout on the path and imports the package again.
+    recorded.run(f"import core, sys; del sys.modules['core']; sys.path.insert(0, {str(checkout)!r}); import core.leak")
+
+    processes = recorded.processes()
     (clean,) = [process for process in processes if "vibe" in process.modules]
-    (leaking,) = [process for process in processes if "core.leak" in process.modules]
+    leaking, found_again = sorted(
+        (process for process in processes if "core.leak" in process.modules), key=lambda process: len(process.modules["core"])
+    )
     # Every product module, submodules included, and nothing from the standard library.
     assert dict(clean.modules) == {
-        "vibe": str(site / "vibe/__init__.py"),
-        "vibe.handlers": str(site / "vibe/handlers/__init__.py"),
-        "vibe.handlers.deep": str(site / "vibe/handlers/deep.py"),
+        "vibe": (str(site / "vibe/__init__.py"),),
+        "vibe.handlers": (str(site / "vibe/handlers/__init__.py"),),
+        "vibe.handlers.deep": (str(site / "vibe/handlers/deep.py"),),
     }
-    assert leaking.modules == {"core": str(checkout / "core/__init__.py"), "core.leak": str(checkout / "core/leak.py")}
+    assert leaking.modules == {
+        "core": (str(checkout / "core/__init__.py"),), "core.leak": (str(checkout / "core/leak.py"),),
+    }
+    # The second file a module was found in is recorded too, and judged.
+    assert found_again.modules["core"] == (str(site / "core/__init__.py"), str(checkout / "core/__init__.py"))
     assert clean.command[1:3] == ("-S", "-c") and Path(clean.cwd).resolve() == tmp_path.resolve()
     assert clean.script is None and not clean.is_test_runner and clean.prefix == sys.prefix
-    problems = qualification.origin_problems(
-        processes, environment=environment, version="3.2.6", harness=tmp_path / "harness"
+    # Read from the installed metadata's header, without the metadata library.
+    assert {process.distribution_version for process in processes} == {"3.2.6"}
+    problems = recorded.problems()
+    assert len([problem for problem in problems if "imported 2 product modules from outside" in problem]) == 2
+    assert not any("ran Avibe" in problem for problem in problems)
+
+
+def test_the_recorder_changes_nothing_else_about_the_process_it_runs_in(tmp_path) -> None:
+    recorded = RecordedEnvironment(tmp_path)
+    # The same start-up hook with nothing behind it but the one library the recorder uses.
+    bare = tmp_path / "bare-site"
+    bare.mkdir()
+    (bare / "only_json.pth").write_text("import json\n")
+    loaded = "import sys; print(' '.join(sorted(sys.modules)))"
+
+    with_recorder = set(recorded.run(loaded).split())
+    with_json_only = set(recorded.run(loaded, site=bare).split())
+
+    # No metadata, path or threading library is loaded ahead of the product.
+    assert with_recorder - with_json_only == {"avibe_qualification_origins"}
+    # A log that cannot be written for a while loses nothing and fails no import.
+    away = f"{recorded.origins}.away"
+    recorded.run(
+        f"import os; os.rename({str(recorded.origins)!r}, {away!r}); import vibe.handlers.deep; "
+        f"os.rename({away!r}, {str(recorded.origins)!r}); import core"
     )
-    assert any("imported 2 product modules from outside" in problem for problem in problems)
+    (process,) = [process for process in recorded.processes() if process.modules]
+    assert sorted(process.modules) == ["core", "vibe", "vibe.handlers", "vibe.handlers.deep"]
+    assert not any("outside" in problem for problem in recorded.problems())
+
+
+@pytest.mark.parametrize("recorder_first", [False, True], ids=["after-the-suite-finder", "ahead-of-the-suite-finder"])
+def test_the_recorder_and_the_suites_own_import_finder_each_handle_an_import_once(
+    tmp_path, monkeypatch, recorder_first
+) -> None:
+    """MH-ENGINE-CHANNEL-010: the recorder runs inside the test runner, beside the suite's own finder.
+
+    Both finders delegate to the rest of ``sys.meta_path``. The first released
+    wheel rehearsal lost 128 cases to the two calling each other without end
+    on ``vibe.models_dev_catalog``, which the suite stubs on import.
+    """
+
+    import importlib
+    import importlib.machinery
+    import importlib.util
+    import sys
+
+    from scripts import model_hub_engine_qualification_origins as shipped
+
+    name = "vibe.models_dev_catalog"
+    suite_finder = next(finder for finder in sys.meta_path if type(finder).__name__ == "_StubOnImport")
+    # The recorder as an environment holds it: a copy beside its configuration, active once imported.
+    (tmp_path / "recorder.py").write_bytes((qualification.REPO_ROOT / qualification.ORIGINS_MODULE).read_bytes())
+    (tmp_path / shipped.CONFIG_NAME).write_text(json.dumps({"directory": str(tmp_path / "origins")}))
+    monkeypatch.setattr(sys, "meta_path", list(sys.meta_path))
+    spec = importlib.util.spec_from_file_location("recorder_under_test", tmp_path / "recorder.py")
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
+    recorder = sys.meta_path[0]
+    assert type(recorder).__name__ == "_Recorder"
+    if not recorder_first:
+        # Where a ``.pth`` leaves it once pytest and the suite have put their finders in front.
+        sys.meta_path.remove(recorder)
+        sys.meta_path.insert(sys.meta_path.index(importlib.machinery.BuiltinImporter), recorder)
+        assert sys.meta_path.index(suite_finder) < sys.meta_path.index(recorder)
+    # The module is imported afresh, with one more stub waiting for it beside the suite's own.
+    package = importlib.import_module("vibe")
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.delattr(package, "models_dev_catalog", raising=False)
+    stubbed: list = []
+    monkeypatch.setitem(suite_finder.waiting, name, [*suite_finder.waiting.get(name, ()), stubbed.append])
+
+    module = importlib.import_module(name)
+
+    # The suite's finder still applied its stubs, once; the recorder saw where the module came from.
+    assert stubbed == [module]
+    (process,) = qualification.read_origin_logs(tmp_path / "origins")
+    assert process.modules[name] == (str(qualification.REPO_ROOT / "vibe" / "models_dev_catalog.py"),)
 
 
 def test_processes_are_told_apart_by_the_interpreters_own_command_line(tmp_path) -> None:

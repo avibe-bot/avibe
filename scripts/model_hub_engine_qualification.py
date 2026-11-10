@@ -377,7 +377,8 @@ class ProcessOrigins:
     cwd: str
     prefix: str
     distribution_version: str | None
-    modules: Mapping[str, Any]
+    #: Every origin recorded for each product module; more than one when it was found again elsewhere.
+    modules: Mapping[str, tuple[Any, ...]]
 
     @property
     def script(self) -> Path | None:
@@ -409,14 +410,20 @@ def read_origin_logs(directory: Path) -> list[ProcessOrigins]:
     processes: list[ProcessOrigins] = []
     for log in sorted(directory.glob("*.jsonl")):
         header: dict[str, Any] | None = None
-        modules: dict[str, Any] = {}
+        modules: dict[str, tuple[Any, ...]] = {}
         try:
             for line in log.read_text(encoding="utf-8").splitlines():
                 record = json.loads(line)
                 if "process" in record:
-                    header = header or record["process"]
-                else:
-                    modules[record["module"]] = record["origin"]
+                    # One log is one process. A second record would have its
+                    # imports judged by the first one's environment.
+                    if header is not None:
+                        raise ValueError("more than one process record")
+                    header = record["process"]
+                elif header is None:
+                    raise ValueError("no process record ahead of the imports")
+                elif record["origin"] not in modules.setdefault(record["module"], ()):
+                    modules[record["module"]] += (record["origin"],)
             if header is None:
                 raise ValueError("no process record")
             processes.append(
@@ -454,11 +461,14 @@ def origin_problems(
 
     problems: list[str] = []
     for process in processes:
-        outside = sorted(name for name, origin in process.modules.items() if not inside(origin))
+        outside = sorted(
+            ((name, origin) for name, origins in process.modules.items() for origin in origins if not inside(origin)),
+            key=lambda found: found[0],
+        )
         if outside:
             problems.append(
-                f"{process.label} imported {len(outside)} product modules from outside the released wheel's "
-                f"environment, such as {outside[0]} from {process.modules[outside[0]]!r}"
+                f"{process.label} imported {len({name for name, _origin in outside})} product modules from outside "
+                f"the released wheel's environment, such as {outside[0][0]} from {outside[0][1]!r}"
             )
         if process.modules and process.distribution_version != version:
             problems.append(f"{process.label} ran Avibe {process.distribution_version!r}, not {version}")
