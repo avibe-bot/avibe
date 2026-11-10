@@ -104,16 +104,18 @@ def _setup(monkeypatch, tmp_path):
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
-def _seed(engine, sid, *, backend="vibey", model="claude-opus-5-5", effort="high", speed=None, running=False):
+def _seed(engine, sid, *, backend="vibey", model="claude-opus-5-5", effort="high", speed=None, running=False,
+          agent_name=None, metadata=None):
     now = "2026-11-10T09:00:00Z"
     with engine.begin() as conn:
         scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj", now=now)
         conn.execute(
             agent_sessions.insert().values(
-                id=sid, scope_id=scope_id, agent_id="agent_" + sid, agent_name=backend, agent_backend=backend,
+                id=sid, scope_id=scope_id, agent_id="agent_" + sid, agent_name=agent_name or backend, agent_backend=backend,
                 agent_variant=backend, session_anchor="anc_" + sid, native_session_id="nat_" + sid, status="active",
                 visibility="foreground", agent_status="running" if running else "idle", model=model,
-                reasoning_effort=effort, metadata_json=json.dumps({"speed": speed} if speed else {}),
+                reasoning_effort=effort,
+                metadata_json=json.dumps({**({"speed": speed} if speed else {}), **(metadata or {})}),
                 created_at=now, updated_at=now, last_active_at=now,
             )
         )
@@ -131,8 +133,13 @@ def _run(cmd, argv, capsys):
     return code, json.loads(captured.out if code == 0 else captured.err)
 
 
+async def _read_agent_sources(backend):
+    return _hub_reader(backend)
+
+
 def _update(capsys, sid, *flags):
-    with patch.object(lent, "model_hub_service", SimpleNamespace(get_agent_sources=_hub_reader)):
+    # The service reads the menu with ``read_agent_sources`` on its loop, which owns Model Hub's recovery state.
+    with patch.object(lent, "model_hub_service", SimpleNamespace(read_agent_sources=_read_agent_sources)):
         return _run(cli.cmd_session_update, ["session", "update", "--session-id", sid, *flags], capsys)
 
 
@@ -250,3 +257,21 @@ def test_agent_run_speed_applies_only_to_a_new_session(monkeypatch, tmp_path, ca
         backend="vibey", agent_label="vibey", model="claude-opus-5-5", reasoning_effort="high",
         speed="fast", hub_agent_reader=_hub_reader, help_command="vibe agent run --help",
     ) == {}
+
+
+def test_session_models_reports_an_explicitly_pinned_null_as_the_sessions_own(monkeypatch, tmp_path, capsys):
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+    engine = _setup(monkeypatch, tmp_path)
+    cli._agent_store().create(name="tuned", backend="vibey", model="gpt-6.1-sol", reasoning_effort="high")
+    _seed(engine, "sespin", agent_name="tuned", model="claude-opus-5-5", effort=None,
+          metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["reasoning_effort"]})
+    _seed(engine, "sesinh", agent_name="tuned", model=None, effort=None)
+
+    _, pinned = _run(cli.cmd_session_models, ["session", "models", "--session-id", "sespin"], capsys)
+    _, inherited = _run(cli.cmd_session_models, ["session", "models", "--session-id", "sesinh"], capsys)
+
+    assert pinned["current"]["reasoning_effort"] is None
+    assert pinned["current"]["from"] == {"model": "session", "reasoning_effort": "session"}
+    assert (inherited["current"]["model"], inherited["current"]["reasoning_effort"]) == ("gpt-6.1-sol", "high")
+    assert inherited["current"]["from"] == {"model": "agent", "reasoning_effort": "agent"}

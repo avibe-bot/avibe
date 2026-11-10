@@ -9044,18 +9044,24 @@ def _route_menu(backend: str, *, hub_agent_reader, help_command: str, provider: 
 
 def _session_route(payload: dict, agent_store) -> tuple[Any, str, dict]:
     """A Session's Agent, backend, and effective model/effort/speed, with where each value comes from."""
+    from core.agent_session_context import session_model_settings
+
     agent_name = (payload.get("agent_name") or "").strip()
     agent = agent_store.get(agent_name) if agent_name else agent_store.get_default_agent()
     backend = (payload.get("agent_backend") or "").strip() or (agent.backend if agent else "")
-    model = payload.get("model") or None
-    effort = payload.get("reasoning_effort") or None
+    # Dispatch's own resolution: an explicitly pinned null is the Session's setting, not inheritance.
+    model, effort, explicit = session_model_settings(
+        payload,
+        fallback_model=agent.model if agent else None,
+        fallback_reasoning_effort=agent.reasoning_effort if agent else None,
+    )
     current = {
-        "model": model or (agent.model if agent else None),
-        "reasoning_effort": effort or (agent.reasoning_effort if agent else None),
+        "model": model,
+        "reasoning_effort": effort,
         "speed": "fast" if payload.get("speed") == "fast" else "standard",
         "from": {
-            "model": "session" if model else "agent",
-            "reasoning_effort": "session" if effort else "agent",
+            name: "session" if name in explicit or payload.get(name) else "agent"
+            for name in ("model", "reasoning_effort")
         },
     }
     return agent, backend, current
