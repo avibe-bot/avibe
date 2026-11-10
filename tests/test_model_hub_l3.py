@@ -2286,6 +2286,75 @@ def test_gateway_serves_a_request_that_arrives_after_its_turn_settled(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("selection", ["sonnet", "sonnet[1m]"])
+def test_mh_match_003_claude_alias_launches_and_routes_on_its_observed_full_id(
+    tmp_path: Path,
+    selection: str,
+) -> None:
+    """MH-MATCH-003: an alias selection launches Claude on the full id its Source lists.
+
+    The Claude CLI rewrites a family alias to a concrete id before it sends
+    anything (observed: ``--model sonnet`` puts ``claude-sonnet-5-5`` on the
+    wire), while a concrete ``--model`` is sent as given. A launch prepared
+    under the alias therefore met a request its own credential refused with a
+    409 before any Source was asked.
+    """
+
+    full_id = "claude-sonnet-5-5"
+
+    async def exercise() -> None:
+        source = _source(
+            "src_customfull",
+            "Custom endpoint listing full ids only",
+            vendor="anthropic",
+            protocol="anthropic",
+            model_id=full_id,
+        )
+        source.base_url = "https://custom.example.invalid"
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[_outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id)],
+        )
+        agent = service.store.config.agents["claude"]
+        agent.routes = {}
+        rows = {model.id: model for model in agent.models}
+        rows[selection].context_window, rows[full_id].context_window = 1_000_000, 200_000
+        service.store.requested_models["claude"] = selection
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve(
+                "claude",
+                selection,
+                process_scope="session:/repo",
+                turn_id="turn_alias_selection",
+            )
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{launch.gateway_base_url}/v1/messages",
+                    json={
+                        "model": full_id,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "stream": False,
+                    },
+                    headers={"Authorization": f"Bearer {launch.gateway_token}"},
+                )
+                assert response.status == 200, await response.text()
+                await response.read()
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [(source.id, full_id, "claude")]
+        # The CLI is started on the id it will send, and the selection keeps
+        # its own menu row: its context budget is not the full id's.
+        assert (launch.runtime_model, launch.target_model) == (full_id, full_id)
+        assert (launch.requested_model, launch.context_window) == (selection, 1_000_000)
+
+    asyncio.run(exercise())
+
+
 def test_gateway_models_endpoint_serves_authenticated_backend_catalog(
     tmp_path: Path,
 ) -> None:
