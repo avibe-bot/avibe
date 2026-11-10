@@ -1,53 +1,53 @@
 diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
-index 1cb4da2..34103d0 100644
+index dc3f3c5..ad1b632 100644
 --- a/internal/runtime/executor/codex_executor_execute.go
 +++ b/internal/runtime/executor/codex_executor_execute.go
-@@ -86,7 +86,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
- 	}
+@@ -102,7 +102,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 	sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, "codex executor", doc, isCompat, targetModel, baseURL)
  
  	url := strings.TrimSuffix(baseURL, "/") + "/responses"
--	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, opts.Headers)
-+	httpReq, upstreamBody, err := e.cacheHelperWithCompat(ctx, from, url, req, body, isCompat, opts.Headers)
+-	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
++	httpReq, upstreamBody, err := e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, isCompat, opts.Headers)
  	if err != nil {
  		return resp, err
  	}
-@@ -267,7 +267,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
- 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, isCompat)
+@@ -302,7 +302,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+ 	optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuthDoc(doc, ctx, opts.Headers, e.cfg, auth, isCompat)
  
  	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
--	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, opts.Headers)
-+	httpReq, upstreamBody, err := e.cacheHelperWithCompat(ctx, from, url, req, body, isCompat, opts.Headers)
+-	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
++	httpReq, upstreamBody, err := e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, isCompat, opts.Headers)
  	if err != nil {
  		return resp, err
  	}
 diff --git a/internal/runtime/executor/codex_executor_request.go b/internal/runtime/executor/codex_executor_request.go
-index 43dd89b..d2bff01 100644
+index 1acd7d7..3465fb8 100644
 --- a/internal/runtime/executor/codex_executor_request.go
 +++ b/internal/runtime/executor/codex_executor_request.go
-@@ -97,6 +97,12 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
+@@ -145,6 +145,12 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
  }
  
- func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte, headerSets ...http.Header) (*http.Request, []byte, error) {
-+	return e.cacheHelperWithCompat(ctx, from, url, req, rawJSON, false, headerSets...)
+ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, doc *ojson.Doc, auth *cliproxyauth.Auth, headerSets ...http.Header) (*http.Request, []byte, error) {
++	return e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, false, headerSets...)
 +}
 +
-+// cacheHelperWithCompat is cacheHelper for a request whose model compatibility mode is
-+// isCompat, which decides how input item IDs are sanitized.
-+func (e *CodexExecutor) cacheHelperWithCompat(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte, isCompat bool, headerSets ...http.Header) (*http.Request, []byte, error) {
++// cacheHelperDocWithCompat applies the Codex input-ID rules for the resolved model's
++// compatibility mode before finalizing the request.
++func (e *CodexExecutor) cacheHelperDocWithCompat(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, doc *ojson.Doc, auth *cliproxyauth.Auth, isCompat bool, headerSets ...http.Header) (*http.Request, []byte, error) {
  	var headers http.Header
  	if len(headerSets) > 0 {
  		headers = headerSets[0]
-@@ -139,7 +145,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
+@@ -190,7 +196,7 @@ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.F
  	if cache.ID != "" {
- 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
+ 		helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cache.ID)
  	}
--	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
-+	rawJSON = helps.SanitizeCodexInputItemIDsWithCompat(rawJSON, isCompat)
- 	rawJSON = helps.FinalizePayload(ctx, rawJSON)
- 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
- 	if err != nil {
+-	helps.SanitizeCodexInputItemIDsDoc(doc)
++	helps.SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat)
+ 	helps.FinalizePayloadDoc(ctx, doc)
+ 	var rawJSON []byte
+ 	if doc != nil {
 diff --git a/internal/runtime/executor/codex_executor_signature_test.go b/internal/runtime/executor/codex_executor_signature_test.go
-index 9947580..b042ac8 100644
+index ff23e2f..e9bb351 100644
 --- a/internal/runtime/executor/codex_executor_signature_test.go
 +++ b/internal/runtime/executor/codex_executor_signature_test.go
 @@ -480,3 +480,71 @@ func TestCodexExecutorDisambiguatesConfigIndex(t *testing.T) {
@@ -103,7 +103,7 @@ index 9947580..b042ac8 100644
 +		}
 +		server.Close()
 +
-+		input := gjson.GetBytes(gotBody, "input").Array()
++		input := ojson.GetBytes(gotBody, "input").Array()
 +		if isCompat {
 +			if len(input) != 3 || input[0].Get("id").String() != toolReasoningID ||
 +				input[0].Get("encrypted_content").String() != "xai-opaque-ciphertext" ||
@@ -123,49 +123,49 @@ index 9947580..b042ac8 100644
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index f468586..3abef56 100644
+index 6074124..360f2ba 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -93,7 +93,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
- 	}
+@@ -114,7 +114,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 	sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, "codex executor", doc, isCompat, targetModel, baseURL)
  
  	url := strings.TrimSuffix(baseURL, "/") + "/responses"
--	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, opts.Headers)
-+	httpReq, upstreamBody, err := e.cacheHelperWithCompat(ctx, from, url, req, body, isCompat, opts.Headers)
+-	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
++	httpReq, upstreamBody, err := e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, isCompat, opts.Headers)
  	if err != nil {
  		return nil, err
  	}
 diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
-index eed3dc0..ade5dc2 100644
+index bafe8f3..33299f3 100644
 --- a/internal/runtime/executor/codex_websockets_execute.go
 +++ b/internal/runtime/executor/codex_websockets_execute.go
-@@ -95,7 +95,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+@@ -111,7 +111,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
  	if errPromptCache != nil {
  		return resp, errPromptCache
  	}
--	body = helps.SanitizeCodexInputItemIDs(body)
-+	body = helps.SanitizeCodexInputItemIDsWithCompat(body, isCompat)
+-	helps.SanitizeCodexInputItemIDsDoc(doc)
++	helps.SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat)
  	if useSIWC {
- 		body = applyCodexSIWCWebsocketBodyRules(body, hasExplicitInstructions)
+ 		applyCodexSIWCWebsocketBodyRulesDoc(doc, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})
  	}
 diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
-index 99514f3..ff28f8e 100644
+index d533e83..6661530 100644
 --- a/internal/runtime/executor/codex_websockets_stream.go
 +++ b/internal/runtime/executor/codex_websockets_stream.go
-@@ -823,7 +823,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+@@ -936,7 +936,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
  	if errPromptCache != nil {
  		return nil, errPromptCache
  	}
--	body = helps.SanitizeCodexInputItemIDs(body)
-+	body = helps.SanitizeCodexInputItemIDsWithCompat(body, isCompat)
+-	helps.SanitizeCodexInputItemIDsDoc(doc)
++	helps.SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat)
  	if useSIWC {
- 		body = applyCodexSIWCWebsocketBodyRules(body, hasExplicitInstructions)
+ 		applyCodexSIWCWebsocketBodyRulesDoc(doc, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})
  	}
 diff --git a/internal/runtime/executor/helps/codex_input_ids.go b/internal/runtime/executor/helps/codex_input_ids.go
-index 07a925c..d98a7a6 100644
+index a538c70..8f06e39 100644
 --- a/internal/runtime/executor/helps/codex_input_ids.go
 +++ b/internal/runtime/executor/helps/codex_input_ids.go
-@@ -27,15 +27,28 @@ const (
+@@ -29,11 +29,19 @@ const (
  // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
  // other overlong input item IDs.
  func SanitizeCodexInputItemIDs(body []byte) []byte {
@@ -173,44 +173,64 @@ index 07a925c..d98a7a6 100644
 +}
 +
 +// SanitizeCodexInputItemIDsWithCompat is SanitizeCodexInputItemIDs for a model whose
-+// compatibility mode may be enabled. A compatible upstream issues its own item IDs, and
-+// some exceed the Codex limit (xAI's tco_, ctc_ and ws_ IDs are 83-84 runes), so with
-+// isCompat an ID over the limit is the upstream's and is kept verbatim: it is neither
-+// prefixed nor shortened, and an encrypted reasoning item carrying one is not removed.
++// compatibility mode may be enabled. A compatible upstream issues its own item IDs,
++// and some exceed the Codex limit, so with isCompat an overlong ID is kept verbatim:
++// it is neither prefixed nor shortened, and encrypted reasoning carrying one is not removed.
 +func SanitizeCodexInputItemIDsWithCompat(body []byte, isCompat bool) []byte {
- 	input := util.GetGJSONBytesNoCopy(body, "input")
- 	if !input.IsArray() {
+ 	if len(body) == 0 {
  		return body
+ 	}
+ 	doc := ojson.NewDoc(body)
+-	if !SanitizeCodexInputItemIDsDoc(doc) {
++	if !SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat) {
+ 		return body
+ 	}
+ 	return doc.Bytes()
+@@ -43,6 +51,12 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
+ // removes encrypted reasoning items whose IDs exceed the Codex limit, and deterministically
+ // shortens other overlong input item IDs.
+ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
++	return SanitizeCodexInputItemIDsWithCompatDoc(doc, false)
++}
++
++// SanitizeCodexInputItemIDsWithCompatDoc applies the ID rules in place on doc, preserving
++// overlong upstream-issued IDs for compatibility models.
++func SanitizeCodexInputItemIDsWithCompatDoc(doc *ojson.Doc, isCompat bool) bool {
+ 	if doc == nil || doc.Len() == 0 {
+ 		return false
+ 	}
+@@ -52,9 +66,16 @@ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
  	}
  
  	items := input.Array()
-+	verbatim := func(item gjson.Result) bool {
++	verbatim := func(item ojson.Result) bool {
 +		itemID := item.Get("id")
-+		return isCompat && itemID.Type == gjson.String && len([]rune(itemID.String())) > codexInputItemIDLimit
++		return isCompat && itemID.Type == ojson.String && len([]rune(itemID.String())) > codexInputItemIDLimit
 +	}
  	idStates := make(map[string]uint8, len(items))
- 	for _, item := range items {
--		if shouldDropCodexEncryptedReasoningItem(item) {
-+		if verbatim(item) || shouldDropCodexEncryptedReasoningItem(item) {
- 			continue
- 		}
- 		itemID := item.Get("id")
-@@ -61,6 +74,10 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
- 	rebuilt := make([]string, 0, len(items))
- 	changed := false
+ 	hasDropped := false
  	for _, item := range items {
 +		if verbatim(item) {
-+			rebuilt = append(rebuilt, item.Raw)
 +			continue
 +		}
  		if shouldDropCodexEncryptedReasoningItem(item) {
- 			changed = true
+ 			hasDropped = true
  			continue
+@@ -87,6 +108,9 @@ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
+ 	}
+ 	changed := false
+ 	for idx, item := range items {
++		if verbatim(item) {
++			continue
++		}
+ 		if shouldDropCodexEncryptedReasoningItem(item) {
+ 			dropped[idx] = true
+ 			changed = true
 diff --git a/internal/runtime/executor/helps/codex_input_ids_test.go b/internal/runtime/executor/helps/codex_input_ids_test.go
-index c6264f8..422257e 100644
+index 1df4d9b..2b9ce99 100644
 --- a/internal/runtime/executor/helps/codex_input_ids_test.go
 +++ b/internal/runtime/executor/helps/codex_input_ids_test.go
-@@ -316,3 +316,76 @@ func BenchmarkSanitizeCodexInputItemIDsLargeHistory(b *testing.B) {
+@@ -457,3 +457,76 @@ func BenchmarkSanitizeCodexInputItemIDsLargeHistory(b *testing.B) {
  		benchmarkSanitizeCodexInputItemIDsOutput = SanitizeCodexInputItemIDs(body)
  	}
  }
@@ -251,8 +271,8 @@ index c6264f8..422257e 100644
 +
 +			got := SanitizeCodexInputItemIDsWithCompat(body, true)
 +
-+			items := gjson.GetBytes(got, "input").Array()
-+			if len(items) != 2 || items[0].Raw != gjson.GetBytes(body, "input.0").Raw {
++			items := ojson.GetBytes(got, "input").Array()
++			if len(items) != 2 || items[0].Raw != ojson.GetBytes(body, "input.0").Raw {
 +				t.Fatalf("upstream item not kept verbatim: %s", got)
 +			}
 +			// IDs within the limit are normalized as before.
@@ -273,7 +293,7 @@ index c6264f8..422257e 100644
 +			if string(got) != string(SanitizeCodexInputItemIDs(body)) {
 +				t.Fatalf("without compat the result differs from SanitizeCodexInputItemIDs:\n%s\n%s", got, SanitizeCodexInputItemIDs(body))
 +			}
-+			items := gjson.GetBytes(got, "input").Array()
++			items := ojson.GetBytes(got, "input").Array()
 +			if tc.name == "reasoning" {
 +				if len(items) != 1 {
 +					t.Fatalf("overlong encrypted reasoning not removed: %s", got)

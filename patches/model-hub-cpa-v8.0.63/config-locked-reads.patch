@@ -1,6 +1,6 @@
-From a010cf786b688ecbd3715bf290d3ea831dfffc1f Mon Sep 17 00:00:00 2001
+From 077c57f2165152e669724a87c901f81bb9c83b36 Mon Sep 17 00:00:00 2001
 From: cyhhao <5381613+cyhhao@users.noreply.github.com>
-Date: Sat, 17 Oct 2026 15:42:59 +0800
+Date: Tue, 10 Nov 2026 11:54:20 +0800
 Subject: [PATCH] fix(config): stop readers seeing a half-written config
 
 In-process config writers rewrite config.yaml by truncating it and then
@@ -17,9 +17,11 @@ call-site test parks each reader and the management write inside its
 file I/O on a named pipe and checks that it holds the lock there.
 
 Upstream: router-for-me/CLIProxyAPI#6701 at 0cd78a14a.
+
+Rebased onto v8.0.63 for Avibe's model-hub-engine-v8.0.63-1.
 ---
  .../api/handlers/management/config_basic.go   |  17 +--
- internal/api/handlers/management/config_v8.go |   3 +-
+ internal/api/handlers/management/config_v8.go |   5 +-
  internal/api/handlers/management/handler.go   |   5 +-
  internal/config/config_callsite_unix_test.go  | 127 ++++++++++++++++++
  internal/config/config_load.go                |  10 +-
@@ -29,7 +31,7 @@ Upstream: router-for-me/CLIProxyAPI#6701 at 0cd78a14a.
  internal/config/config_yaml.go                |   9 +-
  internal/config/export_test.go                |   4 +
  internal/watcher/config_reload.go             |   3 +-
- 11 files changed, 295 insertions(+), 31 deletions(-)
+ 11 files changed, 296 insertions(+), 32 deletions(-)
  create mode 100644 internal/config/config_callsite_unix_test.go
  create mode 100644 internal/config/config_write.go
  create mode 100644 internal/config/config_write_test.go
@@ -37,7 +39,7 @@ Upstream: router-for-me/CLIProxyAPI#6701 at 0cd78a14a.
  create mode 100644 internal/config/export_test.go
 
 diff --git a/internal/api/handlers/management/config_basic.go b/internal/api/handlers/management/config_basic.go
-index a6c02c4d6..86035b0b0 100644
+index a6c02c4..86035b0 100644
 --- a/internal/api/handlers/management/config_basic.go
 +++ b/internal/api/handlers/management/config_basic.go
 @@ -110,20 +110,7 @@ func WriteConfig(path string, data []byte) error {
@@ -72,7 +74,7 @@ index a6c02c4d6..86035b0b0 100644
  		if os.IsNotExist(err) {
  			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "config file not found"})
 diff --git a/internal/api/handlers/management/config_v8.go b/internal/api/handlers/management/config_v8.go
-index b4b8e4184..d4063d516 100644
+index 5f94409..39b6c29 100644
 --- a/internal/api/handlers/management/config_v8.go
 +++ b/internal/api/handlers/management/config_v8.go
 @@ -4,7 +4,6 @@ import (
@@ -83,20 +85,29 @@ index b4b8e4184..d4063d516 100644
  	"reflect"
  	"strings"
  
-@@ -22,7 +21,7 @@ const ConfigV8ContextKey = "management.config-v8"
+@@ -27,7 +26,7 @@ const ConfigV8ContextKey = "management.config-v8"
  func (h *Handler) ConfigV8(c *gin.Context) {
  	h.mu.Lock()
  	defer h.mu.Unlock()
--	data, err := os.ReadFile(h.configFilePath)
-+	data, err := config.ReadConfigFile(h.configFilePath)
+-	raw, err := os.ReadFile(h.configFilePath)
++	raw, err := config.ReadConfigFile(h.configFilePath)
  	if err != nil {
  		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
  		return
+@@ -204,7 +203,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
+ 	// disk. If it cannot be read back, omit the ETag instead of guessing one.
+ 	// Like Home, SourceHash keeps its runtime owner and is published by the
+ 	// reload, so it is not overwritten on next here.
+-	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
++	if saved, errSaved := config.ReadConfigFile(h.configFilePath); errSaved == nil {
+ 		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
+ 	}
+ 	h.cfg = next
 diff --git a/internal/api/handlers/management/handler.go b/internal/api/handlers/management/handler.go
-index c186e75f4..f4c2df15b 100644
+index 7e8db2f..719a1b7 100644
 --- a/internal/api/handlers/management/handler.go
 +++ b/internal/api/handlers/management/handler.go
-@@ -140,12 +140,13 @@ func (h *Handler) SetConfig(cfg *config.Config) {
+@@ -173,12 +173,13 @@ func (h *Handler) oauthConfigWithProxy(proxyURL string) *config.Config {
  
  // isStaleConfigFileSnapshotLocked reports whether cfg was parsed from config file
  // bytes that are no longer on disk. Management saves hold h.mu, so none can land
@@ -114,7 +125,7 @@ index c186e75f4..f4c2df15b 100644
  	}
 diff --git a/internal/config/config_callsite_unix_test.go b/internal/config/config_callsite_unix_test.go
 new file mode 100644
-index 000000000..b069194a8
+index 0000000..b069194
 --- /dev/null
 +++ b/internal/config/config_callsite_unix_test.go
 @@ -0,0 +1,127 @@
@@ -246,7 +257,7 @@ index 000000000..b069194a8
 +	})
 +}
 diff --git a/internal/config/config_load.go b/internal/config/config_load.go
-index 93cc22efb..ac03a338e 100644
+index c4ea79e..134ff86 100644
 --- a/internal/config/config_load.go
 +++ b/internal/config/config_load.go
 @@ -41,7 +41,7 @@ func ComputeSourceHash(data []byte) string {
@@ -276,7 +287,7 @@ index 93cc22efb..ac03a338e 100644
  	if err != nil {
  		if optional {
  			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
-@@ -331,7 +331,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+@@ -338,7 +338,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
  
  	// Only conflicting legacy fields are removed on load. A legacy-only document
  	// stays legacy until a v8 configuration write explicitly migrates it.
@@ -285,7 +296,7 @@ index 93cc22efb..ac03a338e 100644
  	if errRead != nil {
  		return nil, errRead
  	}
-@@ -340,7 +340,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+@@ -347,7 +347,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
  		return nil, errLayout
  	}
  	if changed {
@@ -296,7 +307,7 @@ index 93cc22efb..ac03a338e 100644
  	}
 diff --git a/internal/config/config_write.go b/internal/config/config_write.go
 new file mode 100644
-index 000000000..ea6f7315f
+index 0000000..ea6f731
 --- /dev/null
 +++ b/internal/config/config_write.go
 @@ -0,0 +1,37 @@
@@ -339,7 +350,7 @@ index 000000000..ea6f7315f
 +}
 diff --git a/internal/config/config_write_test.go b/internal/config/config_write_test.go
 new file mode 100644
-index 000000000..dba45497b
+index 0000000..dba4549
 --- /dev/null
 +++ b/internal/config/config_write_test.go
 @@ -0,0 +1,37 @@
@@ -382,7 +393,7 @@ index 000000000..dba45497b
 +}
 diff --git a/internal/config/config_write_unix_test.go b/internal/config/config_write_unix_test.go
 new file mode 100644
-index 000000000..4dc438b71
+index 0000000..4dc438b
 --- /dev/null
 +++ b/internal/config/config_write_unix_test.go
 @@ -0,0 +1,74 @@
@@ -461,7 +472,7 @@ index 000000000..4dc438b71
 +	<-written
 +}
 diff --git a/internal/config/config_yaml.go b/internal/config/config_yaml.go
-index a915eb074..f5544864a 100644
+index 2ee6c1d..1b52f3e 100644
 --- a/internal/config/config_yaml.go
 +++ b/internal/config/config_yaml.go
 @@ -3,7 +3,6 @@ package config
@@ -469,10 +480,10 @@ index a915eb074..f5544864a 100644
  	"bytes"
  	"fmt"
 -	"os"
+ 	"strconv"
  	"strings"
  
- 	"gopkg.in/yaml.v3"
-@@ -17,7 +16,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
+@@ -18,7 +17,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
  	persistCfg := cfg
  	migrating := len(migrateV8) > 0 && migrateV8[0]
  	// Load original YAML as a node tree to preserve comments and ordering.
@@ -481,7 +492,7 @@ index a915eb074..f5544864a 100644
  	if err != nil {
  		return err
  	}
-@@ -113,7 +112,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
+@@ -114,7 +113,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
  			return fmt.Errorf("decode migrated config: %w", err)
  		}
  	}
@@ -490,7 +501,7 @@ index a915eb074..f5544864a 100644
  		return err
  	}
  	if migrated != nil {
-@@ -126,7 +125,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
+@@ -127,7 +126,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
  // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
  // while preserving comments and positions.
  func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
@@ -499,7 +510,7 @@ index a915eb074..f5544864a 100644
  	if err != nil {
  		return err
  	}
-@@ -134,7 +133,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
+@@ -135,7 +134,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
  	if err != nil {
  		return err
  	}
@@ -510,7 +521,7 @@ index a915eb074..f5544864a 100644
  // updateNestedScalarYAML returns data with the nested scalar key path like ["a","b"] set to
 diff --git a/internal/config/export_test.go b/internal/config/export_test.go
 new file mode 100644
-index 000000000..578b99224
+index 0000000..578b992
 --- /dev/null
 +++ b/internal/config/export_test.go
 @@ -0,0 +1,4 @@
@@ -519,7 +530,7 @@ index 000000000..578b99224
 +// ConfigFileMu exposes the config file lock to call-site tests in this directory.
 +var ConfigFileMu = &configFileMu
 diff --git a/internal/watcher/config_reload.go b/internal/watcher/config_reload.go
-index b9d5aabbf..0a8e04a4a 100644
+index 5738909..550f734 100644
 --- a/internal/watcher/config_reload.go
 +++ b/internal/watcher/config_reload.go
 @@ -5,7 +5,6 @@ package watcher
@@ -528,9 +539,9 @@ index b9d5aabbf..0a8e04a4a 100644
  	"encoding/hex"
 -	"os"
  	"reflect"
+ 	"strings"
  	"time"
- 
-@@ -56,7 +55,7 @@ func (w *Watcher) reloadConfigIfChanged() {
+@@ -57,7 +56,7 @@ func (w *Watcher) reloadConfigIfChanged() {
  	w.configApplyMu.Lock()
  	defer w.configApplyMu.Unlock()
  

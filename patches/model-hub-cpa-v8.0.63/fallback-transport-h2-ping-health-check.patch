@@ -1,8 +1,8 @@
 diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
-index d98f7d49..aaff4472 100644
+index cd725e8..33eaafe 100644
 --- a/internal/runtime/executor/helps/proxy_helpers.go
 +++ b/internal/runtime/executor/helps/proxy_helpers.go
-@@ -156,5 +156,8 @@ func buildProxyTransport(proxyURL string) *http.Transport {
+@@ -607,5 +607,8 @@ func buildProxyTransport(proxyURL string) *http.Transport {
  		log.Errorf("%v", errBuild)
  		return nil
  	}
@@ -14,7 +14,7 @@ index d98f7d49..aaff4472 100644
  }
 diff --git a/internal/runtime/executor/helps/upstream_transport.go b/internal/runtime/executor/helps/upstream_transport.go
 new file mode 100644
-index 00000000..d8f22b21
+index 0000000..d8f22b2
 --- /dev/null
 +++ b/internal/runtime/executor/helps/upstream_transport.go
 @@ -0,0 +1,71 @@
@@ -91,7 +91,7 @@ index 00000000..d8f22b21
 +}
 diff --git a/internal/runtime/executor/helps/upstream_transport_test.go b/internal/runtime/executor/helps/upstream_transport_test.go
 new file mode 100644
-index 00000000..a539360d
+index 0000000..eb8e990
 --- /dev/null
 +++ b/internal/runtime/executor/helps/upstream_transport_test.go
 @@ -0,0 +1,233 @@
@@ -231,7 +231,7 @@ index 00000000..a539360d
 +
 +	direct := &config.Config{}
 +	fallback, okFallback := NewUtlsHTTPClient(context.Background(), direct, nil, 0).Transport.(*fallbackRoundTripper)
-+	if !okFallback || fallback.fallback != http.RoundTripper(shared) {
++	if !okFallback || fallback.fallbackRoundTripper() != http.RoundTripper(shared) {
 +		t.Fatalf("NewUtlsHTTPClient fallback = %#v, want the shared upstream transport", fallback)
 +	}
 +	// NewProxyAwareHTTPClient keeps its nil-transport contract; the OpenAI-compatible executor adds the
@@ -263,7 +263,7 @@ index 00000000..a539360d
 +	} {
 +		transport := client.Transport
 +		if wrapped, okWrapped := transport.(*fallbackRoundTripper); okWrapped {
-+			transport = wrapped.fallback
++			transport = wrapped.fallbackRoundTripper()
 +		}
 +		proxyTransport, okProxy := transport.(*http.Transport)
 +		if !okProxy || proxyTransport.HTTP2 == nil || proxyTransport.HTTP2.SendPingTimeout != 30*time.Second || proxyTransport.HTTP2.PingTimeout != 15*time.Second {
@@ -329,23 +329,23 @@ index 00000000..a539360d
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
-index f35432d3..1782b6d9 100644
+index 45c740b..38fccd5 100644
 --- a/internal/runtime/executor/helps/utls_client.go
 +++ b/internal/runtime/executor/helps/utls_client.go
-@@ -419,7 +419,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+@@ -519,7 +519,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
  
  	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
  	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 -	var standardTransport http.RoundTripper = http.DefaultTransport
 +	var standardTransport http.RoundTripper = upstreamFallbackTransport()
+ 	var anthropicFn, fallbackFn func() http.RoundTripper
  	if proxyURL != "" {
- 		if transport := buildProxyTransport(proxyURL); transport != nil {
- 			standardTransport = transport
+ 		fallbackFn = func() http.RoundTripper {
 diff --git a/internal/runtime/executor/openai_compat_executor.go b/internal/runtime/executor/openai_compat_executor.go
-index b63f1258..09fe923c 100644
+index 17a0694..49e47a5 100644
 --- a/internal/runtime/executor/openai_compat_executor.go
 +++ b/internal/runtime/executor/openai_compat_executor.go
-@@ -81,7 +81,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
+@@ -96,7 +96,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
  	if err := e.PrepareRequest(httpReq, auth); err != nil {
  		return nil, err
  	}
@@ -354,7 +354,7 @@ index b63f1258..09fe923c 100644
  	return httpClient.Do(httpReq)
  }
  
-@@ -181,7 +181,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
+@@ -216,7 +216,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth
  		AuthValue: authValue,
  	})
  
@@ -363,7 +363,7 @@ index b63f1258..09fe923c 100644
  	httpClient = reporter.TrackHTTPClient(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
-@@ -282,7 +282,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
+@@ -317,7 +317,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
  		AuthValue: authValue,
  	})
  
@@ -372,7 +372,7 @@ index b63f1258..09fe923c 100644
  	httpClient = reporter.TrackHTTPClient(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
-@@ -408,7 +408,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
+@@ -460,7 +460,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
  		AuthValue: authValue,
  	})
  
@@ -381,7 +381,7 @@ index b63f1258..09fe923c 100644
  	// Early role/empty frames are only first-packet fallbacks, not effective tokens.
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
  	httpResp, err := httpClient.Do(httpReq)
-@@ -678,7 +678,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
+@@ -745,7 +745,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
  		AuthValue: authValue,
  	})
  

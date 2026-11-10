@@ -1,8 +1,8 @@
 diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
-index e090491f..f35432d3 100644
+index 42cf15b..45c740b 100644
 --- a/internal/runtime/executor/helps/utls_client.go
 +++ b/internal/runtime/executor/helps/utls_client.go
-@@ -30,6 +30,17 @@ type utlsRoundTripper struct {
+@@ -31,6 +31,17 @@ type utlsRoundTripper struct {
  	dialer proxy.Dialer
  }
  
@@ -20,7 +20,7 @@ index e090491f..f35432d3 100644
  type closeConnectionBody struct {
  	io.ReadCloser
  	closeConnection func() error
-@@ -124,7 +135,8 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
+@@ -128,7 +139,8 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
  	var err error
  	switch protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol {
  	case "h2":
@@ -32,7 +32,7 @@ index e090491f..f35432d3 100644
  			break
 diff --git a/internal/runtime/executor/helps/utls_client_health_test.go b/internal/runtime/executor/helps/utls_client_health_test.go
 new file mode 100644
-index 00000000..2368c5d5
+index 0000000..2368c5d
 --- /dev/null
 +++ b/internal/runtime/executor/helps/utls_client_health_test.go
 @@ -0,0 +1,198 @@

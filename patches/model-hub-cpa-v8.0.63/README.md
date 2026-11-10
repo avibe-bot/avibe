@@ -1,27 +1,37 @@
-# Avibe-owned CPA v8.0.30 compatibility patches
+# Avibe-owned CPA v8.0.63 compatibility patches
 
 This directory records the source patches carried by Avibe's
-`model-hub-engine-v8.0.30-*` builds: `-1` carries patches 1 to 9, and `-2`
-adds patch 10, the Go module security refresh, built with Go 1.26.10. The
-build applies them with `git apply --whitespace=error`, in the order the
-manifest's `build.patches` records; each one applies on top of the ones before
-it. The packaged manifest names the build Avibe installs.
+`model-hub-engine-v8.0.63-*` builds, built with Go 1.26.10, the version
+upstream's `go.mod` requires. The build applies them with
+`git apply --whitespace=error`, in the order the manifest's `build.patches`
+records; each one applies on top of the ones before it. The packaged manifest
+names the build Avibe installs.
 
 Base:
 
 - Repository: `router-for-me/CLIProxyAPI`
-- Release: `v8.0.30`
-- Source commit: `5be2cdab0869cbaa3d401891f740aebf7e15aa99`
+- Release: `v8.0.63`
+- Source commit: `6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a`
 
-Carried over from the v8.0.28 set: patches 1 to 5, byte-identical; they apply
-to v8.0.30 with hunk offsets only. New in this set: patch 6, the xAI over-limit
-item IDs; patches 7 and 8, private copies of router-for-me/CLIProxyAPI#6701
-and #6700, carried until upstream releases them; and patch 9, upstream's own
-fix a43026d7 from v8.0.33, backported. Patches 7, 8 and 9 are
-`git format-patch` output; `git apply` reads them as the diffs they contain.
+Why v8.0.63: it carries b4e7dbd2, which moves the built-in Claude Code
+fingerprint from 2.1.280 to 2.1.321 (Anthropic requires at least 2.1.290 for
+Claude Fable 5.2), together with upstream's Fable 5.2 beta and effort
+handling.
 
-Each contract was re-measured on v8.0.30: the stock engine fails the check the
-patch exists for, and the patched engine passes it.
+Carried over from the v8.0.30 set: patches 1 to 8, rebased on v8.0.63. Patches
+2 and 4 apply with hunk offsets only; the others follow upstream refactors and
+each section below says what moved. Patches 7 and 8 are still private copies of
+router-for-me/CLIProxyAPI#6701 and #6700, both open upstream on 2026-11-10;
+they are `git format-patch` output, and `git apply` reads them as the diffs
+they contain. Patches 9 and 10 of the v8.0.30 set are dropped because v8.0.63
+contains them (see "Dropped in this set").
+
+Each contract was re-checked on v8.0.63 at the engine's own test boundary: the
+patch's consuming Go tests pass with the patch, and reverting the patch's
+source change makes them fail. With all eight patches applied, `go test ./...`
+passes. The live black-hole timings quoted under patches 4 and 5 were measured
+on earlier releases and were not repeated for this bump; the transport code
+they exercise is described below.
 
 ## `openai-compat-native-token-field.patch`
 
@@ -38,9 +48,11 @@ existing explicit `true` path still canonicalizes to
 buffered and streaming requests retain their native token-limit field.
 
 The patch is limited to the helper used by both OpenAI Chat execution paths
-(`openai_compat_executor.go`, buffered and streaming). The helper and its call
-sites are unchanged from v8.0.23 to v8.0.30; stock v8.0.30 still rewrites the
-field (upstream's `TestNormalizeOpenAIMaxTokens` passes unpatched).
+(`openai_compat_executor.go`, buffered and streaming). Since v8.0.30 upstream
+normalizes on the parsed request document (`NormalizeOpenAIMaxTokensDoc`, which
+the byte-level `NormalizeOpenAIMaxTokens` wraps), so the preservation return
+now sits there; stock v8.0.63 still rewrites the field (upstream's
+`TestNormalizeOpenAIMaxTokens` passes unpatched).
 
 The patch also updates the three `useMaxCompletionTokens=false` cases of
 upstream's `TestNormalizeOpenAIMaxTokens`, which asserted the stock rewrite,
@@ -49,9 +61,8 @@ unchanged. It updates the four `use-max-completion-tokens=false` chat cases of
 upstream's executor-level `TestOpenAICompatExecutor_MaxTokensNormalization`
 and `TestOpenAICompatExecutor_MaxTokensNormalizationStream` the same way: the
 request keeps `max_completion_tokens`, including `null`, and gains no
-`max_tokens`. With all patches applied, `go test ./internal/runtime/executor/`
-and `go test ./internal/runtime/executor/helps/` pass. The test changes do not
-alter the engine binary.
+`max_tokens`. On v8.0.63 those tests read the body with `ojson` instead of
+`gjson`, as upstream's do. The test changes do not alter the engine binary.
 
 ## `oauth-callback-forwarder-loopback.patch`
 
@@ -119,7 +130,10 @@ never runs, because `hints.ModelIDs` is set.
 
 v8.0.29 (08e5762a) fences model registration with epochs; the static catalog
 this patch registers goes through the same fenced path, and the probe still
-narrows it.
+narrows it. On v8.0.63 the registration function reports whether it published,
+so the early return the patch follows is now `return true`; only that context
+line changed, and the added lines are as before. Reverting the source hunk on v8.0.63 fails the rewritten test with
+"registered 0 models before the probe answered".
 
 ## `codex-utls-h2-ping-health-check.patch`
 
@@ -191,6 +205,17 @@ created on first use, with `HTTP2Config{SendPingTimeout: 30s, PingTimeout:
   which sets it only when `NewProxyAwareHTTPClient` left the transport nil.
 
 `buildProxyTransport` sets the same health check on proxy transports.
+
+Since v8.0.30 upstream can pool transports per credential (a credential's
+`connection-pool` block). `NewUtlsHTTPClient` now resolves its standard
+transport lazily: `pooledProxyTransport` returns the credential's pool when it
+opted in, else `buildProxyTransport`, else the shared health-checked clone, so
+every path Avibe takes keeps the health check. A credential that opts into a
+pool gets a plain clone of `http.DefaultTransport` without it; Avibe renders no
+`connection-pool` block. The consuming test now resolves the lazy fallback
+(`fallbackRoundTripper()`) rather than reading the struct field, so it checks
+the transport a request actually uses; reverting the `buildProxyTransport` hunk
+on v8.0.63 fails it.
 `http.DefaultTransport` itself is not modified, and `NewProxyAwareHTTPClient`
 still returns a nil transport when no proxy and no injected RoundTripper
 apply, because the Antigravity executor reads that as "direct" and installs
@@ -265,11 +290,15 @@ neither prefixed nor shortened, and an encrypted reasoning item carrying one is 
 - IDs within the limit are normalized exactly as before.
 - Without `is-compat` nothing changes. That includes today's removal of over-limit encrypted
   reasoning and the shortening of every other over-limit ID.
-- The HTTP executor gets the flag through `cacheHelperWithCompat`; the two WebSocket paths pass it
+- The HTTP executor gets the flag through `cacheHelperDocWithCompat`; the two WebSocket paths pass it
   directly.
+- Since v8.0.30 upstream sanitizes on the parsed request document, so the rule lives in
+  `SanitizeCodexInputItemIDsWithCompatDoc`; `SanitizeCodexInputItemIDsWithCompat` wraps it for bytes,
+  and the stock `SanitizeCodexInputItemIDs(Doc)` entry points call it with compat off. The image
+  endpoints keep `cacheHelperDoc`, as before.
 
 Avibe renders `is-compat` for xAI Sources (#2767), so this patch changes the xAI replay wire: on stock
-v8.0.30 under that config the 84-rune `tco_` reasoning is dropped whole and the `ctc_` ID is shortened
+CPA under that config the 84-rune `tco_` reasoning is dropped whole and the `ctc_` ID is shortened
 (`MH-ENGINE-HOSTED-007` is an expected failure); with the patch both arrive verbatim. For every other
 Source the patch changes no byte.
 
@@ -281,8 +310,8 @@ Tests:
 - `codex_executor_signature_test.go`: `ExecuteStream` with a real 84-rune `tco_` reasoning item and
   its 84-rune `ctc_` custom tool call. An `is-compat` model sends both verbatim. A non-compat model
   strips the reasoning and shortens the call ID, as before.
-- Mutation checks: disabling the verbatim rule fails both tests. Wiring `ExecuteStream` back to
-  `cacheHelper` fails the executor test.
+- Mutation checks, repeated on v8.0.63: disabling the verbatim rule fails both tests. Wiring
+  `ExecuteStream` back to `cacheHelperDoc` fails the executor test.
 
 Drop the patch if xAI rejects verbatim long IDs in the live A/B, or once upstream exempts
 compatibility models from the Codex ID limit.
@@ -290,7 +319,7 @@ compatibility models from the Codex ID limit.
 ## `config-locked-reads.patch`
 
 A private copy of router-for-me/CLIProxyAPI#6701 (Avibe #2686), rebased on
-v8.0.30. Avibe hot-reloads the engine with `PUT /v0/management/config.yaml`.
+v8.0.63. Avibe hot-reloads the engine with `PUT /v0/management/config.yaml`.
 The engine rewrites `config.yaml` in place (the management write, and its own
 rewrite of the management secret to bcrypt on every load), while its watcher,
 loaders and management reads used a bare `os.ReadFile`, so a reader could see a
@@ -317,12 +346,16 @@ and write, inside its own file I/O while the test checks it holds the lock;
 reverting any one to raw file I/O fails its subtest) and
 `TestWriteConfigFileKeepsInode`. `fsync` has no unit test.
 
+v8.0.63 adds one config read: the v8 management PUT reads the saved file back
+to compute its `ETag`. That read goes through `config.ReadConfigFile` too. Avibe
+does not call the v8 PUT, and the call-site test does not park it.
+
 Drop when upstream merges #6701 and Avibe adopts a release that contains it.
 
 ## `claude-retry-headers-on-error-responses.patch`
 
 A private copy of router-for-me/CLIProxyAPI#6700 (Avibe #2666) at its head
-860a2f442, rebased on v8.0.30. When Anthropic refuses a request with a rate
+860a2f442, rebased on v8.0.63. When Anthropic refuses a request with a rate
 limit, its response carries `Retry-After`, `Retry-After-Ms` and the
 `Anthropic-Ratelimit-Unified-*` headers. Stock CPA drops them from the error it
 returns, so a client cannot tell when to retry.
@@ -345,97 +378,30 @@ Tests: `TestClaudeExecutor_ErrorCarriesRetryHeaders`,
 `TestExecutionErrorMessageKeepsCPARetryTimingForEveryConsumer`; seven
 mutants, all caught. Avibe's D6 (a 5xx's `Retry-After: 600` reaches the
 Source cooldown through the real engine) fails on stock v8.0.30 and passes
-with the patch.
+with the patch. On v8.0.63 the shared `statusErr` also carries
+`streamTruncated`, `transientRateLimit` and a log-only `diagnostic`; the
+`headers` field sits beside them, and every Claude upstream HTTP error still
+comes from `classifyClaudeUpstreamErrorWithCooling`.
 
 Drop when upstream merges #6700 and Avibe adopts a release that contains it.
 
-## `gemini-schema-content-keywords.patch`
+## Dropped in this set
 
-Upstream's a43026d7 (router-for-me/CLIProxyAPI#6699, first in v8.0.33),
-applied as published. Since v8.0.28 (a0fd8448) the Gemini and Antigravity
-tool-schema cleaners keep a multi-branch `anyOf`/`oneOf` union instead of
-collapsing it to one branch. A `contentMediaType` or `contentEncoding`
-annotation that the collapse used to drop now reaches the backend, which
-rejects the whole request with 400 `Unknown name "contentMediaType"`. Avibe's
-Gemini subscription is an Antigravity grant, and MCP tool schemas carry these
-annotations. The patch adds both keywords to the cleaners' unsupported list.
-
-Upstream's `TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699`
-covers every cleaner (Gemini, Gemini JSON schema, Antigravity, its tool,
-Claude-tool and response variants): on stock v8.0.30 each keeps both keywords
-at the root, in `anyOf[1]` and in a property; with the patch they are
-stripped, and properties named after the keywords survive. Dropping
-`contentMediaType` from the list fails the test.
-
-Drop at the next bump to v8.0.33 or later, which contains a43026d7.
-
-## `go-module-security-refresh.patch`
-
-Patch 10, new in `model-hub-engine-v8.0.30-2`. `govulncheck -mode binary`
-reports eleven reachable advisories in the `-1` engine: GO-2026-6809 in the
-standard library's `crypto/x509` (Go 1.26.9) and ten in Go modules. The
-standard-library fix is the toolchain, Go 1.26.10, which the manifest records
-as `build.go_version`. This patch moves the modules to their first fixed
-releases:
-
-| Module | v8.0.30 | Patched | Advisories |
-| --- | --- | --- | --- |
-| `golang.org/x/net` | v0.57.0 | v0.60.0 | GO-2026-6603, -6610, -6611, -6612, -6617 (HTTP/2) |
-| `golang.org/x/crypto` | v0.54.0 | v0.57.0 | GO-2026-6354, -6355 (ssh) |
-| `golang.org/x/text` | v0.40.0 | v0.42.0 | GO-2026-6629 |
-| `github.com/go-git/go-git/v6` | v6.0.0-alpha.4.0.20260520124234-0860a7d8a164 | v6.0.0-alpha.5 | GO-2026-6213, -6214 |
-
-Only `x/net` v0.60.0 and `go-git` v6.0.0-alpha.5 are requested. Minimal
-version selection raises the rest: `x/net` v0.60.0 requires `x/crypto`
-v0.57.0, `x/text` v0.42.0 and `x/sys` v0.48.0, `x/text` v0.42.0 requires
-`x/sync` v0.23.0, and `go-git` v6.0.0-alpha.5 requires `go-billy`
-v6.0.0-alpha.2. `go mod tidy` then removes the go.sum lines of the replaced
-versions; no other requirement changes. Upstream v8.0.38, the latest release
-when this patch was made, and upstream `main` still require the vulnerable
-versions.
-
-`go-git` v6.0.0-alpha.5 rewrites pack file access (`internal/packhandle`,
-`x/fdpool`), and a repository handle can keep a pack open after it is deleted.
-Upstream's `corruptGitRepository` test helper removed the packs and then
-checked the corruption through the handle that had just repacked them, which
-still reads them. The patch makes the helper check through a new handle, as
-the store's own operations open one. With that change, every
-`internal/store` test passes unchanged on v6.0.0-alpha.5, and the helper still
-fails when the packs are not removed. The test change does not alter the
-engine binary. `internal/store`'s git token store is the engine's only
-`go-git` user. Avibe never enables it: it needs `GITSTORE_GIT_URL`, which
-the engine's allow-listed environment (`vibe/model_hub_runtime/environment.py`)
-does not pass and no `.env` in the engine's Avibe-owned working directory sets.
-
-Measured with Go 1.26.10. With all ten patches applied, `go test ./...`
-passes: 102 packages, as on the unrefreshed tree. Patches 4 and 5's HTTP/2
-health-check tests also pass on `x/net` v0.60.0. Two candidate builds from
-empty Go caches were byte-identical. `govulncheck -mode binary` reports no
-reachable advisory on any of the six binaries. It still lists two advisories
-it does not find called: GO-2026-5841 (`klauspost/compress/s2`, imported but
-not called) and GO-2026-5932 (`x/crypto/openpgp`, deprecated with no fix).
-
-Drop it once a CPA release that Avibe adopts requires these versions or later.
-At every bump, rebase it onto the new `go.mod` and keep only the lines upstream
-does not already cover, then re-run `govulncheck -mode binary` on the
-candidate.
-
-## Known risk: model registration superseded mid-flight (#6718)
-
-v8.0.29 (08e5762a) fences model registration with epochs. A registration that
-is superseded mid-flight by another update of the same auth's attributes, where
-that update does not register models itself, leaves the auth with no models
-(router-for-me/CLIProxyAPI#6718; reproduced with a synthetic openai-compat
-auth). Avibe does not take that path: its prefix PATCH re-registers
-synchronously, and config reloads and watcher events each register. Upstream
-fixed it in v8.0.33 (f75ea073), a +556/-60 change that does not apply to this
-tree; the next bump resolves it. Revisit if Model Hub reports models vanishing
-right after a Source edit or an OAuth login.
-
-## Dropped earlier: `codex-sse-per-event-parsing.patch`
-
-Dropped with the v8.0.28 set: upstream's `CodexSSEScanner` (7795de19, v8.0.28)
-covers it, and v8.0.30 does not change it.
+- `gemini-schema-content-keywords.patch` (patch 9): upstream's a43026d7, first
+  in v8.0.33, is in v8.0.63; both keywords are in the cleaners' unsupported
+  list, and upstream's
+  `TestCleanJSONSchema_RemovesContentMediaTypeKeyword_Issue6699` covers them.
+- `go-module-security-refresh.patch` (patch 10): v8.0.63's `go.mod` already
+  requires `golang.org/x/net` v0.60.0, `golang.org/x/crypto` v0.57.0,
+  `golang.org/x/text` v0.42.0, `go-git/v6` v6.0.0-alpha.5 and `go-billy/v6`
+  v6.0.0-alpha.2, the versions the patch moved to, and its `go` directive is
+  1.26.10, the toolchain the `-2` build used. Upstream's `internal/store` tests
+  pass on that tree without the helper change the patch carried.
+- The known risk of a model registration superseded mid-flight
+  (router-for-me/CLIProxyAPI#6718) is resolved: its fix f75ea073 (v8.0.33) is
+  in v8.0.63.
+- `codex-sse-per-event-parsing.patch`, dropped with the v8.0.28 set, stays
+  dropped: upstream's `CodexSSEScanner` (7795de19, v8.0.28) covers it.
 
 ## Rebuild
 

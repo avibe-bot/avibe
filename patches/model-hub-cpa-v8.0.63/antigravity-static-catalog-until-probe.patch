@@ -1,5 +1,5 @@
 diff --git a/sdk/cliproxy/antigravity_models_timeout_test.go b/sdk/cliproxy/antigravity_models_timeout_test.go
-index fe25493e..8d3edee9 100644
+index fe25493..8d3edee 100644
 --- a/sdk/cliproxy/antigravity_models_timeout_test.go
 +++ b/sdk/cliproxy/antigravity_models_timeout_test.go
 @@ -10,6 +10,7 @@ import (
@@ -61,12 +61,12 @@ index fe25493e..8d3edee9 100644
  }
  
 diff --git a/sdk/cliproxy/service_models.go b/sdk/cliproxy/service_models.go
-index 686a0405..82961ea0 100644
+index 7daa6ed..732b45e 100644
 --- a/sdk/cliproxy/service_models.go
 +++ b/sdk/cliproxy/service_models.go
-@@ -127,6 +127,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
+@@ -141,6 +141,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
  				s.asyncProbeAntigravityCapabilities(ctx, a, provider)
- 				return
+ 				return true
  			}
 +			// Avibe: until this account's entitlement probe has answered, register
 +			// the static catalog so a fresh engine routes the account at once. The
