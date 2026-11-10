@@ -64,10 +64,11 @@ unchanged.
    in that state is not `healthy`, so step 2 does not hand it a restart.
 4. **Launch at login (macOS), separate.** This replaces self-recovery by the
    service, which step 2 cannot give: a restart seeded by a stale service
-   copies the ended session. Launch at login is being built as `vibe autostart`,
-   an opt-in LaunchAgent that fires once per desktop login and starts Avibe, or
-   restarts a service that is stale or in another audit session. See
-   `macos-stale-session-auto-recovery.md`.
+   copies the ended session. Launch at login is `vibe autostart` (#3515), an
+   opt-in LaunchAgent that fires once per desktop login and starts Avibe, or
+   restarts a service that is stale or in another audit session. It runs in the
+   desktop session, so the restart it schedules is seeded there, as step 2
+   leaves any caller inside to do. See `macos-stale-session-auto-recovery.md`.
 
 Rejected: only warning or refusing (a remote restart would never work);
 `launchctl asuser` (keeps the caller's `PATH`, and cannot cross sessions from
@@ -110,7 +111,7 @@ mechanism:
       running service.
 - [ ] Step 2 verified by a real restart over SSH.
 - [x] Step 3: the `outside_gui_session` state and its notice.
-- [ ] Step 4: launch at login (`vibe autostart`), then the log-out/log-in
-      verification.
+- [x] Step 4: launch at login (`vibe autostart`, #3515).
+- [ ] Step 4 verified by a real log-out and log-in.
 - [ ] Update the stale-session guidance in the `use-avibe` playbook and the
       Doctor action text once step 4 repairs a stale service at login.
