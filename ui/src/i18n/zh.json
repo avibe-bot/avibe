@@ -3606,6 +3606,26 @@
           "action": "去配对"
         }
       },
+      "desktopDownload": {
+        "title": "下载 Avibe 桌面应用",
+        "description": "使用原生应用，在电脑上获得更完整的 Avibe 体验。",
+        "platformLabel": "平台",
+        "architectureLabel": "Mac 芯片",
+        "platforms": {
+          "unknown": "请选择平台",
+          "macos": "macOS",
+          "windows": "Windows x64"
+        },
+        "architectures": {
+          "arm64": "Apple Silicon",
+          "x64": "Intel"
+        },
+        "windowsDetail": "Windows x64 安装程序。",
+        "unknownDetail": "请选择支持的平台来获取安装程序。",
+        "ready": "已准备好下载 {{format}} 安装程序。",
+        "choosePlatform": "下载前请选择平台。",
+        "action": "下载桌面应用"
+      },
       "tips": {
         "label": "每日小技巧",
         "try": "试试",

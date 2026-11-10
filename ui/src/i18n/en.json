@@ -3606,6 +3606,26 @@
           "action": "Pair"
         }
       },
+      "desktopDownload": {
+        "title": "Download Avibe Desktop",
+        "description": "Use the native app for a closer-to-home experience with Avibe.",
+        "platformLabel": "Platform",
+        "architectureLabel": "Mac chip",
+        "platforms": {
+          "unknown": "Choose a platform",
+          "macos": "macOS",
+          "windows": "Windows x64"
+        },
+        "architectures": {
+          "arm64": "Apple Silicon",
+          "x64": "Intel"
+        },
+        "windowsDetail": "Windows x64 installer.",
+        "unknownDetail": "Choose a supported platform to get its installer.",
+        "ready": "Ready to download the {{format}} installer.",
+        "choosePlatform": "Choose a platform before downloading.",
+        "action": "Download desktop app"
+      },
       "tips": {
         "label": "Tip of the day",
         "try": "Try",

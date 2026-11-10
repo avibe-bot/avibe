@@ -12,6 +12,7 @@ import { useDesktopPetSettings } from '../../lib/useDesktopPetSettings';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import { GettingStarted } from './GettingStarted';
+import { DesktopDownloadCta } from './DesktopDownloadCta';
 import { useTips, type Tip } from './homeCopy';
 import { TipOfTheDay } from './TipOfTheDay';
 import { dayNumber, TIP_IDS, tipsForDay, type TipId } from './tips';
@@ -129,6 +130,7 @@ export function HomeGuide({
           onHide={() => update({ tip_hidden_on: today })}
         />
       )}
+      <DesktopDownloadCta />
     </>
   );
 }
