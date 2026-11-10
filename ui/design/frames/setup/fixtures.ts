@@ -10,7 +10,8 @@ import { at, hubApi, ok, runtime, source, type AgentSpec } from '../models/fixtu
 import { settingsConfig } from '../settings/fixtures';
 
 /** A fresh install's `GET /api/config`: setup not finished, no chat platform connected, the
- *  model gateway available and switched on, the three CLI assistants on by default. */
+ *  model gateway available and switched on, the three CLI assistants off until the person
+ *  switches them on (Vibey is built in and always on). */
 export const setupConfig = {
   ...settingsConfig,
   setup_completed: false,
@@ -21,9 +22,9 @@ export const setupConfig = {
   agent_supply_blocks: {},
   agents: {
     ...settingsConfig.agents,
-    claude: { ...settingsConfig.agents.claude, enabled: true },
-    codex: { ...settingsConfig.agents.codex, enabled: true },
-    opencode: { ...settingsConfig.agents.opencode, enabled: true },
+    claude: { ...settingsConfig.agents.claude, enabled: false },
+    codex: { ...settingsConfig.agents.codex, enabled: false },
+    opencode: { ...settingsConfig.agents.opencode, enabled: false },
   },
 };
 
@@ -84,7 +85,7 @@ type Assistant = Cli | 'vibey';
 export type AssistantSpec = {
   /** The model the assistant's built-in Agent is set to; `null` when it has none. */
   model?: string | null;
-  /** Switched on in the config (CLI assistants; Vibey is always on). */
+  /** Switched on in the config (CLI assistants, off on a fresh install; Vibey is always on). */
   enabled?: boolean;
   /** What the CLI probe finds. */
   cli?: CliStatus;
@@ -116,7 +117,7 @@ const cliRuntime = (name: Cli, spec: AssistantSpec): BackendRuntimeInfo => {
   return {
     ok: true,
     name,
-    enabled: spec.enabled ?? true,
+    enabled: spec.enabled ?? false,
     auto_update: true,
     cli_path: name,
     resolved_path: status === 'missing' ? null : `/Users/demo/.local/bin/${name}`,
@@ -139,7 +140,7 @@ const connection = (backend: Assistant, spec: AssistantSpec): BackendConnectionS
     backend,
     installed: backend === 'vibey' || spec.cli !== 'missing',
     cli_status: backend === 'vibey' ? null : spec.cli ?? 'ok',
-    enabled: backend === 'vibey' || (spec.enabled ?? true),
+    enabled: backend === 'vibey' || (spec.enabled ?? false),
     auth,
     application: 'applied',
     ready: auth !== 'none',
@@ -196,7 +197,7 @@ export function setupFixtures({
     capabilities: { model_hub: { enabled: !hubDisabled } },
     agent_supply_blocks: blocks ? Object.fromEntries((Object.keys(specs) as Assistant[]).map((name) => [name, blocks])) : {},
     agents: Object.fromEntries(Object.entries(setupConfig.agents).map(([name, value]) =>
-      [name, name in specs && name !== 'vibey' ? { ...value, enabled: specs[name as Assistant].enabled ?? true } : value])),
+      [name, name in specs && name !== 'vibey' ? { ...value, enabled: specs[name as Assistant].enabled ?? false } : value])),
   };
   // Each assistant routes its model through the first source that supplies it.
   const agentSpecs: AgentSpec[] = (Object.keys(specs) as Assistant[]).map((backend) => {
@@ -209,7 +210,11 @@ export function setupFixtures({
         routes[model.id] ??= { hops: [[src, model.id]] };
       }
     }
-    return { backend, mode: spec.mode ?? 'hub', cliPresent: backend === 'vibey' || spec.cli !== 'missing', order: sources, routes };
+    // The enabled named Agents on the backend, as the server reports them: the card's built-in
+    // Agent, once its backend is on and it has a model.
+    const named = spec.model && (backend === 'vibey' || spec.enabled)
+      ? [{ name: backend, effective_model_id: spec.model, supply_status: 'ok' as const }] : [];
+    return { backend, mode: spec.mode ?? 'hub', cliPresent: backend === 'vibey' || spec.cli !== 'missing', order: sources, routes, namedAgents: named };
   });
   const agents = (Object.keys(specs) as Assistant[]).map((backend) => builtinAgent(backend, specs[backend].model ?? null));
   const reads: Record<string, unknown> = {

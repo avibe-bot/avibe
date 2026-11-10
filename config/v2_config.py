@@ -37,7 +37,13 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    AgentBackend,
+    DEFAULT_AGENT_BACKEND,
+    default_enabled_for_backend,
+)
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
 from vibe.trace_retention_policy import validate_retention_days
@@ -1200,7 +1206,7 @@ def _reset_recoverable_config_section(
         payload[section] = {}
         return True
     if section == "agents":
-        defaults = V2Config.default().agents
+        defaults = _recovery_agents()
         payload[section] = {
             "opencode": dict(defaults.opencode.__dict__),
             "claude": dict(defaults.claude.__dict__),
@@ -1252,8 +1258,8 @@ def _reset_recoverable_config_section(
             agents_payload[agent_name][field_name] = False
             return True
         if agent_name == "codex":
-            # Codex is opt-in in the canonical first-run/recovery config.
-            agents_payload[agent_name] = dict(V2Config.default().agents.codex.__dict__)
+            # Codex is opt-in in the recovery config.
+            agents_payload[agent_name] = dict(_recovery_agents().codex.__dict__)
         else:
             agents_payload[agent_name] = {}
         return True
@@ -2007,6 +2013,8 @@ class RuntimeConfig:
 
 @dataclass
 class OpenCodeConfig:
+    # A saved config that omits ``enabled`` reads as on, as every release has; only a new
+    # install's first config starts native backends off (``V2Config.default``).
     enabled: bool = True
     cli_path: str = "opencode"
     # Install a newer release of this backend CLI once no turn is using it.
@@ -2033,7 +2041,7 @@ class OpenCodeConfig:
 
 @dataclass
 class ClaudeConfig:
-    enabled: bool = True
+    enabled: bool = True  # See ``OpenCodeConfig.enabled``.
     cli_path: str = "claude"
     auto_update: bool = True  # See ``OpenCodeConfig.auto_update``.
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
@@ -2058,7 +2066,7 @@ class ClaudeConfig:
 
 @dataclass
 class CodexConfig:
-    enabled: bool = True
+    enabled: bool = True  # See ``OpenCodeConfig.enabled``.
     cli_path: str = "codex"
     auto_update: bool = True  # See ``OpenCodeConfig.auto_update``.
     idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
@@ -2094,6 +2102,16 @@ class AgentsConfig:
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     avault: AVaultConfig = field(default_factory=AVaultConfig)
+
+
+def _recovery_agents() -> AgentsConfig:
+    """The backend switches for an installation whose ``agents`` could not be read.
+
+    Recovery serves an installation that already ran, not a first run, so it keeps the
+    switches it has always used: OpenCode and Claude Code on, Codex off. A new install's
+    first config starts every native backend off instead (``V2Config.default``).
+    """
+    return AgentsConfig(codex=CodexConfig(enabled=False))
 
 
 _SettledItem = TypeVar("_SettledItem")
@@ -4048,10 +4066,12 @@ class V2Config:
             slack=SlackConfig(bot_token="", app_token=""),
             platforms=PlatformsConfig(enabled=[], primary=WORKBENCH_PLATFORM_ID),
             runtime=RuntimeConfig(default_cwd=str(Path.home() / "work")),
+            # Vibey is built in and always on; the native CLI backends wait for the person to
+            # switch them on.
             agents=AgentsConfig(
-                opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
-                claude=ClaudeConfig(enabled=True, cli_path="claude"),
-                codex=CodexConfig(enabled=False, cli_path="codex"),
+                opencode=OpenCodeConfig(enabled=default_enabled_for_backend("opencode"), cli_path="opencode"),
+                claude=ClaudeConfig(enabled=default_enabled_for_backend("claude"), cli_path="claude"),
+                codex=CodexConfig(enabled=default_enabled_for_backend("codex"), cli_path="codex"),
             ),
             model_hub=ModelHubConfig(),
             platform=WORKBENCH_PLATFORM_ID,
@@ -4062,6 +4082,8 @@ class V2Config:
         """Unreadable installations must not acquire fresh-install Hub modes."""
         config = cls.default()
         config.model_hub = ModelHubConfig.from_payload({"enabled": False})
+        # Nor first-run backend switches: recovery keeps the ones an installation has.
+        config.agents = _recovery_agents()
         return config
 
     @classmethod
