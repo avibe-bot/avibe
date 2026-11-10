@@ -51,11 +51,30 @@ Use `vibe upgrade` to install the next published official release. If Avibe is
 running, this command arranges the service and Web UI restart; if it is stopped,
 the new version takes effect on the next start.
 
-An installed v3.1.0 with Memory enabled or the companion installed asks for a
-matching `avibe-memory` wheel before replacing the core package. New releases
-include a metadata-only compatibility wheel for that old updater. It contains no
-Memory modules and does not enable Memory in the new service. Fresh installs do
-not need the compatibility wheel.
+Starting with **3.2.6**, releases no longer include the `avibe-memory`
+compatibility wheel. The released **v3.1.0** updater requests that wheel when
+Memory is enabled or its companion package is installed. Upgrading that install
+directly to 3.2.6 or later fails its preflight **before changing the installation**.
+Reinstall with the official install script instead:
+
+```bash
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
+```
+
+For a uv tool installation, you can instead replace it with the current core:
+
+```bash
+uv tool install --force avibe-os
+```
+
+Do not add `[memory]` or `--with avibe-memory`; specify any other extra packages
+you still need again. For the uv command, stop the old service before replacing
+the tool, then start Avibe and check `vibe status`. Stopping Avibe interrupts
+active sessions, so do this from a separate terminal if your session runs inside
+Avibe. Reinstallation preserves existing Memory data and the new service ignores
+the obsolete configuration. Releases from v3.1.1 onward already removed Memory;
+the current `vibe upgrade` does not request this wheel. Compatibility assets on
+previously published releases remain untouched.
 
 ### From a GitHub-only pre-release (`gh-vX.Y.ZrcN`)
 

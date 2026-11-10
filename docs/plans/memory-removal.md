@@ -358,6 +358,38 @@ Do not use `git clean`, remove untracked user artifacts, touch `$HOME`, restart
 the local `vibe` service, or modify files outside this repository. The checkout
 contains pre-existing uncommitted files; preserve unrelated changes.
 
+### Compatibility wheel retired from 3.2.6 (owner decision, 2026-11-10)
+
+The owner ended automatic-updater compatibility for **v3.1.0 installations with
+Memory**. Starting with 3.2.6 (including its previews), neither official nor
+GitHub-only releases build, verify, or upload the metadata-only `avibe-memory`
+bridge. The builder, bridge-only tests, and MUC-004 release scenario are retired;
+ordinary install/upgrade release gates and MUC-001–003 config/data-preservation
+contracts remain. This supersedes item 1's ongoing-shipping requirement below;
+the dated implementation evidence is historical, not current release behavior.
+
+Only the checked released **v3.1.0** updater preflights a same-version companion
+wheel at the target GitHub Release. The checked v3.0.14 updater does not, and
+Memory was removed in v3.1.1. Current `vibe upgrade` never requests the companion;
+its provider-detection exclusion remains for installations that still contain it.
+
+GitHub's asset counters read on 2026-11-10 show 113 bridge downloads for v3.1.1
+(published 2026-09-27), then only 3–6 per release through v3.2.4. Bridge/core
+GitHub-wheel counts were respectively 5/4 (3.1.2), 6/4 (3.1.3), 4/3 (3.2.0),
+5/3 (3.2.1), 5/6 (3.2.2), 3/3 (3.2.3), and 3/3 (3.2.4). These small counts are
+consistent with release automation and mirroring rather than continuing
+migration demand. Aggregate counters cannot identify callers or prove that no
+legacy updater fetched a wheel; retirement is an explicit support decision.
+
+Residual impact: an unupdated v3.1.0 installation with Memory fails its missing
+wheel preflight before changing anything. Recovery is a fresh install using the
+official install script or `uv tool install --force avibe-os`, without Memory
+extras; see `docs/UPGRADING.md` for service-stop/restart guidance. Obsolete Memory
+configuration remains ignored and user Memory data remains untouched. Already
+published bridge assets are not changed or removed. The required-check name
+`memory-insight-contract` is unchanged; renaming it requires a separate ruleset
+change in lockstep.
+
 ### Historical release compatibility (2026-09-23)
 
 PR #2120 was closed without merging. Its review, CI and repository branch remain

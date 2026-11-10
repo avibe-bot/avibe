@@ -976,8 +976,7 @@ def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):
     dist = tmp_path / "dist"
     dist.mkdir()
     for name in ("vibe-show-runtime-node-darwin-arm64.tgz", "show-runtime-manifest.json",
-                 "avibe_os-3.1.2rc1.whl", "avibe_os-3.1.2rc1.tar.gz",
-                 "avibe_memory-3.1.2rc1-py3-none-any.whl"):
+                 "avibe_os-3.1.2rc1.whl", "avibe_os-3.1.2rc1.tar.gz"):
         (dist / name).write_bytes(name.encode())
     remote = tmp_path / "remote"
     remote.mkdir()
