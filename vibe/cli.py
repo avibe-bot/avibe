@@ -9331,12 +9331,11 @@ def _session_update(args, invocation: _ServiceInvocation):
             # The menu is read before the write transaction, which must stay short;
             # the write below checks the request again against the row it updates.
             with invocation.stores.session_engine.connect() as conn:
+                route_session = sessions_service.get_active_session(conn, session_id)
                 refusal = _bot_session_refusal(conn, session_id, invocation.caller_env)
                 if refusal is not None:
                     raise refusal
-                _agent, route_backend, _current = _session_route(
-                    sessions_service.get_active_session(conn, session_id), invocation.stores.agent_store
-                )
+                _agent, route_backend, _current = _session_route(route_session, invocation.stores.agent_store)
             route_menu = _route_menu(
                 route_backend,
                 hub_agent_reader=invocation.stores.hub_agent_reader,
