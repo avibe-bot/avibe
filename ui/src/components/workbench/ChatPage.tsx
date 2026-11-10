@@ -3459,6 +3459,11 @@ export const ChatPage: React.FC = () => {
     : { executionProcess: showAgentActivity, harnessMessages: true, backgroundTasks: true };
   // The in-chat ways to the Settings switch stay only where it decides what shows.
   const offersActivitySwitch = canEditAgentActivityVisibility && details.harnessMessages;
+  // Harness input waiting for its Turn is hidden with the delivered Harness rows;
+  // what the user sent, and anything else, stays in the strip.
+  const shownQueueRows = details.harnessMessages
+    ? queueRows
+    : queueRows.filter((row) => chatRowKind(row).kind !== 'harness');
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
@@ -3656,7 +3661,7 @@ export const ChatPage: React.FC = () => {
             the flush, Recall appends into the disabled composer. */}
         {writable && (
           <QueueStrip
-            queue={queueRows}
+            queue={shownQueueRows}
             pendingIds={pendingRowIds}
             onRemove={removeQueued}
             onRecall={recallQueued}

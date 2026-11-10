@@ -304,9 +304,11 @@ Owner decisions 2026-11-01, from the mockups in this Session's Show Page
   reads as on), so a Bot conversation reads like talking to a person. On, the
   conversation hides the execution process (Activity chips and cards, the
   running card included), Harness messages (rows and groups), and the
-  background-task banner; while the Bot works it shows the thinking bubble. Off,
-  Harness messages and the banner show, and the execution process shows when the
-  Settings switch "Show Agent Activity" is also on. The Bot's own replies always
+  background-task banner, and queued Harness input in the queue strip (the
+  user's own waiting messages stay); while the Bot works it shows the thinking
+  bubble. Off, Harness messages, queued or not, and the banner show, and the
+  execution process shows when the Settings switch "Show Agent Activity" is also
+  on. The Bot's own replies always
   show, including its answers to hidden Harness input: a Bot reporting a Watch
   result to the user reads as the Bot speaking first.
 - **Desktop pet.** It keeps the Vibey mascot art; its bubble uses the main

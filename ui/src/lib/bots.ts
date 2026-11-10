@@ -109,8 +109,9 @@ export function botDisplayName(bot: Pick<Bot, 'display_name' | 'builtin' | 'hand
 /** What a Bot's conversation shows besides the conversation itself (owner decision
  *  2026-11-02). With "Hide details" on, the default, it reads like talking to a
  *  person: no execution process (Activity chips and cards, the running card
- *  included), no Harness messages, and no background-task banner; the Bot's own
- *  messages, and the thinking bubble while it works, always show. With it off,
+ *  included), no Harness messages (queued ones included), and no background-task
+ *  banner; the Bot's own messages, the user's queued ones, and the thinking bubble
+ *  while it works always show. With it off,
  *  Harness messages and the banner show, and the execution process follows the
  *  Settings switch "Show Agent Activity" as in any Session. */
 export function conversationDetails(hideDetails: boolean, showAgentActivity: boolean): {
