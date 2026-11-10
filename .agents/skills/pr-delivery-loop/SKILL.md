@@ -22,7 +22,7 @@ The reasons behind these rules, with the failures that produced them, are in `re
 - Read the repository's `AGENTS.md` first. When taking over an existing branch, verify its head and author; unexplained new commits may belong to someone still working. For a new task, create an independent worktree from the latest default branch (`.worktrees/<repo>/<branch>` in the multi-repo workspace). One branch has one writer. Do not use stacked PRs: declare unmerged dependencies in the PR body and make the code depend only on contracts already on the default branch.
 - Before editing, understand who this diff affects: callers, data, migrations, and other lanes. State acceptance as invariants that cover the class of behavior, not only the immediate example; verify both upgrade and downgrade paths for migrations.
 - Run focused tests, changed-file lint, and required repository checks locally (`npm run build` for UI changes). Leave the full suite to CI instead of making it a local push gate; separately verify flows CI does not cover, such as E2E or manual checks.
-- Before pushing, review `git diff origin/<default>...HEAD`: scope drift, omissions, secrets, and temporary files. Compare allocated IDs such as migration revisions with the latest default branch; Git can miss semantic collisions. On a queue-required branch, do not repeatedly rebase or wait for duplicate base-branch CI merely because the base advanced: the queue validates the combined landing tree. Resolve real conflicts and findings normally.
+- Before pushing, review `git diff origin/<default>...HEAD`: scope drift, omissions, secrets, and temporary files. Compare allocated IDs such as migration revisions with the latest default branch; Git can miss semantic collisions. Unless the branch requires an up-to-date head, do not rebase or rerun CI merely because the base advanced; resolve real conflicts and findings normally.
 - Open a non-draft PR with a `type(scope): summary` title and explicit `--base <default branch>`. Use `--body-file` for multiline text. State the scope, validation, remaining manual/E2E checks, dependencies, and intentional non-changes (Known-by-design), so later findings can refer to them. Read back the title, body, and base after creation.
 
 ## Keep one Watch on the PR
@@ -59,7 +59,7 @@ The PR is Merge-ready only when all of these are true:
 - The entire PR has no unresolved thread, including old and outdated heads;
 - The PR is open, non-draft, conflict-free, and GitHub shows `CLEAN`.
 
-These must all be facts about the current head. If any item is uncertain, treat it as not passed and go establish it. On a queue-required branch, Merge-ready means **ready to enqueue**, not that merge-group validation has already passed.
+These must all be facts about the current head. If any item is uncertain, treat it as not passed and go establish it.
 
 ## Merge
 
@@ -70,19 +70,15 @@ Merge follows intent, not a fixed authorization phrase:
 - If the user said to wait or to confirm personally, follow the user's latest instruction.
 - If uncertain, keep verifying and offer the Merge button to the user. Do not race ahead, and do not wait passively for a magic authorization phrase.
 
-Before merging, recheck the Merge-ready conditions live and make sure no delegated lane is still writing this PR. Land dependency contracts before creating consuming PRs; independent approved PRs may enter the queue without serially waiting for each other. Then:
+Before merging, recheck the Merge-ready conditions live and make sure no delegated lane is still writing this PR. Land dependency contracts before creating consuming PRs; independent Merge-ready PRs may merge without serially waiting for each other. Then:
 
 ```bash
 gh pr merge <PR-URL> --squash --match-head-commit <verified-head-SHA>
 ```
 
-`--match-head-commit` binds the request to the verified head. On a branch that requires a merge queue (Avibe `master`), this command requests enqueue; the queue owns the merge strategy. The same queue requirement applies to GitHub's Web UI. Never use `--admin`, bypass actors, direct pushes to the protected branch, or weaker checks to get around it.
+`--match-head-commit` binds the merge to the verified head. Never use `--admin`, bypass actors, direct pushes to the protected branch, or weaker checks to get around a requirement. Command success or an auto-merge request is **not** `MERGED`; read the PR state back. If a branch ever requires a merge queue, this command only enqueues: keep the Watch, branch, and worktree until `MERGED`, and if the PR is dequeued, read the timeline reason, fix it, pass the exact-head gates again, and re-enqueue.
 
-Read back queue membership/timeline after the command. Success or an auto-merge request is **not** `MERGED`; if only auto-merge is enabled, inspect which requirement still prevents enqueue. Keep the same Watch, branch, and worktree through queue validation. Do not use `--delete-branch` at enqueue or push a new head while queued. The queue runs required CI on its synthetic `merge_group` head, which is distinct from the reviewed PR head; do not mistake green PR CI for green queue CI.
-
-If removed from the queue, inspect the timeline reason and associated merge-group run. Diagnose and fix failures/conflicts, rerun the exact-head review/CI gates after any new push, and enqueue again only when ready. A group rebuilt by GitHub is not a merge, and absence from the queue is not proof of success. Do not bypass the queue to resolve a failure.
-
-Only after GitHub reports `MERGED`, read back the merge commit and clean up this task's Watch, worktree, and branch without touching other work. Branches without a queue keep the direct-merge path and the same readback/cleanup gate.
+Only after GitHub reports `MERGED`, read back the merge commit and clean up this task's Watch, worktree, and branch without touching other work.
 
 Merge does not authorize deployment, service restarts, local regression updates, or credential changes. Each needs the user's approval.
 
@@ -99,7 +95,7 @@ Use the conversation's language and lead with the result. The user cares about w
   ```
 
   If buttons are unavailable, say the same next step visibly and include the link.
-- **When acting on merge intent:** do not ask again or offer a stale Merge button. On a queue-required branch, enqueue and say it is queued, then continue monitoring; report it as merged only after the `MERGED` readback. On a direct-merge branch, merge, read back the result, and report it. State the reason when acting on your own judgment.
+- **When acting on merge intent:** do not ask again or offer a stale Merge button. Merge, read back `MERGED` and the merge commit, and report it. State the reason when acting on your own judgment.
 - **After Merge:** when the repository has a local regression workflow (Avibe does), offer `[Update regression]` and `[Update and verify]`. Both update the local master environment; the latter also verifies the affected flows. After the user chooses one, read `references/local-regression.md` before acting.
 
 Buttons belong only in user-facing replies, not lane reports or GitHub comments. When offering one, record the target PR and head internally. After a click, re-fetch live state for that PR; if the head changed or readiness was lost, explain it and offer again instead of using stale approval. If the target PR is unclear, ask rather than guess.
@@ -109,7 +105,7 @@ Buttons belong only in user-facing replies, not lane reports or GitHub comments.
 - The user-started session is the orchestrator and owns final judgments, merging, and user communication. A delegated lane belongs to the session that dispatched it. Authority is user > orchestrator > this skill. Do not delegate final review or merge decisions to a new agent.
 - The orchestrator may make clear, reversible, contract-preserving scope changes. A lane reports work outside its scope instead of editing another lane's area. Merge shared interface contracts into the base before forking parallel lanes.
 - Each round, the orchestrator fetches its own inventory and spot-checks the claimed root-cause fix and a consuming test; a lane report and green tests are not a substitute.
-- When a lane finishes or needs a decision, send its report to the orchestrator with `vibe agent run --session-id <orchestrator> --message-file <report>` and verify delivery. A Watch-triggered lane reports explicitly; a read receipt is not its report. Send orchestrator decisions back to the lane explicitly; GitHub Watch cannot observe session decisions. Keep the lane's Watch until the report is delivered; if the PR is queued or awaiting the orchestrator's merge action, keep it through `MERGED` close-out.
+- When a lane finishes or needs a decision, send its report to the orchestrator with `vibe agent run --session-id <orchestrator> --message-file <report>` and verify delivery. A Watch-triggered lane reports explicitly; a read receipt is not its report. Send orchestrator decisions back to the lane explicitly; GitHub Watch cannot observe session decisions. Keep the lane's Watch until the report is delivered; if the PR is awaiting the orchestrator's merge action, keep it through `MERGED` close-out.
 - Cancellation is asynchronous. Before handing work to someone else, confirm the original lane stopped or explicitly notify both sides of the handoff; do not create two writers.
 - In a user-started session, verify gates, remove the Watch, and send the final report in the same round; do not open a follow-up task only to sequence close-out.
 
