@@ -7,6 +7,7 @@ on:
     workflows:
       - Publish to PyPI
       - Release (AI Notes)
+      - Desktop Release (Stage 2)
       - Guard Model Hub engine release
       - Guard Git Runtime release
       - Build local-only Git runtime

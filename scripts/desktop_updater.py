@@ -98,15 +98,15 @@ def produce(directory: Path, tag: str, source_sha: str, target: str, app: Path |
 
 
 def stage(directory: Path, tag: str, source_sha: str, repo: str, enabled: bool) -> None:
-    """Stage verified stable desktop bytes in the existing Draft, read back every byte."""
+    """Stage verified stable desktop bytes in the existing release, draft or public."""
     if repo != REPOSITORY:
         raise ValueError('Updater repository mismatch')
     paths = release['verify'](directory, tag, source_sha, updater_enabled=enabled)
     state = release['_github']['get_release'](repo, tag)
-    if state and not state.draft:
-        raise ValueError('Cannot retrofit a published desktop release')
+    if state is None:
+        raise ValueError('Release is missing before desktop finalization')
     subprocess.run(['gh', 'release', 'view', tag, '--repo', repo], check=True, stdout=subprocess.DEVNULL)
-    # Existing asset bytes are immutable; missing assets may be added only to Drafts.
+    # Existing asset bytes are immutable; missing assets may be added to this release.
     import tempfile
     with tempfile.TemporaryDirectory() as temporary:
         remote = json.loads(subprocess.check_output(['gh', 'release', 'view', tag, '--repo', repo, '--json', 'assets'], text=True))

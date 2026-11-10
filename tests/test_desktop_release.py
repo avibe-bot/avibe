@@ -714,9 +714,9 @@ def test_workflow_signs_every_macos_layer_before_recording():
     triggers = package.get("on", package.get(True))
     assert set(triggers) == {"workflow_dispatch", "workflow_call", "push", "schedule"}
     assert "secrets" not in triggers["workflow_call"]
-    # Only the default branch warms caches; tag pushes reach this build only through release_ai.
+    # Only the default branch warms caches; tag pushes reach this build only through desktop-release.yml.
     assert triggers["push"]["branches"] == ["master"] and "tags" not in triggers["push"]
-    jobs = workflow("release_ai.yml")["jobs"]
+    jobs = workflow("desktop-release.yml")["jobs"]
     caller = jobs["desktop-packages"]
     assert caller["uses"] == "./.github/workflows/desktop-package.yml"
     # Environment secrets resolve empty in a called job without inheritance (actions/runner#4453).
@@ -969,8 +969,8 @@ def test_signpath_test_signing_is_a_dispatch_only_isolated_lane():
     assert verifier.CERTIFICATE_SHA256 == "38f8d097ed29ecd73394e347a401c0d099379e89e1c47a3843f442041829bc0a"
 
 
-@pytest.mark.parametrize("state", ["new", "draft-partial", "published-identical", "published-legacy",
-                                  "changed-desktop", "changed-package", "upload-corrupt", "missing-local"])
+@pytest.mark.parametrize("state", ["draft-partial", "published-identical", "published-legacy",
+                                  "changed-desktop", "upload-corrupt", "missing-local"])
 def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):
     directory = assemble_assets(tmp_path)
     dist = tmp_path / "dist"
@@ -992,8 +992,9 @@ def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):
             shutil.copyfile(path, remote / path.name)
     if state == "changed-desktop":
         (remote / desktop_paths[0].name).write_bytes(b"different published bytes")
-    if state == "changed-package":
-        (remote / "avibe_os-3.1.2rc1.whl").write_bytes(b"different published wheel")
+    for path in dist.iterdir():
+        if not (remote / path.name).exists():
+            shutil.copyfile(path, remote / path.name)
     if state == "missing-local":
         desktop_paths[0].unlink()
     scripts = tmp_path / "scripts"
@@ -1065,28 +1066,29 @@ if state:
         }))
     if state == "upload-corrupt":
         (tmp_path / "corrupt").touch()
-    command = step("Create GitHub-only Release", "release", "release_ai.yml")["run"]
-    command = command.replace("${{ steps.tag.outputs.tag }}", TAG)
-    command = command.replace("${{ steps.release_type.outputs.prerelease }}", "true")
+    command = step("Attach verified desktop assets to the same release", "stage-desktop", "desktop-release.yml")["run"]
+    command = command.replace("${{ inputs.tag }}", TAG)
+    command = command.replace("${{ needs.resolve-desktop-release.outputs.source_sha }}", SOURCE)
     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=tmp_path,
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
-                                 "SOURCE_SHA": SOURCE, "GITHUB_REPOSITORY": "avibe-bot/avibe"},
+                                 "SOURCE_SHA": SOURCE, "RELEASE_TAG": TAG,
+                                 "GITHUB_REPOSITORY": "avibe-bot/avibe",
+                                 "UPDATER_ENABLED": "false"},
                             capture_output=True, text=True, timeout=30)
-    success = state in {"new", "draft-partial", "published-identical"}
+    success = state in {"draft-partial", "published-identical", "published-legacy"}
     assert (result.returncode == 0) == success, result.stdout + result.stderr
     events_path = tmp_path / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
     finalizations = [args for args in events if "--draft=false" in args]
-    assert bool(finalizations) == success
+    assert not finalizations
     if success:
         assert {path.name for path in remote.iterdir()} == {path.name for path in [*directory.iterdir(), *dist.iterdir()]}
-        assert json.loads((tmp_path / "state.json").read_text())["draft"] is False
         if state == "published-identical":
             assert not any(args[:2] == ["release", "upload"] for args in events)
-    elif state != "upload-corrupt":
-        assert not any(args[:2] == ["release", "upload"] for args in events)
+    elif state == "upload-corrupt":
+        assert any(args[:2] == ["release", "upload"] for args in events)
     else:
-        assert json.loads((tmp_path / "state.json").read_text())["draft"] is True
+        assert not any(args[:2] == ["release", "upload"] for args in events)
 
 
 def test_workflow_shell_syntax():

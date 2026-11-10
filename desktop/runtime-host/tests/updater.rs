@@ -198,6 +198,48 @@ fn channel_selection_uses_semver_and_the_prerelease_flag_together() {
 }
 
 #[test]
+fn target_selection_skips_newer_partial_release_until_signed_set_is_complete() {
+    use avibe_runtime_host::update::{artifact_name, manifest_name, Release};
+    let target = "aarch64-apple-darwin";
+    let complete = |tag: &str, prerelease: bool, version: &str| Release {
+        tag: tag.into(),
+        prerelease,
+        commit: None,
+        assets: [
+            manifest_name(target),
+            format!("{}.sig", manifest_name(target)),
+            artifact_name(version, target).unwrap(),
+        ]
+        .into_iter()
+        .collect(),
+        silent: false,
+    };
+    let partial = Release {
+        tag: "gh-v3.1.2rc8".into(),
+        prerelease: true,
+        commit: None,
+        assets: vec![manifest_name(target)],
+        silent: false,
+    };
+    let selected = Channel::Test
+        .latest_for_target(vec![complete("gh-v3.1.2rc7", true, "3.1.2-rc.7"), partial], target)
+        .unwrap();
+    assert_eq!(selected.1.tag, "gh-v3.1.2rc7");
+    assert!(Channel::Test
+        .latest_for_target(
+            vec![Release {
+                tag: "gh-v3.1.2rc8".into(),
+                prerelease: true,
+                commit: None,
+                assets: vec![manifest_name(target), format!("{}.sig", manifest_name(target))],
+                silent: false,
+            }],
+            target,
+        )
+        .is_none());
+}
+
+#[test]
 fn only_the_supported_index_schema_for_this_repository_is_read() {
     use avibe_runtime_host::update::index_releases;
     let index = serde_json::json!({
