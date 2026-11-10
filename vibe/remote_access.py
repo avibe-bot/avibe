@@ -5542,6 +5542,19 @@ def prepare_pairing_revocation(
     """Fence pending replay before api.save_config publishes a real unpair."""
 
     candidate_is_unpaired = not candidate_config.remote_access.vibe_cloud.is_runtime_paired()
+    # A TLS key belongs to one pairing, including re-pairing the same instance.
+    # Retire before publication so a failed config write loses only the optional
+    # direct path, never lets an old key survive a committed pairing change.
+    previous_cloud = base_config.remote_access.vibe_cloud if base_config is not None else None
+    current_cloud = candidate_config.remote_access.vibe_cloud
+    if (
+        candidate_is_unpaired
+        or previous_cloud is None
+        or _pairing_identity_from_cloud(previous_cloud) != _pairing_identity_from_cloud(current_cloud)
+    ):
+        from vibe.direct_certificates import discard_direct_certificates
+
+        discard_direct_certificates()
     identity_revoked = _pairing_identity_revoked(base_config, candidate_config)
     if not identity_revoked and not candidate_is_unpaired:
         return None
