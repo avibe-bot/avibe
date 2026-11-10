@@ -377,6 +377,16 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         (None, {"get-task-allow": True}, "development signature"),
         (None, {"com.apple.developer.associated-domains": []}, "webcredentials:avibe.bot"),
         (None, {"com.apple.developer.associated-domains": ["*"]}, "webcredentials:avibe.bot"),
+        (
+            None,
+            {
+                "com.apple.developer.associated-domains": [
+                    "webcredentials:avibe.bot",
+                    "webcredentials:attacker.example",
+                ]
+            },
+            "exactly",
+        ),
         (None, {"application-identifier": "ZZZZZZZZZZ.bot.avibe.ios"}, "not signed for"),
         (None, {"aps-environment": "development"}, "aps-environment"),
         (None, {"com.apple.developer.usernotifications.filtering": True}, "forbidden entitlements"),
@@ -388,6 +398,7 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         "debuggable",
         "passkeys",
         "passkeys-wildcard",
+        "passkeys-extra-domain",
         "team",
         "development-aps",
         "filtering",

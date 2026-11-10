@@ -453,6 +453,14 @@ def check_signed_bundle(
                 "The bundle must carry exactly the required "
                 "keychain-access-groups values"
             )
+        if (
+            key == "com.apple.developer.associated-domains"
+            and actual_values != set(required)
+        ):
+            raise TestFlightError(
+                "The bundle must carry exactly the required "
+                f"{key} values {required}"
+            )
         if not set(required) <= actual_values:
             raise TestFlightError(f"The bundle's {key} entitlement lacks {required}")
 
