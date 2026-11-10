@@ -251,6 +251,7 @@ fn desktop_update_commands_are_workbench_scoped() {
             "allow-desktop-update-check",
             "allow-desktop-update-install",
             "allow-desktop-update-skip",
+            "allow-desktop-update-prereleases-set",
             "allow-desktop-remote-install-allowed",
             "allow-desktop-remote-install-set",
             "allow-desktop-update-remote-decline"
@@ -262,6 +263,7 @@ fn desktop_update_commands_are_workbench_scoped() {
         "updater::desktop_update_check",
         "updater::desktop_update_install",
         "updater::desktop_update_skip",
+        "updater::desktop_update_prereleases_set",
         "updater::desktop_remote_install_allowed",
         "updater::desktop_remote_install_set",
         "updater::desktop_update_remote_decline",
@@ -593,6 +595,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "desktop_update_check",
         "desktop_update_install",
         "desktop_update_skip",
+        "desktop_update_prereleases_set",
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",

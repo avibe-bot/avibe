@@ -17174,9 +17174,9 @@ def get_latest_version() -> dict:
     Returns:
         {"current": str, "latest": str, "has_update": bool, "error": str|None}
     """
-    from vibe.upgrade import get_latest_version_info
+    from vibe.upgrade import get_latest_version_info, prerelease_updates_enabled
 
-    return get_latest_version_info(__version__)
+    return get_latest_version_info(__version__, prereleases=prerelease_updates_enabled())
 
 
 def cmd_check_update(args=None):
@@ -17264,6 +17264,7 @@ def cmd_upgrade():
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,
             target_version=info.get("latest"),
+            package_spec=info.get("package_spec"),
         )
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")

@@ -6,7 +6,7 @@ import {
   type VersionInfo,
   type UpgradeResult,
 } from '../context/ApiContext';
-import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal } from 'lucide-react';
+import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal, ExternalLink } from 'lucide-react';
 import clsx from 'clsx';
 import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
@@ -61,6 +61,29 @@ function normalizeVersion(value: string): string {
   ].join('');
 }
 
+// A version (in the PEP 440 form above) is a pre-release when it has a pre or dev segment.
+function isPrereleaseVersion(version: string): boolean {
+  const match = PEP440.exec(version);
+  return Boolean(match && (match[2] || match[6]));
+}
+
+// Whether `version`'s release (X.Y.Z, before any pre-release) precedes `other`'s.
+function releasePrecedes(version: string, other: string): boolean {
+  const release = (value: string) => (PEP440.exec(value)?.[1] ?? '').split('.').map(Number);
+  const [a, b] = [release(version), release(other)];
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference) return difference < 0;
+  }
+  return false;
+}
+
+// Release candidates are published as GitHub-only `gh-vX.Y.ZrcN` tags (docs/release.md).
+function releaseNotesUrl(version: string): string {
+  const tag = isPrereleaseVersion(version) ? `gh-v${version}` : `v${version}`;
+  return `https://github.com/avibe-bot/avibe/releases/tag/${encodeURIComponent(tag)}`;
+}
+
 type RemoteUpdateConfirmation = {
   target: string;
   delivery: 'prompt' | 'install' | 'runtime';
@@ -98,6 +121,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [remoteDelivery, setRemoteDelivery] = React.useState<'prompt' | 'install' | null>(null);
   const [autoUpdate, setAutoUpdate] = React.useState<boolean | null>(null);
   const [savingAutoUpdate, setSavingAutoUpdate] = React.useState(false);
+  const [prereleases, setPrereleases] = React.useState<boolean | null>(null);
+  const [savingPrereleases, setSavingPrereleases] = React.useState(false);
   const popupRef = React.useRef<HTMLDivElement>(null);
   const popupId = React.useId();
 
@@ -117,6 +142,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     try {
       const config = await api.getConfig();
       setAutoUpdate(config.update?.auto_update ?? true);
+      setPrereleases(config.update?.prereleases === true);
     } catch (e) {
       console.error('Failed to load config:', e);
     }
@@ -131,6 +157,28 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       console.error('Failed to save auto-update setting:', e);
     } finally {
       setSavingAutoUpdate(false);
+    }
+  };
+
+  // One switch per instance: the Runtime's `update.prereleases`, or the desktop
+  // app's own update channel when the desktop app owns updates.
+  const handlePrereleasesToggle = async (enabled: boolean) => {
+    setSavingPrereleases(true);
+    try {
+      if (desktopActions) {
+        // The shell rechecks on its new channel and publishes the result.
+        await desktopActions.setPrereleases(enabled);
+        setDesktopUpdateState((previous) => previous && { ...previous, prereleases: enabled });
+      } else {
+        await api.mutateConfig([setConfigField(['update', 'prereleases'], enabled)]);
+        setPrereleases(enabled);
+        setUpgradeResult(null);
+        void checkVersion(true);
+      }
+    } catch (e) {
+      console.error('Failed to save the pre-release update setting:', e);
+    } finally {
+      setSavingPrereleases(false);
     }
   };
 
@@ -338,6 +386,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   );
   const currentVersion = (hasVersionSkew ? runtimeVersion : shellVersion ?? runtimeVersion) || '...';
   const isSourceBuild = !inDesktopShell && versionInfo?.build?.kind === 'source';
+  // Running a pre-release with only an older stable release on offer: name that row the latest
+  // stable release, so it does not read as older than "latest".
+  const awaitingStable = !hasUpdate && latestVersion !== null && !isPrereleaseVersion(latestVersion)
+    && isPrereleaseVersion(normalizeVersion(currentVersion))
+    && releasePrecedes(latestVersion, normalizeVersion(currentVersion));
+  // A shell that predates the switch reports no `prereleases`, and keeps its menu item.
+  const prereleaseSwitch = isDesktopManaged
+    ? (desktopActions && typeof desktopUpdateState?.prereleases === 'boolean' ? desktopUpdateState.prereleases : null)
+    : (versionInfo && capabilities.can_manage_instance && !isSourceBuild ? prereleases : null);
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
   const displayVersion = isSourceBuild ? shortSourceRevision : shortenVersion(currentVersion);
@@ -622,9 +679,24 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
               {/* Latest Version */}
               {!isSourceBuild && latestVersion && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted">{t('dashboard.latestVersion')}</span>
-                  <span className="font-mono font-medium text-foreground">{latestVersion}</span>
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="shrink-0 text-muted">{t(awaitingStable ? 'dashboard.latestStableVersion' : 'dashboard.latestVersion')}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {isPrereleaseVersion(latestVersion) && (
+                      <span className={badgeVariants({ variant: 'info' })}>{t('dashboard.prereleaseBadge')}</span>
+                    )}
+                    <a
+                      href={releaseNotesUrl(latestVersion)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex min-w-0 items-center gap-1 rounded-sm font-mono font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      title={t('dashboard.releaseNotes')}
+                      aria-label={t('dashboard.releaseNotesFor', { version: latestVersion })}
+                    >
+                      <span className="break-all">{latestVersion}</span>
+                      <ExternalLink size={12} className="shrink-0 text-muted" aria-hidden="true" />
+                    </a>
+                  </span>
                 </div>
               )}
 
@@ -708,7 +780,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               ) : versionInfo && (!versionInfo.error || desktopUpdateState?.phase === 'current') ? (
                 <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
                   <Check size={16} className="shrink-0" />
-                  <span>{t('dashboard.upToDate')}</span>
+                  <span>{t(awaitingStable ? 'dashboard.awaitingStableRelease' : 'dashboard.upToDate')}</span>
                 </div>
               ) : versionInfo?.error && !nativeUpdateStateAvailable ? (
                 <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
@@ -760,6 +832,24 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                     disabled={savingAutoUpdate}
                   />
 
+                </div>
+              )}
+
+              {prereleaseSwitch !== null && (
+                <div className={clsx(
+                  'flex items-center justify-between gap-3',
+                  isDesktopManaged && 'border-t border-border pt-3',
+                )}>
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground">{t('dashboard.prereleaseUpdates')}</div>
+                    <div className="text-xs text-muted">{t('dashboard.prereleaseUpdatesHint')}</div>
+                  </div>
+                  <ToggleSwitch
+                    enabled={prereleaseSwitch}
+                    onClick={() => handlePrereleasesToggle(!prereleaseSwitch)}
+                    disabled={savingPrereleases || checking || upgrading || restarting}
+                    label={t('dashboard.prereleaseUpdates')}
+                  />
                 </div>
               )}
             </div>

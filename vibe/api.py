@@ -98,6 +98,7 @@ from vibe.upgrade import (
     execute_upgrade_plan,
     format_deferred_activation_log,
     get_latest_version_info,
+    prerelease_updates_enabled,
     get_running_vibe_path,
     get_safe_cwd,
     format_activation_failures,
@@ -7207,7 +7208,7 @@ def get_version_info() -> dict:
     elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
-        result = get_latest_version_info(__version__)
+        result = get_latest_version_info(__version__, prereleases=prerelease_updates_enabled())
     result["build"] = build.as_dict()
     if managed_by:
         result["managed_by"] = managed_by
@@ -7240,10 +7241,13 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         }
 
     current_vibe_path = get_running_vibe_path()
+    version_info = get_version_info()
     try:
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,
-            target_version=get_version_info().get("latest"),
+            target_version=version_info.get("latest"),
+            # A release candidate installs from its mirrored wheel; stable from PyPI.
+            package_spec=version_info.get("package_spec"),
         )
     except ValueError as exc:
         return {
