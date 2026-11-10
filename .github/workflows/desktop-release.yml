@@ -295,7 +295,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -330,3 +330,16 @@ jobs:
             --source-sha "$SOURCE_SHA" \
             --repo "$GITHUB_REPOSITORY" \
             ${args[@]+"${args[@]}"}
+
+      # Stage 1 dispatches this workflow with GITHUB_TOKEN. Do not rely on a
+      # downstream workflow_run event to reconcile the newly attached assets.
+      - name: Dispatch release mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run release-mirror.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref master \
+            -f dry_run=false

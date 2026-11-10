@@ -669,6 +669,47 @@ def test_release_workflows_split_core_publication_from_desktop_stage():
     assert "--repo \"$GITHUB_REPOSITORY\"" in attach["run"]
 
 
+@pytest.mark.parametrize("dispatch_exit", [0, 1])
+def test_desktop_attachment_dispatches_live_mirror_last(tmp_path, dispatch_exit):
+    # RC3 attached desktop assets without a follow-up mirror run. Checking
+    # workflow_run names alone cannot prove the token-dispatched chain works.
+    job = _job("desktop-release.yml", "stage-desktop")
+    step = _step(job, "Dispatch release mirror")
+    attach = _step(job, "Attach verified desktop assets to the same release")
+    assert job["steps"][-2:] == [attach, step]
+    assert step.get("if", "success()") == "success()"
+    assert not step.get("continue-on-error", False)
+    assert job["permissions"]["actions"] == "write"
+    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert step["shell"] == "bash"
+
+    # Execute the workflow's actual shell with only gh replaced: prove the
+    # destination, ref, write-mode input, and dispatch failures are preserved.
+    binary = tmp_path / "gh"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path('dispatch.json').write_text(json.dumps(sys.argv[1:]))\n"
+        "sys.exit(int(os.environ['DISPATCH_EXIT']))\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+             "GITHUB_REPOSITORY": "fixture/release", "GH_TOKEN": "test-token",
+             "DISPATCH_EXIT": str(dispatch_exit)},
+        capture_output=True, text=True, timeout=15,
+    )
+    assert json.loads((tmp_path / "dispatch.json").read_text()) == [
+        "workflow", "run", "release-mirror.yml", "--repo", "fixture/release",
+        "--ref", "master", "-f", "dry_run=false",
+    ]
+    assert result.returncode == dispatch_exit, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("tag", ["v3.1.0", "gh-v3.2.0rc1"])
 @pytest.mark.parametrize("desktop_enabled", [False, True])
 def test_desktop_stage_requires_complete_signed_build(tag, desktop_enabled):
