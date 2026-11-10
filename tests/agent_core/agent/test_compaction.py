@@ -1243,6 +1243,29 @@ async def test_a_turn_keeps_its_input_and_every_steer_verbatim_across_a_mid_turn
     assert compaction.payload["kept_inputs"] == inputs
 
 
+async def test_a_steer_arriving_during_a_checkpoint_enters_the_request_the_checkpoint_made_room_for():
+    # The checkpoint turn runs after the tool batch's boundary drained the queue and before the request it makes room
+    # for is sent. A steer accepted meanwhile is that request's newest message: composing admits steers after the
+    # transition too, or the model would answer without it.
+    holder, steered = {}, []
+
+    class SteeredAtCheckpoint(Model):
+        async def stream(self, request, cancel):
+            if is_checkpoint(request):
+                steered.append(await holder["agent"].steer(input_row("steer", "STEER: also report each size")))
+            async for event in super().stream(request, cancel):
+                yield event
+
+    model = SteeredAtCheckpoint(growing(4), [[Done(assistant(CHECKPOINT))]])
+    holder["agent"] = agent = make_agent(model, tools=[reader(tokens(6_000))])
+    events = await run(agent, "read f0 to f3")
+    assert steered == [True] and len(model.checkpoint_requests) == 1
+    assert len(model.conversation_requests) == 5
+    newest = model.conversation_requests[-1].messages[-1]
+    assert isinstance(newest, UserMessage) and newest.content[0].text == "STEER: also report each size"
+    assert events[-1].reason == "completed"
+
+
 async def test_a_small_fallback_drops_a_previous_checkpoint_too_large_for_it_and_continues():
     # A 15,000-token checkpoint written on a large route cannot fit an 8,000-token fallback: no fork can take it, and a
     # drop that kept it would still not fit. The drop leaves its model text out, says so, and the Turn continues.
