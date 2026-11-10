@@ -7903,6 +7903,54 @@ def remote_access_status():
     return jsonify(status_payload)
 
 
+@app.route("/api/direct/rendezvous", methods=["POST"])
+def direct_rendezvous():
+    """Tell an authenticated remote client how to dial this instance directly.
+
+    Contract: docs/plans/remote-direct-rendezvous.md. The answer is public
+    endpoint information bound to the caller's remote session; it is not a
+    credential and grants nothing by itself.
+    """
+
+    from vibe import direct_rendezvous as rendezvous_state
+
+    config = _load_remote_access_config()
+    session = getattr(g, "remote_session_payload", None)
+    subject = str((session or {}).get("sub") or "").strip()
+    if config is None or not subject:
+        # A local or setup-host request has no remote session to bind to and no
+        # use for a direct path.
+        return jsonify({"ok": False, "error": "remote_session_required"}), 403
+    payload = request.json
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != rendezvous_state.RENDEZVOUS_VERSION
+        or not rendezvous_state.is_endpoint_id(payload.get("client_endpoint_id"))
+    ):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+
+    instance_id = config.remote_access.vibe_cloud.instance_id
+    hostname = _remote_access_public_host(config) or ""
+    if _effective_normalized_host() != hostname:
+        # The direct path serves the managed hostname only. A session on a
+        # custom hostname keeps using the tunnel.
+        result = rendezvous_state.unavailable(
+            instance_id=instance_id,
+            hostname=hostname,
+            reason="hostname_not_direct",
+        )
+    else:
+        result = rendezvous_state.rendezvous.offer(
+            instance_id=instance_id,
+            hostname=hostname,
+            subject=subject,
+            client_endpoint_id=payload["client_endpoint_id"],
+        )
+    response = jsonify(result)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
