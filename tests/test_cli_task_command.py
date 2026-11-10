@@ -4905,4 +4905,4 @@ def test_agent_run_refuses_a_model_for_an_existing_session_and_says_how_to_chang
 
     assert result == 1
     assert payload["code"] == "model_override_with_existing_session"
-    assert "Web UI's Session model picker" in payload["hint"] and "--fork-session" in payload["hint"]
+    assert "vibe session update" in payload["hint"] and "--queue" in payload["hint"]

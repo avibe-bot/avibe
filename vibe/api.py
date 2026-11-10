@@ -8084,6 +8084,82 @@ def agent_model_options(
     return result
 
 
+def _hub_route_menu(hub_agent: Any) -> Optional[list[dict]]:
+    """The Web route picker's menu from Model Hub's Agent payload, or None when Hub does not serve the backend.
+
+    Mirrors ``hubCatalogModels`` (``ui/src/lib/backendModels.ts``): routeable models once each, in catalog order;
+    efforts without those every hop would refuse (``effort_menu.omitted``) and none for a model that does not
+    reason; ``fast`` where the model's hop is asked for the fast tier, ``unconfirmed`` when its last fast
+    response did not run at that tier.
+    """
+    if not isinstance(hub_agent, dict) or hub_agent.get("mode") != "hub":
+        return None
+    catalog = hub_agent.get("catalog_models")
+    if not isinstance(catalog, list):
+        return None
+    models: list[dict] = []
+    seen: set[str] = set()
+    for row in catalog:
+        model_id = row.get("id") if isinstance(row, dict) else None
+        if not row or not row.get("routeable") or not isinstance(model_id, str) or not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        omitted = set((row.get("effort_menu") or {}).get("omitted") or [])
+        efforts = (
+            []
+            if row.get("supports_reasoning") is False
+            else [effort for effort in row.get("reasoning_efforts") or [] if effort not in omitted]
+        )
+        entry: dict = {"value": model_id, "label": row.get("display_name") or model_id, "reasoning_efforts": efforts}
+        if row.get("fast_mode") is True:
+            entry["fast"] = "unconfirmed" if row.get("fast_mode_confirmed") is False else "offered"
+        models.append(entry)
+    return models
+
+
+def route_menu_options(
+    backend: str,
+    *,
+    hub_agent_reader: Optional[Callable[[str], Any]] = None,
+    provider: Optional[str] = None,
+) -> dict:
+    """The models, efforts, and fast tiers a Session on ``backend`` can switch to: the Web route picker's menu.
+
+    ``hub_agent_reader`` returns Model Hub's Agent payload for a backend (``ModelHubService.get_agent_sources``,
+    in the service or over its internal RPC). A Hub-served backend's menu comes from it and is authoritative.
+    A Direct backend, or a Hub that cannot answer, falls back to ``agent_model_options``: Vibey's configured menu
+    stays authoritative, while Claude and Codex bundled catalogs may lag a release. Only Hub offers fast mode.
+    """
+    normalized_backend = (backend or "").strip().lower()
+    hub_agent = None
+    hub_read = False
+    if hub_agent_reader is not None and normalized_backend in AGENT_BACKENDS:
+        try:
+            hub_agent = hub_agent_reader(normalized_backend)
+            hub_read = True
+        except Exception:
+            logger.debug("Model Hub menu read failed for %s", normalized_backend, exc_info=True)
+    models = _hub_route_menu(hub_agent)
+    if models is not None and not (provider and normalized_backend == "opencode"):
+        return {
+            "ok": True,
+            "backend": normalized_backend,
+            "mode": "hub",
+            "models": models,
+            "source": "model_hub",
+            "live": True,
+            "authoritative": True,
+        }
+    options = dict(agent_model_options(normalized_backend, provider=provider))
+    if options.get("ok"):
+        options["mode"] = (
+            "hub" if not is_native_cli_backend(normalized_backend)
+            else str((hub_agent or {}).get("mode") or "direct") if hub_read else "unknown"
+        )
+        options["authoritative"] = not is_native_cli_backend(normalized_backend)
+    return options
+
+
 _AGENT_INSTALL_JOB_LOCK = threading.Lock()
 _AGENT_INSTALL_JOBS: dict[str, dict] = {}
 _AGENT_INSTALL_LATEST_BY_BACKEND: dict[str, str] = {}
