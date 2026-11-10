@@ -290,6 +290,7 @@ for (const cell of cells) {
     // them loaded first.
     for (const chip of [HOSTS[cell.host], source].filter((selector) => selector.includes('activity:'))) {
       await tap(chip);
+      await expect(transcript(page).locator(chip).locator('[aria-busy="true"]')).toHaveCount(0);
       await tap(chip);
     }
     // What is open before what is watched: the host when it folds; the other one when it shrinks (a member's

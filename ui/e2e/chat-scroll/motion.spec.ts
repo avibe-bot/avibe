@@ -721,9 +721,7 @@ type Disclosed = {
   /** How many copies of each part a chip and its panel share (its icon, its label) are drawn, at the most and
    *  at the least: one, always, never two over each other. */
   copies: [number, number];
-  /** Where the one copy of the shared label that shows is (left, middle), and how opaque what the summary stands
-   *  in for in the content (a chip panel's head bar) shows. */
-  title: [number, number] | null;
+  /** How opaque what the summary stands in for in the content (a chip panel's head bar) shows. */
   head: number | null;
   /** Something in the transcript animates a transform, a translate, a scale, or a clip, besides opacity. */
   moves: boolean;
@@ -867,12 +865,6 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         summary: summaryOpacity,
         late: late ? shownOpacity(late) : null,
         through: late && contentOpacity !== null && summaryOpacity !== null ? contentOpacity * (1 - summaryOpacity) : null,
-        title: (() => {
-          const shown = [...item.querySelectorAll('[data-transcript-shared="label"]')].filter((label) => shownOpacity(label) > 0.05);
-          if (shown.length !== 1) return null;
-          const box = shown[0].getBoundingClientRect();
-          return [box.left, box.top + box.height / 2] as [number, number];
-        })(),
         head: (() => {
           const bar = item.querySelector('[data-transcript-summary-head]');
           return bar ? shownOpacity(bar) : null;
@@ -955,24 +947,11 @@ function expectCovered(frames: Disclosed[]) {
   expect(Math.min(...cover)).toBeGreaterThanOrEqual(0.95);
 }
 /** What a chip and its panel share (its icon and its label) is drawn once at every read, never twice. */
-function expectNoDoubledLabel(frames: Disclosed[], { moves = true }: { moves?: boolean } = {}) {
+function expectNoDoubledLabel(frames: Pick<Disclosed, 'copies'>[]) {
   // Two copies lying on each other draw their text twice (it reads bolder for those frames), even where they are
   // exactly in place: what a chip and its panel share hands over in one frame, and is never missing either.
   expect(Math.max(...frames.map(({ copies }) => copies[0]))).toBe(1);
   expect(Math.min(...frames.map(({ copies }) => copies[1]))).toBe(1);
-  if (!moves) return;
-  // The one that shows moves between the panel head's place and the pill's: read at any time during its move it
-  // is somewhere in between, where one that jumped there is only ever at either end. Judged where the reads come
-  // closer together than the move lasts (over 120 ms), so one of them falls in it.
-  const seen = ownPath(frames);
-  const places = seen.map(({ title }) => title).filter((place): place is [number, number] => place !== null);
-  const apart = (a: [number, number], b: [number, number]) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
-  const [start, end] = [places[0], places.at(-1)!];
-  const reads = seen.map(({ at }) => at);
-  const sparsest = Math.max(0, ...reads.slice(1).map((at, index) => at - reads[index]));
-  if (apart(start, end) > 2 && sparsest < 110) {
-    expect(places.filter((place) => apart(place, start) > 1 && apart(place, end) > 1).length).toBeGreaterThanOrEqual(1);
-  }
 }
 /** Closing lifts the rows below by exactly what the layout gives back: once what closed is gone, nothing moves on. */
 function expectLandsAsItGoes(all: Disclosed[]) {
@@ -1038,6 +1017,63 @@ async function fastestMove(page: Page) {
 const CHIP = '[data-transcript-key^="activity:"]';
 const PILL = ':scope > div > button';
 const GROUP_CARD = 'button.flex-col > span.relative';
+
+test('the execution-process label travels between its pill and panel without jumping or doubling', async ({ page }) => {
+  await open(page, 'delay=0&activity=1&records=1&count=392');
+  for (const expanded of [false, true]) {
+    const samples = await page.evaluate(async (control) => {
+      const transcript = document.querySelector('[data-testid="chat-transcript"]')!;
+      const button = [...transcript.querySelectorAll<HTMLElement>(control)].at(-1)!;
+      button.click();
+      // React commits the click in a microtask. Capture the animations before yielding a frame: even a
+      // runner that draws no frame in the short, eased label move must exercise its interior geometry.
+      for (let tick = 0; tick < 6; tick += 1) await Promise.resolve();
+      const animations = transcript.getAnimations({ subtree: true }).filter((animation) => animation.id === 'transcript-disclose');
+      const labelMove = animations.find((animation) => {
+        const effect = animation.effect as KeyframeEffect;
+        return effect.target?.matches('[data-transcript-shared="label"]') && effect.getKeyframes().some((frame) => 'translate' in frame);
+      });
+      if (!labelMove) throw new Error('The shared label must have a motion to sample');
+      const duration = Number(labelMove.effect!.getTiming().duration);
+      const start = Number(labelMove.startTime);
+      const saved = animations.map((animation) => ({ animation, time: animation.currentTime, start: animation.startTime }));
+      const opacity = (el: Element) => {
+        let value = 1;
+        for (let node: Element | null = el; node && node !== transcript; node = node.parentElement) value *= Number(getComputedStyle(node).opacity);
+        return value;
+      };
+      const item = (labelMove.effect as KeyframeEffect).target!.closest('[data-transcript-key]')!;
+      try {
+        animations.forEach((animation) => animation.pause());
+        // Seek the real effects on one shared clock. Do not seek to their end (which would finish them).
+        // This tests rendered interpolation, not just the presence of keyframes or a favorable rAF sample.
+        return Array.from({ length: 41 }, (_, index) => {
+          const elapsed = duration * Math.min(index / 40, 0.999);
+          saved.forEach(({ animation, start: began }) => { animation.currentTime = start + elapsed - Number(began); });
+          const parts = ['icon', 'label'].map((key) => [...item.querySelectorAll(`[data-transcript-shared="${key}"]`)].filter((part) => opacity(part) > 0.05));
+          const box = parts[1].length === 1 ? parts[1][0].getBoundingClientRect() : null;
+          return {
+            copies: [Math.max(...parts.map((nodes) => nodes.length)), Math.min(...parts.map((nodes) => nodes.length))] as [number, number],
+            title: box ? [box.left, box.top + box.height / 2] as [number, number] : null,
+          };
+        });
+      } finally {
+        saved.forEach(({ animation, time, start }) => {
+          animation.currentTime = time;
+          animation.play();
+          animation.startTime = start;
+        });
+      }
+    }, `${CHIP} button[aria-expanded="${expanded}"]`);
+    expectNoDoubledLabel(samples);
+    const places = samples.map(({ title }) => title!);
+    const apart = (a: [number, number], b: [number, number]) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+    const [start, end] = [places[0], places.at(-1)!];
+    expect(apart(start, end)).toBeGreaterThan(2);
+    expect(places.filter((place) => apart(place, start) > 1 && apart(place, end) > 1).length).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => transcript(page).evaluate((el) => el.getAnimations({ subtree: true }).some((animation) => animation.id === 'transcript-disclose' && animation.playState === 'running'))).toBe(false);
+  }
+});
 
 test('an execution-process chip opens to its panel as the rows below make room, and closes back into its pill', async ({ page }) => {
   // count=392 puts the last chip at the bottom of the screen; its steps load as it opens.
@@ -1416,7 +1452,7 @@ test('under reduced motion a disclosure only fades, nothing moves, and no title 
   for (const frames of [opening, closing]) {
     expect(frames.some(({ moves }) => moves)).toBe(false);
     expectCovered(frames);
-    expectNoDoubledLabel(frames, { moves: false });
+    expectNoDoubledLabel(frames);
     // The pill and the panel's head bar trade places in one frame: never both drawn (judged where both are read
     // at the frame's time, as with where things are).
     expect(drawn(frames).filter(({ summary, head }) => (summary ?? 0) > 0.05 && (head ?? 0) > 0.05)).toEqual([]);
