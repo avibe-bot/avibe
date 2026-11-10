@@ -3138,6 +3138,7 @@
     "sandbox_ready_timeout": "The verified Vault sandbox did not start. Check your connection, update Avibe, and retry.",
     "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
     "stale_login_session": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
+    "outside_gui_session": "Avibe is running outside your desktop session, so credentials kept in the Keychain (GitHub CLI, Vault) are unavailable. Restart Avibe from a terminal on this Mac's desktop.",
     "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
     "cache_ttl_unsupported": "That cache lifetime is not supported by this route. Use the built-in estimate or a provider-compatible value.",
     "field_exists": "A field with this name already exists. Choose a different name.",

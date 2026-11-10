@@ -10,7 +10,7 @@ import clsx from 'clsx';
 import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
 import { ShellSidebarContext } from '../context/ShellSidebarContext';
 import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
-import { useApi } from '../context/ApiContext';
+import { useApi, type MacOSLoginSessionStatus } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
@@ -57,17 +57,17 @@ import { WebPushReconciler } from './workbench/WebPushReconciler';
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
 const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
 
-const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay = false }) => {
+const MacOSLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay = false }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const [stale, setStale] = useState(false);
+  const [state, setState] = useState<MacOSLoginSessionStatus['state'] | null>(null);
 
   useEffect(() => {
     let active = true;
     const read = () => {
       if (document.visibilityState !== 'visible') return;
       void api.getMacOSLoginSessionStatus().then((result) => {
-        if (active) setStale(result.state === 'stale_login_session');
+        if (active) setState(result.state);
       }).catch(() => {
         // A diagnostic notice must not make the Workbench unavailable.
       });
@@ -82,12 +82,20 @@ const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay
     };
   }, [api]);
 
+  // An ended session breaks everything the service starts; outside the desktop session only the
+  // Keychain is out of reach, so that one is a warning. Any other state shows nothing.
+  const stale = state === 'stale_login_session';
+  const copy = stale
+    ? 'errors.stale_login_session'
+    : state === 'outside_gui_session'
+      ? 'errors.outside_gui_session'
+      : null;
   const noticeRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
     const notice = noticeRef.current;
     const main = notice?.closest('main');
-    if (!overlay || !stale || !notice || !main) return undefined;
+    if (!overlay || !copy || !notice || !main) return undefined;
 
     const updateHeight = () => {
       main.style.setProperty(MACOS_SESSION_NOTICE_HEIGHT_VAR, `${notice.getBoundingClientRect().height}px`);
@@ -99,20 +107,21 @@ const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay
       observer?.disconnect();
       main.style.removeProperty(MACOS_SESSION_NOTICE_HEIGHT_VAR);
     };
-  }, [overlay, stale]);
+  }, [overlay, copy]);
 
-  if (!stale) return null;
+  if (!copy) return null;
   return (
     <div
       ref={noticeRef}
       role="alert"
       className={clsx(
-        'shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10',
+        'shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border px-4 py-3 text-[13px] leading-snug md:mx-10',
+        stale ? 'border-destructive/35 bg-destructive/8 text-destructive-ink' : 'border-gold/40 bg-gold/10 text-foreground',
         overlay && 'fixed inset-x-0 top-0 z-50 m-0 rounded-none border-x-0 border-t-0 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:hidden',
       )}
     >
-      <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-      <span>{t('errors.stale_login_session')}</span>
+      <AlertTriangle className={clsx('mt-0.5 size-4 shrink-0', !stale && 'text-gold-ink')} />
+      <span>{t(copy)}</span>
     </div>
   );
 };
@@ -608,7 +617,7 @@ export const AppShell: React.FC = () => {
           )
         )}
       >
-        <MacOSStaleLoginSessionNotice overlay={(isChat || isSearch) && !isDesktop} />
+        <MacOSLoginSessionNotice overlay={(isChat || isSearch) && !isDesktop} />
         <div className={clsx(
           'w-full',
           isFullHeightApp

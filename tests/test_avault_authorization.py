@@ -62,18 +62,55 @@ def test_stale_login_session_replaces_raw_avault_failure(mac_avault, monkeypatch
     assert status["login_session_state"] == "stale_login_session"
 
 
-def test_target_service_state_comes_from_the_running_service(monkeypatch):
+def test_keychain_refusal_outside_the_desktop_session_asks_for_a_restart(mac_avault, monkeypatch):
+    from vibe.avault_agent import AvaultAgentAuthorizationRequiredError
+
+    mac_avault()
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "outside_gui_session")
+
+    with pytest.raises(api.AvaultAuthorizationRequiredError) as exc:
+        api.avault_pubkey()
+
+    # The dialog cannot appear from this session, so no authorization is asked for or recorded.
+    assert exc.value.code == "outside_gui_session"
+    assert "Restart Avibe" in str(exc.value)
+    assert isinstance(exc.value, api.AvaultPreHandoffError)
+    # One-shot delivery stays fail-closed, as it does for a missing authorization.
+    with pytest.raises(api.AvaultAuthorizationRequiredError) as exc:
+        api.avault_deliver_run(_secret(), ["sh", "-c", "exit 0"])
+    assert exc.value.code == "outside_gui_session"
+    assert not isinstance(exc.value, api.AvaultPreHandoffError)
+
+    class Client:
+        def deliver_inject(self, **_kwargs):
+            raise AvaultAgentAuthorizationRequiredError("macOS Keychain needs a one-time authorization")
+
+    monkeypatch.setattr(api, "_avault_agent_client", Client)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    with pytest.raises(api.AvaultPreHandoffError) as exc:
+        api.avault_agent_deliver_inject(grant_id="vgr_1", path="/tmp/out.env", fmt="dotenv", secrets=[])
+    assert exc.value.code == "outside_gui_session"
+    assert api.get_avault_authorization_status()["required"] is False
+
+
+@pytest.mark.parametrize("state", ["stale_login_session", "outside_gui_session"])
+def test_target_service_state_comes_from_the_running_service(monkeypatch, state):
     from vibe import internal_client
+    from vibe.macos_session_diagnostics import MacOSSessionProbe
+
+    def probe_host(_probe):
+        raise AssertionError("the running service already reported its state")
 
     monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(MacOSSessionProbe, "capture_context", probe_host)
     monkeypatch.setattr(internal_client, "health_identity_sync", lambda: {
         "ok": True,
         "service": "vibe-remote-internal",
         "version": 1,
-        "macos_login_session_state": "stale_login_session",
+        "macos_login_session_state": state,
     })
 
-    assert api.macos_login_session_state(service_pid=4242) == "stale_login_session"
+    assert api.macos_login_session_state(service_pid=4242) == state
 
 
 def test_avault_without_the_contract_keeps_todays_failures(mac_avault):
@@ -194,6 +231,15 @@ def test_concurrent_authorize_requests_share_one_avault_dialog(mac_avault):
             "no_gui_session",
             True,
         ),
+        # A desktop session exists, but this process is not in it: the dialog cannot appear here either.
+        (
+            lambda avault, monkeypatch: (
+                avault.flag("deny"),
+                monkeypatch.setattr(api, "macos_login_session_state", lambda: "outside_gui_session"),
+            ),
+            "no_gui_session",
+            True,
+        ),
         (lambda avault, monkeypatch: monkeypatch.setattr(api, "_resolve_avault_cli_path", lambda: None), "avault_missing", False),
     ],
 )
@@ -248,21 +294,29 @@ def test_status_readers_and_failed_calls_never_authorize(mac_avault, monkeypatch
     assert doctor["status"] == "warn" and "repair" not in doctor
 
 
-def test_doctor_reports_stale_login_session_with_restart_action(monkeypatch):
+@pytest.mark.parametrize(
+    ("state", "status"),
+    [
+        ("stale_login_session", "fail"),
+        # Only Keychain-backed credentials are lost, so this one is a warning.
+        ("outside_gui_session", "warn"),
+    ],
+)
+def test_doctor_reports_a_login_session_problem_with_restart_action(monkeypatch, state, status):
     monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(vibe.runtime, "resolve_service_owner_pid", lambda include_starting=False: 4242)
     calls = []
 
     def probe(**kwargs):
         calls.append(kwargs)
-        return "stale_login_session"
+        return state
 
     monkeypatch.setattr(api, "macos_login_session_state", probe)
 
     item = cli._macos_login_session_doctor_items(language="en")[0]
 
-    assert item["status"] == "fail"
-    assert item["code"] == "stale_login_session"
+    assert item["status"] == status
+    assert item["code"] == state
     assert calls == [{"service_pid": 4242}]
     assert "vibe restart" in item["action"]
 

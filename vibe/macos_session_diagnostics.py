@@ -162,6 +162,11 @@ def login_session_state(context: SessionContext) -> str:
         return "no_gui_session"
     if context.gui_domain_available is None:
         return "unknown"
+    if context.asid_match is False:
+        # The user has a desktop session and this process is in another audit
+        # session (one started over SSH, say), which cannot reach the login
+        # Keychain. Fast User Switching keeps the two IDs equal.
+        return "outside_gui_session"
     return "healthy"
 
 
