@@ -17095,7 +17095,9 @@ def cmd_doctor(args=None):
             deep=bool(getattr(args, "doctor_deep", False)),
         )
         if getattr(args, "json", False):
-            _print_cli_payload("doctor_repair", **result)
+            payload = dict(result)
+            kind = payload.pop("kind", "doctor_repair")
+            _print_cli_payload(kind, **payload)
         else:
             _print_doctor_repair_result(result)
         return 0 if result.get("ok") else 1

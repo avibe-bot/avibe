@@ -47,11 +47,22 @@ def test_windows_engine_start_and_api_key_source_keep_secrets_private(root):
     # must pass the audit every engine start runs.
     (store.auth_dir / "codex-synthetic.json").write_text("{}", encoding="utf-8")
     (store.auth_dir / "codex-synthetic.json.lock").write_text("", encoding="utf-8")
+    # CPA v8.0.63 also creates a journal subtree. Inherited DACLs, not
+    # POSIX mode bits, must keep every engine-created entry private.
+    journal = store.auth_dir / ".codex-refresh"
+    claim = journal / ("a" * 64)
+    claim.mkdir(parents=True)
+    receipt = claim / "receipt"
+    receipt.write_text("synthetic-refresh-receipt", encoding="utf-8")
     store.audit_auth_permissions()
-    for path in (store.root, instance_dir, instance_dir / "runtime-secrets.json", instance_dir / "logs", store.auth_dir):
+    for path in (
+        store.root, instance_dir, instance_dir / "runtime-secrets.json",
+        instance_dir / "logs", store.auth_dir, journal, claim, receipt,
+    ):
         assert _private(path), path
     store.delete_oauth_auth_file("codex-synthetic.json")
-    assert list(store.auth_dir.iterdir()) == []
+    assert list(store.auth_dir.iterdir()) == [journal]
+    assert receipt.read_text(encoding="utf-8") == "synthetic-refresh-receipt"
 
 
 @windows_only
