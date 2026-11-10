@@ -903,9 +903,9 @@ not an explicit progress or completion report. Failed, cancelled, or interrupted
 runs still send an immediate notice to their caller Session.
 
 Use `--no-reply` with an existing `--session-id` or `--bot` for informational work:
-the receiver sees `[No reply needed.]`, and that message neither opens nor
-answers/rearms a delegation and emits no read receipt. It does not disable
-failure notices or affect an already-open reverse delegation. Combining it with
+the receiver sees `[No reply needed.]`, and that message does not open or
+re-arm a delegation, but it closes an existing reverse delegation, and emits no
+read receipt. It does not disable failure notices. Combining it with
 `--sync` or a new/forked Session is a usage error.
 
 `--callback`, `--callback-session-id`, and `--no-callback` are accepted no-ops,

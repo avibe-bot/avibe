@@ -1029,8 +1029,9 @@ Failed, cancelled, or interrupted runs still notify the caller immediately.
 Use `--sync` only when the terminal should wait for completion.
 
 Use `--no-reply` on an existing `--session-id` or `--bot` message for
-informational work: it creates no delegation or receipt, leaves existing
-pairs unchanged, and tells the receiver no reply is needed. It rejects `--sync`
+informational work: it creates no delegation or receipt, does not re-arm an
+existing pair, and closes an existing reverse pair while telling the receiver
+no reply is needed. It rejects `--sync`
 and new/forked Sessions. The three callback flags remain accepted no-ops with
 one stderr deprecation line; old pending callbacks are honored once.
 
