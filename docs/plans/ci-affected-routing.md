@@ -86,6 +86,37 @@ The browser boundary is unchanged: sparse checkout contains exactly `ui/`,
 The existing classifier excludes build configuration and non-portable added UI
 filenames from the installed-package skip allowlist.
 
+### Parallel UI static checks
+
+The November 10 static-check optimization keeps the `ui-checks` producer and
+all its callers, but runs two independent matrix legs on existing hosted Linux
+runners. `core` runs theme validation, lint, test/i18n types and design types;
+`e2e` runs the existing all-suite browser-fixture type checker. Each command runs
+exactly once per selected workflow, with the same package lock, Node version,
+compiler and flags. Each runner performs its own `npm ci`.
+
+The E2E checker already uses up to four CPU workers; its worker count and suite
+coverage do not change. The matrix has `fail-fast: false`, no permissive error
+handling and no serial concurrency limit. The `unit-tests` gate and full-master
+certificate wait for the entire matrix and still reject a failed, cancelled or
+unexpectedly skipped producer. Narrative-only PRs still skip the whole producer;
+queue/full-master routing, browser execution, result reuse and release gates do
+not change.
+
+Before this split, twelve recent completed thin queue runs on November 10 had a
+4m18s median workflow-created-to-final-job time (3m35s–5m32s); all twelve were
+limited by UI static validation. This is not enqueue-to-merge time. For example,
+run `42748505399` spent about 94s in lint followed by 146s in E2E type checking,
+with only 9s installing dependencies. The split removes that serialization at
+the cost of one extra hosted runner and dependency install, not fewer checks.
+Compare real post-change PR/queue timings before claiming a speedup; a roughly
+three-minute queue median is a target, not measured evidence.
+
+The workflow coverage contract in `tests/test_ci_pipeline.py` expands each
+matrix leg's actual command expression, protecting against omitted, duplicated
+or unused commands. Existing `tests/test_ci_scope.py` negative cases continue to
+cover producer failure, cancellation, missing results and wrong-mode skips.
+
 ## Required contexts and fail-closed aggregation
 
 The six required leaf names remain substantive checks:
@@ -239,10 +270,10 @@ post-change results. Eleven of thirteen historical failed-check evictions lose
 their blocking cause; two artifact-build failures remain. This does not prove
 that no cross-PR interaction can escape the thin profile.
 
-The owner will change merge-queue **build concurrency from 2 to 4 after this PR
-merges**. Keep the nine contexts and current merge-size rules unchanged. The
-thin profile requests about eight hosted Linux jobs plus one self-hosted npm
-job after classification: four active groups can require about 32 hosted Linux
+The rollout raised merge-queue **build concurrency from 2 to 4**. Keep the nine
+contexts and current merge-size rules unchanged. With the UI static split, the
+thin profile requests about nine hosted Linux jobs plus one self-hosted npm job
+after classification: four active groups can require about 36 hosted Linux
 slots, in addition to PRs/full master; aggregators add short dispatches. Effective
 runner limits must be observed, not inferred from a published default quota.
 

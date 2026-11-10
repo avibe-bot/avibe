@@ -429,9 +429,26 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
     assert all(step.get("working-directory") == "ui" for step in check_steps)
+    # Each static command still runs exactly once, now across two independent
+    # runners. Expanding the actual matrix expressions catches a missing or
+    # duplicated command without treating a declared-but-unused leg as coverage.
+    strategy = checks["strategy"]
+    assert strategy["fail-fast"] is False
+    assert strategy.get("max-parallel", 2) >= 2
+    legs = strategy["matrix"]["include"]
+    assert {leg["lane"] for leg in legs} == {"core", "e2e"} and len(legs) == 2
+    assert next(leg["checks"] for leg in legs if leg["lane"] == "e2e").splitlines() == [
+        "npm run typecheck:e2e",
+    ]
+    shared = [
+        line
+        for leg in legs
+        for step in check_steps
+        for line in step["run"].replace("${{ matrix.checks }}", leg["checks"]).splitlines()
+    ]
+    assert shared.count("npm ci") == len(legs)
+    assert all("${{" not in line for line in shared)
     # Static checks and Vitest run independently. Only the former is in MG_THIN.
-    shared = "\n".join(step["run"] for step in check_steps).splitlines()
-    assert "npm ci" in shared
     test_commands = [line for step in jobs["ui-tests"]["steps"] for line in step.get("run", "").splitlines()]
     check_commands = shared + test_commands
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
