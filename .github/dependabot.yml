@@ -36,10 +36,11 @@ updates:
         update-types:
           - minor
           - patch
-    # Vitest 5.1.0 excludes our supported Node20 toolchain. Keep the 4.x
-    # declaration and leave later candidates eligible for compatibility review.
-    # Tested 0.5.5, 0.5.6 and 0.5.7 change refresh diagnostics beyond the
-    # existing lint ledger. Keep 0.4.26; review later candidates independently.
+    # Tested Vitest 5.0.5 and 5.1.0 exclude our supported Node20 toolchain.
+    # 5.0.5 also breaks executable scenario evidence collected through its CLI.
+    # Keep the 4.x declaration; review later candidates independently.
+    # Tested refresh releases change diagnostics beyond the existing lint ledger.
+    # Keep 0.4.26 for now; later candidates still get an independent review.
     ignore:
       # 31.0.0 excludes Node20 and its Undici dependency fails startup there.
       # Preserve the supported toolchain; review later candidates independently.
@@ -50,7 +51,7 @@ updates:
       - dependency-name: "@playwright/test"
         versions: ["1.65.0"]
       - dependency-name: vitest
-        versions: ["5.1.0"]
+        versions: ["5.0.5", "5.1.0"]
       - dependency-name: eslint-plugin-react-refresh
         versions: ["0.5.5", "0.5.6", "0.5.7"]
 

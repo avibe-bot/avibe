@@ -74,7 +74,7 @@ def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:
     # Hold that candidate, not unrelated UI packages or future reviewed releases.
     ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
     assert [item for item in ui["ignore"] if item["dependency-name"] == "vitest"] == [
-        {"dependency-name": "vitest", "versions": ["5.1.0"]}
+        {"dependency-name": "vitest", "versions": ["5.0.5", "5.1.0"]}
     ]
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
