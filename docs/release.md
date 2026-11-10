@@ -61,6 +61,29 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
 
+## Activate a release on a machine
+
+Install a release, RC or stable, only from the published GitHub Release, never
+from a workflow artifact or a Draft. The wheel's Show Runtime manifest points at
+that tag's release assets, and an unpublished release serves them to nobody, so
+the new service fails to download its runtime and Show pages fall back. Before
+installing, require that the release reports `isDraft=false` and that a runtime
+archive downloads without authentication, for example
+`curl -fsSL -o /dev/null https://github.com/avibe-bot/avibe/releases/download/<tag>/vibe-show-runtime-node-darwin-arm64.tgz`.
+An authenticated `gh release download` is not proof: it also reads Drafts.
+
+Install through the tagged `install.sh` with `AVIBE_INSTALL_PACKAGE_SPEC` set to
+the published wheel, and do not skip its Show Runtime preparation. After the
+restart, open an existing Show page and require real page content: an
+`X-Avibe-Show-Recovery` header means the fallback answered, even with HTTP 200.
+
+```bash
+curl -fsS -D - -o /dev/null "$BASE/show/$SESSION/" |
+  python3 -c 'import sys; h=sys.stdin.read().lower(); assert "x-avibe-show-recovery:" not in h, h'
+```
+
+Then load that page's HTML and its scripts, not a redirect or a login page.
+
 ## Release E2E
 
 Pull-request CI does not run the hermetic Model Hub E2E (`-m e2e_model_hub`).
