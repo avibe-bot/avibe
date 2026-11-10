@@ -24,7 +24,7 @@ export const BACKEND_CATALOG = [
     "display_name": "OpenCode",
     "config_key": "opencode",
     "default_cli": "opencode",
-    "default_enabled": true,
+    "default_enabled": false,
     "latest_probe": [
       "github",
       "sst/opencode"
@@ -45,7 +45,7 @@ export const BACKEND_CATALOG = [
     "display_name": "Claude Code",
     "config_key": "claude",
     "default_cli": "claude",
-    "default_enabled": true,
+    "default_enabled": false,
     "latest_probe": [
       "npm",
       "@anthropic-ai/claude-code"

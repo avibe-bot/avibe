@@ -491,7 +491,10 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             assert _REPLY in (vibey.get("result_text") or ""), vibey
             assert any(item["path"] == "/v1/chat/completions" for item in chat.requests())
 
-            # So does a Claude Code turn in hub mode.
+            # So does a Claude Code turn in hub mode, once the person switches Claude Code on:
+            # a new install starts it off, and the running service takes it on at once.
+            enabled = service.ok("POST", "/api/config", {"agents": {"claude": {"enabled": True}}})
+            assert enabled["agent_backend_runtime"]["hot_reconciled"] is True, enabled
             service.ok("PATCH", "/api/models/agents/claude/mode", {"mode": "hub"})
             _route(service, "claude", _CLAUDE_MODEL, anthropic_source["id"], _CLAUDE_MODEL)
             claude = _turn(service, "claude")
