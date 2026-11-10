@@ -1,5 +1,7 @@
 # Shared chat-scroll observation follow-up
 
+> Note (2026-11-10): the curtain matrix (`ui/e2e/chat-scroll/curtain.spec.ts`) was removed afterwards by owner decision; #3453's product fix stays. The curtain notes below are history.
+
 ## Contract and boundary
 
 This is a browser-test-only follow-up to the shared-base failures observed on
