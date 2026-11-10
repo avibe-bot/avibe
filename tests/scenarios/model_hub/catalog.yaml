@@ -687,6 +687,14 @@ scenarios:
     test: tests/test_model_hub_vibey_consumer.py::test_sequential_vibey_retry_replaces_route_and_retains_served_provenance
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request
+  - id: MH-VIBEY-011
+    name: A Vibey Turn that follows its Session to another model is routed and recorded under the model it asked for last
+    status: covered
+    kind: routing
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_a_vibey_turn_that_moves_to_another_model_is_routed_and_recorded_under_it
+    related_tests:
+      - tests/test_vibey_agent.py::test_a_running_turn_takes_its_sessions_model_effort_and_speed_at_its_next_request
   - id: MH-VIBEY-010
     name: A Vibey call that failed over to another Source does not refuse the Turn's next call while it settles
     status: covered
@@ -2269,6 +2277,12 @@ scenarios:
     kind: projection
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_003_model_menu_marks_the_models_a_turn_would_run_fast_on
+  - id: MH-FAST-005
+    name: A running Vibey Turn's next request runs at the tier its Session names now, and an unchanged resolution keeps it
+    status: covered
+    kind: routing
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_005_a_running_turn_moves_to_the_tier_its_session_names_now
   - id: MH-FAST-004
     name: A relay is asked for the fast tier too, and its responses decide whether the menu says it ran
     status: covered

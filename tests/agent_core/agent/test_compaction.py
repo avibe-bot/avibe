@@ -1057,6 +1057,29 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     assert events[-1].reason == "completed"
 
 
+async def test_a_run_whose_route_moves_to_a_smaller_window_between_requests_rolls_before_the_next_one_is_sent():
+    # A Turn can move to another model between two requests (its Session's model changed). Nine results read on the
+    # 200,000-token window meet the engine route's 32,000-token input limit at the next request: it rolls on the new
+    # route and goes out within that route's room, so the provider is never sent a request the new route cannot take.
+    store = InMemoryTranscriptStore()
+    model = Model(
+        reads(9),
+        [[Done(assistant(block(f"{CHECKPOINT_BODY} ROLL ONE")))], [Done(assistant(block(f"{CHECKPOINT_BODY} ROLL TWO")))]],
+    )
+    agent = make_agent(model, store=store, tools=[sized_reader(*[5_000] * 9)], selection=(LARGE,) * 9 + (SELECTION,))
+    events = await run(agent)
+    rows = await store.load("session")
+    compactions = [row for row in rows if row.kind == "compaction"]
+    assert [(row.payload["mode"], row.payload["reason"]) for row in compactions] == [("rolling", "overflow")] * 2
+    # Nothing moved out while the large window had room: both rolls follow the ninth result.
+    assert compactions[0].context_seq > max(row.context_seq for row in rows if row.kind == "tool_result")
+    moved = model.conversation_requests[-1]
+    assert "ROLL TWO" in checkpoint_message(moved)
+    assert request_tokens(moved.system, moved.tools, moved.messages) + 4_096 + 8_000 <= 32_000
+    assert all(request_tokens(fork.system, fork.tools, fork.messages) <= 32_000 for fork in model.checkpoint_requests)
+    assert events[-1].reason == "completed"
+
+
 #: A 1,000,000-token route answering up to 128,000 tokens: M = 30,000 and T = 842,000 (section 1).
 MILLION = ModelSelection(
     ENDPOINT, replace(SELECTION.capabilities, context_window=1_000_000, input_limit=None, max_output_tokens=128_000)
