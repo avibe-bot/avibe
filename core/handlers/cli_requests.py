@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _AGENT_RUN_STRINGS = frozenset({
     "agent", "bot", "session_id", "fork_session", "scope_id", "project", "visibility",
-    "model", "reasoning_effort", "cwd", "callback_session_id", "message", "message_file",
+    "model", "reasoning_effort", "speed", "cwd", "callback_session_id", "message", "message_file",
 })
 _AGENT_RUN_BOOLS = frozenset({
     "queue", "fork_self", "same_scope", "callback", "no_callback", "no_reply", "close_after", "sync_run", "json",
@@ -38,6 +38,8 @@ _HELP_COMMANDS = {
     "session.queue.remove": "vibe session queue remove --help",
 }
 _NON_FINITE = {"inf", "-inf", "nan"}
+#: How long a CLI route check waits for Model Hub's menu before the request fails.
+_HUB_MENU_READ_SECONDS = 15.0
 
 
 def _agent_run_arguments(arguments: dict[str, Any]) -> Namespace:
@@ -180,6 +182,12 @@ def _command_arguments(operation: str, path: tuple[str, ...], arguments: dict[st
     return Namespace(**values)
 
 
+def _bound_hub_agent_reader(controller, loop: asyncio.AbstractEventLoop):
+    stores = _warm_stores(controller)
+    stores.bind_loop(loop)
+    return stores.hub_agent_reader
+
+
 class WarmCliStores:
     """What a service-owned CLI command reads and writes through, never rebuilt per request.
 
@@ -197,6 +205,7 @@ class WarmCliStores:
         self._controller = controller
         self._lock = threading.Lock()
         self._reader: Any = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def task_store(self):
@@ -242,6 +251,28 @@ class WarmCliStores:
     @property
     def session_turns(self):
         return getattr(self._controller, "session_turns", None)
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """The controller loop, which owns Model Hub's recovery state; set by each request on that loop."""
+        self._loop = loop
+
+    @property
+    def hub_agent_reader(self):
+        """Model Hub's Agent payload, the route menu the Web picker reads; None without a Model Hub service.
+
+        The command's synchronous work runs off the loop, but the payload reads recovery state the loop owns,
+        so the read is ``read_agent_sources`` on the loop, which offloads only the payload construction.
+        """
+        service = getattr(self._controller, "model_hub_service", None)
+        loop = self._loop
+        if service is None or loop is None:
+            return None
+
+        def read(backend: str):
+            future = asyncio.run_coroutine_threadsafe(service.read_agent_sources(backend), loop)
+            return future.result(timeout=_HUB_MENU_READ_SECONDS)
+
+        return read
 
     def close(self) -> None:
         with self._lock:
@@ -290,6 +321,7 @@ async def handle_control_request(
 
 async def _command(controller, request: ControlRequest, path, run_sync) -> dict[str, Any]:
     help_command = _HELP_COMMANDS.get(request.operation)
+    loop = asyncio.get_running_loop()
 
     # Argument decoding (the parser, its import), admission, store work and its
     # first effects all run off the loop. The second deadline check is inside the
@@ -314,10 +346,12 @@ async def _command(controller, request: ControlRequest, path, run_sync) -> dict[
                     return result(cli._task_error_payload(exc), execution="not_executed"), None
                 if request.expired:
                     return failure("deadline_expired", "Control request expired before execution"), None
+                stores = _warm_stores(controller)
+                stores.bind_loop(loop)
                 invocation = cli._ServiceInvocation(
                     caller_env=request.caller_env,
                     cwd=request.cwd,
-                    stores=_warm_stores(controller),
+                    stores=stores,
                     home=getattr(args, "invocation_home", None),
                 )
                 outcome = cli._SERVICE_COMMANDS[request.operation](args, invocation)
@@ -367,6 +401,7 @@ async def _agent_run(controller, request: ControlRequest, args, run_sync) -> dic
 
 
 async def _agent_run_request(controller, request: ControlRequest, args, run_sync, *, sync_run_id: str | None) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
     # Admission, file access, configuration and SQLite all run off the loop. The
     # second deadline check is inside the worker, after any executor queue wait.
     def enqueue():
@@ -389,6 +424,7 @@ async def _agent_run_request(controller, request: ControlRequest, args, run_sync
                 response, callback_session_id = cli._enqueue_agent_run(
                     args, caller_env=request.caller_env, invocation_cwd=request.cwd,
                     agent_store=agent_store, request_store=request_store, run_id=sync_run_id,
+                    hub_agent_reader=_bound_hub_agent_reader(controller, loop),
                 )
                 return result(response), (authority, request_store, callback_session_id)
         except Exception as exc:

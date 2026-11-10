@@ -91,7 +91,12 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
     expected = {"current": "3.0.6", "latest": "3.0.7", "has_update": True, "error": None}
     monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
     monkeypatch.setattr("vibe.__version__", "3.0.6", raising=False)
-    monkeypatch.setattr(api, "get_latest_version_info", lambda current: expected if current == "3.0.6" else None)
+    monkeypatch.setattr(
+        api,
+        "get_latest_version_info",
+        # With no config, pre-release updates stay off.
+        lambda current, *, prereleases: expected if (current, prereleases) == ("3.0.6", False) else None,
+    )
 
     assert api.get_version_info() == {**expected, "build": {"kind": "package"}}
 

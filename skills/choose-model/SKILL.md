@@ -1,8 +1,8 @@
 ---
 name: choose-model
 slug: choose-model
-description: Choose the model, reasoning effort, and speed for work you hand out or continue. Match them to the work and how fast it is needed. Keep work in the Session that holds its context when the model should change, and pass the choice explicitly.
-version: 0.2.0
+description: Choose the model, reasoning effort, and speed for work you hand out or continue. Match them to the work and how fast it is needed. See and switch an existing Session's settings rather than start over, and pass the choice explicitly.
+version: 0.3.0
 ---
 
 # Choose a Model
@@ -11,8 +11,8 @@ Before you dispatch or continue work, pick the model, reasoning effort, and spee
 
 ## 1. See what is configured
 - `vibe agent list` shows each enabled Agent with its backend, default model, and effort.
-- `vibe agent models <agent>` lists the models and efforts that Agent can use.
-- `vibe session get --session-id <id>` shows a Session's current model, effort, and speed.
+- `vibe agent models <agent>` lists the models and efforts an Agent can use, and which of them have a fast tier.
+- `vibe session models --session-id <id>` shows a Session's current model, effort, and speed, and exactly what it can switch to. This is the menu the user sees in the Web.
 
 Choose from these lists. A Vibey or OpenCode Agent runs every family its list shows. A Claude Code Agent runs only Claude, and a Codex Agent only GPT. If the family that fits is not configured, use the closest one and tell the user when it matters.
 
@@ -35,28 +35,33 @@ Effort is how long the model thinks before it acts. Set it by how hard the work 
 
 Then weigh urgency. When the user is waiting in the conversation, or the work is a quick check, take a faster tier and lower effort; a good answer now beats a perfect one in ten minutes. For background or long work where quality matters more than time, spend more. Cost rises with tier and effort, the same way.
 
+Speed `fast` runs the same model on its vendor's faster tier, at a higher price per token. It suits a Session the user is actively waiting on, not background work or bulk work. Turn it back to `standard` when the wait is over.
+
 For example: "is PR 3442 merged?" gets a small tier on low. A failing test with a clear stack trace gets medium. "Why do replies sometimes go missing?" gets a large tier on xhigh. An overnight security review of the Vault boundary gets GPT's large tier on xhigh or max.
 
 Higher effort does not rescue an unclear brief. A clearer brief usually helps more.
 
-Fast mode runs the same model on its vendor's faster tier, at a higher price per token. It suits a Session the user is actively waiting on, not background or bulk work. A Session started with `vibe agent run` runs at the standard tier; the user turns Fast on or off in the Web model menu.
-
-## 4. Pass the choice, and keep work where its context is
-For a new Session, name both, so the choice is deliberate and visible in the run record:
+## 4. Pass the choice, or switch the Session
+For a new Session, name the model and effort (and `--speed fast` when it is warranted), so the choice is deliberate and visible in the run record:
 
 `vibe agent run --agent <agent> --model <model> --reasoning-effort <effort> --message ...`
 
-When work already under way should move to another model, effort, or speed, the Session that holds its context is usually the right place to continue. The model menu there switches it from the next Turn. A command for Agents to do this is coming. Until it lands, ask the user to switch the Session in the Web model menu, then continue there. If a Turn is running, send the next message with `--queue` so it starts on the new model after that Turn, or stop the Turn first with `vibe runs cancel <run-id>`. Switching works in both directions. After a hard design phase, the mechanical follow-up can drop to lower effort.
+When work already under way should move to another model, effort, or speed, switch the Session that holds its context instead of opening a new one. Check its menu with `vibe session models`, then:
+
+`vibe session update --session-id <id> --model <model> --reasoning-effort <effort>`
+
+`--speed fast` or `--speed standard` changes the tier the same way. A refusal says why and what to do instead.
+
+The switch applies from the next Turn. If a Turn is running, either let it finish and send the next message with `--queue`, or stop it with `vibe runs cancel <run-id>` and then send. A message sent without `--queue` joins the running Turn, which keeps its old settings. Switching works in both directions. After a hard design phase, drop to lower effort for the mechanical follow-up.
 
 Start a new Session instead when:
 - the backend must change: a Claude Code Session cannot run GPT, and a Codex Session cannot run Claude;
 - the context is very long and mostly spent. The first Turn on a new model re-reads all of it without the prompt cache, and a fresh brief can be cheaper;
-- the work is separate anyway;
-- the user is not there to switch it and the work cannot wait.
+- the work is separate anyway.
 
 To keep the context and leave the original as it is, fork with `vibe agent run --fork-session <id> --model <model> --reasoning-effort <effort> --message ...`.
 
-A Bot runs on the model the user chose for it, and `--model` is refused with `--bot`.
+A Bot runs on the model the user chose for it. Only the user, or the Bot itself when the user asks, changes it.
 
 ## 5. The user's findings come first
 What the user has found about models overrides this Skill. That covers what they tell you now and what is recorded in your memory (a Bot's memory files, or the Project's `AGENTS.md`), so check there before you choose. When the user shares a finding, or confirms one you observed, record it there so later choices use it.

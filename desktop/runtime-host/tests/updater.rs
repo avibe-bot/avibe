@@ -193,8 +193,16 @@ fn channel_selection_uses_semver_and_the_prerelease_flag_together() {
         release("v3.1.1", false),
     ];
     assert_eq!(Channel::Test.latest(listed.clone()).unwrap().1.tag, "gh-v3.1.2rc10");
-    assert_eq!(Channel::Stable.latest(listed).unwrap().1.tag, "v3.1.1");
+    assert_eq!(Channel::Stable.latest(listed.clone()).unwrap().1.tag, "v3.1.1");
     assert!(Channel::Stable.latest(Vec::new()).is_none());
+    // With pre-releases on, the stable release that supersedes its candidates
+    // is offered; with them off, a candidate never is.
+    let mut released = listed;
+    released.push(release("v3.1.2", false));
+    assert_eq!(Channel::Test.latest(released.clone()).unwrap().1.tag, "v3.1.2");
+    released.push(release("gh-v3.1.3rc1", true));
+    assert_eq!(Channel::Test.latest(released.clone()).unwrap().1.tag, "gh-v3.1.3rc1");
+    assert_eq!(Channel::Stable.latest(released).unwrap().1.tag, "v3.1.2");
 }
 
 #[test]

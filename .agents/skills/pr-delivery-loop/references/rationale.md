@@ -13,19 +13,11 @@ other shared namespaces fail the same way. Compare allocated identities with the
 latest default branch before pushing, even when Git reports no conflict. This
 habit catches obvious collisions; it is not a substitute for combined-tree CI.
 
-A PR head passing against yesterday's base says nothing about the next landing
-tree after another PR merges. Running full CI on every `master` push is too late:
-rapid merges can cancel those runs and leave releases waiting for a quiet branch.
-Avibe instead requires a merge queue. Review and PR CI qualify the exact PR head
-for enqueue; `merge_group` CI validates it together with the current base and
-preceding queue entries before landing. Concurrent independent PRs need neither
-serial rebase loops nor a release-time merge freeze.
-
-Enqueue is a request, not completion. A failed group can remove an entry, and
-GitHub can rebuild a group with a different synthetic SHA. Keep the Watch and
-worktree until the PR itself is `MERGED` and its merge commit is read back. The
-waiter records timeline events rather than only current membership so an enqueue
-and dequeue between polls cannot disappear.
+Avibe merges directly instead of through a merge queue. Over 72 hours the queue
+caught no real combination conflict; every eviction was a flake or
+infrastructure, and it slowed delivery. Exact-head review and PR CI, including
+the `manifest-consistency` guard for locks and CI manifests, gate the merge; the
+full master backstop checks every landing, and releases need its exact-SHA pass.
 
 A contract file left untracked causes a related failure. Other lanes cannot get
 it from the base branch, and it can later block the primary checkout's

@@ -7,24 +7,23 @@ for `AGENTS.md`. The workflows are the source of truth for the final commands.
 
 Fetch `origin/master` and record the candidate's exact SHA for all release-only
 validation and tag creation; do not switch it silently while checks run. New PRs
-may continue through the merge queue: there is no routine release-time merge
-freeze. The queue's thin combination check is not full release qualification.
+may continue to merge: there is no routine release-time merge freeze.
 
-Require both the candidate's successful merge-group landing validation and a
-successful **full master backstop at the exact candidate SHA**. `lint.yml` runs
-that full pass after master pushes, including iOS, desktop, browser, installer,
-web-fetch and Windows checks. A running pass finishes; only the newest pending
-master pass waits. `release_ai.yml`, `publish.yml`, and `desktop-release.yml` enforce the full
+Require a successful **full master backstop at the exact candidate SHA** for
+every release, stable included. `lint.yml` runs that full pass after master
+pushes, including iOS, desktop, browser, installer, web-fetch and Windows
+checks. A running pass finishes; only the newest pending master pass waits.
+`release_ai.yml`, `publish.yml`, and `desktop-release.yml` enforce the full
 master backstop before their respective build, signing, or publication paths.
 See [CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
 NavigationPolicyTests quarantine (#3418) does not relax this release gate:
 iOS must pass in the exact full master run, even while its PR check is advisory.
 
-A green PR or merge-group head, another SHA's full run, or a missing/coalesced
-run is not proof. Select a full-green master SHA; wait for its current full pass,
-or rerun its existing master backstop. Manual full validation is available on
-master. A synthetic queue head is never the commit to tag. Historical runs with
-no explicit full-backstop certificate are not assumed equivalent.
+A green PR head, another SHA's full run, or a missing/coalesced run is not
+proof. Select a full-green master SHA; wait for its current full pass, or rerun
+its existing master backstop. Manual full validation is available on master.
+Historical runs with no explicit full-backstop certificate are not assumed
+equivalent.
 
 Before pushing a tag, fetch master again. If the release is required to include
 newly landed work, select the new tip and repeat candidate-specific gates; otherwise

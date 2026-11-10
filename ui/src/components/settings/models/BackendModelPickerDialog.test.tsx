@@ -209,6 +209,25 @@ describe('BackendModelPickerDialog', () => {
     expect(onAdd).not.toHaveBeenCalled();
   });
 
+  it.each(['Fable 5.2', 'fable-5-2', 'claude fable 5.2'])(
+    'finds an unlabelled built-in by the name its ID spells: %s',
+    async (query) => {
+      const user = userEvent.setup();
+      answers({
+        builtin: [
+          candidate('claude-fable-5-2', { origin: 'builtin' }),
+          candidate('claude-fable-5-1', { origin: 'builtin' }),
+        ],
+      });
+      renderPicker();
+
+      await waitFor(() => expect((search() as HTMLInputElement).disabled).toBe(false));
+      await user.type(search(), query);
+      expect(group(BUILT_IN).getByRole('checkbox', { name: 'claude-fable-5-2' })).toBeTruthy();
+      expect(screen.queryByRole('checkbox', { name: 'claude-fable-5-1' })).toBeNull();
+    },
+  );
+
   it('hands an unmatched query to the editor, and hands over nothing when there is none', async () => {
     const user = userEvent.setup();
     answers({ builtin: [candidate('gpt-6', { origin: 'builtin' })] });

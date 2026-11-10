@@ -124,7 +124,7 @@
     },
     "updater": {
       "menu": "Check for Desktop Updates…",
-      "testChannel": "Use TEST Updates",
+      "testChannel": "Get Pre-release Updates",
       "title": "Avibe Desktop Updates",
       "current": "Current version",
       "latest": "Latest version",
@@ -2944,7 +2944,9 @@
       "pushTitle": "Push (browser or Home Screen app)",
       "pushHint": "Whether this browser receives pushes at all.",
       "desktopTitle": "Desktop app notifications",
-      "desktopHint": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications."
+      "desktopHint": "Vault approvals and finished background runs. This computer only; same switch as the menu bar.",
+      "desktopHintMenuBar": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications.",
+      "desktopSaveFailed": "Couldn't save the notification switch. Try again."
     }
   },
   "remoteAccess": {
@@ -3820,7 +3822,7 @@
       "moreUnreadInFull": "Some unread sessions aren't in this preview — open the full inbox.",
       "notifications": {
         "checking": "Checking notifications",
-        "unsupported": "Notifications unavailable",
+        "unsupported": "This browser can't receive push notifications",
         "localOnly": "Notifications unavailable for this account",
         "installFirst": "Add to Home Screen first",
         "enable": "Enable notifications",
@@ -4559,6 +4561,13 @@
     "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
+    "prereleaseUpdates": "Get pre-release updates",
+    "prereleaseUpdatesHint": "Also offer release candidates early",
+    "latestStableVersion": "Latest Stable",
+    "awaitingStableRelease": "You're on a pre-release. The next stable release will be offered when it's out.",
+    "prereleaseBadge": "Pre-release",
+    "releaseNotes": "Release notes",
+    "releaseNotesFor": "Release notes for {{version}}",
     "desktopManagedUpdate": "Updates come from the Avibe desktop app on the computer running Avibe. Check for updates there.",
     "desktopManagedUpdateAvailable": "Update available",
     "desktopManagedUpdateOwnerHint": "Request the update on the host. The desktop app will prompt there or install unattended according to its local setting.",

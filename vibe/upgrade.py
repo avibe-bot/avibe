@@ -50,6 +50,12 @@ PACKAGE_NAME = CORE_PACKAGE_NAME
 LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
+# The download mirror's release index (docs/plans/release-download-mirror.md).
+# Release candidates are GitHub-only `gh-vX.Y.ZrcN` releases, never on PyPI;
+# their wheels are mirrored beside the index at `<root>releases/<tag>/<asset>`.
+DEFAULT_RELEASE_INDEX_URL = "https://dl.avibe.bot/index/releases.json"
+RELEASE_INDEX_REPOSITORY = "avibe-bot/avibe"
+_PRERELEASE_TAG_RE = re.compile(r"gh-v(?P<version>\d+\.\d+\.\d+rc\d+)")
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 DESKTOP_MANAGED_RUNTIME_ENV = "AVIBE_DESKTOP_MANAGED_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -1419,7 +1425,80 @@ def has_newer_version(candidate: str, current: str) -> bool:
         return candidate != current
 
 
-def get_latest_version_info(current_version: str) -> dict:
+def get_release_index_url() -> str:
+    return os.environ.get("AVIBE_RELEASE_INDEX_URL", DEFAULT_RELEASE_INDEX_URL)
+
+
+def prerelease_updates_enabled() -> bool:
+    """The instance's ``update.prereleases`` setting; off when unreadable.
+
+    Read from the raw config file, like the update checker's hot reload, so an
+    unrelated broken section cannot change which releases are offered.
+    """
+
+    try:
+        data = json.loads(config_paths.get_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    update = data.get("update") if isinstance(data, dict) else None
+    return isinstance(update, dict) and update.get("prereleases") is True
+
+
+def select_latest_prerelease(index: Mapping[str, object], index_url: str) -> tuple[str, str] | None:
+    """The newest release candidate with a mirrored core wheel, and its install spec.
+
+    The spec pins the wheel's mirrored URL and SHA-256 from the index, so pip
+    and uv verify the bytes they install.
+    """
+
+    if index.get("schema_version") != 1 or index.get("repository") != RELEASE_INDEX_REPOSITORY:
+        return None
+    releases = index.get("releases")
+    if not isinstance(releases, list):
+        return None
+    wheel_prefix = canonicalize_name(PACKAGE_NAME).replace("-", "_")
+    best: tuple[object, str, str] | None = None
+    for release in releases:
+        if not isinstance(release, Mapping) or release.get("prerelease") is not True:
+            continue
+        match = _PRERELEASE_TAG_RE.fullmatch(str(release.get("tag") or ""))
+        parsed = _parse_version(match["version"]) if match else None
+        if parsed is None or (best is not None and parsed <= best[0]):
+            continue
+        version = match["version"]
+        wheel = f"{wheel_prefix}-{version}-py3-none-any.whl"
+        assets = release.get("assets")
+        asset = next(
+            (
+                item
+                for item in (assets if isinstance(assets, list) else [])
+                if isinstance(item, Mapping) and item.get("name") == wheel
+            ),
+            None,
+        )
+        digest = str(asset.get("sha256") or "") if asset else ""
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            continue
+        url = urllib.parse.urljoin(index_url, f"../releases/{urllib.parse.quote(release['tag'])}/{wheel}")
+        best = (parsed, version, f"{PACKAGE_NAME} @ {url}#sha256={digest}")
+    return None if best is None else (best[1], best[2])
+
+
+def _fetch_latest_prerelease() -> tuple[str, str] | None:
+    url = get_release_index_url()
+    req = urllib.request.Request(url, headers={"User-Agent": PACKAGE_NAME})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return select_latest_prerelease(json.loads(resp.read().decode("utf-8")), url)
+
+
+def get_latest_version_info(current_version: str, *, prereleases: bool = False) -> dict:
+    """The newest release to offer: stable from PyPI, plus release candidates when opted in.
+
+    An offered release candidate also carries ``package_spec``, the requirement
+    that installs it. Turning pre-releases off never offers a downgrade: an
+    older stable release is not newer than the running candidate.
+    """
+
     result = {"current": current_version, "latest": None, "has_update": False, "error": None}
 
     try:
@@ -1435,6 +1514,18 @@ def get_latest_version_info(current_version: str) -> dict:
             result["has_update"] = has_newer_version(latest, current_version)
     except Exception as e:
         result["error"] = str(e)
+        return result
+
+    if prereleases:
+        try:
+            candidate = _fetch_latest_prerelease()
+        except Exception as exc:
+            # Stable releases remain on offer when the pre-release index is unreachable.
+            logger.warning("Pre-release update check failed: %s", exc)
+            candidate = None
+        if candidate and (not result["latest"] or has_newer_version(candidate[0], result["latest"])):
+            result["latest"], result["package_spec"] = candidate
+            result["has_update"] = has_newer_version(candidate[0], current_version)
 
     return result
 

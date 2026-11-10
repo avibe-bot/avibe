@@ -241,6 +241,10 @@ def in_process_cli_control(monkeypatch):
         def session_turns(self):
             return cli_control_support.lent.session_turns
 
+        @property
+        def model_hub_service(self):
+            return cli_control_support.lent.model_hub_service
+
     class RequestStore:
         """Built on first use: Agent Run reads this store before its refusals."""
 
