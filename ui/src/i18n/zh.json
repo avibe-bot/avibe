@@ -7142,8 +7142,8 @@
       "issues": {
         "invalidUrl": "URL 无效。",
         "unclosedQuote": "有未闭合的引号。",
-        "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用 JSON 页签。",
-        "windowsPath": "这里无法可靠解析 Windows 路径，请使用 JSON 页签。"
+        "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用「粘贴 JSON 导入」。",
+        "windowsPath": "这里无法可靠解析 Windows 路径，请使用「粘贴 JSON 导入」。"
       },
       "namePlaceholder": "docs",
       "kindHttp": "HTTP",

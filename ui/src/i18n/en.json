@@ -7142,8 +7142,8 @@
       "issues": {
         "invalidUrl": "This URL is not valid.",
         "unclosedQuote": "A quote is not closed.",
-        "shellOperator": "Shell operators such as | && ; > are not supported. Use the JSON tab.",
-        "windowsPath": "Windows paths are ambiguous here. Use the JSON tab."
+        "shellOperator": "Shell operators such as | && ; > are not supported. Use Import JSON.",
+        "windowsPath": "Windows paths are ambiguous here. Use Import JSON."
       },
       "namePlaceholder": "docs",
       "kindHttp": "HTTP",
