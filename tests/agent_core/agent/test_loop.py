@@ -585,6 +585,48 @@ async def test_C4_steer_waits_for_the_batch_and_follow_up_waits_for_natural_end(
     assert [agent.store.final[row.row_id] for row in rows if row.kind == "response"] == [False, False, True]
 
 
+@pytest.mark.parametrize("window", ["route_resolution", "retried_attempt"])
+async def test_C4_a_steer_arriving_before_the_next_request_is_sent_enters_that_request(window):
+    # A tool batch ends with nothing queued, so its boundary drains nothing. The steer arrives before the request that
+    # is answered leaves: while its route resolves, or during an attempt that is dropped and retried. That request
+    # carries it behind the tool result; left queued, the model answers without it and the steer costs another request.
+    holder = {}
+
+    class SteeringRouter(FakeModelRouter):
+        async def resolve(self):
+            # Resolution 0 is the run's preflight; 1 is for the request after the tool batch.
+            if window == "route_resolution" and self.resolutions == 1:
+                assert await holder["agent"].steer(input_row("steer", "one more thing"))
+            return await super().resolve()
+
+    async def dropped(request, cancel):
+        assert await holder["agent"].steer(input_row("steer", "one more thing"))
+        yield ProviderError("server", "temporary upstream failure", True)
+
+    provider = ScriptedProvider(
+        [
+            [Done(assistant(calls=[ToolCallBlock("a", "echo")]))],
+            *([dropped] if window == "retried_attempt" else []),
+            [Done(assistant("final"))],
+        ]
+    )
+    agent = holder["agent"] = make_agent(provider, tools=[FakeTool()], retry=RetryPolicy(initial_delay_s=0))
+    agent.models = SteeringRouter(provider)
+
+    events = await collect(agent)
+
+    assert [user_texts(request) for request in provider.requests] == [
+        ["hello"],
+        *([["hello"]] if window == "retried_attempt" else []),
+        ["hello", "one more thing"],
+    ]
+    rows = await agent.store.load("session")
+    assert [row.kind for row in rows] == ["input", "response", "tool_result", "input", "response"]
+    assert [agent.store.final[row.row_id] for row in rows if row.kind == "response"] == [False, True]
+    assert [event.message_id for event in events if isinstance(event, SteerApplied)] == ["steer"]
+    assert events[-1].reason == "completed"
+
+
 async def test_C4_pending_steer_prevents_finality_and_late_steer_is_refused_during_commit():
     class PausingStore(InMemoryTranscriptStore):
         def __init__(self):
