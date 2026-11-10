@@ -287,12 +287,13 @@ target-qualified `.SIGNATURE` metadata file records what was produced:
 
 ### Initial test distribution
 
-`Release (AI Notes)` calls the existing `desktop-self-contained-package` workflow
-for canonical `gh-vX.Y.ZrcN` tags. For example, `gh-v3.1.2rc1` builds the tag's
-exact commit, stamps desktop version `3.1.2-rc.1`, and bundles Avibe `3.1.2rc1`.
-All three native builds must succeed before the existing release job publishes
-the GitHub prerelease. Official stable `vX.Y.Z` releases use the same desktop builder only when the G2
-stable signing gate below is enabled; PyPI publication retains its sole finalizer.
+`Desktop Release (Stage 2)` calls the existing `desktop-self-contained-package` workflow
+for canonical `gh-vX.Y.ZrcN` tags after the core release stage. For example,
+`gh-v3.1.2rc1` builds the tag's exact commit, stamps desktop version
+`3.1.2-rc.1`, and bundles Avibe `3.1.2rc1`. Official stable `vX.Y.Z` releases
+use the same desktop builder only when the G2 stable signing gate below is
+enabled. The core release and PyPI publication no longer wait for desktop
+packaging; Stage 2 attaches the verified installers to the same GitHub Release.
 
 The macOS app and DMG are Developer ID signed, notarized, and stapled as
 described above; the Windows NSIS installer is unsigned. Each raw
@@ -305,10 +306,11 @@ requires the signed macOS layers; every macOS record includes the pinned Cua
 Driver source archive, patch, tool snapshot, prepared binary, packaged binary,
 and code-signing provenance. The verifier still accepts already published
 schema-1 and schema-2 records, with their ad-hoc macOS layers, as legacy input.
-A failed
-build or check leaves the release unpublished.
+A failed desktop build or check leaves the desktop set incomplete; the updater
+filters that release out until all target metadata and payloads are present.
 Existing asset bytes cannot be overwritten; a changed build requires a new rc.
-Already-published releases cannot be retrofitted with missing desktop assets.
+Stage 2 may attach missing assets to the same in-flight release, but operators
+must not use it to retrofit an unrelated published tag.
 
 The manual workflow remains available for artifact-only builds: select a source
 ref and SemVer version in Actions. It signs and notarizes when the complete
@@ -727,12 +729,14 @@ never use the disposable test-fixture key for a release.
 4. Cut a new owner-authorized tag. Signing happens after the final macOS app seal
    and Windows installer are produced. Every target signs its own manifest,
    verifies both signatures with the same Rust contract used by the shell, then
-   uploads. The release job verifies all targets again and reads back uploaded
-   bytes. Stable assets are staged before the exact-source notes workflow can
-   succeed; the existing `publish.yml` finalizer waits for that workflow before
-   publishing. TEST retains its existing sole finalizer. Never retrofit rc14 or
-   overwrite a published asset, and never rotate the public key without a planned
-   bridge release signed by the currently trusted key.
+   uploads. `Desktop Release (Stage 2)` attaches the complete verified desktop
+   set to the same tag after the core release stage; stable assets may therefore
+   arrive after the Python finalizer publishes the release. The updater ignores
+   a release until its target's complete signed metadata and payload are present.
+   The mirror follows both stages and reconciles partial publication safely.
+   Never retrofit rc14 or overwrite a published asset, and never rotate the
+   public key without a planned bridge release signed by the currently trusted
+   key.
 
 Dependencies: shared `minisign-verify` 0.2.5 / `base64` 0.22 / `semver` 1, HTTPS
 `reqwest`, and native archive/temporary-file support. The shell downloads and

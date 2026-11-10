@@ -13,8 +13,8 @@ Require a successful **full master backstop at the exact candidate SHA** for
 every release, stable included. `lint.yml` runs that full pass after master
 pushes, including iOS, desktop, browser, installer, web-fetch and Windows
 checks. A running pass finishes; only the newest pending master pass waits.
-`release_ai.yml` and `publish.yml` enforce whole-run success plus the
-`master-full-backstop` certificate before any build/sign/publish path.
+`release_ai.yml`, `publish.yml`, and `desktop-release.yml` enforce the full
+master backstop before their respective build, signing, or publication paths.
 See [CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
 NavigationPolicyTests quarantine (#3418) does not relax this release gate:
 iOS must pass in the exact full master run, even while its PR check is advisory.
@@ -51,10 +51,23 @@ remain mandatory.
 
 ## Workflow ownership and artifacts
 
-The official workflows stage assets and generated notes in a Draft.
-`Release (AI Notes)` may update notes but never publishes. `Publish to PyPI` is
-the finalizer: it verifies the exact notes run, publishes the asset-complete
-GitHub Release, and only then allows PyPI publication.
+The official workflows stage notes and release assets in one immutable tag/release.
+`Release (AI Notes)` generates notes and publishes the core/runtime assets for
+GitHub-only pre-releases; for official stable tags it leaves a Draft for
+`Publish to PyPI`, which remains the stable core/PyPI finalizer after exact
+notes verification. `Desktop Release (Stage 2)` runs independently after the
+core stage, preserves the exact tag/source binding, and attaches the verified
+signed desktop set to the same release. The updater and mirror each treat a
+partial desktop set as unavailable until Stage 2 completes.
+
+The two release workflows may reuse a canonical Show Runtime bundle set from a
+previous successful release run when every identity field matches: trusted
+producer workflow/run, resolved `package-lock.json` digest, Node/npm toolchain,
+platform, external Runtime ref, exported router digest, and archive digest. A
+missing or mismatched identity falls back to a native rebuild and publishes a
+new canonical set. This applies only to the unsigned Show Runtime archives and
+router; release-versioned wheels, desktop-private wheels, and signed assets are
+never reused.
 
 GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They
@@ -113,9 +126,9 @@ that guard: the mirror holds the pinned release, verified against the manifest.
 
 `Mirror releases to dl.avibe.bot` copies published release assets to
 `https://dl.avibe.bot/releases/<tag>/<asset>` and writes the release index at
-`https://dl.avibe.bot/index/releases.json`. It follows the publishing
-workflows, so a renamed publishing workflow must also be renamed in its
-trigger. It also keeps version-less links to the newest stable desktop
-installers, such as
+`https://dl.avibe.bot/index/releases.json`. It follows `Publish to PyPI`,
+`Release (AI Notes)`, and `Desktop Release (Stage 2)`, so either stage can
+reconcile the same release without overwriting immutable bytes. It also keeps
+version-less links to the newest stable desktop installers, such as
 `https://dl.avibe.bot/latest/Avibe_aarch64-apple-darwin.dmg`. The contract and retention rules are in
 `docs/plans/release-download-mirror.md`.

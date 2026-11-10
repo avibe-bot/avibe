@@ -10,12 +10,12 @@ import { connectionApi, setupFixtures } from './fixtures';
 const route = '/setup';
 const wizard = () => <Wizard />;
 
-/** Every CLI assistant signs in on its own and has no connection yet. */
+/** Every CLI assistant is ticked, signs in on its own, and has no connection yet. */
 const fixtures = setupFixtures({
   assistants: {
-    claude: { mode: 'direct', auth: 'none' },
-    codex: { mode: 'direct', auth: 'none' },
-    opencode: { mode: 'direct', auth: 'none' },
+    claude: { enabled: true, mode: 'direct', auth: 'none' },
+    codex: { enabled: true, mode: 'direct', auth: 'none' },
+    opencode: { enabled: true, mode: 'direct', auth: 'none' },
   },
   api: connectionApi,
 });

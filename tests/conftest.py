@@ -1428,6 +1428,27 @@ def hold_migration_lock_elsewhere():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_launch_agent(monkeypatch):
+    """Keep `vibe autostart` and its login entry away from the developer's launchd.
+
+    The LaunchAgent file lands in the isolated home, but ``launchctl`` acts on the
+    developer's real desktop session: loading the agent there runs its login
+    entry, which starts or restarts the Avibe the developer is working in. A test
+    that reaches ``launchctl`` through ``vibe.login_autostart`` fails here unless
+    it replaced the runner with a fake of its own.
+    """
+
+    def refuse(command, timeout):
+        raise AssertionError(f"a test reached the real launchctl: {list(command)}")
+
+    def stub(login_autostart) -> None:
+        monkeypatch.setattr(login_autostart, "run_bounded_command", refuse)
+
+    with _stubbed_for_this_test("vibe.login_autostart", stub):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_oauth_runtime_state():
     """Reset module-level in-memory OAuth caches between tests.
 

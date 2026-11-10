@@ -31,6 +31,9 @@ ROOT_TOOL_BIN_DIR="/usr/local/bin"
 # Keep in step with INSTALLER_LAUNCHER_DIRS in vibe/upgrade.py.
 INSTALLER_LAUNCHER_DIRS=("$HOME/.local/bin" "$HOME/bin" "/usr/local/bin" "/opt/homebrew/bin")
 PUBLIC_INSTALL_SCRIPT_URL="https://avibe.bot/install.sh"
+# The LaunchAgent `vibe autostart on` writes on macOS, for the default home only.
+# Keep in step with LABEL in vibe/login_autostart.py.
+LOGIN_AGENT_LABEL="bot.avibe.autostart"
 VIBE_CANDIDATE_BIN_PATH=""
 # uv 0.10.8 and later fetch managed Python from Astral's CDN and fall back to
 # GitHub; earlier uv fetches it from GitHub only. uv_python_install_mirror
@@ -1319,8 +1322,15 @@ uninstall_avibe() {
     local -a doomed_physical=()
     local -a unlinked_data=()
     local -a running=()
+    local login_agent=""
 
     root="$(install_generations_root)"
+    if uninstalling_default_home; then
+        login_agent="$HOME/Library/LaunchAgents/$LOGIN_AGENT_LABEL.plist"
+        if [ ! -e "$login_agent" ] && [ ! -L "$login_agent" ]; then
+            login_agent=""
+        fi
+    fi
     while IFS= read -r item; do launchers+=("$item"); done < <(managed_launchers)
     while IFS= read -r item; do markers+=("$item"); done < <(stale_launcher_markers "${launchers[@]}")
     local -a other_uv_tools=()
@@ -1342,7 +1352,7 @@ uninstall_avibe() {
         info "Leaving the uv tool install $package in place: it belongs to no AVIBE_HOME, so only an uninstall of the default home removes it"
     done
     if [ "${#launchers[@]}" -eq 0 ] && [ "${#markers[@]}" -eq 0 ] && [ "${#uv_tools[@]}" -eq 0 ] &&
-        [ ! -e "$root" ] && [ ! -L "$root" ] && { [ "$PURGE_USER_DATA" != "1" ] || [ "${#data[@]}" -eq 0 ]; }; then
+        [ -z "$login_agent" ] && [ ! -e "$root" ] && [ ! -L "$root" ] && { [ "$PURGE_USER_DATA" != "1" ] || [ "${#data[@]}" -eq 0 ]; }; then
         info "No Avibe installation was found, so nothing was removed."
         report_remaining_vibe
         print_kept_data "${data[@]}"
@@ -1370,6 +1380,7 @@ uninstall_avibe() {
             fi
         done
         local -a listing=("${launchers[@]}" "${markers[@]}")
+        if [ -n "$login_agent" ]; then listing+=("$login_agent"); fi
         if [ -e "$root" ] || [ -L "$root" ]; then listing+=("$root"); fi
         for item in "${uv_tools[@]}"; do listing+=("$tool_dir/$item (uv tool $item)"); done
         for item in "${doomed_data[@]}"; do listing+=("$item    (your Avibe data)"); done
@@ -1440,6 +1451,19 @@ uninstall_avibe() {
         echo "  To check, run: ps -eo pid,args | grep -E 'opencode serve|cloudflared'"
     fi
 
+    if [ -n "$login_agent" ]; then
+        # First, so no login starts a launcher that is about to go. Unloading
+        # stops nothing: the agent only ever runs once, at login.
+        if command -v launchctl >/dev/null 2>&1; then
+            launchctl bootout "gui/$(id -u)/$LOGIN_AGENT_LABEL" >/dev/null 2>&1
+        fi
+        if rm -f -- "$login_agent" 2>/dev/null && [ ! -e "$login_agent" ] && [ ! -L "$login_agent" ]; then
+            success "Removed the launch-at-login agent $login_agent"
+        else
+            warn "Could not remove $login_agent"
+            failed=1
+        fi
+    fi
     for item in "${launchers[@]}" "${markers[@]}"; do
         if rm -f -- "$item" 2>/dev/null && [ ! -e "$item" ] && [ ! -L "$item" ]; then
             success "Removed $item"

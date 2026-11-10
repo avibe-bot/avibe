@@ -47,9 +47,9 @@ vibe stop         # 停止所有服务
   输出精简的观察格式（`--json` 返回驱动的原始负载），`vibe vault run` 原样转出所运行
   命令的输出，`vibe debug prompt export` 输出它的导出文档。
 - **运维命令**面向终端前的用户，输出文本。`version`、`check-update`、`doctor`、
-  `runtime`、`remote` 子命令、`screenshot` 和 `data retention` 加 `--json` 时输出
-  JSON 信封。服务生命周期命令 `start`、`stop`、`restart`、`upgrade` 以及引导式
-  `vibe remote` 配置只输出进度文本，不接受 `--json`。
+  `runtime`、`remote` 和 `autostart` 子命令、`screenshot` 和 `data retention` 加
+  `--json` 时输出 JSON 信封。服务生命周期命令 `start`、`stop`、`restart`、`upgrade`
+  以及引导式 `vibe remote` 配置只输出进度文本，不接受 `--json`。
 - **语言。** CLI 的帮助、错误、提示和通知始终是英文，与配置的界面语言无关。IM、
   Web UI 和通知遵循配置的语言；Web 诊断面板用该语言显示与 `vibe doctor` 相同的诊断。
 
@@ -220,6 +220,33 @@ vibe status
 如果正在运行的服务比最近一次激活的安装更旧，输出还会包含 `generation_downgrade`
 对象：其中有正在运行的 `version` 和 `generation`、`activated_version` 和
 `activated_generation`，以及选中较新安装的 `launcher`。通过这个启动器重启即可运行新版本。
+
+### `vibe autostart`
+
+在 macOS 上，每次登录桌面时启动 Avibe。默认关闭，适用于 CLI 安装。
+
+```bash
+vibe autostart on
+vibe autostart status
+vibe autostart off
+```
+
+**行为：**
+- `on` 写入一个用户级 LaunchAgent：`~/Library/LaunchAgents/bot.avibe.autostart.plist`，并把它加载到你的桌面会话。加载时它会运行一次，和登录时一样。通过 SSH 运行时，只要你有桌面会话，仍会加载到桌面会话；没有打开的桌面会话时，下次登录桌面后生效。这个文件本身就是开关，没有对应的配置项。
+- 每次登录桌面时，这个 agent 运行一次然后退出：
+  - 没有 Avibe 在运行：按 `vibe start --no-open-browser` 的方式启动 Avibe；
+  - Avibe 已在当前桌面会话中运行：什么都不做；
+  - Avibe 所在的登录会话已经结束，或它运行在另一个会话中（注销后重新登录，或通过 SSH 启动）：重启 Avibe，重启后它运行在桌面会话中，可以重新访问钥匙串；
+  - 无法判断 Avibe 运行在哪个会话，或正在运行的 Avibe 属于桌面应用：什么都不做，并把原因写入 `~/.avibe/logs/autostart.log`。
+- 两次登录之间不会运行任何东西。用 `vibe stop` 停止的 Avibe 会保持停止，直到下次登录桌面；Avibe 自己退出后也不会被重新拉起。
+- launchd 启动这个 agent 时只提供最小的环境变量。Avibe 仍会取得你登录 shell 的 `PATH`（见 `vibe start`）；shell 配置文件导出的其他变量不会生效。
+- 这个 agent 运行的是升级时始终指向当前安装的 `vibe` 启动器，所以 `vibe upgrade` 不会改动它。
+- `off` 只卸载并删除这一个 LaunchAgent，不动其他任何东西。正在运行的 Avibe 继续运行。用安装脚本卸载 Avibe 时也会删除它。
+- `status` 显示登录启动是否开启、agent 是否已加载到你的桌面会话、它运行的启动器，以及 macOS 把它归属到的解释器。
+- **隐私权限。** 登录时启动的 Avibe 不是由终端启动的，所以不具备你授予终端的权限（例如“完全磁盘访问权限”）。macOS 把它归属到运行 `vibe` 的 Python 解释器。如果工作区位于受保护的文件夹（桌面、文稿、下载）或外接卷上，请把 `vibe autostart status` 给出的解释器添加到“系统设置 > 隐私与安全性 > 完全磁盘访问权限”。升级把 Avibe 换到另一个 Python 版本后，这个路径会变，请再看一次 `status`。
+- 以下情况会拒绝执行且不做任何改动：在 Linux 和 Windows 上；在桌面应用管理的 Runtime 内（桌面应用有自己的登录启动设置）；`AVIBE_HOME` 指向另一个 home 时（agent 启动的是默认 home）；以及 `vibe` 从某个安装代（install generation）或虚拟环境内部运行时（升级会替换它们）。
+
+这些子命令加 `--json` 时输出 JSON 信封。
 
 ### `vibe skill`
 

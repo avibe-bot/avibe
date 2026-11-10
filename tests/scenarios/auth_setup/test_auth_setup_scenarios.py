@@ -5209,8 +5209,8 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
 def test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_default(monkeypatch, tmp_path):
     """AUTH-SETUP-132: first Agent read -> Vibey default -> runnable route -> completion keeps Vibey.
 
-    A fresh install with the native backends enabled records the built-in Vibey Agent as its
-    default on the first read; setup never writes a default for it. Once Vibey can run, setup
+    A fresh install records the built-in Vibey Agent as its default on the first read; setup
+    never writes a default for it. Once Vibey can run, setup
     completes and Vibey is still the confirmed default. Every step is the HTTP route setup
     calls; the browser's rule of keeping a recorded default that can run is the supporting test.
     """
@@ -5219,7 +5219,6 @@ def test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_de
 
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     V2Config.default().save()
-    assert V2Config.load().agents.opencode.enabled and V2Config.load().agents.claude.enabled
     service, store, _adapter = _service(tmp_path / "hub")
     agents = VibeAgentStore()
     service.named_agents_override = lambda backend: [
@@ -5282,6 +5281,49 @@ def test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_de
         assert agents.get_default_agent().name == vibey["name"]
     finally:
         agents.close()
+
+
+def test_a_new_install_starts_with_cli_assistants_off_and_a_tick_enables_one(monkeypatch, tmp_path):
+    """AUTH-SETUP-160: first-run seed -> setup reads -> one switch ticked -> only that assistant on.
+
+    Vibey is built in and is a new install's default, so the first config leaves Claude Code,
+    Codex and OpenCode off and the assistants screen starts with every CLI switch clear. Ticking
+    one sends the merge patch the card's switch sends: that assistant and its built-in Agent turn
+    on, the other two stay off, and the default stays Vibey.
+    """
+    from vibe import internal_client
+
+    async def no_controller(_backends):
+        raise internal_client.InternalServerUnavailable("no controller in this scenario")
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(internal_client, "reconcile_agent_backends", no_controller)
+    monkeypatch.setattr(runtime, "service_process_running", lambda: False)
+    cli._ensure_config()
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def switches() -> dict[str, bool]:
+        agents = client.get("/api/config").get_json()["agents"]
+        return {backend: agents[backend]["enabled"] for backend in ("claude", "codex", "opencode")}
+
+    def enabled_agents() -> dict:
+        return client.get("/api/agents").get_json()
+
+    assert switches() == {"claude": False, "codex": False, "opencode": False}
+    first = enabled_agents()
+    assert {row["backend"] for row in first["agents"]} == {"vibey"}
+    vibey = next(row for row in first["agents"] if row["bot"] is None)
+    assert first["default_agent_name"] == vibey["name"]
+
+    ticked = client.post("/api/config", json={"agents": {"claude": {"enabled": True}}}, headers=headers)
+    assert ticked.status_code == 200, ticked.get_json()
+    assert ticked.get_json()["agent_backend_runtime"]["apply_on_next_start"] is True
+
+    assert switches() == {"claude": True, "codex": False, "opencode": False}
+    after = enabled_agents()
+    assert {row["backend"] for row in after["agents"]} == {"vibey", "claude"}
+    assert after["default_agent_name"] == vibey["name"]
 
 
 def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp_path):

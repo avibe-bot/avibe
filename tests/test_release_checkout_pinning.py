@@ -17,7 +17,7 @@ TOOLING = (
 
 def test_release_tooling_never_runs_from_an_unpinned_checkout():
     covered = set()
-    for file in ("desktop-package.yml", "desktop-signpath-test.yml", "release_ai.yml"):
+    for file in ("desktop-package.yml", "desktop-signpath-test.yml", "release_ai.yml", "desktop-release.yml"):
         jobs = workflow(file)["jobs"]
         for name, job in jobs.items():
             steps = job.get("steps", [])
@@ -44,5 +44,6 @@ def test_release_tooling_never_runs_from_an_unpinned_checkout():
         "resolve-desktop-release",
         "build-assets",
         "certum-windows-sign",
+        "stage-desktop",
         "release",
     }

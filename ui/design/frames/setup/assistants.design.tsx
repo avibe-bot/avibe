@@ -1,6 +1,7 @@
 // Setup · AI assistants: the third screen of `/setup`, the shipped Wizard reached the way a person
 // reaches it, through the intro's 立即开始 and the providers' 继续. Each assistant's card shows its
-// lifecycle, its switch, and the model its built-in Agent uses; Vibey is built in and always on.
+// lifecycle, its switch, and the model its built-in Agent uses; Vibey is built in and always on, and
+// a fresh install leaves the CLI assistants' switches off until the person ticks them.
 import { Wizard } from '@/components/Wizard';
 
 import { frames, type FrameSpec } from '../../frame';
@@ -29,19 +30,23 @@ const screen = (name: string, title: string, spec: SetupSpec = {}, extra: Partia
   ...extra,
 });
 
+/** All three CLI assistants ticked by hand. */
+const ticked = { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } } as const;
+
 /** Claude Code has an update, Codex is switched off, OpenCode is not installed yet. */
 const mixed: SetupSpec = {
-  assistants: { claude: { update: true }, codex: { enabled: false }, opencode: { cli: 'missing' } },
+  assistants: { claude: { enabled: true, update: true }, codex: { enabled: false }, opencode: { enabled: true, cli: 'missing' } },
 };
 
 const designFrames = frames([
-  screen('default', '设置向导 · AI 助手 · 全部就绪'),
+  screen('default', '设置向导 · AI 助手 · 新安装：Vibey 就绪，其他助手未勾选'),
+  screen('ticked', '设置向导 · AI 助手 · 三个助手都已勾选，全部就绪', { assistants: ticked }),
   screen('vibey-no-model', '设置向导 · AI 助手 · Vibey 还没有模型，卡内选择', {
-    assistants: { vibey: { model: null } },
+    assistants: { ...ticked, vibey: { model: null } },
     api: candidatesApi,
   }),
-  screen('nothing-ready', '设置向导 · AI 助手 · Vibey 没有模型、助手都未启用', {
-    assistants: { vibey: { model: null }, claude: { enabled: false }, codex: { enabled: false }, opencode: { enabled: false } },
+  screen('nothing-ready', '设置向导 · AI 助手 · Vibey 没有模型、助手都未勾选', {
+    assistants: { vibey: { model: null } },
     api: candidatesApi,
   }),
   screen('mixed', '设置向导 · AI 助手 · 可升级、已停用、未安装', mixed),
@@ -58,9 +63,9 @@ const designFrames = frames([
   }),
   screen('direct', '设置向导 · AI 助手 · 自带登录：订阅与 API Key 已连接', {
     assistants: {
-      claude: { mode: 'direct', auth: 'subscription' },
-      codex: { mode: 'direct', auth: 'api_key' },
-      opencode: { mode: 'direct', auth: 'none' },
+      claude: { enabled: true, mode: 'direct', auth: 'subscription' },
+      codex: { enabled: true, mode: 'direct', auth: 'api_key' },
+      opencode: { enabled: true, mode: 'direct', auth: 'none' },
     },
   }),
   screen('short', '设置向导 · AI 助手 · 矮窗口 1366×768', {}, { width: 1366, height: 768 }),

@@ -78,6 +78,26 @@ impl Channel {
             .filter_map(|release| Some((Self::of(release.prerelease).version(&release.tag).ok()?, release)))
             .max_by(|a, b| a.0.cmp(&b.0))
     }
+    /// The highest release whose target has the complete signed updater set.
+    pub fn latest_for_target(self, releases: Vec<Release>, target: &str) -> Option<(Version, Release)> {
+        releases
+            .into_iter()
+            .filter(|release| self == Self::Test || !release.prerelease)
+            .filter_map(|release| {
+                let version = Self::of(release.prerelease).version(&release.tag).ok()?;
+                let manifest = manifest_name(target);
+                let required = [
+                    manifest.clone(),
+                    format!("{manifest}.sig"),
+                    artifact_name(&version.to_string(), target).ok()?,
+                ];
+                required
+                    .iter()
+                    .all(|name| release.assets.iter().any(|asset| asset == name))
+                    .then_some((version, release))
+            })
+            .max_by(|a, b| a.0.cmp(&b.0))
+    }
 }
 
 pub fn target_spec(target: &str) -> Result<(&'static str, &'static str), String> {
