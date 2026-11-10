@@ -232,6 +232,25 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, monkey
         assert result.returncode == 0 and "workflow-owned automation" in result.stdout
 
 
+@pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
+def test_workflow_owned_checkout_loads_its_scripts_alone(tmp_path, workflow_name, job_name, checkout_name, workflow_ref):
+    # Load each checked-out script from a tree holding only the declared files,
+    # so a helper it reads beside itself must be declared too (#3472 dropped one).
+    files = _step(_job(workflow_name, job_name), checkout_name)["with"]["sparse-checkout"].splitlines()
+    for name in files:
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+    for name in files:
+        if name.startswith("scripts/") and name.endswith(".py"):
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", "import runpy, sys; runpy.run_path(sys.argv[1], run_name='sparse_probe')",
+                 str(tmp_path / name)],
+                cwd=tmp_path, capture_output=True, text=True, timeout=60,
+            )
+            assert result.returncode == 0, f"{name}: {result.stderr[-800:]}"
+
+
 def test_preview_python_assets_build_from_the_desktop_source_sha():
     # The desktop packages are built from the resolved TEST source; the Python
     # assets published beside them must come from that same commit.
