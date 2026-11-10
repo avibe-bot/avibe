@@ -15,6 +15,7 @@ import { vaultFixtures } from './fixtures';
 
 const fixtures = vaultFixtures();
 const address = 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z';
+const session = { id: 'ses_airdrop', label: 'Devnet 空投脚本', isWorkbench: true, isIdFallback: false };
 
 // A legacy message with one System transfer of 0.01 SOL: 150 bytes.
 const transfer =
@@ -47,12 +48,12 @@ const designFrames = frames([
   part('create-import-phone', '添加密钥 · Solana · 导入 · 手机', 400, <SolanaKeyBuilder source="import" />, true),
   part('address', '密钥列表 · Solana 密钥只有这一行地址', 80, <SigningAddressRow label="Solana" value={address} />),
   part('address-phone', '密钥列表 · Solana 地址 · 手机', 80, <SigningAddressRow label="Solana" value={address} />, true),
-  part('approval', '审批 · 标准档 Solana 密钥签名 · 摘要（详情收起）', 230, <SolanaSignRows address={address} messageHex={transfer} />),
-  part('approval-details', '审批 · 详情展开：完整地址与完整待签名字节', 440, <SolanaSignRows address={address} messageHex={transfer} details />),
-  part('approval-details-long', '审批 · 长消息在详情框内滚动', 480, <SolanaSignRows address={address} messageHex={long} details />),
-  part('approval-empty', '审批 · 空消息也是合法消息（详情展开）', 240, <SolanaSignRows address={address} messageHex="" details />),
-  part('approval-phone', '审批 · 摘要（详情收起）· 手机', 230, <SolanaSignRows address={address} messageHex={transfer} />, true),
-  part('approval-details-phone', '审批 · 详情展开 · 手机', 520, <SolanaSignRows address={address} messageHex={transfer} details />, true),
+  part('approval', '审批 · 标准档 Solana 密钥签名 · 摘要（详情收起）', 230, <SolanaSignRows address={address} session={session} messageHex={transfer} />),
+  part('approval-details', '审批 · 详情展开：完整地址与完整待签名字节', 440, <SolanaSignRows address={address} session={session} messageHex={transfer} details />),
+  part('approval-details-long', '审批 · 长消息在详情框内滚动', 480, <SolanaSignRows address={address} session={session} messageHex={long} details />),
+  part('approval-empty', '审批 · 空消息也是合法消息（详情展开）', 240, <SolanaSignRows address={address} session={session} messageHex="" details />),
+  part('approval-phone', '审批 · 摘要（详情收起）· 手机', 230, <SolanaSignRows address={address} session={session} messageHex={transfer} />, true),
+  part('approval-details-phone', '审批 · 详情展开 · 手机', 520, <SolanaSignRows address={address} session={session} messageHex={transfer} details />, true),
 ]);
 
 export default designFrames;

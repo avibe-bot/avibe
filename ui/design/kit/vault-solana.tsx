@@ -1,6 +1,6 @@
 // What a standard-tier Solana key adds to the Vault (docs/plans/vault-solana.md §8), drawn before the
 // consumer API is on the default branch. Only the new parts live here: the Chain choice and Solana key
-// builder of the Add dialog, the notice a Protected choice gets, and the message a sign approval shows.
+// builder of the Add dialog, the note a Protected choice gets, and the message a sign approval shows.
 // Everything else on those surfaces is the shipped component and is not redrawn. New copy is draft copy.
 // Delete this file when the shipped form and approval card draw these states.
 import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
@@ -12,6 +12,8 @@ import { SegmentedRadio } from '@/components/ui/segmented';
 import { SigningAddressRow } from '@/components/ui/signing-address-list';
 import { Textarea } from '@/components/ui/textarea';
 import { DetailRow } from '@/components/ui/vault-approval-card';
+import type { VaultRequestSessionDisplay } from '@/components/ui/vault-request-session';
+import { VaultRequestSessionLink } from '@/components/ui/vault-request-session-link';
 
 import { useDraft } from './draft';
 
@@ -116,15 +118,17 @@ export function SolanaProtectedNotice() {
 }
 
 /**
- * What the sign approval shows for a standard Solana key that asks before every signature, in place
- * of the hash row. The summary has the address that signs, the size of the message, and a notice that
- * the message is not decoded. One Details section holds everything in full: the whole address, which
- * the summary row cuts short where the dialog is narrow, and the exact bytes. The bytes are never the
- * summary, however long the message is; Copy takes all of them whether or not Details is open. An
- * empty message is a valid message: it has no bytes to show and nothing left undecoded.
+ * What the sign approval shows for a standard Solana key that asks before every signature. The rows
+ * and their order are the EVM approval's: the address that signs, the Session, then what is signed,
+ * where the size of the message stands in place of the hash. One Details section holds everything in
+ * full: the whole address, which the summary row cuts short where the dialog is narrow, and the exact
+ * bytes. The bytes are never the summary, however long the message is; Copy takes all of them whether
+ * or not Details is open. An empty message is a valid message with no bytes to show. Like the EVM
+ * approval, the standard tier decodes nothing and carries no notice about it.
  */
-export function SolanaSignRows({ address, messageHex, details = false }: {
+export function SolanaSignRows({ address, session, messageHex, details = false }: {
   address: string;
+  session: VaultRequestSessionDisplay;
   /** The exact message bytes, as hex. */
   messageHex: string;
   /** Details is open. */
@@ -142,6 +146,9 @@ export function SolanaSignRows({ address, messageHex, details = false }: {
           <SigningAddressRow label="Solana" value={address} />
         </div>
       </DetailRow>
+      <DetailRow label={t('vaults.approval.session')}>
+        <VaultRequestSessionLink session={session} className="text-foreground" textClassName="text-sm" />
+      </DetailRow>
       <DetailRow label={d('待签名消息', 'Message')}>
         <span className="text-sm text-foreground">
           {bytes > 0 ? d(`${bytes} 字节`, bytes === 1 ? '1 byte' : `${bytes} bytes`) : d('空消息（0 字节）', 'Empty message (0 bytes)')}
@@ -153,11 +160,6 @@ export function SolanaSignRows({ address, messageHex, details = false }: {
           </button>
         ) : null}
       </DetailRow>
-      {bytes > 0 ? (
-        <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
-          {d('这条消息未解析，批准即为盲签。', 'This message is not decoded; approving it is blind signing.')}
-        </div>
-      ) : null}
       <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
         <button type="button" aria-expanded={details} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
           <Chevron className="size-3.5 text-muted" />
