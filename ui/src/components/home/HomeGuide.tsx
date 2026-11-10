@@ -130,7 +130,7 @@ export function HomeGuide({
           onHide={() => update({ tip_hidden_on: today })}
         />
       )}
-      <DesktopDownloadCta />
+      {desktop && <DesktopDownloadCta />}
     </>
   );
 }
