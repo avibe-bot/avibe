@@ -9016,8 +9016,8 @@ def _session_queue_remove(args, invocation: _ServiceInvocation):
     return notify_live_ui
 
 
+#: The one model family each single-vendor native CLI runs; Vibey and OpenCode run every family on their menus.
 _NATIVE_BACKEND_VENDORS = {"claude": "anthropic", "codex": "openai"}
-_BACKEND_FAMILY_LABELS = {"claude": "Claude Code", "codex": "Codex"}
 _VENDOR_FAMILY_LABELS = {"anthropic": "Claude", "openai": "GPT"}
 
 
@@ -9139,7 +9139,7 @@ def _check_session_route(
 
             vendor = model_vendor(model)
             if vendor and vendor != expected_vendor:
-                backend_label = _BACKEND_FAMILY_LABELS[backend]
+                backend_label = display_name_for_backend(backend)
                 family = _VENDOR_FAMILY_LABELS[expected_vendor]
                 raise TaskCliError(
                     f"a {backend_label} Session runs only {family} models, not '{model}'",
@@ -9233,7 +9233,7 @@ def cmd_session_models(args):
         expected_vendor = _NATIVE_BACKEND_VENDORS.get(backend)
         if expected_vendor:
             notes.append(
-                f"A {_BACKEND_FAMILY_LABELS[backend]} Session runs only {_VENDOR_FAMILY_LABELS[expected_vendor]} "
+                f"A {display_name_for_backend(backend)} Session runs only {_VENDOR_FAMILY_LABELS[expected_vendor]} "
                 "models; another family needs a new Session."
             )
         if not menu.get("authoritative"):
