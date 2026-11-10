@@ -87,7 +87,7 @@ const renderTranscript = (over: Partial<Props> = {}) => {
   const view = render(<MemoryRouter><Transcript {...props} /></MemoryRouter>);
   const scroller = view.getByTestId('chat-transcript');
   // ``overscroll``: how far past the bottom the platform's rubber band may pull.
-  const geometry = { extraAbove: 0, clientHeight: 800, overscroll: 0 };
+  const geometry = { extraAbove: 0, clientHeight: 800, overscroll: 0, wholeCssPixels: false, ignoreWrites: false };
   let scrollTop = 0;
   // jsdom has no layout, so geometry comes from the committed content column's
   // direct children: the head slot and the rows, which pickScrollAnchor walks too.
@@ -116,7 +116,12 @@ const renderTranscript = (over: Partial<Props> = {}) => {
     scrollTop: {
       configurable: true,
       get: () => scrollTop,
-      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight + geometry.overscroll)); },
+      set: (value: number) => {
+        if (geometry.ignoreWrites) return;
+        const clamped = Math.max(0, Math.min(value, scroller.scrollHeight - scroller.clientHeight + geometry.overscroll));
+        // WebKit-style scroll storage; layout rects above remain fractional.
+        scrollTop = geometry.wholeCssPixels ? Math.floor(clamped) : clamped;
+      },
     },
   });
   scroller.getBoundingClientRect = () => ({ top: 10, bottom: 10 + geometry.clientHeight, height: geometry.clientHeight }) as DOMRect;
@@ -227,6 +232,126 @@ describe('transcript older-page loading', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     scrollTo(0);
     expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  // Setter admission is stricter than visible position: even a same-value write
+  // interrupts iOS touch. Geometry-only paging assertions cannot catch it. The
+  // old 0.5px admission writes for +/-0.75, including the click before RO runs.
+  it.each([-1, 1])('retains fractional restore debt until a whole CSS pixel is owed (direction %i)', (direction) => {
+    const { scroller, scrollTo, geometry, rerender } = renderTranscript({ hasOlder: false });
+    geometry.wholeCssPixels = true;
+    // Let the overflow observer install the end-of-history slot before anchoring.
+    act(TestResizeObserver.resize);
+    scrollTo(1000);
+    const write = vi.spyOn(scroller, 'scrollTop', 'set');
+    geometry.extraAbove = direction * 0.75;
+    act(TestResizeObserver.resize);
+    act(TestResizeObserver.resize);
+    rerender({ agentDisplayName: 'Renamed agent' });
+    expect(write).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(1000);
+
+    geometry.extraAbove = direction;
+    act(TestResizeObserver.resize);
+    expect(write).toHaveBeenCalledExactlyOnceWith(1000 + direction);
+    expect(scroller.scrollTop).toBe(1000 + direction);
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains the native setter remainder without retrying a same-value fractional write', () => {
+    const { scroller, scrollTo, geometry } = renderTranscript({ hasOlder: false });
+    geometry.wholeCssPixels = true;
+    // Let the overflow observer install the end-of-history slot before anchoring.
+    act(TestResizeObserver.resize);
+    scrollTo(1000);
+    const write = vi.spyOn(scroller, 'scrollTop', 'set');
+    geometry.extraAbove = 1.75;
+    act(TestResizeObserver.resize);
+    expect(write).toHaveBeenCalledExactlyOnceWith(1001.75);
+    expect(scroller.scrollTop).toBe(1001);
+    act(TestResizeObserver.resize);
+    expect(write).toHaveBeenCalledTimes(1);
+    geometry.extraAbove = 2;
+    act(TestResizeObserver.resize);
+    expect(write).toHaveBeenLastCalledWith(1002);
+    expect(scroller.scrollTop).toBe(1002);
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([-0.75, 0.75, -2, 2])('settles a pending %spx shift on a tap before resize without a fractional setter call', (shift) => {
+    const { scroller, scrollTo, geometry } = renderTranscript({ hasOlder: false });
+    geometry.wholeCssPixels = true;
+    // Let the overflow observer install the end-of-history slot before anchoring.
+    act(TestResizeObserver.resize);
+    scrollTo(1000);
+    const row = scroller.querySelector<HTMLElement>('[data-message-id="msg-310"]')!;
+    const write = vi.spyOn(scroller, 'scrollTop', 'set');
+    geometry.extraAbove = shift;
+    fireEvent.click(row);
+    expect(write).toHaveBeenCalledTimes(Math.abs(shift) < 1 ? 0 : 1);
+    expect(scroller.scrollTop).toBe(1000 + (Math.abs(shift) < 1 ? 0 : shift));
+    const calls = write.mock.calls.length;
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    fireEvent.click(row);
+    act(TestResizeObserver.resize);
+    expect(write).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each([
+    { direction: 1, available: 0 },
+    { direction: 1, available: 0.75 },
+    { direction: -1, available: 0 },
+    { direction: -1, available: 0.75 },
+  ])('drops edge-limited debt without a setter ($direction, $available px available)', ({ direction, available }) => {
+    const { scroller, scrollTo, geometry } = renderTranscript({ hasOlder: false, needsLatestReload: true });
+    act(TestResizeObserver.resize);
+    scrollTo(direction > 0 ? 1000 : available);
+    // Touching a later row gives both directions a row whose layout can shift,
+    // including at the top, where the first row itself cannot move upward.
+    fireEvent.click(scroller.querySelector('[data-message-id="msg-310"]')!);
+    let maximum = direction > 0 ? 1000 + available : 4000;
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => maximum + geometry.clientHeight });
+    const before = scroller.scrollTop;
+    const write = vi.spyOn(scroller, 'scrollTop', 'set');
+    geometry.extraAbove = direction * 4;
+    act(TestResizeObserver.resize);
+    act(TestResizeObserver.resize);
+    expect(write).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(before);
+    // Make room without a scroll event/anchor capture. Impossible debt must
+    // have been forgotten, not postponed until the edge moves away.
+    maximum = 5000;
+    scroller.scrollTop = 1000;
+    write.mockClear();
+    act(TestResizeObserver.resize);
+    expect(write).not.toHaveBeenCalled();
+    fireEvent.scroll(scroller);
+    fireEvent.click(scroller.querySelector('[data-message-id="msg-310"]')!);
+    act(TestResizeObserver.resize);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('forgets a whole-pixel correction the platform refused instead of retrying it forever', () => {
+    const { scroller, scrollTo, geometry } = renderTranscript({ hasOlder: false });
+    act(TestResizeObserver.resize);
+    scrollTo(1000);
+    const write = vi.spyOn(scroller, 'scrollTop', 'set');
+    geometry.ignoreWrites = true;
+    geometry.extraAbove = 4;
+    act(TestResizeObserver.resize);
+    expect(write).toHaveBeenCalledExactlyOnceWith(1004);
+    expect(scroller.scrollTop).toBe(1000);
+    geometry.ignoreWrites = false;
+    act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
+    expect(write).toHaveBeenCalledTimes(1);
+    geometry.extraAbove = 6;
+    act(TestResizeObserver.resize);
+    expect(scroller.scrollTop).toBe(1002);
+    expect(write).toHaveBeenCalledTimes(2);
   });
 
   it('allows another upward scroll inside the trigger band without a down-and-up detour', async () => {

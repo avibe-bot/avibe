@@ -5347,14 +5347,24 @@ export const Transcript: React.FC<TranscriptProps> = ({
       // on screen without anything above it changing size (lib/layoutBox).
       const currentTop = topInContent(target.el, content.getBoundingClientRect().top, content);
       const delta = currentTop - target.top;
-      if (Math.abs(delta) < 0.5) return;
+      // Use a whole CSS pixel, not a device pixel: some engines discard a
+      // fractional scrollTop write even at high DPR. Leave that debt on the
+      // anchor until further layout shifts make it large enough to compensate.
+      if (Math.abs(delta) < 1) return;
       const before = el.scrollTop;
-      el.scrollTop += delta;
+      const next = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, before + delta));
+      if (Math.abs(next - before) < 1) {
+        // The edge cannot take this correction. Re-anchor instead of issuing
+        // (and retrying) a clamped no-op that would interrupt a touch.
+        captureAnchor();
+        return;
+      }
+      el.scrollTop = next;
       const applied = el.scrollTop - before;
       takebackRef.current = { from: before, to: el.scrollTop, at: performance.now() };
       lastWriteAtRef.current = takebackRef.current.at;
       // Held from here: the shift is compensated and must not be again. What
-      // the scroll position could not take (a fraction of a device pixel) stays
+      // the scroll position could not take (less than one CSS pixel) stays
       // owed, so fractions do not add up over a run of shifts; anything larger
       // (the position clamped) is dropped rather than retried on every commit.
       if (Math.abs(delta - applied) >= 1) {
