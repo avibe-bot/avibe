@@ -203,6 +203,7 @@ def source_runnable(
 
 
 _CLAUDE_FAMILY_ALIASES = {
+    "fable": "fable",
     "opus": "opus",
     "opus[1m]": "opus",
     "sonnet": "sonnet",

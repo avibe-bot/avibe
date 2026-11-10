@@ -39,6 +39,10 @@ def test_upstream_reasoning_signal_uses_only_the_protocol_default(
         # Mythos 5 and 5.1 have every Anthropic level, which is exactly the protocol default list, so no row is
         # needed for them.
         ("anthropic", "claude-mythos-5-1", ("reasoning",), ("low", "medium", "high", "xhigh", "max"), "upstream"),
+        ("anthropic", "claude-fable-5-2", None, ("low", "medium", "high", "xhigh", "max"), "catalog"),
+        ("anthropic", "anthropic/claude-fable-5-2", ("reasoning",), ("low", "medium", "high", "xhigh", "max"), "upstream"),
+        ("openai_responses", "gpt-6.1-terra", None, ("none", "low", "medium", "high", "xhigh", "max"), "catalog"),
+        ("openai_responses", "openai/gpt-6.1-terra", None, ("none", "low", "medium", "high", "xhigh", "max"), "catalog"),
         # A snapshot, a context tag or a provider prefix names the same row.
         ("anthropic", "claude-opus-5-20260724", None, ("low", "medium", "high", "xhigh", "max"), "catalog"),
         ("anthropic", "anthropic/claude-opus-5[1m]", None, ("low", "medium", "high", "xhigh", "max"), "catalog"),
