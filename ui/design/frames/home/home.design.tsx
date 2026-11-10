@@ -129,8 +129,20 @@ const stateFrames: FrameSpec[] = STATES.flatMap((state) => [
   })),
 ]);
 
+const browserDesktopFrame: FrameSpec = {
+  name: 'c-ready-browser-desktop',
+  title: '首页 · 浏览器桌面 1440×900 · 提供 Desktop 应用下载',
+  width: 1440,
+  height: 900,
+  status: 'shipped',
+  route: '/',
+  fixtures: fixturesOf(STATES[2], false),
+  render: home,
+};
+
 const designFrames = frames([
   ...stateFrames,
+  browserDesktopFrame,
   {
     name: 'e-native-phone',
     title: '首页 · iOS App（iPhone 17 Pro，安全区 62/34）· 账户头像进入账号与实例，底栏贴近底部',
