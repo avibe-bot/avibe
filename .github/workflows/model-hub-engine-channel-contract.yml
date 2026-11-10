@@ -110,8 +110,8 @@ jobs:
           - {platform: linux-arm64, runner: ubuntu-24.04-arm}
           # Windows runs x64 Python, as Avibe does there; on Arm that Python
           # still selects the native arm64 engine (core/windows_arch.py).
-          - {platform: windows-amd64, runner: windows-latest, python_arch: x64}
-          - {platform: windows-arm64, runner: windows-11-arm, python_arch: x64}
+          - {platform: windows-amd64, runner: windows-latest, python_arch: x64, python_build: win-amd64}
+          - {platform: windows-arm64, runner: windows-11-arm, python_arch: x64, python_build: win-amd64}
     steps:
       # Manifests are compared byte for byte; a Windows checkout must not
       # rewrite their line endings.
@@ -128,9 +128,43 @@ jobs:
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        id: python
         with:
           python-version: "3.12"
           architecture: ${{ matrix.python_arch }}
+
+      # On windows-11-arm, setup-python has ended as successful without
+      # installing anything (seen in lint.yml's windows-model-hub), after which
+      # `python` was the image's own interpreter. One more attempt, and then
+      # `python` must be the interpreter setup-python reported, of the build
+      # this leg asked for.
+      - name: Set up Python again if the first attempt installed nothing
+        if: steps.python.outputs.python-path == ''
+        id: python_retry
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Require the requested Python
+        shell: bash
+        env:
+          SETUP_PYTHON: ${{ steps.python.outputs.python-path || steps.python_retry.outputs.python-path }}
+          PYTHON_BUILD: ${{ matrix.python_build }}
+        run: |
+          python - <<'EOF'
+          import os, sys, sysconfig
+
+          setup, wanted = os.environ["SETUP_PYTHON"], os.environ["PYTHON_BUILD"]
+          version, build = "%d.%d" % sys.version_info[:2], sysconfig.get_platform()
+          print(f"python {version} {build} at {sys.executable}; setup-python reported {setup or 'nothing'}")
+          if not setup:
+              raise SystemExit("setup-python reported no interpreter in two attempts")
+          if not os.path.samefile(sys.executable, setup):
+              raise SystemExit("`python` is not the interpreter setup-python reported")
+          if version != "3.12" or (wanted and build != wanted):
+              raise SystemExit(f"this job needs Python 3.12 {wanted}".rstrip())
+          EOF
 
       - name: Install package
         shell: bash
