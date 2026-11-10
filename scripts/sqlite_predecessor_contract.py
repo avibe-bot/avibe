@@ -291,9 +291,22 @@ def _run(*args: str, **kwargs) -> str:
     return result.stdout
 
 
+def _is_avibe_release(tag: str) -> bool:
+    from scripts.release_package_version import package_version_from_release_tag
+
+    try:
+        package_version_from_release_tag(tag)
+    except ValueError:
+        return False
+    return True
+
+
 def previous_release(repo: str, *, release_tag: str | None = None) -> dict:
     pages = json.loads(_run("gh", "api", f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp"))
-    releases = [item for page in pages for item in page if not item["draft"] and item.get("published_at")]
+    # The repository also publishes managed-runtime assets (model-hub-engine-v*,
+    # git-runtime-v*); they carry no Avibe wheel and are never a predecessor.
+    releases = [item for page in pages for item in page if not item["draft"] and item.get("published_at")
+                and _is_avibe_release(item["tag_name"])]
     # A rerun of an already-published target still compares with its immediate
     # predecessor, not with itself or a release published after that target.
     target = next((item for item in releases if item["tag_name"] == release_tag), None)
