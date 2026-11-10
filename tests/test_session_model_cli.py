@@ -1,7 +1,8 @@
 """Seeing and switching a Session's model, reasoning effort, and speed from the CLI.
 
 The menu is the Web route picker's (``hubCatalogModels`` in ``ui/src/lib/backendModels.ts``), projected from Model
-Hub's Agent payload; a change is the same ``update_session`` write the Web PATCH makes, applied from the next Turn.
+Hub's Agent payload; a change is the same ``update_session`` write the Web PATCH makes. A running Vibey Turn takes
+it at its next model request; a Claude Code, Codex, or OpenCode Session takes it at its next Turn.
 """
 
 from __future__ import annotations
@@ -144,7 +145,7 @@ def _update(capsys, sid, *flags):
 
 
 @pytest.mark.parametrize("running", [False, True])
-def test_update_switches_model_effort_and_speed_from_the_next_turn(monkeypatch, tmp_path, capsys, running):
+def test_update_switches_model_effort_and_speed(monkeypatch, tmp_path, capsys, running):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa", running=running)
 
@@ -153,7 +154,6 @@ def test_update_switches_model_effort_and_speed_from_the_next_turn(monkeypatch, 
     )
 
     assert code == 0, payload
-    assert payload["applies_from"] == "next_turn"
     assert payload["turn_running"] is running
     assert payload["session"]["model"] == "gpt-6.1-sol" and payload["session"]["speed"] == "fast"
     assert _row(engine, "sesaaa") == ("gpt-6.1-sol", "medium", "fast")
@@ -161,6 +161,22 @@ def test_update_switches_model_effort_and_speed_from_the_next_turn(monkeypatch, 
 
     code, payload = _update(capsys, "sesaaa", "--speed", "standard")
     assert code == 0 and _row(engine, "sesaaa") == ("gpt-6.1-sol", "medium", None)
+
+
+@pytest.mark.parametrize(("backend", "applies_from"), [("vibey", "next_request"), ("claude", "next_turn")])
+def test_a_change_says_when_it_reaches_a_running_turn(monkeypatch, tmp_path, capsys, backend, applies_from):
+    """Vibey resolves its route for every model request, so the caller need not wait for its Turn or stop it; a
+    native CLI is given its model when a Turn starts."""
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", backend=backend, running=True)
+
+    code, payload = _update(capsys, "sesaaa", "--reasoning-effort", "low")
+    _, menu = _run(cli.cmd_session_models, ["session", "models", "--session-id", "sesaaa"], capsys)
+
+    assert code == 0, payload
+    assert (payload["applies_from"], payload["turn_running"]) == (applies_from, True)
+    assert ("next model request" in menu["notes"][0]) is (applies_from == "next_request")
+    assert ("next Turn" in menu["notes"][0]) is (applies_from == "next_turn")
 
 
 def test_model_change_clears_an_effort_the_new_model_does_not_offer(monkeypatch, tmp_path, capsys):

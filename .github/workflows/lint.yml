@@ -278,8 +278,8 @@ jobs:
       fail-fast: false
       matrix:
         # Keep each suite's workers, server and type check unchanged. Four
-        # independent runners balance the measured command wall times at about
-        # eight minutes each (run 41810827956); see docs/plans/ci-browser-parallelism.md.
+        # independent runners balance measured command wall times; see
+        # docs/plans/ci-browser-parallelism.md for the coverage contract.
         include:
           - lane: 1
             suites: |
@@ -297,6 +297,7 @@ jobs:
               npm run test:chat-paging
               npm run test:model-provider
               npm run test:web-fetch
+              npm run test:voice-shortcut
           - lane: 3
             suites: |
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
@@ -306,14 +307,13 @@ jobs:
               npm run test:motion
               npm run test:citations
               npm run test:session-dot
+              npm run test:vault-integrity
           - lane: 4
             suites: |
-              npm run test:vault-integrity
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
               npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts
               npm run test:badge-triggers
               npm run test:chat-selection
-              npm run test:voice-shortcut
               npm run test:chat-scroll
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

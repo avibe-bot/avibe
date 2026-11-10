@@ -87,6 +87,7 @@ from core.agent_core.messages import (
     text as text_block,
 )
 from core.agent_input import AgentInputMetadata
+from core.agent_session_context import session_model_settings, session_speed_for_context
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -126,6 +127,7 @@ from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
+from storage.agent_session_rows import session_route_settings, session_speed
 from storage.agent_transcript import (
     INPUT_TYPES,
     MESSAGE_TURN_ID_SQL,
@@ -178,6 +180,16 @@ def _hub_error_kind(kind: Optional[str]) -> Optional[str]:
     return kind if kind in NAMED_ERROR_KINDS else None
 
 
+@dataclass(frozen=True)
+class _Route:
+    """What a Turn's next model request asks for: the model, its reasoning effort, and the processing tier
+    (``"fast"``, or None for standard)."""
+
+    model: str
+    reasoning_effort: Optional[str]
+    speed: Optional[str]
+
+
 @dataclass
 class _Run:
     """One Turn's state, published before its first await (``handle_message``)."""
@@ -188,6 +200,8 @@ class _Run:
     instance: str
     agent: Optional[Agent] = None
     router: Optional[HubModelRouter] = None
+    # What dispatch resolved for the Turn, then what its Session asks for at each later request (``_follow_session``).
+    route: Optional[_Route] = None
     cwd: str = ""
     instructions_notice: Optional[str] = None
     settled: bool = False
@@ -968,7 +982,8 @@ class VibeyAgent(BaseAgent):
     async def _preflight(self, turn: _Run) -> HubModelRouter:
         """Resolve the route before the input is written; the run's first model call reuses it.
 
-        A later attempt resolves again (C-6 item 3); a Model Hub refusal there is kept on
+        A later attempt resolves again (C-6 item 3), for the model and processing tier the
+        Session asks for by then (``_follow_session``); a Model Hub refusal there is kept on
         the Turn, so its failure shows the Hub's copy, as a refusal at preflight does.
         """
         from modules.agents.model_hub import bind_launch, launch_refusal_copy, resolve_model_hub_launch
@@ -979,13 +994,19 @@ class VibeyAgent(BaseAgent):
         if not model:
             raise ValueError(f"{display_name_for_backend(BACKEND)} has no model selected.")
         context = request.context
+        turn.route = _Route(
+            model,
+            request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
+            session_speed_for_context(context),
+        )
 
         async def resolve() -> ModelSelection:
+            route = turn.route
             try:
                 # Every resolution names the Turn: the loop's later model calls run in their own tasks.
                 launch = await resolve_model_hub_launch(
-                    self.controller, BACKEND, model, process_scope=f"{BACKEND}:{session_id}", context=context,
-                    turn_id=turn.turn_id,
+                    self.controller, BACKEND, route.model, process_scope=f"{BACKEND}:{session_id}", context=context,
+                    turn_id=turn.turn_id, speed=route.speed,
                 )
             except Exception as error:
                 turn.refusal = launch_refusal_copy(self.controller, error)
@@ -995,7 +1016,62 @@ class VibeyAgent(BaseAgent):
             selection = budgeted(selection_from_hop(launch.to_hop_resolution()))
             return await self._native_search_recovery_route(turn, selection)
 
-        return HubModelRouter(resolve, self._providers, first=await resolve())
+        first = await resolve()
+
+        async def resolve_next() -> ModelSelection:
+            await self._follow_session(turn)
+            return await resolve()
+
+        return HubModelRouter(resolve_next, self._providers, first=first)
+
+    async def _follow_session(self, turn: _Run) -> None:
+        """Before each model request after the Turn's first: take what the Session asks for now.
+
+        A Session's model, reasoning effort, and speed can change while its Turn runs (the Web
+        picker, ``vibe session update``), and the next request goes out on them. Only a Turn
+        that dispatch resolved from the Session's row follows it, by dispatch's own rule over
+        the row as it is now: a setting the row does not name is the one the Session inherits,
+        and an explicit subagent model or effort is the request's own. The tool list, the
+        hosted-tool declarations, and the system prompt stay the Turn's (``_build_agent``).
+        """
+        request, route = turn.request, turn.route
+        target = (request.context.platform_specific or {}).get("agent_session_target")
+        if route is None or not isinstance(target, dict) or str(target.get("id") or "") != turn.session_id:
+            return
+        try:
+            row = await asyncio.to_thread(self._session_route_settings, turn.session_id)
+        except Exception:
+            # Following is an addition to the Turn, never a reason to fail it: it keeps what it has.
+            logger.warning("Vibey could not read the settings of Session %s", turn.session_id, exc_info=True)
+            return
+        if row is None:
+            return
+        model, reasoning_effort, _ = session_model_settings(
+            row,
+            fallback_model=request.vibe_agent_inherited_model,
+            fallback_reasoning_effort=request.vibe_agent_inherited_reasoning_effort,
+        )
+        current = _Route(
+            # A Session that names no model cannot run; the Turn keeps the one it has.
+            route.model if request.subagent_model else str(model or "").strip() or route.model,
+            route.reasoning_effort if request.subagent_reasoning_effort else reasoning_effort,
+            session_speed(row["metadata"]),
+        )
+        if current == route:
+            return
+        logger.info(
+            "Vibey turn %s follows its Session: model %s -> %s, effort %s -> %s, speed %s -> %s",
+            turn.turn_id, route.model, current.model, route.reasoning_effort, current.reasoning_effort,
+            route.speed or "standard", current.speed or "standard",
+        )
+        turn.route = current
+        if turn.agent is not None:
+            # The request's capability filter still decides whether the hop takes it (``Agent._built``).
+            turn.agent.reasoning_effort = current.reasoning_effort
+
+    def _session_route_settings(self, session_id: str) -> Optional[dict[str, Any]]:
+        with self._engine.connect() as conn:
+            return session_route_settings(conn, session_id)
 
     async def _native_search_recovery_route(self, turn: _Run, selection: ModelSelection) -> ModelSelection:
         """Derive a per-tool route from this Turn's immutable committed response facts."""

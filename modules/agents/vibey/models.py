@@ -214,8 +214,10 @@ class HubModelRouter:
     """``ModelRouter`` for one run: a fresh hop for every model attempt (C-6 item 3).
 
     ``first`` is the selection the adapter already resolved during preflight; the
-    loop's first attempt reuses it, so a run resolves once and again only after a
-    retryable error or a refusal (``vibey-hosted-tools.md`` §3.5).
+    loop's first request reuses it. Every later request resolves again: the next
+    one after a tool batch, and one that answers a retryable error or a refusal
+    (``vibey-hosted-tools.md`` §3.5). A later resolution may name another model,
+    since the adapter follows its Session; the Turn's tool list stays ``preflight``'s.
     """
 
     def __init__(

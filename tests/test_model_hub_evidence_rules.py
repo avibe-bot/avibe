@@ -38,6 +38,14 @@ REPLAY_REFUSED = {
     "type": "error",
     "error": {"type": "invalid_request_error", "message": "Invalid encrypted_content in search_result block"},
 }
+# As Anthropic spells it, measured through a relay on 2026-11-10: a block path, then both names in backticks.
+REPLAY_REFUSED_AS_MEASURED = {
+    "type": "error",
+    "error": {
+        "type": "invalid_request_error",
+        "message": "messages.29.content.0: Invalid `encrypted_content` in `search_result` block",
+    },
+}
 WEB_SEARCH_HISTORY = [
     {"role": "user", "content": "搜索 Avibe"},
     {
@@ -65,6 +73,11 @@ CASES = [
     (
         "replayed-search-result", "claude", "anthropic", "anthropic",
         {"max_tokens": 64, "messages": WEB_SEARCH_HISTORY}, 400, REPLAY_REFUSED,
+        EvidenceFeature.hosted("web_search", "replay"), "400 invalid_request_error",
+    ),
+    (
+        "replayed-search-result-as-measured", "claude", "anthropic", "anthropic",
+        {"max_tokens": 64, "messages": WEB_SEARCH_HISTORY}, 400, REPLAY_REFUSED_AS_MEASURED,
         EvidenceFeature.hosted("web_search", "replay"), "400 invalid_request_error",
     ),
     ("another-effort-named", "codex", "openai", "openai_responses",

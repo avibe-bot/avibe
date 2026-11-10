@@ -7044,7 +7044,6 @@
     "add": "Add MCP",
     "addTitle": "Add MCP",
     "refresh": "Refresh",
-    "refreshAll": "Refresh",
     "remove": "Delete",
     "removeConfirm": "Delete MCP server {{name}}?",
     "removeAvibeHint": "This removes the server from Avibe.",
@@ -7059,7 +7058,7 @@
     "projectEmpty": "No project MCP in this project yet.",
     "globalBadge": "Global",
     "failed": "MCP operation failed.",
-    "pasteHint": "Paste an mcpServers JSON block. Env and header values are stored in plaintext on this machine.",
+    "pasteHint": "Paste an mcpServers JSON.",
     "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
     "source": {
       "avibe": "Avibe",
@@ -7101,7 +7100,7 @@
     },
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",
-    "addSubtitle": "Paste MCP config JSON. Avibe registers it so every Agent can call vibe mcp.",
+    "addSubtitle": "Once added, every Agent can call it.",
     "unchangedCount": "{{count}} already present.",
     "succeededCount": "{{count}} succeeded",
     "failedCount": "{{count}} failed:",
@@ -7118,8 +7117,8 @@
     "addResultHint": "These servers need login before their tools are available.",
     "loginComplete": "MCP login completed",
     "addMode": "How to add",
-    "addModeJson": "Paste JSON",
-    "addModeForm": "Form",
+    "addModeJson": "Import JSON",
+    "addModeForm": "Fill in",
     "form": {
       "name": "Name",
       "target": "URL or command",
@@ -7132,12 +7131,11 @@
       "removeRow": "Remove",
       "advanced": "Advanced",
       "cwd": "Working directory",
-      "hint": "Values are stored in plaintext on this machine. Use the JSON tab for OAuth, timeouts, tool filters, or ${VAR} references.",
       "issues": {
         "invalidUrl": "This URL is not valid.",
         "unclosedQuote": "A quote is not closed.",
-        "shellOperator": "Shell operators such as | && ; > are not supported. Use the JSON tab.",
-        "windowsPath": "Windows paths are ambiguous here. Use the JSON tab."
+        "shellOperator": "Shell operators such as | && ; > are not supported. Use Import JSON.",
+        "windowsPath": "Windows paths are ambiguous here. Use Import JSON."
       },
       "namePlaceholder": "docs",
       "kindHttp": "HTTP",

@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 
 from config.v2_config import ModelHubConfig
 from core.agent_core.agent.events import NAMED_ERROR_KINDS, ToolFinished
@@ -221,6 +221,8 @@ class _Controller:
         self.started: list[Optional[str]] = []
         self.native_agents: list[Optional[str]] = []
         self.hub_calls: list[str] = []
+        # The processing tier each resolution asked for: ``"fast"``, or None for standard.
+        self.hub_speeds: list[Optional[str]] = []
         self.hub_protocol = "anthropic"
         # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
         self.hub_limits = {"context_window": 32000, "max_output_tokens": 4096}
@@ -274,8 +276,11 @@ class _Controller:
         self.terminals.append({"turn": _turn(context), "is_error": is_error, "settled_by": settled_by})
         self.terminal_texts.append(terminal_evidence.get("result_text"))
 
-    async def _resolve(self, backend, requested_model, *, process_scope=None, turn_id=None) -> ModelHubLaunch:
+    async def _resolve(
+        self, backend, requested_model, *, process_scope=None, turn_id=None, speed=None
+    ) -> ModelHubLaunch:
         self.hub_calls.append(requested_model)
+        self.hub_speeds.append(speed)
         return ModelHubLaunch(
             backend=backend,
             channel="hub",
@@ -2578,6 +2583,119 @@ async def test_every_model_hub_resolution_names_its_turn(engine, session, tmp_pa
 
     assert turns == [_turn(request.context)] * 2
 
+
+def _changing_session(engine, **changes) -> FakeTool:
+    """A tool whose call changes the Session's settings with the write the Web picker and ``vibe session update``
+    make; with no ``changes`` it leaves the Session alone."""
+    from storage import workbench_sessions_service
+
+    async def execute(arguments, ctx):
+        if changes:
+            with engine.begin() as conn:
+                workbench_sessions_service.update_session(conn, SESSION, **changes)
+        return ToolResult((text("a.py"),))
+
+    return FakeTool("echo", execute=execute)
+
+
+#: Per case: how the request differs from a Turn on ``test-model`` at effort ``low``, what the Session's row names
+#: when the Turn starts, the change made while its tool runs, and the model, effort and tier its second request
+#: asks for.
+_FOLLOWED = {
+    "model": ({}, {}, {"model": "other-model"}, ("other-model", "low", None)),
+    "effort": ({}, {}, {"reasoning_effort": "high"}, ("test-model", "high", None)),
+    "speed": ({}, {}, {"speed": "fast"}, ("test-model", "low", "fast")),
+    "unchanged": ({}, {}, {}, ("test-model", "low", None)),
+    # A setting the Session's row stops naming goes to what the Session inherits, as the next Turn's would.
+    "cleared": (
+        {"vibe_agent_reasoning_effort": "high"}, {"reasoning_effort": "high"}, {"reasoning_effort": None},
+        ("test-model", "low", None),
+    ),
+    # An explicit subagent model and effort are the request's own; the tier is the Session's.
+    "subagent": (
+        {"subagent_model": "sub-model", "subagent_reasoning_effort": "high"}, {},
+        {"model": "other-model", "reasoning_effort": "low", "speed": "fast"}, ("sub-model", "high", "fast"),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_FOLLOWED))
+async def test_a_running_turn_takes_its_sessions_model_effort_and_speed_at_its_next_request(
+    engine, session, tmp_path, published, case
+) -> None:
+    from storage import workbench_sessions_service
+
+    overrides, row, changes, (model, effort, speed) = _FOLLOWED[case]
+    if row:
+        with engine.begin() as conn:
+            workbench_sessions_service.update_session(conn, SESSION, **row)
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[_changing_session(engine, **changes)])
+    harness.controller.hub_limits = {
+        **harness.controller.hub_limits, "supports_reasoning": True, "reasoning_efforts": ("low", "high"),
+    }
+    request = harness.request("list files")
+    # What dispatch resolved, and what the Session inherits where its row names nothing.
+    request.vibe_agent_reasoning_effort = "low"
+    request.vibe_agent_inherited_model, request.vibe_agent_inherited_reasoning_effort = "test-model", "low"
+    for name, value in overrides.items():
+        setattr(request, name, value)
+    started = (
+        request.subagent_model or request.vibe_agent_model,
+        request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
+    )
+
+    await harness.agent.handle_message(request)
+
+    first, second = harness.provider.requests
+    assert (first.endpoint.model_id, first.reasoning_effort) == started
+    assert (second.endpoint.model_id, second.reasoning_effort) == (model, effort)
+    assert list(zip(harness.controller.hub_calls, harness.controller.hub_speeds)) == [(started[0], None), (model, speed)]
+    # The Turn keeps its prefix: the same system prompt and tool list go out on the new route.
+    assert (second.system, second.tools) == (first.system, first.tools)
+    assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
+
+
+async def test_a_turn_dispatch_did_not_resolve_from_its_session_keeps_its_route(
+    engine, session, tmp_path, published
+) -> None:
+    """Dispatch decides where a Turn's settings come from (``message_handler``): one whose context carries a run
+    target and no copy of the Session's row was not resolved by the rule a follow applies, so it keeps its route."""
+    harness = _Harness(
+        engine, tmp_path, "telegram", _tool_turn(),
+        tools=[_changing_session(engine, model="other-model", speed="fast")],
+    )
+    request = harness.request("list files")
+    spec = request.context.platform_specific
+    spec["agent_run_target"] = {"agent_session_id": SESSION, "agent_backend": "vibey"}
+    del spec["agent_session_target"]
+
+    await harness.agent.handle_message(request)
+
+    assert harness.controller.hub_calls == ["test-model"] * 2 and harness.controller.hub_speeds == [None] * 2
+
+
+def test_the_session_settings_a_turn_follows_are_read_by_primary_key(engine, session) -> None:
+    """The read runs before every model request after a Turn's first, so it must stay one lookup of its Session's
+    row however many Sessions exist."""
+    from storage.agent_session_rows import session_route_settings
+
+    statements: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    try:
+        with engine.connect() as conn:
+            assert session_route_settings(conn, SESSION) == {"model": None, "reasoning_effort": None, "metadata": {}}
+            assert session_route_settings(conn, "ses_gone") is None
+            (statement,) = set(statements)
+            plan = [row[3] for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", ("ses_any",))]
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert plan == ["SEARCH agent_sessions USING INDEX sqlite_autoindex_agent_sessions_1 (id=?)"]
+
+
 async def test_an_im_stop_finds_the_turn_by_its_runtime_key(engine, session, tmp_path, published) -> None:
     started = asyncio.Event()
 
@@ -4232,6 +4350,140 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
     assert final.content == (TextBlock(text="hi"),)
     assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", hub_protocol, "served-model")
     assert harness.controller.im_client.sent == ["hi"]
+
+
+def _thinking_tool_stream(protocol: str, model: str, call_id: str) -> str:
+    """A response that thinks, then calls ``echo``: its thinking carries the opaque payload ``opaque:<model>`` (an
+    Anthropic signature, or an OpenAI reasoning item's encrypted content)."""
+    if protocol == "anthropic":
+        return _sse_lines(
+            {"type": "message_start", "message": {"usage": {}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "plan"}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "signature_delta", "signature": f"opaque:{model}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1,
+             "content_block": {"type": "tool_use", "id": call_id, "name": "echo"}},
+            {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "input_json_delta", "partial_json": '{"path":"src"}'}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+            {"type": "message_stop"},
+        )
+    reasoning = {"type": "reasoning", "id": "rs_1", "encrypted_content": f"opaque:{model}"}
+    call = {"type": "function_call", "id": "fc_1", "call_id": call_id, "name": "echo", "arguments": '{"path":"src"}'}
+    return _sse_lines(
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1"}},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {"type": "response.output_item.added", "output_index": 1, "item": {**call, "arguments": ""}},
+        {"type": "response.output_item.done", "output_index": 1, "item": call},
+        {"type": "response.completed", "response": {"status": "completed"}},
+    )
+
+
+def _sse_lines(*events: dict) -> str:
+    return "".join(f"data: {json.dumps(event, separators=(',', ':'))}\n\n" for event in events)
+
+
+def _wire_tool_loop(protocol: str, body: dict) -> tuple[list[str], list[str]]:
+    """The tool calls a wire request carries and the results that answer them, by id and in order."""
+    if protocol == "anthropic":
+        blocks = [block for message in body["messages"] if isinstance(message["content"], list)
+                  for block in message["content"]]
+        return (
+            [block["id"] for block in blocks if block["type"] == "tool_use"],
+            [block["tool_use_id"] for block in blocks if block["type"] == "tool_result"],
+        )
+    return (
+        [item["call_id"] for item in body["input"] if item.get("type") == "function_call"],
+        [item["call_id"] for item in body["input"] if item.get("type") == "function_call_output"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("models", "thinking"),
+    [
+        # Claude under manual thinking and GPT, there and back: the loop Claude's second request continues starts
+        # with GPT's call, not with a thinking block of its own, so it goes out with thinking off.
+        (("claude-sonnet-4-5", "gpt-6.1-sol", "claude-sonnet-4-5", "gpt-6.1-sol"), {"type": "disabled"}),
+        # Two Claude models on one Source identity are still two origins, there and back; adaptive thinking stays on.
+        (("claude-opus-5-5", "claude-fable-5-2", "claude-opus-5-5"), {"type": "adaptive"}),
+    ],
+    ids=["claude-gpt-claude", "opus-fable"],
+)
+async def test_a_turn_that_changes_model_between_tool_calls_sends_each_model_a_valid_loop_without_foreign_thinking(
+    engine, session, tmp_path, published, models, thinking
+) -> None:
+    """A model change inside a Turn lands in the middle of a tool loop. Each request then carries every earlier call
+    with its result, in the target protocol's shape, and none of another model's thinking: no signature, and no
+    encrypted reasoning item. A model's own thinking still goes back to it."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+    from storage import workbench_sessions_service
+
+    def protocol_of(model: str) -> str:
+        return "openai_responses" if model.startswith("gpt") else "anthropic"
+
+    sent: list[tuple[str, dict]] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        index, model = len(sent), body["model"]
+        protocol = protocol_of(model)
+        sent.append((request.url.path, body))
+        served = {"provider": "test-provider", "api": protocol, "model": model, "source": "src_account0001"}
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)},
+            text=(
+                _TEXT_STREAMS[protocol][1] if index == len(models) - 1
+                else _thinking_tool_stream(protocol, model, f"call_{index}")
+            ),
+        )
+
+    moves = iter(models[1:])
+
+    async def move_session(arguments, ctx):
+        with engine.begin() as conn:
+            workbench_sessions_service.update_session(conn, SESSION, model=next(moves))
+        return ToolResult((text("a.py"),))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "avibe", [], tools=[FakeTool("echo", execute=move_session)],
+            providers=registry_providers(media_loader=None, client=client),
+        )
+        harness.controller.hub_limits = {
+            **harness.controller.hub_limits, "supports_reasoning": True, "reasoning_efforts": ("high",),
+        }
+        # Every hop is one Source, so one identity: only the origin decides what may go back.
+        harness.controller.hub_source_id = "src_account0001"
+        resolve = harness.controller._resolve
+
+        async def route(backend, model, **kwargs):
+            harness.controller.hub_protocol = protocol_of(model)
+            return await resolve(backend, model, **kwargs)
+
+        harness.controller.model_hub_runtime.resolve = route
+        request = harness.request("list files")
+        request.vibe_agent_model, request.vibe_agent_reasoning_effort = models[0], "high"
+        request.vibe_agent_inherited_model, request.vibe_agent_inherited_reasoning_effort = models[0], "high"
+        await harness.agent.handle_message(request)
+
+    assert [body["model"] for _path, body in sent] == list(models)
+    assert [path for path, _body in sent] == [_TEXT_STREAMS[protocol_of(model)][0] for model in models]
+    for index, (_path, body) in enumerate(sent):
+        model, wire = models[index], json.dumps(body)
+        calls, results = _wire_tool_loop(protocol_of(model), body)
+        assert calls == results and len(calls) == index
+        # Only the thinking this model produced itself comes back to it.
+        for earlier in models[:index]:
+            assert (f"opaque:{earlier}" in wire) is (earlier == model), (index, earlier)
+    claude = [body for _path, body in sent if protocol_of(body["model"]) == "anthropic"]
+    assert claude[-1]["thinking"] == thinking
+    assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
 
 
 @pytest.mark.parametrize(

@@ -62,6 +62,12 @@ Invariants:
   `call_` + the first 24 hex characters of SHA-256 of the stored id. Anthropic accepts `^[a-zA-Z0-9_-]{1,64}$`; the
   other protocols' limits are recorded in the `ai` lane's conversion tables. The map is computed per request; the
   stored transcript is never rewritten.
+- Responses `function_call.id` is an optional provider item identity, separate from `call_id`, which pairs a
+  call with its `function_call_output`. Emit `id` only from the `native_id` admitted by the transform's existing
+  origin/account rules; never synthesize it from the portable call ID. A foreign or synthetic call therefore has
+  no item `id`, but keeps its paired `call_id`. Same-origin native item IDs and their serialization order stay
+  unchanged. Tool outputs do not invent item IDs either. Reasoning and hosted item IDs remain inside their
+  existing opaque-payload admission rules above.
 - Every tool call in the request has exactly one result. A call without a stored result gets a synthetic result,
   `[tool call interrupted; no result recorded]`, with `is_error: true` (C-5 settles most such calls from the job handle
   first).

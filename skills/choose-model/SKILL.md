@@ -2,7 +2,7 @@
 name: choose-model
 slug: choose-model
 description: Choose the model, reasoning effort, and speed for work you hand out or continue. Match them to the work and how fast it is needed. See and switch an existing Session's settings rather than start over, and pass the choice explicitly.
-version: 0.3.0
+version: 0.3.1
 ---
 
 # Choose a Model
@@ -52,7 +52,12 @@ When work already under way should move to another model, effort, or speed, swit
 
 `--speed fast` or `--speed standard` changes the tier the same way. A refusal says why and what to do instead.
 
-The switch applies from the next Turn. If a Turn is running, either let it finish and send the next message with `--queue`, or stop it with `vibe runs cancel <run-id>` and then send. A message sent without `--queue` joins the running Turn, which keeps its old settings. Switching works in both directions. After a hard design phase, drop to lower effort for the mechanical follow-up.
+When the switch applies depends on the Session's backend, and the reply says which as `applies_from`:
+
+- **Vibey** (`next_request`): a running Turn takes the switch at its next model request. Do not wait for the Turn or stop it.
+- **Claude Code and Codex** (`next_turn`): the switch applies from the next Turn. If a Turn is running, either let it finish and send the next message with `--queue`, or stop it with `vibe runs cancel <run-id>` and then send. A message sent without `--queue` joins the running Turn, which keeps its old settings.
+
+Switching works in both directions. After a hard design phase, drop to lower effort for the mechanical follow-up.
 
 Start a new Session instead when:
 - the backend must change: a Claude Code Session cannot run GPT, and a Codex Session cannot run Claude;

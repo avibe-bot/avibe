@@ -1412,10 +1412,12 @@ def _message_to_response(
                         }
                     )
             elif isinstance(block, ToolCallBlock):
+                # ``id`` is an optional Responses item identity, not the call/result pairing key.
+                # The transform clears foreign native IDs; never recreate one from the portable call ID.
                 items.append(
                     {
                         "type": "function_call",
-                        "id": block.native_id or block.id,
+                        **({"id": block.native_id} if block.native_id else {}),
                         "call_id": block.id,
                         "name": block.name,
                         "arguments": json.dumps(dict(block.arguments), ensure_ascii=False),

@@ -17,6 +17,7 @@ const api = {
   listSkills: vi.fn(),
   checkSkills: vi.fn(),
   listMcpServers: vi.fn(),
+  discoverMcp: vi.fn(),
   connectWorkbenchEvents: vi.fn(),
 };
 
@@ -101,6 +102,7 @@ beforeEach(() => {
       { name: 'suno', auth: 'ok', source: 'avibe', transport: 'http', toolCount: 2, url: 'https://api.suno.com/mcp' },
     ],
   });
+  api.discoverMcp.mockResolvedValue({ ok: true });
   api.connectWorkbenchEvents.mockReturnValue(() => {});
 });
 
@@ -142,6 +144,37 @@ describe('SkillsPage links', () => {
     await screen.findByText('suno');
     fireEvent.click(screen.getByRole('button', { name: 'bare link' }));
     await waitFor(() => expect(tab(en.skills.tabSkills).getAttribute('aria-checked')).toBe('true'));
+  });
+});
+
+describe('SkillsPage toolbar on the MCP tab', () => {
+  it('runs MCP discovery from the header refresh only on the MCP tab, for the viewed project', async () => {
+    renderPage('/skills');
+    await screen.findByText('pdf-tools');
+    const skillLists = api.listSkills.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: en.common.refresh }));
+    await waitFor(() => expect(api.listSkills.mock.calls.length).toBeGreaterThan(skillLists));
+    expect(api.discoverMcp).not.toHaveBeenCalled();
+
+    fireEvent.click(tab(en.skills.tabMcp));
+    fireEvent.click(tab(en.skills.scopeProject));
+    await waitFor(() => expect(api.listMcpServers).toHaveBeenLastCalledWith('proj_a'));
+    const mcpLists = api.listMcpServers.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: en.common.refresh }));
+    await waitFor(() => expect(api.discoverMcp).toHaveBeenCalledWith('proj_a'));
+    await waitFor(() => expect(api.listMcpServers.mock.calls.length).toBe(mcpLists + 1));
+    expect(api.discoverMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the add dialog from the search row', async () => {
+    renderPage('/skills?tab=mcp');
+    await screen.findByText('suno');
+    const row = screen.getByPlaceholderText(en.mcpHub.searchPlaceholder).closest('div')!.parentElement!;
+    const [add, ...others] = screen.getAllByRole('button', { name: en.mcpHub.add });
+    expect(others).toEqual([]);
+    expect(row.contains(add)).toBe(true);
+    fireEvent.click(add);
+    expect(await screen.findByRole('dialog', { name: en.mcpHub.addTitle })).toBeTruthy();
   });
 });
 
