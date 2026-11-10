@@ -64,10 +64,18 @@ must include an installable wheel containing `ui/dist` and
 ## Release E2E
 
 Pull-request CI does not run the hermetic Model Hub E2E (`-m e2e_model_hub`).
-`Model Hub release E2E` runs it nightly and on demand on a clean runner, with
+`Model Hub release E2E` runs it nightly and on demand on clean runners, with
 the pinned engine and the latest agent CLIs. Before tagging a stable `v*`
 release, dispatch it on the release commit and require a green run at that
 exact SHA; a strict `xfail` names a known, tracked gap, not a pass to ignore.
+
+The run shares the selection out over two shard jobs, and its `model-hub-e2e`
+job is the verdict. That job passes only when both shards succeeded in the
+same run attempt at the release commit, against the same agent CLI versions
+and the engine that commit pins; when together they ran every case of
+`-m e2e_model_hub tests/e2e` exactly once; and when every case a covered
+scenario row cites passed. Shards from different attempts do not join: after
+a failure, re-run all jobs, not only the failed one.
 
 ## Managed-runtime manifests
 
