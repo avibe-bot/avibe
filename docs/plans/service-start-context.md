@@ -59,8 +59,9 @@ unchanged.
    refuse, because a remote restart must still be possible. `vibe start` with
    nothing running stays a local start and gives the same warning.
 3. **Notice (macOS).** "A desktop session exists and the service is outside it"
-   becomes a degraded state on the surfaces that show `stale_login_session`
-   today: the Web banner, Doctor, and `vibe status`.
+   is the degraded state `outside_gui_session` on the surfaces that show
+   `stale_login_session`: the Web banner, Doctor, and `vibe status`. A service
+   in that state is not `healthy`, so step 2 does not hand it a restart.
 4. **Self-recovery (macOS), separate.** A service that finds itself stale while
    a new desktop session exists restarts itself once into that session. Step 2
    cannot do this: a restart seeded by a stale service copies the ended
@@ -107,7 +108,7 @@ mechanism:
 - [x] Step 2: a restart from outside the desktop session goes through the
       running service.
 - [ ] Step 2 verified by a real restart over SSH.
-- [ ] Step 3.
+- [x] Step 3: the `outside_gui_session` state and its notice.
 - [ ] Step 4: a way into a new desktop session that keeps the privacy
       permissions, then the log-out/log-in verification.
 - [ ] Update the stale-session guidance in the `use-avibe` playbook and the
