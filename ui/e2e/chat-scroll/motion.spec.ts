@@ -14,6 +14,10 @@ async function open(page: Page, query: string) {
   await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
   await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${query}`);
   await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
+  // The composer's rich editor is loaded apart from the page (lib/lazyPage) and draws nothing until it lands; then
+  // the composer grows by its line and the transcript above it is that much shorter. On a slow runner it can land
+  // after the rows: a case must not start before, or it records the transcript resizing as what it watches.
+  await expect(page.locator('[contenteditable="true"]').first()).toBeAttached();
   // A link to a message opens the chat there; otherwise it opens at its end.
   if (!/(^|&)msg=/.test(query)) await expect.poll(() => fromBottom(page)).toBeLessThan(1);
   await page.waitForTimeout(300);
