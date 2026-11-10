@@ -300,7 +300,7 @@
       "contextSchemeMismatch": "Bitcoin Taproot 上下文必须使用 schnorr-secp256k1-bip341-keypath；EVM 和 EIP-712 上下文必须使用 ECDSA；Solana 交易上下文必须使用 ed25519。请用兼容的配对重新创建请求。",
       "invalidSignature": "返回的签名编码无效，或无法通过已固定公钥和请求摘要（或消息）的验证。该签名未作为成功结果交付。",
       "invalidInput": "签名输入与签名方案不匹配。ed25519 对原始消息字节签名：请提供 message_hex（十六进制，最大 1 MiB），不要提供 digest。secp256k1 方案对 32 字节摘要签名，不接受 message_hex。",
-      "protectedSolanaUnsupported": "暂不支持保护档 Solana 密钥和保护档 Solana 签名。未创建、请求或签署任何内容。请使用标准档 Solana 密钥。"
+      "protectedSolanaUnsupported": "暂不支持保护档 Solana 密钥和保护档 Solana 签名。未创建、请求或签署任何内容。请保留现有密钥及其保护档位不变，待 Avibe 更新支持保护档 Solana 后再试。"
     },
     "requestNotification": {
       "title": "有一个密钥请求需要你处理",

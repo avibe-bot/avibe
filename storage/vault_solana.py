@@ -76,16 +76,18 @@ def validate_context(context: Any, *, message_hex: str) -> dict[str, Any]:
 
     The context is signed into the operation binding as given, so its
     ``messageHex`` must already be lower case, and a transaction is never empty.
+    This check is bounded: it reads two fixed keys and tests the message length
+    before looking at its content, so it is safe to run on an untrusted context
+    before any pass that walks or encodes every value.
     """
     if not isinstance(context, dict):
         raise SolanaSigningError("signing_context must be an object")
     if context.get("kind") != CONTEXT_KIND:
         raise SolanaSigningError(f"ed25519 signing accepts only a {CONTEXT_KIND} signing_context")
-    extra = set(context) - {"kind", "messageHex"}
-    if extra:
-        raise SolanaSigningError(f"signing_context contains unsupported fields: {', '.join(sorted(extra))}")
-    context_message = context.get("messageHex")
-    # Size first, as for the request's own message: nothing oversized is scanned.
+    if set(context) != {"kind", "messageHex"}:
+        # Field names are not echoed: they are caller-supplied and unbounded.
+        raise SolanaSigningError(f"a {CONTEXT_KIND} signing_context has exactly the fields kind and messageHex")
+    context_message = context["messageHex"]
     if isinstance(context_message, str) and len(context_message) > MAX_MESSAGE_BYTES * 2:
         raise SolanaSigningError(f"{CONTEXT_KIND} messageHex exceeds the 1 MiB message limit")
     if not isinstance(context_message, str) or len(context_message) % 2 or not _LOWER_HEX_RE.fullmatch(context_message):

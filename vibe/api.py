@@ -5359,6 +5359,18 @@ def _verifiable_signing_context_from_payload(
         return None
     if not isinstance(context, dict):
         raise _signing_context_invalid("signing_context must be an object")
+    if message_hex is not None or context.get("kind") == "solana-transaction-v1":
+        # An exact-message request is bound by its message, and only by the Solana
+        # kind. Its check is bounded, so it runs instead of the generic pass below:
+        # an oversized context is refused before any value is walked or encoded.
+        from storage import vault_solana
+
+        if message_hex is None:
+            raise _signing_context_invalid("a solana-transaction-v1 signing_context requires scheme ed25519 with message_hex")
+        try:
+            return vault_solana.validate_context(context, message_hex=message_hex)
+        except vault_solana.SolanaSigningError as exc:
+            raise _signing_context_invalid(str(exc)) from exc
     _validate_signing_context_json(context)
     kind = context.get("kind")
     if not isinstance(kind, str):
@@ -5368,7 +5380,6 @@ def _verifiable_signing_context_from_payload(
         "eip-712-typed-data": {"kind", "digestAlgorithm", "typedData", "digest"},
         "avault-agent-operation": {"kind", "digestAlgorithm", "canonicalPreimage", "digest"},
         "bitcoin-taproot-keypath-v1": {"kind", "network", "unsignedTransaction", "prevout", "digestAlgorithm", "digest"},
-        "solana-transaction-v1": {"kind", "messageHex"},
     }
     allowed = allowed_fields.get(kind)
     if allowed is None:
@@ -5376,16 +5387,6 @@ def _verifiable_signing_context_from_payload(
     extra = set(context) - allowed
     if extra:
         raise _signing_context_invalid(f"signing_context contains unsupported fields: {', '.join(sorted(extra))}")
-    if message_hex is not None or kind == "solana-transaction-v1":
-        # An exact-message request is bound by its message, and only by the Solana kind.
-        from storage import vault_solana
-
-        if message_hex is None:
-            raise _signing_context_invalid("a solana-transaction-v1 signing_context requires scheme ed25519 with message_hex")
-        try:
-            return vault_solana.validate_context(context, message_hex=message_hex)
-        except vault_solana.SolanaSigningError as exc:
-            raise _signing_context_invalid(str(exc)) from exc
     context_digest = context.get("digest")
     if not isinstance(context_digest, str) or context_digest.lower() != digest:
         raise _signing_context_invalid("signing_context digest must match the sign request digest")

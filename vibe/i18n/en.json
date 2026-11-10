@@ -300,7 +300,7 @@
       "contextSchemeMismatch": "Bitcoin Taproot contexts require schnorr-secp256k1-bip341-keypath; EVM and EIP-712 contexts require an ECDSA scheme; Solana transaction contexts require ed25519. Recreate the request with a compatible pairing.",
       "invalidSignature": "The returned signature has an invalid encoding or does not verify against the pinned key and the requested digest or message. It was not delivered as a successful result.",
       "invalidInput": "The signing input does not match the scheme. ed25519 signs the exact message bytes: provide message_hex (hexadecimal, at most 1 MiB) and no digest. secp256k1 schemes sign a 32-byte digest and do not accept message_hex.",
-      "protectedSolanaUnsupported": "Protected Solana keys and protected Solana signing are not supported yet. Nothing was created, requested or signed. Use a standard Solana key."
+      "protectedSolanaUnsupported": "Protected Solana keys and protected Solana signing are not supported yet. Nothing was created, requested or signed. Keep the key and its protection unchanged, and try again after an Avibe update adds protected Solana support."
     },
     "requestNotification": {
       "title": "A vault request needs your attention",

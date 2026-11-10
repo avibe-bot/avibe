@@ -284,6 +284,41 @@ def test_only_a_matching_solana_context_binds_an_exact_message(avault, capfd, en
     assert_nothing_happened(avault)
 
 
+class Unscanned(str):
+    """A context value that fails the test if anything encodes it, as a generic JSON pass would."""
+
+    def encode(self, *_args, **_kwargs):
+        pytest.fail("an oversized Solana context was scanned before its size was checked")
+
+
+@pytest.mark.parametrize("entrypoint", [api.vault_sign, api.request_vault_sign, "cli"])
+@pytest.mark.parametrize("placement", ["signing_context", "signingContext", "delivery.signing_context", "delivery.signingContext"])
+@pytest.mark.parametrize("scheme", ["ed25519", "ecdsa-secp256k1-recoverable"])
+def test_an_oversized_solana_context_is_refused_before_it_is_scanned(avault, monkeypatch, capfd, entrypoint, placement, scheme):
+    """The 1 MiB bound applies to the context too, ahead of the pass that walks and encodes every value."""
+    create_key(solana_key(TWO_BYTES["public_key"]) if scheme == "ed25519" else SECP_KEY, always_ask=True)
+    walk = Mock(side_effect=AssertionError("generic context traversal ran"))
+    monkeypatch.setattr(api, "_validate_signing_context_json", walk)
+    oversized = "00" * (vault_solana.MAX_MESSAGE_BYTES + 1)
+    payload = {"name": "KEY", "scheme": scheme}
+    payload.update({"message_hex": "00"} if scheme == "ed25519" else {"digest": DIGEST})
+    if entrypoint == "cli":
+        if placement != "signing_context":
+            pytest.skip("the CLI has one context flag")
+        payload["signing_context"] = solana_context(oversized)
+    else:
+        context = solana_context(Unscanned(oversized))
+        if "." in placement:
+            payload["delivery"] = {placement.split(".")[1]: context}
+        else:
+            payload[placement] = context
+    code, message = call_entrypoint(entrypoint, payload, capfd)
+    assert code == "invalid_request"
+    assert ("1 MiB" if scheme == "ed25519" else "requires scheme ed25519") in message
+    walk.assert_not_called()
+    assert_nothing_happened(avault)
+
+
 def test_a_standard_request_may_carry_the_solana_context_and_binds_it(avault):
     create_key(solana_key(TRANSFER["public_key"]), always_ask=True)
     context = solana_context(TRANSFER["message"])
@@ -335,6 +370,9 @@ def test_protected_solana_refusal_is_localized_on_the_web(avault, monkeypatch, l
     body = response.get_json()
     assert body["code"] == "protected_solana_unsupported"
     assert body["message"].startswith(expected)
+    # The refusal must not steer the user to a weaker tier for the same funds.
+    assert "standard" not in body["message"].lower()
+    assert "标准" not in body["message"]
 
 
 @pytest.mark.parametrize("approval", [False, True])

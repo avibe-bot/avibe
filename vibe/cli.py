@@ -19774,7 +19774,10 @@ def build_parser():
             "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
             "returns the public signature. Protected Solana keys cannot sign yet."
         ),
-        epilog="Example:\n  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex 01000103",
+        epilog=(
+            "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
+            '  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"'
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault sign --help",
     )
