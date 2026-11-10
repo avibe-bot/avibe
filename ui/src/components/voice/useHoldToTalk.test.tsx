@@ -42,6 +42,7 @@ const pipeline = vi.hoisted(() => ({
   captureActive: false,
   /** How long the microphone and audio graph take to open. */
   startMs: 0,
+  startError: null as unknown,
   /** What the dictation decides when the reader stops waiting: keep the take, or discard it. */
   keepOnSetAside: true,
 }));
@@ -67,7 +68,9 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         done,
         resolve,
         reject,
-        start: vi.fn(() => new Promise<void>((ready) => setTimeout(ready, pipeline.startMs))),
+        start: vi.fn(() => pipeline.startError
+          ? Promise.reject(pipeline.startError)
+          : new Promise<void>((ready) => setTimeout(ready, pipeline.startMs))),
         finish: vi.fn(),
         abort: vi.fn(() => reject(new VoiceTranscriptionError('cancelled'))),
         canRetry: vi.fn(() => true),
@@ -177,6 +180,7 @@ beforeEach(() => {
   pipeline.permission = 'granted';
   pipeline.captureActive = false;
   pipeline.startMs = 0;
+  pipeline.startError = null;
   pipeline.keepOnSetAside = true;
   send.mockReset().mockResolvedValue(true);
   telemetry.emit.mockReset();
@@ -195,6 +199,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   cleanup();
   vi.useRealTimers();
 });
@@ -500,6 +505,115 @@ describe('useHoldToTalk', () => {
     await flush();
     expect(send).toHaveBeenCalledTimes(2);
     expect(hold.outcome).toBe('sent');
+  });
+
+  it('reports a refused first permission probe, and tries again on the next hold', async () => {
+    pipeline.permission = 'prompt';
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValue(new DOMException('Blocked', 'NotAllowedError'));
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.outcome).toBe('denied');
+    expect(hold.phase).toBe('idle');
+    await holdFor(el);
+    expect(hold.outcome).toBe('denied');
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+    expect(telemetry.emit).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'capture_trace', entry: 'hold', mic: 'NotAllowedError', captureClass: 'no_microphone',
+    }));
+  });
+
+  it('lets an explicit Desktop hold recheck capture despite a stale browser denial', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    pipeline.permission = 'denied';
+    const el = await mount();
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(1);
+    expect(hold.phase).toBe('listening');
+    expect(navigator.permissions.query).not.toHaveBeenCalled();
+  });
+
+  it('keeps a native permission denial authoritative, including in a Desktop-marked page', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    native.permission.mockResolvedValue('denied');
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.outcome).toBe('denied');
+    expect(pipeline.takes).toHaveLength(0);
+    expect(navigator.permissions.query).not.toHaveBeenCalled();
+  });
+
+  it('logs input counts and an origin category without device identities', async () => {
+    pipeline.permission = 'prompt';
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValue(new DOMException('private message', 'NotAllowedError'));
+    Object.defineProperty(navigator.mediaDevices, 'enumerateDevices', {
+      value: vi.fn(async () => [
+        { kind: 'audioinput', label: 'private microphone', deviceId: 'private-device', groupId: 'private-group' },
+        { kind: 'audiooutput', label: 'private speaker' },
+      ]),
+    });
+    const el = await mount();
+    await holdFor(el);
+    const trace = telemetry.emit.mock.calls.map(([event]) => event).find((event) => event.event === 'capture_trace');
+    expect(trace).toMatchObject({ mic: 'NotAllowedError', audioInputCount: 1, origin: 'loopback' });
+    expect(JSON.stringify(trace)).not.toContain('private');
+  });
+
+  it('does not replace a later take with an obsolete permission failure', async () => {
+    pipeline.permission = 'prompt';
+    let refuse!: (error: Error) => void;
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.outcome).toBe('asking');
+    pipeline.permission = 'granted';
+    await holdFor(el);
+    expect(hold.phase).toBe('listening');
+    await act(async () => refuse(new DOMException('Blocked', 'NotAllowedError')));
+    expect(hold.phase).toBe('listening');
+    expect(hold.outcome).toBeNull();
+  });
+
+  it('does not redisplay a dismissed permission request when its answer arrives', async () => {
+    pipeline.permission = 'prompt';
+    let refuse!: (error: Error) => void;
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const el = await mount();
+    await holdFor(el);
+    act(() => hold.dismiss());
+    await act(async () => refuse(new DOMException('Blocked', 'NotAllowedError')));
+    expect(hold.outcome).toBeNull();
+  });
+
+  it.each([
+    ['NotFoundError', 'no-device'],
+    ['NotReadableError', 'mic-busy'],
+    ['AbortError', 'mic-failed'],
+  ])('reports %s from the first permission probe as %s', async (name, outcome) => {
+    pipeline.permission = 'prompt';
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValue(new DOMException('Unavailable', name));
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.outcome).toBe(outcome);
+    expect(pipeline.takes).toHaveLength(0);
+  });
+
+  it.each([
+    ['NotAllowedError', 'denied'],
+    ['NotFoundError', 'no-device'],
+    ['NotReadableError', 'mic-busy'],
+    ['TypeError', 'mic-failed'],
+  ])('classifies %s when a Desktop take cannot open as %s and permits a second hold', async (name, outcome) => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    pipeline.permission = 'denied';
+    pipeline.startError = new DOMException('Blocked', name);
+    const el = await mount();
+    await holdFor(el);
+    expect(hold.outcome).toBe(outcome);
+    expect(hold.phase).toBe('idle');
+    pipeline.startError = null;
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(2);
+    expect(hold.phase).toBe('listening');
   });
 
   it('lets the permission prompt take the first hold, records the next once allowed, and says why a refused one does nothing', async () => {

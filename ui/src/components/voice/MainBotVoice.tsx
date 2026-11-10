@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
+import { isDesktopShell } from '@/lib/desktopShell';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { BotAvatar } from '../ui/bot-avatar';
@@ -101,7 +102,7 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
         {outcome === 'sent' && <BotAvatar avatar={bot.avatar} name={bot.name} size={28} />}
         {(outcome === 'cancelled' || outcome === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
         {(outcome === 'too-short' || outcome === 'asking') && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
-        {(outcome === 'no-sound' || outcome === 'mic-busy') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
+        {(outcome === 'no-sound' || outcome === 'mic-busy' || outcome === 'no-device' || outcome === 'mic-failed') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
         {(outcome === 'denied' || failed) && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
         {outcome === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
@@ -126,11 +127,13 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
               {outcome === 'too-short' && <span className="text-foreground">{t('voice.tooShort')}</span>}
               {outcome === 'no-sound' && <span className="text-foreground">{t('voice.noSound')}</span>}
               {outcome === 'mic-busy' && <span className="text-foreground">{t('voice.micBusy')}</span>}
+              {outcome === 'no-device' && <span className="text-foreground">{t('voice.noDevice')}</span>}
+              {outcome === 'mic-failed' && <span className="text-foreground">{t('voice.micFailed')}</span>}
               {outcome === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
               {outcome === 'denied' && (
                 <>
                   <span className="font-semibold text-foreground">{t('voice.deniedTitle')}</span>
-                  <span className="text-muted">{t('voice.deniedBody', { name: bot.name })}</span>
+                  <span className="text-muted">{t(isDesktopShell() ? 'voice.deniedDesktop' : 'voice.deniedBody', { name: bot.name })}</span>
                 </>
               )}
               {outcome === 'unavailable' && (

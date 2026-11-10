@@ -120,7 +120,10 @@ beforeEach(() => {
   nativeHapticImpact.mockReset().mockResolvedValue(true);
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+  cleanup();
+});
 
 describe('when a press may become a hold', () => {
   it('lets a mouse hold an empty composer, focused or not, and says so in the placeholder', async () => {
@@ -338,6 +341,23 @@ describe('what the composer shows', () => {
     hookMock.state = { phase: 'listening' };
     renderComposer();
     await waitFor(() => expect(screen.getByRole('button', { name: en.chat.compose.voice })).toHaveProperty('disabled', true));
+  });
+
+  it.each([
+    ['no-device', en.voice.noDevice],
+    ['mic-failed', en.voice.micFailed],
+  ])('shows an actionable %s note', async (outcome, note) => {
+    hookMock.state = { outcome };
+    renderComposer();
+    expect(await screen.findByText(note)).toBeTruthy();
+  });
+
+  it('points a refused Desktop microphone to system settings', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    hookMock.state = { outcome: 'denied' };
+    renderComposer();
+    expect(await screen.findByText(en.voice.deniedDesktop)).toBeTruthy();
+    expect(screen.queryByText(en.voice.composer.deniedBrowser)).toBeNull();
   });
 
   it('says what a press that sent nothing led to', async () => {
