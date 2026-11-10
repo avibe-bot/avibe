@@ -86,7 +86,8 @@ async function place(page: Page, selector: string, y: number) {
     scroller.scrollTop += el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - (at as number);
     const band = Math.max(4000, scroller.clientHeight * 8);
     const first = scroller.querySelector('[data-message-id]')?.getAttribute('data-message-id');
-    return { clear: scroller.scrollTop > band + 200 || first === 'msg_00000', first };
+    // ChatPage asks for an older page only while scrollTop <= the band.
+    return { clear: scroller.scrollTop > band || first === 'msg_00000', first };
   }, [selector, y] as const);
   // A page asked for lands once the reader rests: place, and look again a moment later.
   await expect.poll(async () => (await put()).clear, { timeout: 30_000, intervals: [900] }).toBe(true);
