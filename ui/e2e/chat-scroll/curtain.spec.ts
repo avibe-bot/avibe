@@ -99,8 +99,12 @@ async function place(page: Page, selector: string, y: number) {
   expect((await put()).first).toBe(placed.first);
 }
 
-/** `exact`: two takes in a row read the same (WebKit samples a running animation at each read: a take that spans
- *  a millisecond mixes moments, and only reads taken at one moment are judged). */
+/** `exact`: the take was read at one moment, and on time (as motion.spec's frames are). WebKit samples a running
+ *  animation at each read, to the millisecond: a take that spans a millisecond mixes moments, the same way take
+ *  after take where its reads fall the same way, so the moment is timed by a clock (an element an animation moves
+ *  1 px per ms), read before and after. And WebKit samples an animation created since the last frame (a curtain is
+ *  drawn again at every commit) at that frame's time, the running ones at the read's: so a take counts only once
+ *  the clock reads the timeline's time, or every animation it reads has been drawn in a frame. */
 type Frame = { box: number | null; edge: number | null; exact: boolean };
 
 /** Runs the cell's taps (`steps`: whose control, after how many ms, and not before the host's edge is past the
@@ -163,12 +167,32 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
       const carried = tops[at].top - top - laid[at].top;
       return { box, edge: band - (top + slide + carried) };
     };
-    const read = (): Frame => {
+    const clock = document.createElement('div');
+    clock.setAttribute('aria-hidden', 'true');
+    Object.assign(clock.style, { position: 'fixed', top: '0', left: '0', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' });
+    document.body.append(clock);
+    const ticking = clock.animate([{ translate: '0 0px' }, { translate: '0 600000px' }], { duration: 600000, easing: 'linear', fill: 'both' });
+    ticking.startTime = document.timeline.currentTime;
+    const clockAt = () => clock.getBoundingClientRect().top;
+    const clockStart = Number(ticking.startTime);
+    // The transcript's animations a frame read has seen: drawn since, so WebKit samples them like the clock.
+    const seen = new WeakSet<Animation>();
+    const ours = () => document.getAnimations().filter((animation) => {
+      const target = (animation.effect as KeyframeEffect | null)?.target;
+      return !!target && scroller.contains(target);
+    });
+    const read = (atFrame = false): Frame => {
       for (let attempt = 0; ; attempt += 1) {
+        const before = clockAt();
         const value = take();
-        const again = take();
-        const exact = JSON.stringify(value) === JSON.stringify(again);
-        if (exact || attempt === 7) return { ...value, exact };
+        const still = clockAt() === before;
+        const running = ours();
+        const exact = still && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
+        if (exact || attempt === 7) {
+          // Seen once a frame's read is done (its retries run in the same frame, before anything is drawn).
+          if (atFrame) running.forEach((animation) => seen.add(animation));
+          return { ...value, exact };
+        }
       }
     };
     const out: Frame[] = [];
@@ -219,7 +243,7 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     for (const { who, after, edgePast } of steps) {
       for (let count = 0; count === 0 ? after > 0 || !edgeIsPast(edgePast) : performance.now() - lastTap < after || !edgeIsPast(edgePast); count += 1) {
         const stamp = await frame();
-        const value = read();
+        const value = read(true);
         out.push(value);
         follow();
         sourceMoved(stamp);
@@ -246,13 +270,15 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     }
     while (performance.now() - lastTap < readFor) {
       const stamp = await frame();
-      const value = read();
+      const value = read(true);
       out.push(value);
       follow();
       sourceMoved(stamp);
       besides();
       if (value.box !== null) down.push(stamp);
     }
+    ticking.cancel();
+    clock.remove();
     const span = (stamps: number[]) => (stamps.length > 1 ? stamps.at(-1)! - stamps[0] : 0);
     // The uppermost row tapped: nothing tapped in the cell lies above it.
     const uppermost = tapped.reduce((top, row) => (row.el.compareDocumentPosition(top.el) & Node.DOCUMENT_POSITION_FOLLOWING ? row : top));
@@ -355,7 +381,7 @@ for (const cell of cells) {
     expect(result.down).toBeGreaterThanOrEqual(200 * SLOWER);
     if (cell.bar === 'on screen') expect(result.barTop!).toBeLessThan(result.bottom);
     if (cell.bar === 'below the screen') expect(result.barTop!).toBeGreaterThan(result.bottom);
-    // Judged at the reads taken at one moment (two takes in a row read the same), a few at least.
+    // Judged at the reads taken at one moment and on time, a few at least.
     const exact = result.frames.filter((frame) => frame.exact);
     const boxes = exact.map(({ box }) => box).filter((box): box is number => box !== null);
     const edges = exact.map(({ edge }) => edge).filter((edge): edge is number => edge !== null);
