@@ -475,7 +475,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                   <button
                     type="button"
                     onClick={() => void submitPath()}
-                    className="shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-foreground/[0.04]"
+                    className="shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-wash"
                   >
                     {t('directoryBrowser.editPathDone')}
                   </button>
@@ -569,7 +569,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                     onClick={() => isDir && navigate(row.full)}
                     className={clsx(
                       'flex w-full items-center px-3 py-1.5 text-left text-[12.5px] transition',
-                      isDir ? 'text-foreground hover:bg-foreground/[0.04]' : 'cursor-default text-muted/70',
+                      isDir ? 'text-foreground hover:bg-wash' : 'cursor-default text-muted/70',
                     )}
                   >
                     {isDir ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}

@@ -1138,6 +1138,135 @@ test('a Harness group closed while it still opens, after a member opened in it, 
   expectLandsAsItGoes(closing);
 });
 
+// A member's body opened while its group still opens: the group's curtain lies in its collapse bar, which the
+// layout puts lower at once, on screen or below it.
+for (const [where, block] of [['below the screen', 'center'], ['on screen', 'start']] as const) {
+  test(`a member opened while its group still opens leaves the curtain of the group on its top, its edge going with what the body pushes down (collapse bar ${where})`, async ({ page }) => {
+    await open(page, 'delay=0&count=392');
+    await transcript(page).evaluate((scroller, at) => [...scroller.querySelectorAll('[data-harness-group]')].at(-1)!.scrollIntoView({ block: at }), block);
+    await page.waitForTimeout(400);
+    const { bottom, bar, growth, frames } = await page.evaluate(async () => {
+      const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
+      const column = scroller.firstElementChild!.firstElementChild!;
+      const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+      [...scroller.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+      for (let count = 0; count < 2; count += 1) await frame();
+      const group = [...column.children].filter((el) => /^harness-(member|collapse):/.test((el as HTMLElement).dataset.transcriptKey ?? '')) as HTMLElement[];
+      // The first member (the top of what the group covers), the one under it, and the collapse bar.
+      const [member, below] = group;
+      const host = group.at(-1)!;
+      // Read at one moment (WebKit samples a running animation at each read): where the curtain's box lies from the
+      // group's top, and where its edge is carried, besides its own slide, from the member under the opened body.
+      const take = () => {
+        const clip = host.querySelector(':scope > [data-transcript-curtain-clip]');
+        const curtain = clip?.firstElementChild;
+        if (!clip || !curtain) return null;
+        const slide = new DOMMatrixReadOnly(getComputedStyle(curtain).transform).m42;
+        return { box: clip.getBoundingClientRect().top - member.getBoundingClientRect().top, edge: curtain.getBoundingClientRect().top - slide - below.getBoundingClientRect().top, slide };
+      };
+      const read = () => {
+        for (let attempt = 0; ; attempt += 1) {
+          const value = take();
+          const again = take();
+          if (!value || !again || (value.box === again.box && value.edge === again.edge && value.slide === again.slide) || attempt === 4) return value;
+        }
+      };
+      const height = member.offsetHeight;
+      const bar = host.getBoundingClientRect();
+      const out = [read()];
+      member.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+      for (let count = 0; count < 30 && host.querySelector('[data-transcript-curtain-clip]'); count += 1) {
+        await frame();
+        out.push(read());
+      }
+      return { bottom: scroller.getBoundingClientRect().bottom, bar: { top: bar.top, bottom: bar.bottom }, growth: member.offsetHeight - height, frames: out };
+    });
+    // What it is about: the body grew, the collapse bar lay where this case says, and the group still opened for a
+    // good part of the body's way.
+    expect(growth).toBeGreaterThan(20);
+    if (block === 'center') expect(bar.top).toBeGreaterThan(bottom + growth);
+    else expect(bar.bottom).toBeLessThan(bottom);
+    const kept = frames.filter((at): at is NonNullable<typeof at> => at !== null);
+    expect(kept.length).toBeGreaterThan(8);
+    // The box stays on the top of what it covers; the edge goes with the members the body pushes down, so none of
+    // what it covers shows before the edge reaches it.
+    expect(Math.max(...kept.map(({ box }) => Math.abs(box)))).toBeLessThanOrEqual(1);
+    expect(Math.max(...kept.map(({ edge }) => Math.abs(edge - kept[0].edge)))).toBeLessThanOrEqual(1);
+  });
+}
+
+test('a second member opened as its group stops opening, while the first one still grows, leaves no curtain once all of it has come to rest', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  await transcript(page).evaluate((scroller) => [...scroller.querySelectorAll('[data-harness-group]')].at(-1)!.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(400);
+  const replaced = await page.evaluate(async () => {
+    const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = scroller.firstElementChild!.firstElementChild!;
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    [...scroller.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+    for (let count = 0; count < 6; count += 1) await frame();
+    const group = [...column.children].filter((el) => /^harness-(member|collapse):/.test((el as HTMLElement).dataset.transcriptKey ?? '')) as HTMLElement[];
+    const [first, second] = group;
+    first.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+    // The group's own slide has ended, and what the first body grew under its curtain still moves it: the second
+    // body opens then.
+    for (let count = 0; count < 120; count += 1) {
+      await frame();
+      // The group's own curtain, in its collapse bar (the bodies have theirs in their own rows).
+      const curtain = group.at(-1)!.querySelector(':scope > [data-transcript-curtain-clip] > [data-transcript-curtain]');
+      if (!curtain) return false;
+      const animations = curtain.getAnimations();
+      const slide = animations.find((animation) => 'transform' in ((animation.effect as KeyframeEffect).getKeyframes()[0] ?? {}));
+      if (slide?.playState === 'finished' && animations.some((animation) => animation.playState === 'running')) {
+        second.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+        return true;
+      }
+    }
+    return false;
+  });
+  expect(replaced).toBe(true);
+  // Once all of it has come to rest, no curtain is left over what it revealed.
+  await page.waitForTimeout(1500);
+  await expect(transcript(page).locator('[data-transcript-curtain-clip]')).toHaveCount(0);
+});
+
+test('a body closed while it still opens in a group that still opens turns back from where its collapse bar is drawn', async ({ page }) => {
+  await open(page, 'delay=0&count=392');
+  await transcript(page).evaluate((scroller) => [...scroller.querySelectorAll('[data-harness-group]')].at(-1)!.scrollIntoView({ block: 'start' }));
+  await page.waitForTimeout(400);
+  const { onScreen, path, closedAt } = await page.evaluate(async () => {
+    const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
+    const column = scroller.firstElementChild!.firstElementChild!;
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    [...scroller.querySelectorAll<HTMLElement>('[data-harness-group] button[aria-expanded="false"]')].at(-1)!.click();
+    for (let count = 0; count < 2; count += 1) await frame();
+    const group = [...column.children].filter((el) => /^harness-(member|collapse):/.test((el as HTMLElement).dataset.transcriptKey ?? '')) as HTMLElement[];
+    const [member] = group;
+    // What the collapse bar shows (not the curtain it holds).
+    const bar = [...group.at(-1)!.children].find((part) => !part.hasAttribute('data-transcript-curtain-clip'))!;
+    const onScreen = group.at(-1)!.getBoundingClientRect().bottom < scroller.getBoundingClientRect().bottom;
+    const out = [bar.getBoundingClientRect().top];
+    member.querySelector<HTMLElement>('button[aria-expanded="false"]')!.click();
+    let closedAt = -1;
+    for (let count = 0; count < 50; count += 1) {
+      await frame();
+      out.push(bar.getBoundingClientRect().top);
+      // Closed early, with most of the way down still ahead of the bar.
+      if (count === 1) {
+        member.querySelector<HTMLElement>('button[aria-expanded="true"]')!.click();
+        closedAt = out.length - 1;
+      }
+    }
+    return { onScreen, path: out, closedAt };
+  });
+  expect(onScreen).toBe(true);
+  // It went down with the body; from where it was drawn as the body closed it goes back up, never further down
+  // first, and comes to rest where it started.
+  expect(path[closedAt] - path[0]).toBeGreaterThan(5);
+  expect(Math.max(...path.slice(closedAt)) - path[closedAt]).toBeLessThanOrEqual(1);
+  expect(Math.abs(path.at(-1)! - path[0])).toBeLessThanOrEqual(1);
+});
+
 test('a Harness group a link opened folds back into its card when closed, rising once to where the layout puts the rows', async ({ page }) => {
   // Opened by a link to one of its members, not by a tap: nothing was measured as it opened.
   await open(page, 'delay=0&count=392&msg=msg_00373');
@@ -1266,7 +1395,12 @@ test('two disclosures opened a moment apart move the rows they share by both, an
     return null;
   });
   expect(pair).not.toBeNull();
-  await page.waitForTimeout(400);
+  // The pair is near the top of what is loaded, so the older page comes in first (the scroller rightly holds the
+  // reader through it): wait for it, so only the two disclosures move anything while they are watched.
+  const firstRow = () => transcript(page).locator('[data-message-id]').first().getAttribute('data-message-id');
+  const loadedFrom = await firstRow();
+  await expect.poll(firstRow).not.toBe(loadedFrom);
+  await page.waitForTimeout(600);
   // The chip first; two frames later, while it still moves the Harness row and everything under it, the row.
   const frames = await discloseAndWatch(page, `[data-message-id="${pair!.row}"] button[aria-expanded="false"]`, {
     before: { control: `[data-transcript-key="${pair!.chip}"] button[aria-expanded="false"]`, index: 0, frames: 2 },
@@ -1280,6 +1414,52 @@ test('two disclosures opened a moment apart move the rows they share by both, an
   expect(rowPath(frames).turns).toBe(0);
   const tail = frames.slice(-10).map(({ next }) => next!);
   expect(Math.max(...tail) - Math.min(...tail)).toBeLessThanOrEqual(0.5);
+});
+
+test('a disclosure tapped on a row another opening still pushes down writes no scroll position, and nothing jumps', async ({ page }) => {
+  // A conversation with no older page (count=40), so nothing but the two disclosures can move the scroll position.
+  // The chip's steps land 200 ms after it is tapped, after the row is: the chip grows again above the row the
+  // reader holds, which the chip's motion shows as the row sliding on, and the scroller must not also make up.
+  await open(page, 'delay=0&activity=1&records=1&activityDelay=200&count=40');
+  // The last chip with a Harness row of its own after it; the row a quarter of the way down the screen (what
+  // follows it on screen too, where the motion moves it), the chip above it: the reader is reading, not following the tail, so the scroller holds what they touch, and the
+  // chip's opening pushes the row down on screen.
+  const pair = await transcript(page).evaluate((scroller) => {
+    const column = scroller.firstElementChild!.firstElementChild!;
+    const items = [...column.children] as HTMLElement[];
+    const harness = new Set(window.__scrollLab.history.filter((message) => message.type === 'harness').map((message) => message.id));
+    for (const [index, chip] of [...items.entries()].reverse()) {
+      if (!chip.dataset.transcriptKey?.startsWith('activity:')) continue;
+      const row = items.slice(index + 1).find((el) => harness.has(el.dataset.messageId ?? '') && el.querySelector('button[aria-expanded="false"]'));
+      if (row) {
+        scroller.scrollTop += row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientHeight * 0.25;
+        return { chip: chip.dataset.transcriptKey, row: row.dataset.messageId! };
+      }
+    }
+    return null;
+  });
+  expect(pair).not.toBeNull();
+  await page.waitForTimeout(400);
+  await record(page, 0.5);
+  // The chip first; six frames later, while its opening still pushes the row down, the row is tapped. The
+  // scroller holds the row where the layout puts it, which nothing above it changes now: it writes nothing,
+  // and nothing on screen moves but the two disclosures.
+  const frames = await discloseAndWatch(page, `[data-message-id="${pair!.row}"] button[aria-expanded="false"]`, {
+    before: { control: `[data-transcript-key="${pair!.chip}"] button[aria-expanded="false"]`, index: 0, frames: 6 },
+    frames: 60,
+  });
+  expect(frames[0].moving).toBe(true);
+  await page.waitForTimeout(300);
+  const { writes } = await stop(page);
+  expect(restoreWrites(writes)).toEqual([]);
+  // The row itself only goes down, with the chip's edge, and comes to rest. (What follows it ends up below the
+  // screen, where the motion does not move it: the other specs judge the rows below an edge.)
+  const tops = frames.filter(({ frame, exact }) => frame !== null && exact).map(({ tapped }) => tapped);
+  const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
+  expect(steps.length).toBeGreaterThan(0);
+  expect(steps.every((step) => step > 0)).toBe(true);
+  const rest = tops.slice(-10);
+  expect(Math.max(...rest) - Math.min(...rest)).toBeLessThanOrEqual(0.5);
 });
 
 test('under reduced motion a disclosure only fades, nothing moves, and no title is drawn twice', async ({ page }) => {

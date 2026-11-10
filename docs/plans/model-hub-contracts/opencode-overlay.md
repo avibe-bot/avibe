@@ -84,8 +84,9 @@ contract (one OpenAI-compatible provider, `vendor/model` ids); nothing of that s
   capability headers (`FORWARDED_CALLER_HEADERS`); the engine passes that `User-Agent` upstream
   unchanged (measured on CLIProxyAPI v7.3.16, which otherwise sends `CLIProxyAPI/<version>`),
   so an upstream sees the calling agent's identity. Upstream auth is the engine's Bearer form. A Responses-frontend body reaching a `codex-api-key` upstream
-  is rewritten by the engine's Codex executor regardless of flags (`max_output_tokens`
-  dropped; `instructions: ""`, and `parallel_tool_calls: true` only when the body has tools) — a known engine limitation the implementation verifies against each real
+  is rewritten by the engine's Codex executor regardless of flags (`instructions: ""`, and
+  `parallel_tool_calls: true` only when the body has tools; since CLIProxyAPI v8.0.63 it keeps
+  `max_output_tokens`, raising an integer below 16 to 16) — a known engine limitation the implementation verifies against each real
   `openai_responses` Source before enabling the route, and tracks as an engine follow-up.
   The engine no longer adds its hosted `image_generation` tool: it runs with
   `disable-image-generation: passthrough`, and nothing adds it back (`vibey-hosted-tools.md` §7.1).

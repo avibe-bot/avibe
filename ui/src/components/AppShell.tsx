@@ -52,6 +52,7 @@ import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/setti
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 import { DesktopSettingsCommand } from './DesktopSettingsCommand';
 import { prefetchRoutePages } from '../routePages';
+import { WebPushReconciler } from './workbench/WebPushReconciler';
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
 const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
@@ -372,6 +373,7 @@ export const AppShell: React.FC = () => {
   if (setupShell) {
     return (
       <ShellSidebarContext.Provider value={shellDrawsSidebar}>
+        <WebPushReconciler />
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <DesktopSettingsCommand />
@@ -436,6 +438,7 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
+    <WebPushReconciler />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>

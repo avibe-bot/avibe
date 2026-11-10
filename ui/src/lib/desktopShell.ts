@@ -9,6 +9,8 @@ declare global {
     readonly __AVIBE_DESKTOP_PET__?: true;
     /** The shell supports Desktop Mini settings IPC on the Workbench page. */
     readonly __AVIBE_DESKTOP_PET_SETTINGS__?: true;
+    /** The shell supports native desktop notification settings IPC on the Workbench page. */
+    readonly __AVIBE_DESKTOP_NOTIFICATIONS__?: true;
     /** The macOS shell answers the Computer Use guide's actions. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
     /** The main Workbench can ask the shell to open standalone native app windows. */
@@ -64,8 +66,14 @@ export function canConfigureDesktopPet(): boolean {
   return isDesktopShell() && window.__AVIBE_DESKTOP_PET_SETTINGS__ === true;
 }
 
+/** Probe the native desktop notification settings contract before rendering its switch. */
+export function canConfigureDesktopNotifications(): boolean {
+  return isDesktopShell() && window.__AVIBE_DESKTOP_NOTIFICATIONS__ === true;
+}
+
 export const DESKTOP_OPEN_SHORTCUT_SETTINGS_EVENT = 'avibe:desktop-open-shortcut-settings';
 export const DESKTOP_PET_SETTINGS_EVENT = 'avibe:desktop-pet-settings';
+export const DESKTOP_NOTIFICATIONS_EVENT = 'avibe:desktop-notifications';
 
 export type DesktopPetVoiceMode = 'hold' | 'toggle';
 export type DesktopPetShortcutTarget = 'voice' | 'toggle';
@@ -120,6 +128,43 @@ export function listenDesktopPetSettings(handler: DesktopPetSettingsListener): (
   };
   window.addEventListener(DESKTOP_PET_SETTINGS_EVENT, listener);
   return () => window.removeEventListener(DESKTOP_PET_SETTINGS_EVENT, listener);
+}
+
+export type DesktopNotificationsActions = {
+  get: () => Promise<boolean>;
+  set: (enabled: boolean) => Promise<boolean>;
+};
+
+const desktopNotificationsInvoke = (): ShellInvoke | null => {
+  if (!canConfigureDesktopNotifications()) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+export function desktopNotificationsActions(): DesktopNotificationsActions | null {
+  const invoke = desktopNotificationsInvoke();
+  if (!invoke) return null;
+  return {
+    get: async () => {
+      const value = await invoke('desktop_notifications_state');
+      if (typeof value !== 'boolean') throw new Error('Desktop notification preference is unavailable');
+      return value;
+    },
+    set: async (enabled) => {
+      const value = await invoke('desktop_notifications_set_enabled', { enabled });
+      if (typeof value !== 'boolean') throw new Error('Desktop notification preference was not confirmed');
+      return value;
+    },
+  };
+}
+
+export function listenDesktopNotifications(handler: (enabled: boolean) => void): () => void {
+  const listener = (event: Event) => {
+    const detail = (event as CustomEvent<{ enabled?: unknown }>).detail;
+    if (detail && typeof detail.enabled === 'boolean') handler(detail.enabled);
+  };
+  window.addEventListener(DESKTOP_NOTIFICATIONS_EVENT, listener);
+  return () => window.removeEventListener(DESKTOP_NOTIFICATIONS_EVENT, listener);
 }
 
 type ShellInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -183,6 +228,8 @@ export type DesktopUpdateState = {
   phase: DesktopUpdatePhase;
   latest: string | null;
   channel: 'stable' | 'test';
+  /** Whether the shell offers pre-releases too; absent from shells without the Workbench switch. */
+  prereleases?: boolean;
   skippedVersion: string | null;
   interactive: boolean;
   remoteInstallAllowed?: boolean;
@@ -229,6 +276,8 @@ export type DesktopUpdateShellActions = {
   install: () => Promise<void>;
   skip: () => Promise<void>;
   declineRemoteRequest: () => Promise<void>;
+  /** Offer pre-releases (the shell's `test` channel) as well as stable releases. */
+  setPrereleases: (enabled: boolean) => Promise<void>;
 };
 
 export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
@@ -240,6 +289,7 @@ export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
     install: async () => { await invoke('desktop_update_install'); },
     skip: async () => { await invoke('desktop_update_skip'); },
     declineRemoteRequest: async () => { await invoke('desktop_update_remote_decline'); },
+    setPrereleases: async (enabled) => { await invoke('desktop_update_prereleases_set', { enabled }); },
   };
 }
 

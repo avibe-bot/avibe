@@ -648,9 +648,9 @@ vibe screenshot --json
 
 ### `vibe session`
 
-List, inspect, update, and drive Agent sessions. `list` and `get` are read-only;
-`update` changes the title, visibility, or scope. Archived sessions are
-soft-deleted and never surfaced.
+List, inspect, update, and drive Agent sessions. `list`, `get`, and `models`
+are read-only; `update` changes the title, visibility, scope, model, reasoning
+effort, or speed. Archived sessions are soft-deleted and never surfaced.
 
 ```bash
 vibe session list                       # active sessions, 20 per page by default, newest activity first
@@ -664,6 +664,9 @@ vibe session update --title 'Release review'                 # inside an Avibe A
 vibe session update --title 'Release review' --if-untitled   # keep a title a user or Agent set
 vibe session update --session-id sesk8m4q2p7x --title ''     # clear the title
 vibe session update --session-id sesk8m4q2p7x --hidden       # background-only; --visible promotes it
+vibe session models --session-id sesk8m4q2p7x                # current model, effort, speed, and what it can switch to
+vibe session update --session-id sesk8m4q2p7x --model gpt-6.1-sol --reasoning-effort high
+vibe session update --session-id sesk8m4q2p7x --speed fast   # or --speed standard
 vibe session queue list --session-id sesk8m4q2p7x            # queued messages in FIFO order
 vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x
 vibe session send-now --session-id sesk8m4q2p7x              # promote the exact queue head
@@ -691,6 +694,38 @@ reports that the existing title was kept. `--type` accepts
 a platform id: `avibe` (Web/Workbench), `slack`, `discord`, `telegram`, `lark`,
 `wechat`. For richer filtering — by agent, time range, message content, or
 cross-table joins — use `vibe data query`.
+
+#### A Session's model, effort, and speed
+
+`vibe session models` shows what the Web model picker shows for one Session.
+`current` holds its model, reasoning effort, and speed (`fast` or `standard`),
+where the model and effort come from (`session` when set on it, `agent` when
+inherited from its Agent), and `turn_running`. `models` lists what it can
+switch to: each model's `reasoning_efforts`, and `fast` (`offered`, or
+`unconfirmed` when the last fast response did not run at the fast tier) on a
+model with a fast tier. The menu is Model Hub's live answer; a Direct Claude
+Code or Codex Agent lists its bundled catalog and offers no fast mode.
+`vibe agent models <agent>` lists the same menu for an Agent.
+`changeable: false` with a `reason` says the caller may not change it.
+
+`vibe session update --model`, `--reasoning-effort`, and `--speed` make the same
+change as the Web picker, from the Session's next Turn. A running Turn keeps
+its settings, and so does a message that joins it, so send the next message
+with `vibe agent run --session-id <id> --queue`, or stop the Turn with
+`vibe runs cancel <run-id>` first. The reply adds `applies_from: "next_turn"`,
+`turn_running`, and any `notes`. Like the Web picker, a new model whose
+efforts do not include the current one clears it (the Agent's default then
+applies), and fast stays set across a model without a fast tier, which runs at
+the standard tier. The CLI never changes the remembered fast default for new
+Web Sessions. Refusals:
+
+| Code | When |
+| --- | --- |
+| `model_family_unsupported` | A Claude Code Session asked for a non-Claude model, or a Codex Session for a non-GPT one. Start a new Session on an Agent that runs it, or switch the Session's Agent in the Web UI. |
+| `session_model_unavailable` | The model is not on a Model Hub or Vibey menu. A Direct Claude Code or Codex catalog can lag a release, so there a same-family model it does not list is a note instead. |
+| `session_effort_unavailable` | The model does not offer that effort. |
+| `fast_unavailable` | `--speed fast` on a model without a fast tier. |
+| `bot_model_is_users` | Another Agent or Bot changing a Bot's Session. A Bot's model is its user's: only the user (a terminal with no calling Agent Session) or that Bot itself changes it. |
 
 ### `vibe runs`
 
@@ -830,7 +865,7 @@ Stop.
 `--bot <handle>` messages a Bot's permanent Session (see `vibe bot`). The run is
 queued behind the Bot's earlier messages, as with `--queue`, so a Bot handles
 one message at a time. A Bot keeps one conversation on its own model:
-`--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`,
+`--agent`, `--session-id`, the fork flags, `--model`, `--reasoning-effort`, `--speed`,
 the placement flags, `--cwd`, and `--close-after` are refused with `--bot`.
 `--agent` keeps its meaning for an Agent that is also a Bot: it starts a new
 Session of that Agent, never a message to the Bot.
@@ -842,15 +877,15 @@ Session keeps the source backend. `--agent`, `--model`, and
 stays the same; a cross-backend fork is rejected. Do not combine
 `--fork-session` with `--session-id`.
 
-`--model` and `--reasoning-effort` set the model of any new Session the run
-creates (a blank new Session or a fork), and the Session
-keeps it for its later turns. They are refused with `--session-id`; an existing
-Session's model is changed in the Web UI's Session model picker. The pair the
-new Session will run on (each override over the default it would otherwise
-keep) is checked against the Agent's catalog. A Vibey model or effort its Model
-Hub menu does not offer, or a menu that cannot be loaded, is refused; for claude
-and codex an unknown value is a warning, since their bundled catalogs can lag
-behind a new release. `vibe agent models <agent>` lists valid values.
+`--model`, `--reasoning-effort`, and `--speed` set the model, effort, and speed
+of any new Session the run creates (a blank new Session or a fork), and the
+Session keeps them for its later turns. A new Session runs at the standard tier
+unless `--speed fast` is given; a fork keeps its source's speed. They are
+refused with `--session-id`: switch an existing Session with
+`vibe session update` (see [A Session's model, effort, and speed](#a-sessions-model-effort-and-speed)).
+The values the new Session will run on (each override over the default it
+would otherwise keep) are checked against the same menu `vibe session models`
+shows, with the same refusals. `vibe agent models <agent>` lists valid values.
 
 The command prints one `run` object: its `id`, `status`, `run_type`,
 `agent_name`, and the resolved `session_id`, `scope_id`, and `visibility`.
@@ -868,9 +903,9 @@ not an explicit progress or completion report. Failed, cancelled, or interrupted
 runs still send an immediate notice to their caller Session.
 
 Use `--no-reply` with an existing `--session-id` or `--bot` for informational work:
-the receiver sees `[No reply needed.]`, and that message neither opens nor
-answers/rearms a delegation and emits no read receipt. It does not disable
-failure notices or affect an already-open reverse delegation. Combining it with
+the receiver sees `[No reply needed.]`, and that message does not open or
+re-arm a delegation, but it closes an existing reverse delegation, and emits no
+read receipt. It does not disable failure notices. Combining it with
 `--sync` or a new/forked Session is a usage error.
 
 `--callback`, `--callback-session-id`, and `--no-callback` are accepted no-ops,

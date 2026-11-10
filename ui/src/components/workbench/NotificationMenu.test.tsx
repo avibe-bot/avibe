@@ -2,13 +2,8 @@
 
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const native = vi.hoisted(() => ({ shell: false }));
-vi.mock('../../lib/native', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../lib/native')>()),
-  isNativeShell: () => native.shell,
-}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
@@ -30,20 +25,19 @@ vi.mock('./WebPushControl', () => ({
 
 import { NotificationMenu } from './NotificationMenu';
 
-beforeEach(() => {
-  native.shell = false;
+afterEach(() => {
+  cleanup();
+  delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
 });
 
-afterEach(() => cleanup());
-
 describe('NotificationMenu', () => {
-  it('shows browser Web Push outside the native shell', () => {
+  it('shows the Web Push control when the instance can be read in a browser', () => {
     render(<MemoryRouter><NotificationMenu /></MemoryRouter>);
     expect(screen.getByTestId('web-push-control')).toBeTruthy();
   });
 
-  it('hides browser Web Push in the native shell', () => {
-    native.shell = true;
+  it('hides the Web Push control in the desktop shell', () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
     render(<MemoryRouter><NotificationMenu /></MemoryRouter>);
     expect(screen.queryByTestId('web-push-control')).toBeNull();
   });

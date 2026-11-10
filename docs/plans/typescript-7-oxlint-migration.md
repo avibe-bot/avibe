@@ -108,8 +108,8 @@ unreleased 7.1/main APIs exist in 7.0.2.
 
 The grouped UI update advances Oxlint from **1.91.0 to 1.92.0**. Its independent
 engine identity guard and assertion move together; the complete rule policy and
-`eslint-baseline.json` remain unchanged. On identical application source,
-isolated exact-lock installations measured **1590 TS/TSX files, 766 errors,
+`eslint-baseline.json` remain unchanged. Before base integration, on identical
+application source, isolated exact-lock installations measured **1590 TS/TSX files, 766 errors,
 60 warnings and 46 suppressed messages** on both versions. Every diagnostic
 matches by file, rule, severity, location and message after normalizing only
 worktree/temporary-root paths; coverage and policy measurements also match.
@@ -133,6 +133,15 @@ budgets. Minimum Node **20.19.0** passes 87 focused lint/motion/dialog tests and
 the UI build. The five dependency-policy tests pass. Vitest 4.1.11, jsdom 29.1.1
 and the Node engine range are unchanged. Full application/browser/native checks
 remain GitHub CI gates, not a repeated local workload.
+
+After ordinary integration of master `33e658970` (including the landed Vitest,
+SQLAlchemy and Cargo dependency policies), the same complete comparison covers
+**1593 TS/TSX files** with all **872** visible/suppressed diagnostic records
+unchanged. The integrated tree passes **868** focused UI checks, **14** dependency
+policy cases, the same lint/theme/type/build/budget gates, and the minimum-Node20
+checks/build. The integration also brings in the already-adopted Model Hub engine:
+its manifest is identical to the new base. No hosted-wire approval label or CI
+comparison change is part of this dependency update.
 
 ## Local acceptance evidence (2026-11-04)
 

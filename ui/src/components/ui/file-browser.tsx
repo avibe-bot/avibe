@@ -220,7 +220,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   onClick={() => navigateTo(crumb.path)}
                   {...railDropProps(crumb.path)}
                   className={clsx(
-                    'max-w-[140px] truncate rounded px-1.5 py-0.5 text-[12.5px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground',
+                    'max-w-[140px] truncate rounded px-1.5 py-0.5 text-[12.5px] text-muted transition hover:bg-wash hover:text-foreground',
                     dropTarget === crumb.path && 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan',
                   )}
                 >
@@ -403,7 +403,7 @@ const RailRow: React.FC<{
         ? 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan'
         : active
           ? 'bg-cyan-soft text-foreground'
-          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+          : 'text-muted hover:bg-wash hover:text-foreground',
     )}
   >
     <span className="shrink-0">{icon}</span>

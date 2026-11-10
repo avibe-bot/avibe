@@ -64,11 +64,11 @@ SHA-256, and extracted binary SHA-256. The verified upstream bytes are published
   publication. A scheduled guard verifies that release and preserves a
   manifest-keyed backup that can restore missing assets without overwriting a
   mismatched asset. For this change,
-the reviewed target is Avibe-owned CLIProxyAPI `v8.0.30` at source commit
-`5be2cdab0869cbaa3d401891f740aebf7e15aa99`, built with Go 1.26.10 for
+the reviewed target is Avibe-owned CLIProxyAPI `v8.0.63` at source commit
+`6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a`, built with Go 1.26.10 for
 darwin-arm64, darwin-x64, linux-amd64, linux-arm64, windows-amd64 and
 windows-arm64. The release assets are built from that exact upstream source
-with the patches in `patches/model-hub-cpa-v8.0.30/`, applied in the order the
+with the patches in `patches/model-hub-cpa-v8.0.63/`, applied in the order the
 manifest's `build.patches` records; the packaged manifest records the resulting
 archive and binary digests. Rolling back means reverting the whole adoption
 change, which restores the previous patch directory and manifest together.

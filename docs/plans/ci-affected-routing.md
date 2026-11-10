@@ -1,192 +1,258 @@
-# Conservative affected routing for `lint`
+# CI scope: routed PRs, thin merge groups, full master
 
-Owner request (2026-11-04): skip pull-request CI work that a change provably
-cannot reach, without weakening any gate. Base: master `9ea2dd696` (#3239).
-No branch-protection change, runner purchase, lane-count change, release
-workflow edit, retry, or timeout relaxation.
+> Status, November 10, 2026: the `master` merge queue was removed; `merge_group`
+> CI is dormant. PR routing and the full master backstop remain in force.
 
-## Contract
+Owner decision: November 9, 2026. This replaces PR/queue affected routing while
+preserving the narrative-only PR fast path. The merge queue still validates its
+exact combined tree, but does not repeat every test already required on a PR.
 
-`changes` (`scripts/ci_docs_only.py`) classifies the complete Git-tree diff
-exactly as the documentation fast path does (`ci-docs-fast-path.md`). For a
-pull request it compares the event base with the checked-out synthetic merge,
-and verifies both merge parents. It writes four literal outputs:
-`docs_only=true|false`, `windows_control_ipc=true|false`,
-`browser=run|skip` and `platform=run|skip`.
+## Change contract
 
-A route skips only on a `pull_request` into the repository's default branch,
-and only when every changed path is narrative or in the route's allowlist. Each
-of the following runs everything:
+- Keep the same nine required contexts; no transitional ruleset change is needed.
+- Proven narrative-only PRs keep their existing fast path: only classification,
+  dependency-free repository-guidance checks and skip-verifying aggregates.
+  They do not run unit tests, UI checks, builds, manifest checks or collection.
+  Other PRs run the cheap Linux checks.
+- A merge group runs only the combination-sensitive fast checks, targeting about
+  five minutes p50 CI wall time. This is not a five-minute enqueue-to-merge promise.
+- Master runs the full suite after landings. A running pass finishes; only the
+  newest pending master pass waits. Release builds require exact-SHA full-green proof.
+- No test result is reused from a different SHA. No lock is regenerated in CI.
+- Unknown paths and uncertain diff classification select all heavy **PR** jobs.
+  `MG_THIN` is a deliberate mode-level exclusion, not a claim of path independence.
 
-- a push (master validates the whole tree, since latest-wins cancellation can
-  drop an earlier run);
-- an unsupported event, or a missing or malformed payload;
-- a merge-parent or checkout mismatch, or an empty or incomplete diff;
-- a status other than A/M/D, or any mode other than a regular file, such as
-  an executable bit, a symlink, a submodule or a type change;
-- a path outside every allowlist.
+## One scope authority
 
-Rename detection is off, so a move counts both its deleted and its added path.
+`scripts/ci_scope.py` owns the literal modes `PR`, `MG_THIN`, `MASTER_FULL`, the
+complete producer disposition map, and required-gate validation. `changes`
+emits the mode and a JSON plan with an explicit boolean `docs_only`. A job's
+condition reads its own disposition. The gates verify the mode against the
+actual event, not just an output string. Only a proven narrative-only PR may
+set `docs_only`; neither queue nor master can inherit that shortcut.
 
-| Route | Jobs that may skip | Changed paths that allow it |
-| --- | --- | --- |
-| `browser` | `ui-browser-checks` (4 lanes, 14 commands) | narrative docs, or a path under `core/`, `modules/`, `vibe/`, `storage/`, `config/`, `tests/`, `skills/`, `desktop/`, `docs/`, `assets/`, `standards/`, `examples/`, `.agents/`, or `main.py`, and none inside the browser checkout |
-| `platform` | `web-fetch-runtime` (5 legs) and `windows-install-smoke-runners` | narrative docs; `docs/**`; `tests/scenarios/<area>/catalog.yaml`; `ui/src/**`, `ui/e2e/**`, `ui/design/**`; `ui/playwright*.config.ts`, `ui/tsconfig.tests.json`, `ui/eslint-baseline.json`, `ui/.oxlintrc.json`, `ui/README.md`, `ui/agentation.d.ts`, `ui/design.html`; and every added path must be a portable name (`[A-Za-z0-9._@+-]{1,64}` per segment, no trailing dot, no Windows device name) |
+For PR routing, `scripts/ci_docs_only.py` still owns the complete Git diff:
+checked-out synthetic merge and both event parents, no rename detection, NUL
+framing, no API file-list truncation. Deleted and added sides of a move both
+count. Missing parents, unreadable Git objects, an empty/incomplete diff,
+non-regular modes, non-default targets, unknown paths, and newly added
+non-portable names fail closed. Its standalone CLI remains a diff diagnostic,
+not the workflow's authority to skip cheap checks.
 
-Nothing else is routed. The Python unit shards, Vitest and static UI checks,
-`build-linux-artifacts`, the install/upgrade regressions and distribution
-contracts, `scenario-evidence`, and the six required leaf jobs (`ruff`,
-`show-router-integration`, `memory-insight-contract`,
-`migration-release-guard`, `npm-wrapper`, `build-linux-artifacts`) keep their
-existing conditions. So do the Windows control IPC selection and every
-push-only Windows job. A skipped required leaf passes branch protection with no
-gate looking at it, which is why none of them is routed.
+Except for `changes`, the PR column below describes **non-narrative PRs**;
+proven narrative-only PRs explicitly skip every producer.
 
-## Why each family is independent of its allowlist
-
-**Browser lanes.**
-
-- Each lane runs Vite dev or build+preview and Playwright.
-- `ui/scripts/e2e-suite.mjs` spawns only node (tsc and Playwright), and no lane
-  starts Python.
-- Outside `ui/`, the lanes read only these files:
-  - `ui/vite.config.ts` allows Vite to serve `vibe/message_types.json` and
-    three `vibe/data/*.json` catalogs;
-  - `e2e/support/vendors.ts` and `e2e/vault-integrity/integrity.spec.ts` read
-    the same JSON;
-  - the build lane's out-of-tree import check reads `Dockerfile`.
-
-This is enforced rather than inferred. The browser job's checkout is a non-cone
-sparse checkout of exactly `/ui/`, `/vibe/message_types.json`, `/vibe/data/`
-and `/Dockerfile`, on every run including full ones. Any suite that reads
-anything else fails rather than silently depending on it.
-`tests/test_ci_pipeline.py` pins that list equal to `BROWSER_CHECKOUT` in the
-classifier. It also requires every file the Dockerfile ui-builder stage copies,
-which is what the import check validates against, to lie inside it. A local
-run of all 14 lane commands against such a sparse checkout of `9ea2dd696`
-passed.
-
-**Installed-package platform checks.**
-
-- `web-fetch-runtime` installs the wheel and the frozen requirements from
-  `uv.lock`. It then runs five Python test files with `tests/conftest.py`.
-  Those files import `core.web_fetch_worker`,
-  `core.handlers.model_hub.local_fetch` and
-  `desktop/scripts/build-runtime-bundle.py` (with a placeholder `ui/dist`).
-- The Windows smoke runs `install.ps1`, `vibe version`, the engine-platform
-  probe and the uninstall paths.
-
-Neither reads Web UI content. The allowlisted paths reach them only as the
-bytes of `vibe/ui/dist` inside the wheel. That output is still built by
-`build-linux-artifacts`, and its member names are still checked by the
-distribution contracts in `install-upgrade-shards`. What remains is
-filesystem portability on Windows and macOS: whether the installed file
-names can exist on those filesystems.
-
-- **Hashed output names.** The production build names everything it takes from
-  the allowlisted sources `assets/<source name>-<content hash>.<ext>`, in one
-  flat directory. The other outputs are `index.html` and verbatim copies of
-  `public/`. A build of `9ea2dd696` confirms this: 266 hashed assets plus
-  `index.html` and the `public/` files.
-- **Build code is excluded.** A Vite plugin can emit files under any name and
-  path. For example, a `generateBundle` emit of both `assets/emoji` and
-  `assets/EMOJI/en.json` builds and passes the Linux distribution contracts,
-  but collides as a file and a directory on a case-insensitive filesystem. So
-  `ui/scripts/**`, which holds the build's plugins and scripts, is not UI
-  source. Neither are `ui/public/**`, the package manifests, `vite.config.ts`,
-  `index.html` and the build `tsconfig` files. A test follows every local
-  module `vite.config.ts` loads, transitively, and requires each to be outside
-  the allowlist.
-- **Added names must be portable.** Every added path in a routed change must
-  be a portable name.
-
-**Why the larger candidates stay unrouted.**
-
-Python tests read `ui/` broadly. Examples:
-
-- whole-tree scans of `ui/src`, in `test_show_page_legacy_ui_removed.py` and
-  `test_api_save_config_merge.py`;
-- negative existence checks, in `test_permissions_scenarios.py`;
-- catalog citations of UI tests and `ui/e2e` specs, in
-  `tests/scenarios/test_catalog_citations.py`;
-- the i18n catalogs, `ui/public/push-sw.js`, and the Model Hub authority globs.
-
-Neither a sparse checkout nor Python audit hooks can prove such a list
-complete, because negative scans pass vacuously when the tree is absent. Vitest
-reads four `.py` files: `vibe/remote_access.py`, `vibe/model_hub_client.py`,
-`vibe/backend_model_catalog.py` and `core/bots.py`. It also reads Model Hub
-contracts, `tests/fixtures` and the scenario catalogs.
-
-## Gates
-
-No route exists without a required gate that checks it. Both routed families
-report through an existing required context; no context was added or renamed.
-
-- `unit-tests` reads `BROWSER_ROUTE`. The browser lanes must report `skipped`
-  when the documentation fast path or the literal `skip` route says so, and
-  `success` otherwise.
-- `windows-install-smoke` now also needs `web-fetch-runtime` and reads
-  `PLATFORM_ROUTE`. Both platform producers must report `skipped` when skipped
-  by docs or route, and `success` otherwise. This is a deliberate
-  strengthening: `web-fetch-runtime` was previously in no required context.
-  Any of its five legs that fails, is cancelled, times out, or never gets a
-  hosted runner now fails the required `windows-install-smoke` context, which
-  keeps its historical name because branch protection requires it. The job
-  graph has no cycle: `web-fetch-runtime` needs only `changes` and
-  `build-linux-artifacts`.
-- Every gate fails on any of the following:
-  - a classification that did not succeed;
-  - a `docs_only` or route value other than the literals;
-  - a producer that failed, was cancelled or is missing;
-  - a producer that skipped when it should have run;
-  - a producer that ran when its route said skip.
-  `tests/test_ci_pipeline.py` executes each gate's shell from `lint.yml` over
-  every valid scope and route combination, every producer outcome, every scope
-  result, and the invalid literals.
-
-## Master and releases
-
-Master pushes always run every job. A release source is a master commit whose
-complete push run is green, so routing affects only pull-request feedback, and
-the master run is the backstop after merge. Release workflows (`publish.yml`,
-`release_ai.yml`, the dispatched `model-hub-e2e.yml`) are unchanged.
-
-## Historical replay
-
-Scratch replay with this PR's `scope_of` on blobless Git objects. Squash-merge
-diffs stand in for the PR synthetic merges, and failed runs use
-merge-base..head.
-
-| Sample | browser skip | platform skip | both | full | docs |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Last 400 squash merges | 128 | 91 | 10 | 170 | 1 |
-| 300 merged PRs (Oct 19–Nov 4), weighted by their 755 PR runs | 176 | 139 | 25 | 414 | 1 |
-
-On the PR runs, the browser route would have skipped 4 lane jobs on about 27%
-of them, and the platform route 6 jobs (two macOS, one Windows web-fetch leg,
-one ARM, one ubuntu, plus the Windows smoke) on about 22%.
-
-**300 failed PR runs (Sep 27–Nov 4).** In 6 of them, a job that the route would
-have skipped failed or was cancelled; in 5 of those 6, nothing else failed.
-Each was read from its job log or annotations:
-
-| Run | Change | Would-skip failure | Cause |
+| Producer family | PR | MG_THIN | MASTER_FULL |
 | --- | --- | --- | --- |
-| 39386231456 | Python, plans and catalog | browser: `project-order/order.spec.ts` keyboard test | The project-order readiness flake later fixed by #3238 |
-| 41362459680 | desktop Cargo bump | browser lane 2: `bots.spec.ts` muting case | Flake; the next head passed |
-| 41392997060 | UI design | macOS-intel web-fetch: `test_model_hub_local_fetch.py` attempt-expiry timing (`service_busy` vs `fetch_timeout`) | Python test timing; the PR also failed a browser lane, which still runs |
-| 41495159770, 41853843794 | UI | macOS web-fetch cancelled | "The job was not acquired by Runner of type hosted" |
-| 41861194599 | `ui/e2e` only | Windows web-fetch float-boundary assertion and two unacquired macOS legs | The transport-test clock fixed in #3238 |
+| `changes` and narrative-only guidance check | Classification always; guidance on narrative-only PRs | Classification | Classification |
+| Ruff, UI static/types, Linux artifact build, migration guard | Always | Always | Always |
+| `memory-insight-contract`, Show router integration, npm wrapper | Always | Always | Always |
+| Lock/manifest/workflow guard, Python collect smoke | Always | Always | Always |
+| Eight Python unit shards, Vitest | Always | Out of scope | Always |
+| Hosted-wire PR decision job | Always; compare only for an engine-changing PR | Out of scope | Successful no-op; the label decision belongs to the PR |
+| Scenario execution evidence | Validate selected producers | Out of scope; no scenario rows attested | Validate every producer |
+| Four browser lanes | Existing conservative browser routing | Out of scope | All |
+| iOS simulator | Native/contract/unknown paths; separate **advisory** workflow until #3418 is fixed | Out of scope | Required |
+| Desktop shell | Native/contract paths, unknown paths; required | Out of scope | All OS legs |
+| Installer/distribution shards, Windows x64 + ARM install smoke | Packaging/install inputs, unknown paths | Out of scope | All |
+| Windows agent, Model Hub, control IPC | Python/runtime/test inputs, unknown paths | Out of scope | x64 + ARM where supported |
+| Linux/Windows web-fetch | Existing installed-package routing | Out of scope | All |
+| Both macOS web-fetch legs | Fetch/runtime/build/dependency inputs; otherwise skip | Out of scope | Both |
 
-None of these failures came from a file the routed job reads. Separately, 11
-failed runs failed only in web-fetch-runtime, 8 of them on routes where it still
-runs: under the new gate, those are required-context failures.
+The Linux artifact job also builds and verifies the bundled mobile UI. Ordinary
+UI work therefore checks that bundle without allocating a simulator. Native
+bridge inputs (`ui/src/lib/native*`, `ui/src/lib/useNative*`, `ui/src/mobile/`),
+iOS sources, message/catalog contracts, and the bundled mascot select iOS.
+Desktop sources, native bridge inputs and i18n contracts select desktop.
 
-**Limits.** The replay approximates synthetic merges with squash or merge-base
-diffs, and it only exposes couplings that produced a failure. It is evidence for
-the boundaries above, not proof of zero lost coverage. The proof rests on the
-input analysis and on the enforced browser checkout. No time saving is claimed
-until routed runs exist: wall time is still bounded by Vitest and the unit
-shards, and the expected gains are runner slots and the macOS/Windows queue
-tail for UI pull requests. Measure actual routed PR runs after merge before
-quoting a figure.
+**iOS remains advisory on PRs:** NavigationPolicyTests #3418 is not fixed. The
+November 6–9 sample has 13 NavigationPolicy failures across 109 queue trees;
+making it required now would frequently block native PRs. `ios-shell.yml`
+therefore runs affected PRs independently using `ci_scope.py --optional-ios`,
+with real red results (no `continue-on-error`), but no required aggregate waits
+for that advisory workflow. The main lint iOS producer is explicitly out of PR
+scope. It still runs and must pass in `MASTER_FULL`, so failed native validation
+cannot qualify a release. Once #3418 is fixed, return the affected PR iOS call
+to lint and retire its separate PR trigger. Desktop remains required on affected
+PRs now. This is a quarantine decision, not a flake fix.
+
+Shared CI scripts/workflows, root manifests/locks, installer entry points,
+unknown roots, and UI build configuration/plugins are conservative full-PR
+inputs. Python/runtime roots remain broad Windows inputs: a Linux pass does not
+establish Windows handles, process, filesystem, or ARM behavior. Mac fetch
+selection is narrower than other platform checks; it is not a blanket macOS
+exemption. The explicit path predicates live in `ci_scope.py`, not duplicated
+workflow-level `paths` filters.
+
+The browser boundary is unchanged: sparse checkout contains exactly `ui/`,
+`vibe/message_types.json`, `vibe/data/`, the bundled mascot, and `Dockerfile`.
+The existing classifier excludes build configuration and non-portable added UI
+filenames from the installed-package skip allowlist.
+
+## Required contexts and fail-closed aggregation
+
+The six required leaf names remain substantive checks:
+
+`ruff`, `show-router-integration`, `memory-insight-contract`,
+`migration-release-guard`, `npm-wrapper`, `build-linux-artifacts`.
+
+The three existing required aggregate names remain:
+
+- `unit-tests`: unit shards, scenario evidence, UI static/types, Vitest, browser,
+  hosted-wire, manifest guard, Python smoke, the six required leaves, desktop,
+  and the main iOS producer (explicitly skipped on PR/MG, required on master).
+- `install-upgrade-regression`: installer/distribution shards.
+- `windows-install-smoke`: x64/ARM installation, all selected web-fetch legs,
+  Windows agent, Model Hub and IPC.
+
+Every in-scope producer must report **exactly `success`**. Every explicitly
+out-of-scope producer must report **exactly `skipped`**. A missing/unknown mode,
+route, dependency or result, cancellation, unexpected skip, or unexpected run
+fails. Gates run with `always()` so a skipped producer cannot skip its gate.
+Matrix and reusable-workflow failure/cancellation must propagate; no job uses
+`continue-on-error` to manufacture a pass.
+
+Scenario evidence receives the same mode and plan. Each selected JUnit producer
+must leave its exact matrix artifact count. Missing reports are not treated as
+path-skipped jobs; unexpected reports from out-of-scope producers fail. PR-only
+omissions are labeled **out of scope**, not passed. `MG_THIN` skips the entire
+scenario evidence job and explicitly attests no rows. `MASTER_FULL` has no
+out-of-scope producers; release-only cases keep their separate release gate.
+
+## Combination checks
+
+`manifest-consistency` runs real read-only resolvers:
+
+- `cargo metadata --locked --format-version 1` for the desktop workspace,
+  including workspace member manifests. Do not add `--no-deps`: it can miss a
+  stale lock. This is resolution, not native compilation/linkage.
+- `npm ci --ignore-scripts --dry-run --no-audit --no-fund` for UI and desktop.
+- `uv lock --check`; `--frozen` alone would skip the freshness check.
+- Before/after manifest and lock hashes, including failed resolver invocations.
+- Tracked JSON/YAML syntax, JSON Schema dialect validation and tracked companion
+  data/schema consistency, pinned actionlint for the CI/release workflow boundary,
+  and repository workflow-contract tests.
+
+The dependency-free npm launcher has an explicit no-lock contract. Two existing
+TypeScript JSONC configs remain owned by `tsc`. Actionlint 1.7.12 has one exact
+`publish.yml` compatibility exception for GitHub's newer `concurrency.queue`;
+an independent guard validates that field. Other unknown keys still fail.
+Caches contain downloaded dependencies, never permission to rewrite a lock.
+
+`python-smoke` installs locked dependencies and runs `pytest --collect-only`
+for the unit selection under the Linux loopback-only wrapper. It catches import,
+collection and shared-schema combinations without executing the full unit suite.
+
+Required queue API reads use the existing `release_asset_download.py` transport
+policy: at most three attempts, 1/2-second exponential backoff with up to 0.5s
+jitter, and one 30-second retry window. The predecessor's `gh api` listings
+(including the final freshness check) and wheel download share this policy;
+each CLI call also has a hard remaining-wall-time timeout. A failed paginated
+response is discarded, and wheel retries overwrite only the new temporary
+probe directory's partial file before mandatory digest validation.
+
+The other required-queue API consumer, Show/runtime metadata and asset lookup
+in `build-linux-artifacts`, already uses this same transport. There is no extra
+cache, nested retry loop, whole-job retry, or fallback to an older predecessor.
+Only transient network errors, 5xx, 429 and identified secondary limits qualify.
+Ordinary 4xx, unknown CLI errors, malformed successful JSON, digest failures and
+SQLite contract/freshness failures do not retry. Server `Retry-After` hints take
+precedence; a direct GitHub rate limit without a hint requires at least a minute,
+so it fails clearly outside this short budget rather than retrying too early.
+Existing unauthenticated public-asset fallback is retained, but cannot replay
+a throttled API during its own retries. For streaming assets the window limits
+retries, not a healthy large transfer;
+individual socket inactivity timeouts remain bounded by the remaining window.
+
+## Full master backstop and releases
+
+`lint.yml` triggers on `push: master` and supports a manual full run on master.
+Its concurrency group is shared by those two event types, with
+`cancel-in-progress: false` for master. This coalesces the **whole pass**,
+including iOS/desktop/web-fetch called workflows; none has an independent master
+or merge-group trigger. The advisory iOS PR trigger has its own PR cancellation
+group; full master calls use a unique run ID and are never independently
+cancelled. PR supersession cancels only that PR. Immutable merge groups do not
+cancel one another.
+
+`master-full-backstop` checks every producer and all three required aggregates
+in `MASTER_FULL`. `release_ai.yml` and `publish.yml` resolve the requested tag
+(including annotated tags and dispatch overrides) to its exact source SHA and
+refuse all build/sign/publish paths without a successful full master `lint.yml`
+run plus that terminal certificate. PR, merge-group, failed, cancelled, missing,
+or another SHA's runs do not qualify. Historical full runs without this explicit
+certificate are not assumed equivalent.
+
+A SHA coalesced out of the pending queue is **not releaseable** merely because a
+later master is green. Release a full-green SHA; wait for its in-progress full
+run or rerun its existing master backstop. No tag/publish operation is performed
+by this CI change.
+
+**Fix-forward owner:** the author of the landing that first made master red owns
+triage and the fix (release owner `cyhhao` assigns an owner if attribution is unclear).
+Pause release/promotion at the last full-green master; for a confirmed product
+regression, pause ordinary auto-enqueue until the fix is ready. A moved failure
+is later feedback, not a repaired flake or permission for unbounded reruns.
+
+## Representative dry run
+
+Executed by `tests/test_ci_scope.py`. Cheap Linux checks run for every row
+**except narrative docs**, which retain the fast path. The iOS column describes
+the separate advisory PR run; desktop and all other selected jobs are required.
+`W` means Windows agent/Model Hub/IPC; installation is a separate column.
+
+| Representative diff | Browser | iOS | Desktop | Installer + Win install | W | Linux/Win fetch | Mac fetch |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `ui/src/App.tsx` | Run | Skip | Skip | Skip | Skip | Skip | Skip |
+| `core/controller.py` | Skip | Skip | Skip | Skip | Run | Run | Skip |
+| `ios/Avibe/NavigationPolicy.swift` | Run | Run | Skip | Skip | Skip | Run | Skip |
+| `desktop/src-tauri/src/main.rs` | Skip | Skip | Run | Run | Skip | Run | Run |
+| `pyproject.toml` / `install.ps1` | Run | Run | Run | Run | Run | Run | Run |
+| `docs/guide.md` | Skip | Skip | Skip | Skip | Skip | Skip | Skip |
+| `.github/workflows/lint.yml` | Run | Run | Run | Run | Run | Run | Run |
+| Unknown new root or unclassifiable diff | Run | Run | Run | Run | Run | Run | Run |
+
+Every row uses the same thin queue profile and the same full master profile.
+The iOS row retains conservative existing browser/platform routing; no extra
+path-independence claim is introduced just to make the table cheaper.
+
+## Timing evidence and rollout
+
+November 6–9 sample: 109 queue trees, 89 completed enqueue-to-merge histories.
+Measured MG unit shards were **6.60/8.31 minutes p50/p90** and Vitest
+**8.13/9.14**. Wider sharding has not demonstrated a five-minute combined queue;
+therefore both stay on PR/master, not MG. Retained UI static is **4.67/5.12**,
+Linux build **1.32/1.50**, migration guard **2.03/2.42**.
+
+Historical DAG replay, retaining per-job scheduling delays and terminal gate
+overhead, budgets one parallel minute each for the new guard and collection:
+
+| Measurement | Before p50/p90 min | Projected p50/p90 min |
+| --- | --- | --- |
+| Thin MG required CI, 109 trees | — | **5.18 / 5.85** |
+| Paired final successful-attempt CI, 89 landings | 15.37 / 19.69 | **5.22 / 5.84** |
+| Same final enqueue → MERGED, keeping observed waits | 16.55 / 27.31 | **5.95 / 14.77** |
+| First enqueue bounded replay, preserving remaining recovery gaps | 17.23 / 34.47 | **5.83 / 11.25** |
+
+Two minutes for each new parallel job leaves the replay's wall percentiles
+unchanged because static UI still dominates. New mobile-bundle work, checkout
+steps in gates, cache misses and changed runner contention are not measurements
+in that replay. Do not add percentile components or present these estimates as
+post-change results. Eleven of thirteen historical failed-check evictions lose
+their blocking cause; two artifact-build failures remain. This does not prove
+that no cross-PR interaction can escape the thin profile.
+
+The owner will change merge-queue **build concurrency from 2 to 4 after this PR
+merges**. Keep the nine contexts and current merge-size rules unchanged. The
+thin profile requests about eight hosted Linux jobs plus one self-hosted npm
+job after classification: four active groups can require about 32 hosted Linux
+slots, in addition to PRs/full master; aggregators add short dispatches. Effective
+runner limits must be observed, not inferred from a published default quota.
+
+Watch the first real enqueue → MERGED samples, MG CI p50/p90, per-job
+`created_at → started_at` runner wait (especially Linux p90), PR/full-master
+wait and full-backstop completion latency. Compare against the historical
+Linux MG wait p90 of 1.15 minutes. If four groups increase waits enough to erase
+the latency gain, reduce concurrency rather than weaken checks. The owner
+measures actual queue latency and owns the ruleset change; this PR changes no
+ruleset, queue admission, tag, release or deployment.

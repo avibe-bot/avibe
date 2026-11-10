@@ -300,7 +300,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({
                   <div
                     key={i}
                     className={clsx(
-                      'px-4 py-2.5 transition-colors hover:bg-foreground/[0.02]',
+                      'px-4 py-2.5 transition-colors hover:bg-wash',
                       log.level === 'ERROR' && 'bg-destructive/[0.04]',
                       log.level === 'WARNING' && 'bg-gold/[0.04]'
                     )}

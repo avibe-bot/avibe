@@ -584,6 +584,11 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     )[0]
     assert "publish-avibe-memory:" not in publish
     assert "environment: pypi-avibe-memory" not in publish
+    for workflow in (publish, notes):
+        assert "avibe_memory-" not in workflow
+        assert "build_retired_companion.py" not in workflow
+        assert "test_retired_updater_bridge.py" not in workflow
+    assert "gh release download v3.1.0" not in publish
     assert "- finalize-github-release" in avibe_publish
     assert "- finalize-github-release" in legacy_publish
 

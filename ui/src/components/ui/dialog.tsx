@@ -76,7 +76,7 @@ export const DialogContent = React.forwardRef<
           // line, a long word) can never widen the track past the dialog.
           // `motion-dialog` (index.css): a sheet's rise and fall on a phone, a dialog's fade and grow on
           // a desktop; `motion-card`, that fade and grow on a phone too.
-          // Level 3 (ui/design: system/elevation/dialog); a phone's sheet casts upward from the bottom edge.
+          // Level 3 (ui/design: system/overlays/dialog); a phone's sheet casts upward from the bottom edge.
           mobilePresentation === 'card' ? 'motion-card shadow-elevation-3' : 'motion-dialog shadow-elevation-3 max-md:shadow-elevation-3-up',
           'fixed left-1/2 top-1/2 z-50 grid grid-cols-1 min-w-0 w-full max-w-lg max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-xl border border-edge bg-popover p-6 max-md:left-0 max-md:right-0 max-md:top-auto max-md:bottom-0 max-md:w-full max-md:max-w-none max-md:max-h-[90dvh] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:rounded-b-none max-md:p-5 max-md:pb-[calc(1.5rem+env(safe-area-inset-bottom))]',
           mobileSheetHeight === 'tall' && 'max-md:h-[90dvh]',

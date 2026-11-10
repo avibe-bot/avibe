@@ -25,7 +25,7 @@ const PopoverContent = React.forwardRef<
         className={cn(
           // `motion-popover` (index.css): grows from its trigger on `fast` and fades out on `fast`
           // (docs/plans/web-ui-motion.md M6). A floating surface: the popover fill, no outline,
-          // level 2 (ui/design: system/elevation/popover).
+          // level 2 (ui/design: system/overlays/popover).
           'motion-popover z-50 w-72 rounded-md border border-edge bg-popover p-4 text-text shadow-elevation-2 outline-none',
           className,
         )}

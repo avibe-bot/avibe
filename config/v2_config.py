@@ -181,6 +181,7 @@ MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
 MODEL_HUB_BACKENDS = AGENT_BACKENDS
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
+    "fable": "fable",
     "opus": "opus",
     "opus[1m]": "opus",
     "sonnet": "sonnet",
@@ -3930,6 +3931,7 @@ class UpdateConfig:
     check_interval_minutes: int = 60  # How often to check for updates (0 = disable)
     idle_minutes: int = 30  # Minutes of inactivity before auto-update
     notify_admins: bool = True  # Send update notification to admins when update is available
+    prereleases: bool = False  # Also offer GitHub-only release candidates (gh-vX.Y.ZrcN)
 
 
 @dataclass

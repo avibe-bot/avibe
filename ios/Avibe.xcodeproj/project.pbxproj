@@ -27,8 +27,24 @@
 		100000000000000000000012 /* MobileApp in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		100000000000000000000013 /* MobileOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* MobileOnboardingTests.swift */; };
 		100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */; };
+		1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C0 /* NativePushCoordinatorTests.swift */; };
 		100000000000000000000015 /* MobilePasskey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
 		1000000000000000000000A1 /* FormAccessoryBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A1 /* FormAccessoryBar.swift */; };
+		1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A2 /* NativePushCoordinator.swift */; };
+		1000000000000000000000A3 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
+		1000000000000000000000A4 /* PushKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A4 /* PushKeychainStore.swift */; };
+		1000000000000000000000A5 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B0 /* NotificationService.swift */; };
+		1000000000000000000000A6 /* PushNotificationProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B1 /* PushNotificationProcessor.swift */; };
+		1000000000000000000000A7 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
+		1000000000000000000000A8 /* PushKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A4 /* PushKeychainStore.swift */; };
+		1000000000000000000000A9 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B2 /* Localizable.strings */; };
+		1000000000000000000000AA /* PushNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B3 /* PushNotificationTests.swift */; };
+		1000000000000000000000AB /* relay-apns-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B4 /* relay-apns-envelope.json */; };
+		1000000000000000000000AC /* instance-webpush-receiver.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B5 /* instance-webpush-receiver.json */; };
+		1000000000000000000000AD /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B6 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		1000000000000000000000AE /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B0 /* NotificationService.swift */; };
+		1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B1 /* PushNotificationProcessor.swift */; };
+			1000000000000000000000C1 /* native-subscription-key.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1 /* native-subscription-key.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -38,6 +54,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 500000000000000000000001;
 			remoteInfo = Avibe;
+		};
+		300000000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 400000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000003;
+			remoteInfo = NotificationService;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -65,9 +88,23 @@
 		200000000000000000000015 /* MobileApp */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MobileApp; sourceTree = "<group>"; };
 		200000000000000000000016 /* MobileOnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingTests.swift; sourceTree = "<group>"; };
 		200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransportIntegrationTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000C0 /* NativePushCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinatorTests.swift; sourceTree = "<group>"; };
 		200000000000000000000018 /* MobilePasskey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePasskey.swift; sourceTree = "<group>"; };
 		2000000000000000000000A1 /* FormAccessoryBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormAccessoryBar.swift; sourceTree = "<group>"; };
+		2000000000000000000000A2 /* NativePushCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinator.swift; sourceTree = "<group>"; };
+		2000000000000000000000A3 /* PushCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCrypto.swift; sourceTree = "<group>"; };
+		2000000000000000000000A4 /* PushKeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushKeychainStore.swift; sourceTree = "<group>"; };
 		200000000000000000000019 /* Avibe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Avibe.entitlements; sourceTree = "<group>"; };
+		2000000000000000000000B0 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/NotificationService.swift; sourceTree = "<group>"; };
+		2000000000000000000000B1 /* PushNotificationProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/PushNotificationProcessor.swift; sourceTree = "<group>"; };
+		2000000000000000000000B2 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = Localizable.strings; sourceTree = "<group>"; };
+		2000000000000000000000B3 /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000B4 /* relay-apns-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = relay-apns-envelope.json; sourceTree = "<group>"; };
+		2000000000000000000000B5 /* instance-webpush-receiver.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = instance-webpush-receiver.json; sourceTree = "<group>"; };
+		2000000000000000000000B6 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		2000000000000000000000B7 /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
+		2000000000000000000000B8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+			2000000000000000000000C1 /* native-subscription-key.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = native-subscription-key.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +122,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		600000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -93,6 +137,8 @@
 			children = (
 				700000000000000000000002 /* Avibe */,
 				700000000000000000000004 /* AvibeTests */,
+				700000000000000000000006 /* NotificationService */,
+				700000000000000000000007 /* PushFixtures */,
 				700000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -110,7 +156,10 @@
 				200000000000000000000014 /* MobileOnboardingContainer.swift */,
 				200000000000000000000018 /* MobilePasskey.swift */,
 				200000000000000000000010 /* NativeBridge.swift */,
+				2000000000000000000000A2 /* NativePushCoordinator.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
+				2000000000000000000000A3 /* PushCrypto.swift */,
+				2000000000000000000000A4 /* PushKeychainStore.swift */,
 				200000000000000000000004 /* RootView.swift */,
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
@@ -139,8 +188,32 @@
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
+				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
+				2000000000000000000000B3 /* PushNotificationTests.swift */,
 			);
 			path = AvibeTests;
+			sourceTree = "<group>";
+		};
+		700000000000000000000006 /* NotificationService */ = {
+			isa = PBXGroup;
+			children = (
+				2000000000000000000000B8 /* Info.plist */,
+				2000000000000000000000B2 /* Localizable.strings */,
+				2000000000000000000000B7 /* NotificationService.entitlements */,
+				2000000000000000000000B0 /* NotificationService.swift */,
+				2000000000000000000000B1 /* PushNotificationProcessor.swift */,
+			);
+			path = NotificationService;
+			sourceTree = "<group>";
+		};
+		700000000000000000000007 /* PushFixtures */ = {
+			isa = PBXGroup;
+			children = (
+					2000000000000000000000C1 /* native-subscription-key.json */,
+				2000000000000000000000B4 /* relay-apns-envelope.json */,
+				2000000000000000000000B5 /* instance-webpush-receiver.json */,
+			);
+			path = "../tests/fixtures/push";
 			sourceTree = "<group>";
 		};
 		700000000000000000000005 /* Products */ = {
@@ -148,6 +221,7 @@
 			children = (
 				20000000000000000000000D /* Avibe.app */,
 				20000000000000000000000E /* AvibeTests.xctest */,
+				2000000000000000000000B6 /* NotificationService.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -163,10 +237,12 @@
 				900000000000000000000001 /* Sources */,
 				600000000000000000000001 /* Frameworks */,
 				A00000000000000000000001 /* Resources */,
+				E00000000000000000000001 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				B00000000000000000000002 /* NotificationService dependency */,
 			);
 			name = Avibe;
 			productName = Avibe;
@@ -191,6 +267,23 @@
 			productReference = 20000000000000000000000E /* AvibeTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		500000000000000000000003 /* NotificationService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000004 /* Build configuration list for PBXNativeTarget "NotificationService" */;
+			buildPhases = (
+				900000000000000000000003 /* Sources */,
+				600000000000000000000003 /* Frameworks */,
+				A00000000000000000000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NotificationService;
+			productName = NotificationService;
+			productReference = 2000000000000000000000B6 /* NotificationService.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -207,6 +300,9 @@
 					500000000000000000000002 = {
 						CreatedOnToolsVersion = 26.6;
 						TestTargetID = 500000000000000000000001;
+					};
+					500000000000000000000003 = {
+						CreatedOnToolsVersion = 26.6;
 					};
 				};
 			};
@@ -226,6 +322,7 @@
 			targets = (
 				500000000000000000000001 /* Avibe */,
 				500000000000000000000002 /* AvibeTests */,
+				500000000000000000000003 /* NotificationService */,
 			);
 		};
 /* End PBXProject section */
@@ -247,10 +344,35 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+					1000000000000000000000C1 /* native-subscription-key.json in Resources */,
+				1000000000000000000000AB /* relay-apns-envelope.json in Resources */,
+				1000000000000000000000AC /* instance-webpush-receiver.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A00000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1000000000000000000000A9 /* Localizable.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		E00000000000000000000001 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				1000000000000000000000AD /* NotificationService.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		D00000000000000000000001 /* Verify Mobile App Bundle */ = {
@@ -292,7 +414,12 @@
 				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
 				100000000000000000000015 /* MobilePasskey.swift in Sources */,
 				10000000000000000000000D /* NativeBridge.swift in Sources */,
+				1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
+				1000000000000000000000A3 /* PushCrypto.swift in Sources */,
+				1000000000000000000000A4 /* PushKeychainStore.swift in Sources */,
+				1000000000000000000000AE /* NotificationService.swift in Sources */,
+				1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */,
 				100000000000000000000004 /* RootView.swift in Sources */,
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
@@ -307,6 +434,19 @@
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
+				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
+				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		900000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1000000000000000000000A5 /* NotificationService.swift in Sources */,
+				1000000000000000000000A6 /* PushNotificationProcessor.swift in Sources */,
+				1000000000000000000000A7 /* PushCrypto.swift in Sources */,
+				1000000000000000000000A8 /* PushKeychainStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -317,6 +457,11 @@
 			isa = PBXTargetDependency;
 			target = 500000000000000000000001 /* Avibe */;
 			targetProxy = 300000000000000000000001 /* PBXContainerItemProxy */;
+		};
+		B00000000000000000000002 /* NotificationService dependency */ = {
+			isa = PBXTargetDependency;
+			target = 500000000000000000000003 /* NotificationService */;
+			targetProxy = 300000000000000000000002 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -477,6 +622,7 @@
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(APP_PROVISIONING_PROFILE_SPECIFIER)";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -521,6 +667,47 @@
 			};
 			name = Release;
 		};
+		C00000000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = NotificationService/NotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationService/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		C00000000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = NotificationService/NotificationService.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = NotificationService/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(NOTIFICATION_SERVICE_PROFILE_SPECIFIER)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -547,6 +734,15 @@
 			buildConfigurations = (
 				C00000000000000000000005 /* Debug */,
 				C00000000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		800000000000000000000004 /* Build configuration list for PBXNativeTarget "NotificationService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C00000000000000000000007 /* Debug */,
+				C00000000000000000000008 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -121,7 +121,7 @@ export function TelegramTopicList<T extends { enabled: boolean }>({
                     <button
                       type="button"
                       onClick={() => onToggleExpanded(topic.id)}
-                      className="rounded-md p-1.5 text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+                      className="rounded-md p-1.5 text-muted transition-colors hover:bg-wash hover:text-foreground"
                       aria-label={expanded ? t('channelList.topicCollapse') : t('channelList.topicExpand')}
                     >
                       {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}

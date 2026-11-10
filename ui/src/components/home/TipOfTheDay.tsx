@@ -6,7 +6,7 @@ import { useIsDesktop } from '@/lib/useIsDesktop';
 import { Button } from '../ui/button';
 import type { Tip } from './homeCopy';
 
-const CONTROL_CLASS = 'grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-foreground/5 hover:text-foreground';
+const CONTROL_CLASS = 'grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-wash hover:text-foreground';
 // A horizontal swipe this far (px) on a phone turns to the next or previous tip.
 const SWIPE_PX = 40;
 

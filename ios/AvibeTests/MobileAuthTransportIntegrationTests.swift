@@ -26,6 +26,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             .passkeyChallenge: [.challenge],
             .verifySecondFactor: [.secondFactor, .session],
             .logout: [.logout],
+            .pushManagement: [.request],
         ]
         XCTAssertEqual(
             Set(stagesByOperation.keys),
@@ -311,6 +312,60 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             state.requests().isEmpty,
             "No readiness request reached the control plane in \(attempts) attempts."
         )
+    }
+
+    func testPushManagementPreservesInt64ResponseTokensAcrossTransport() async throws {
+        let state = HTTPFixtureState()
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            switch request.path {
+            case "/api/config/auth":
+                return .json("{}")
+            case "/api/push/test":
+                let count = state.requests().filter {
+                    $0.path == "/api/push/test"
+                }.count
+                let generation = count == 1
+                    ? "9007199254740993"
+                    : "9223372036854775807"
+                return .json(
+                    #"{"provider_generation":\#(generation)}"#
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let transport = MobileAuthTransport(
+            controlPlaneURL: baseURL,
+            websiteDataStore: .nonPersistent(),
+            deadlines: MobileAuthTransportDeadlines.testing(5_000)
+        )
+        defer {
+            _ = transport.invalidate()
+        }
+
+        let expected: [(String, Int64)] = [
+            ("9007199254740993", 9_007_199_254_740_993),
+            ("9223372036854775807", Int64.max),
+        ]
+        for (raw, value) in expected {
+            let response = try await transport.pushManagementRequest(
+                PushManagementRequest(
+                    method: "GET",
+                    path: "/api/push/test",
+                    headers: [:],
+                    body: nil
+                )
+            )
+            let generation = try XCTUnwrap(
+                response.body["provider_generation"] as? NSNumber
+            )
+            XCTAssertEqual(generation.int64Value, value, raw)
+        }
     }
 
     func testHangingSessionReadTimesOut() async throws {

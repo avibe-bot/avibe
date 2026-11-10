@@ -137,7 +137,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
         size="icon"
         className={clsx(
           compact
-            ? 'size-6 shrink-0 rounded-md border-0 text-muted shadow-none hover:bg-foreground/[0.06] hover:text-foreground'
+            ? 'size-6 shrink-0 rounded-md border-0 text-muted shadow-none hover:bg-wash hover:text-foreground'
             : 'size-7 shrink-0',
         )}
         disabled
@@ -222,7 +222,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
               size="icon"
               className={clsx(
                 compact
-                  ? 'size-6 shrink-0 rounded-md text-muted hover:bg-foreground/[0.06] hover:text-foreground'
+                  ? 'size-6 shrink-0 rounded-md text-muted hover:bg-wash hover:text-foreground'
                   : 'size-7 shrink-0',
               )}
               aria-label={toggleLabel}
@@ -250,7 +250,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                     role="radio"
                     aria-checked={active}
                     onClick={() => onSetMode(id)}
-                    className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-surface-2"
+                    className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-wash"
                   >
                     <span
                       className={clsx(
@@ -280,7 +280,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
             <button
               type="button"
               onClick={closeFromPopover}
-              className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-[13px] text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-[13px] text-muted transition-colors hover:bg-wash hover:text-foreground"
             >
               <span className="grid size-8 shrink-0 place-items-center">
                 <X className="size-4" />

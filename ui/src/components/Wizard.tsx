@@ -235,7 +235,9 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
             : <RefreshCw size={16} className="motion-safe:animate-spin" />
           : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
       </Button>
+      {/* `data-absent` lets the phone's pinned bar drop the empty row instead of holding it. */}
       <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" style={{ visibility: back ? 'visible' : 'hidden' }}
+        data-absent={back ? undefined : ''}
         disabled={!back || !!handoff || !!action?.busy || navigationLocked} onClick={() => { if (back) navigate(back); }}>
         <ArrowLeft size={14} />{t(back === 'providers' ? 'onboarding.flow.backToProviders' : 'onboarding.flow.backToIntro')}
       </Button>

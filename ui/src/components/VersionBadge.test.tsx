@@ -14,6 +14,7 @@ import {
 const api = vi.hoisted(() => ({
   getVersion: vi.fn<() => Promise<Partial<VersionInfo> & Pick<VersionInfo, 'current' | 'latest' | 'has_update'>>>(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
   getConfig: vi.fn(async () => ({ update: { auto_update: true } })),
+  mutateConfig: vi.fn(async () => ({})),
   requestDesktopUpdate: vi.fn<(...args: unknown[]) => Promise<DesktopRemoteUpdateResult>>(),
   doUpgrade: vi.fn<(...args: unknown[]) => Promise<UpgradeResult>>(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
 }));
@@ -401,7 +402,6 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
-    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText('Stable launcher repair is still required.')).toBeTruthy();
     expect(screen.queryByText('raw installer transcript')).toBeNull();
@@ -421,7 +421,6 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
-    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText(/deferred activation helper/)).toBeTruthy();
     expect(screen.queryByText('raw deferred helper transcript')).toBeNull();
@@ -440,7 +439,6 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
-    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText(i18n.t('dashboard.upgradeSuccess'))).toBeTruthy();
     expect(screen.queryByText(/installer stdout/)).toBeNull();
@@ -460,7 +458,6 @@ describe('desktop version ownership', () => {
 
     fireEvent.click(await screen.findByTitle('v9.9.9'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
-    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
 
     expect(await screen.findByText(i18n.t('dashboard.upgradeFailed'))).toBeTruthy();
     expect(screen.queryByText('raw package-manager transcript')).toBeNull();
@@ -468,8 +465,9 @@ describe('desktop version ownership', () => {
 });
 
 // These contracts exercise the request/receipt boundary. Existing updater tests
-// only covered native install/skip and cannot catch remote authorization,
-// counted confirmation, or a disconnected host being mistaken for success.
+// only covered native install/skip and cannot catch remote authorization, a
+// request that waits on a second confirmation, or a disconnected host being
+// mistaken for success.
 const remoteReceipt = (phase: NonNullable<VersionInfo['remote_request']>['phase'], progress: number | null = null): VersionInfo => ({
   current: '9.9.9', latest: '10.0.0', has_update: true, error: null, managed_by: 'desktop',
   remote_request: { request_id: 'request-1', target: '10.0.0', phase, progress, error_code: null, updated_at: '2026-10-29T02:00:00Z' },
@@ -487,10 +485,6 @@ async function requestFromBrowser() {
   fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') }));
 }
 
-function confirmRequest() {
-  fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirm') }));
-}
-
 describe('remote desktop update contract', () => {
   it.each(['owner', 'member', 'editor', 'viewer'] as const)('projects %s capability to request controls and guidance', async (role) => {
     authorization.capabilities.can_manage_instance = role === 'owner' || role === 'member';
@@ -506,34 +500,21 @@ describe('remote desktop update contract', () => {
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
 
-  it('checks work on first submit, displays nested counts/unknown, and retries explicitly confirmed', async () => {
-    api.requestDesktopUpdate.mockResolvedValueOnce({ ok: false, error: 'confirmation_required', counts: {
-      agents: 2, watches: 3, tasks: 4, total: 9, unknown: true,
-    } });
-    await requestFromBrowser();
-    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateCheckWork'))).toBeTruthy();
-    confirmRequest();
-    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateInterruptions', { agents: 2, watches: 3, tasks: 4 }))).toBeTruthy();
-    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateUnknownWork'))).toBeTruthy();
-    expect(api.requestDesktopUpdate).toHaveBeenLastCalledWith('10.0.0', { confirmInterrupt: false });
-    api.getVersion.mockResolvedValue(remoteReceipt('awaiting_host'));
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirmInterrupt') }));
-    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateAwaitingHost'))).toBeTruthy();
-    expect(api.requestDesktopUpdate).toHaveBeenLastCalledWith('10.0.0', { confirmInterrupt: true });
-    expect(api.doUpgrade).not.toHaveBeenCalled();
-  });
-
-  it.each(['prompt', 'install'] as const)('shows %s delivery before submitting and follows the authoritative result', async (delivery) => {
+  // Clicking Update is the user's decision: one click sends the request, which
+  // consents to interrupting active work, and no confirmation step follows.
+  it.each(['prompt', 'install'] as const)('sends the %s request on one click and follows the authoritative result', async (delivery) => {
     api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0-rc.1', has_update: true, managed_by: 'desktop', remote_install_allowed: delivery === 'install' });
     api.requestDesktopUpdate.mockResolvedValue({ ok: true, request_id: 'request-1', delivery });
-    await requestFromBrowser();
-    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateConfirmDescription', { delivery: i18n.t(delivery === 'install'
-      ? 'dashboard.desktopRemoteUpdateDeliveryInstall' : 'dashboard.desktopRemoteUpdateDeliveryPrompt') }))).toBeTruthy();
+    await openBrowserPopup('v9.9.9');
     api.getVersion.mockResolvedValue({ ...remoteReceipt(delivery === 'install' ? 'downloading' : 'awaiting_host', 42), remote_install_allowed: delivery === 'install' });
-    confirmRequest();
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') }));
+    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateConfirmDescription', { delivery: i18n.t(delivery === 'install'
+      ? 'dashboard.desktopRemoteUpdateDeliveryInstall' : 'dashboard.desktopRemoteUpdateDeliveryPrompt') }))).toBeTruthy();
     expect(await screen.findByText(i18n.t(delivery === 'install' ? 'dashboard.desktopRemoteUpdateDownloading' : 'dashboard.desktopRemoteUpdateAwaitingHost', { progress: 42 }))).toBeTruthy();
     // SemVer is sent unchanged, even though the badge normalizes display strings.
-    expect(api.requestDesktopUpdate).toHaveBeenCalledWith('10.0.0-rc.1', { confirmInterrupt: false });
+    expect(api.requestDesktopUpdate).toHaveBeenCalledExactlyOnceWith('10.0.0-rc.1', { confirmInterrupt: true });
+    // The version popover is the only dialog.
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
   });
 
   it.each(['failed', 'declined', 'expired'] as const)('renders terminal %s from a receipt', async (phase) => {
@@ -613,7 +594,6 @@ describe('remote desktop update contract', () => {
   it.each(['not_desktop_managed', 'no_update_available', 'update_in_progress', 'desktop_shell_unavailable'] as const)('handles %s without falling back to Runtime upgrade', async (error) => {
     api.requestDesktopUpdate.mockResolvedValue({ ok: false, error });
     await requestFromBrowser();
-    confirmRequest();
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
@@ -630,7 +610,8 @@ describe('remote desktop update contract', () => {
     const requestButton = screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') });
     expect((requestButton as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(requestButton);
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(api.requestDesktopUpdate).toHaveBeenCalledExactlyOnceWith('10.0.0', { confirmInterrupt: true });
   });
 
   // Native settlement can precede the API status-file read; both a direct
@@ -672,17 +653,20 @@ describe('remote desktop update contract', () => {
     await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_check'));
   });
 
-  it('keeps the Member pure-Web upgrade and handles its counted confirmation', async () => {
+  it('updates the Runtime on one click for a Member, with no confirmation step', async () => {
     authorization.capabilities.is_instance_owner = false;
     api.getVersion.mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true });
-    api.doUpgrade.mockResolvedValueOnce({ ok: false, error: 'confirmation_required', counts: { agents: 1, watches: 0, tasks: 2, total: 3, unknown: false } });
+    let finish!: (result: UpgradeResult) => void;
+    api.doUpgrade.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     await openBrowserPopup('v9.9.9');
     fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
-    confirmRequest();
-    expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateInterruptions', { agents: 1, watches: 0, tasks: 2 }))).toBeTruthy();
-    expect(api.doUpgrade).toHaveBeenLastCalledWith({ confirmInterrupt: false });
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateConfirmInterrupt') }));
-    await vi.waitFor(() => expect(api.doUpgrade).toHaveBeenLastCalledWith({ confirmInterrupt: true }));
+    expect(api.doUpgrade).toHaveBeenCalledExactlyOnceWith({ confirmInterrupt: true });
+    // The version popover stays the only dialog and shows the request in flight.
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect((screen.getByRole('button', { name: i18n.t('dashboard.upgrading') }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => finish({ ok: true, message: 'Upgrade successful', output: null, restarting: false }));
+    expect(await screen.findByText(i18n.t('dashboard.upgradeSuccess'))).toBeTruthy();
+    expect(api.doUpgrade).toHaveBeenCalledOnce();
     expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
   });
 
@@ -692,5 +676,59 @@ describe('remote desktop update contract', () => {
     await openBrowserPopup('v9.9.9');
     expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
     expect(api.getConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('pre-release updates', () => {
+  const prereleaseSwitch = () => screen.findByRole('switch', { name: i18n.t('dashboard.prereleaseUpdates') });
+
+  it('saves the Runtime setting, rechecks, and offers the release candidate with its notes', async () => {
+    api.getConfig.mockResolvedValueOnce({ update: { auto_update: true, prereleases: false } });
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.5', latest: '3.2.5', has_update: false });
+    await openBrowserPopup('v3.2.5');
+    const toggle = await prereleaseSwitch();
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.5', latest: '3.2.6rc2', has_update: true });
+    fireEvent.click(toggle);
+    await vi.waitFor(() => expect(api.mutateConfig).toHaveBeenCalledWith([
+      { kind: 'set', path: ['update', 'prereleases'], value: true },
+    ]));
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenLastCalledWith({ cache: false }));
+    expect(await screen.findByText(i18n.t('dashboard.prereleaseBadge'))).toBeTruthy();
+    const notes = screen.getByRole('link', { name: i18n.t('dashboard.releaseNotesFor', { version: '3.2.6rc2' }) });
+    expect(notes.getAttribute('href')).toBe('https://github.com/avibe-bot/avibe/releases/tag/gh-v3.2.6rc2');
+    expect((await prereleaseSwitch()).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeTruthy();
+  });
+
+  it('names the older stable release while running a pre-release with the switch off', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.6rc2', latest: '3.2.5', has_update: false });
+    await openBrowserPopup('v3.2.6rc2');
+    expect(await screen.findByText(i18n.t('dashboard.awaitingStableRelease'))).toBeTruthy();
+    expect(screen.getByText(i18n.t('dashboard.latestStableVersion'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.upToDate'))).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
+  });
+
+  it('sets the desktop app channel in the shell instead of the Runtime config', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') {
+        return { phase: 'current', latest: '3.2.5', channel: 'stable', prereleases: false, skippedVersion: null, interactive: false };
+      }
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.5', '3.2.5', null, true);
+    fireEvent.click(await screen.findByTitle('v3.2.5'));
+    fireEvent.click(await prereleaseSwitch());
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_prereleases_set', { enabled: true }));
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it('hides the switch under a desktop shell that predates it', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
+    fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
+    expect(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: i18n.t('dashboard.prereleaseUpdates') })).toBeNull();
   });
 });

@@ -1,5 +1,13 @@
 # Memory retirement: official upgrade gates
 
+> **Status — 2026-11-10:** Starting with 3.2.6, the owner has retired the
+> compatibility wheel and MUC-004 release gate. MUC-001–003 and ordinary
+> install/upgrade regressions remain. The bridge requirements and evidence below
+> describe the historical implementation; the current decision and v3.1.0
+> reinstall fallback are in [memory-removal.md](memory-removal.md#compatibility-wheel-retired-from-326-owner-decision-2026-11-10)
+> and [UPGRADING.md](../UPGRADING.md#memory-removal). Already published assets and
+> user Memory data remain untouched.
+
 ## Background and goal
 
 The removed Memory implementation must not reappear in persisted configuration,

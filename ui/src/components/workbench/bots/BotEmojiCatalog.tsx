@@ -186,7 +186,7 @@ function SkinToneButton({ toneLabels }: { toneLabels: Record<SkinTone, string> }
         setTone(next);
         rememberSkinTone(next);
       }}
-      className="grid size-8 shrink-0 place-items-center rounded-lg text-[17px] leading-none transition hover:bg-foreground/[0.06]"
+      className="grid size-8 shrink-0 place-items-center rounded-lg text-[17px] leading-none transition hover:bg-wash"
     >
       {/* Empty only until the data loads. */}
       {shown?.emoji}
@@ -275,7 +275,7 @@ export default function BotEmojiCatalog({ current, onPick, onBack, columns, auto
               onClick={onBack}
               aria-label={t('bots.emojiPicker.back')}
               title={t('bots.emojiPicker.back')}
-              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-wash hover:text-foreground"
             >
               <ChevronLeft className="size-4" />
             </button>
@@ -305,7 +305,7 @@ export default function BotEmojiCatalog({ current, onPick, onBack, columns, auto
                   onClick={() => pick(emoji)}
                   className={clsx(
                     cellClass,
-                    emoji === current ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-foreground/[0.06]',
+                    emoji === current ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-wash',
                   )}
                 >
                   {emoji}

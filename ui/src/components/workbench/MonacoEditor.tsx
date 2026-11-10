@@ -217,7 +217,7 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
   };
 
   const accessoryBtn =
-    'shrink-0 rounded-md border border-edge px-2.5 py-1.5 font-mono text-[12px] text-foreground active:bg-foreground/[0.08] shadow-elevation-0';
+    'shrink-0 rounded-md border border-edge px-2.5 py-1.5 font-mono text-[12px] text-foreground active:bg-wash-press shadow-elevation-0';
 
   return (
     <div className="flex h-full min-h-0 flex-col">

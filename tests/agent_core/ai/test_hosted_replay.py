@@ -628,8 +628,8 @@ def _thinking_first_refusal(body: dict[str, Any]) -> Optional[str]:
     start with a thinking block; None when it holds."""
 
     thinking = body.get("thinking", {}).get("type")
-    if thinking == "disabled" and "opus-5-5" in body.get("model", ""):
-        return "thinking.type: Claude Opus 5.5 does not support `disabled`"
+    if thinking == "disabled" and body.get("model") in {"claude-opus-5-5", "claude-fable-5-2"}:
+        return f"thinking.type: {body['model']} does not support `disabled`"
     # Only manual thinking requires the continued assistant message to start with thinking.
     if thinking != "enabled":
         return None
@@ -759,6 +759,8 @@ _NON_CLAUDE_MODEL = "grok-4.7"
         # Adaptive thinking never needs the continued message to start with thinking, and is never turned off.
         (_ADAPTIVE_MODEL, (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "adaptive"),
         (_ADAPTIVE_MODEL, (_READ_CALL,), "result", "adaptive"),
+        ("claude-fable-5-2", (ThinkingBlock(text="plan the read"), _READ_CALL), "result", "adaptive"),
+        ("claude-fable-5-2", (_READ_CALL,), "result", "adaptive"),
         # Manual thinking: a loop whose signed thinking goes back keeps it on...
         (_MANUAL_MODEL, (_THOUGHT, _READ_CALL), "result", "enabled"),
         # ...one whose thinking went as text, or that starts with the call, continues with thinking off...
@@ -774,7 +776,8 @@ _NON_CLAUDE_MODEL = "grok-4.7"
         # ...but its normal non-tool-loop reasoning request remains unchanged.
         (_NON_CLAUDE_MODEL, (TextBlock("done"),), "user", "enabled"),
     ],
-    ids=["adaptive-thinking-as-text", "adaptive-call-first", "manual-signed-thinking-first", "manual-thinking-as-text",
+    ids=["adaptive-thinking-as-text", "adaptive-call-first", "fable-thinking-as-text", "fable-call-first",
+         "manual-signed-thinking-first", "manual-thinking-as-text",
          "manual-call-first", "manual-user-message-after-results", "manual-new-turn", "non-claude-tool-loop",
          "non-claude-new-turn"],
 )
@@ -821,7 +824,9 @@ def _thought_and_read() -> str:
 
 
 @pytest.mark.parametrize(
-    ("model", "continuation"), [(_ADAPTIVE_MODEL, "adaptive"), (_MANUAL_MODEL, "disabled")], ids=["adaptive", "manual"]
+    ("model", "continuation"),
+    [(_ADAPTIVE_MODEL, "adaptive"), ("claude-fable-5-2", "adaptive"), (_MANUAL_MODEL, "disabled")],
+    ids=["adaptive", "fable", "manual"],
 )
 async def test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on(
     monkeypatch, model, continuation
@@ -849,5 +854,5 @@ async def test_a_session_whose_signatures_were_refused_still_finishes_tool_loops
     bodies = [json.loads(wire.content) for wire in sent[1]]
     # Refused, resent without signatures, then the loop's continuation with thinking off.
     assert len(bodies) == 3
-    first = "adaptive" if model == _ADAPTIVE_MODEL else "enabled"
+    first = "enabled" if model == _MANUAL_MODEL else "adaptive"
     assert [body["thinking"]["type"] for body in bodies] == [first, first, continuation]

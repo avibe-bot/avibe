@@ -82,7 +82,10 @@ dependencies = [
     "pypdf>=6.21.2",
     "python-multipart>=0.0.9",
     "PyJWT[crypto]>=2.15.0",
-    "SQLAlchemy>=2.0.0",
+    # 2.1 requires Python 3.11+. Keep its adopted line on newer Python while
+    # maintaining the compatible 2.0 patch line for Python 3.10.
+    "SQLAlchemy>=2.0.57,<2.1; python_version < '3.11'",
+    "SQLAlchemy>=2.1.0; python_version >= '3.11'",
     "alembic>=1.13.0",
     "psutil>=7.1.0",
     "packaging>=23.0",

@@ -9,6 +9,7 @@ import vibe.upgrade
 
 from contextlib import nullcontext
 import io
+import json
 import os
 import shlex
 import stat
@@ -1495,7 +1496,8 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     )
     calls: dict[str, Any] = {}
 
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
+    rc_spec = "avibe-os @ https://dl.avibe.bot/releases/gh-v3.0.15rc1/avibe_os-3.0.15rc1-py3-none-any.whl#sha256=" + "a" * 64
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15rc1", "package_spec": rc_spec})
     monkeypatch.setattr(
         api,
         "build_upgrade_plan",
@@ -1523,7 +1525,9 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     assert calls["run_kwargs"]["text"] is True
     assert calls["run_kwargs"]["timeout"] == 1800
     assert calls["run_kwargs"]["env"] == plan.env
-    assert calls["plan_kwargs"]["target_version"] == "3.0.15"
+    # The offered release candidate installs from its own wheel, through the same plan.
+    assert calls["plan_kwargs"]["target_version"] == "3.0.15rc1"
+    assert calls["plan_kwargs"]["package_spec"] == rc_spec
     safe_cwd = calls["run_kwargs"].get("cwd")
     assert safe_cwd and os.path.isabs(safe_cwd), f"subprocess.run cwd must be an absolute path, got {safe_cwd!r}"
     assert calls["restart_kwargs"] == {
@@ -2201,6 +2205,98 @@ def test_get_latest_version_info_uses_override_metadata_url(monkeypatch, tmp_pat
     info = get_latest_version_info("2.2.0")
 
     assert info == {"current": "2.2.0", "latest": "9999.0.0", "has_update": True, "error": None}
+
+
+_RC_SHA = "c" * 64
+
+
+def _write_release_feeds(tmp_path, monkeypatch, *, stable: list[str], candidates: list[str]) -> None:
+    """PyPI metadata with the stable releases, and the mirror index with the GitHub-only candidates."""
+
+    pypi = tmp_path / "pypi.json"
+    pypi.write_text(json.dumps({"releases": {version: [{}] for version in stable}}), encoding="utf-8")
+    monkeypatch.setenv("VIBE_UPDATE_METADATA_URL", pypi.as_uri())
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    releases = [
+        {
+            "tag": f"gh-v{version}",
+            "prerelease": True,
+            "commit": "0" * 40,
+            "assets": [
+                {"name": f"avibe_memory-{version}-py3-none-any.whl", "sha256": "d" * 64},
+                {"name": f"avibe_os-{version}-py3-none-any.whl", "sha256": _RC_SHA},
+            ],
+        }
+        for version in candidates
+    ]
+    # Neither a candidate without its core wheel digest nor a full release under a gh-v tag is offered.
+    releases += [
+        {"tag": "gh-v9.0.0rc1", "prerelease": True, "commit": "0" * 40, "assets": [{"name": "avibe_os-9.0.0rc1-py3-none-any.whl"}]},
+        {"tag": "gh-v9.0.1rc1", "prerelease": False, "commit": "0" * 40, "assets": []},
+    ]
+    index = index_dir / "releases.json"
+    index.write_text(
+        json.dumps({"schema_version": 1, "repository": "avibe-bot/avibe", "releases": releases}), encoding="utf-8"
+    )
+    monkeypatch.setenv("AVIBE_RELEASE_INDEX_URL", index.as_uri())
+
+
+@pytest.mark.parametrize(
+    ("current", "stable", "candidates", "prereleases", "latest", "has_update", "offers_wheel"),
+    [
+        # Off: stable releases only, as before.
+        ("3.2.5", ["3.2.5"], ["3.2.6rc1", "3.2.6rc2"], False, "3.2.5", False, False),
+        # On: the newest candidate is newer than every stable release.
+        ("3.2.5", ["3.2.5"], ["3.2.6rc1", "3.2.6rc2"], True, "3.2.6rc2", True, True),
+        # On: 3.2.6rc2 < 3.2.6, so the stable release that supersedes it wins.
+        ("3.2.6rc2", ["3.2.5", "3.2.6"], ["3.2.6rc2"], True, "3.2.6", True, False),
+        # Turned off on a candidate: an older stable release is never offered as a downgrade...
+        ("3.2.6rc2", ["3.2.5"], ["3.2.6rc2"], False, "3.2.5", False, False),
+        # ...and the next stable release newer than it is.
+        ("3.2.6rc2", ["3.2.5", "3.2.6"], ["3.2.6rc2"], False, "3.2.6", True, False),
+    ],
+)
+def test_get_latest_version_info_offers_release_candidates_only_when_opted_in(
+    monkeypatch, tmp_path, current, stable, candidates, prereleases, latest, has_update, offers_wheel
+):
+    _write_release_feeds(tmp_path, monkeypatch, stable=stable, candidates=candidates)
+
+    info = get_latest_version_info(current, prereleases=prereleases)
+
+    assert (info["latest"], info["has_update"], info["error"]) == (latest, has_update, None)
+    if offers_wheel:
+        wheel = (tmp_path / "releases" / f"gh-v{latest}" / f"avibe_os-{latest}-py3-none-any.whl").as_uri()
+        assert info["package_spec"] == f"avibe-os @ {wheel}#sha256={_RC_SHA}"
+    else:
+        assert "package_spec" not in info
+
+
+def test_get_latest_version_info_keeps_stable_offer_when_prerelease_index_fails(monkeypatch, tmp_path):
+    _write_release_feeds(tmp_path, monkeypatch, stable=["3.2.5", "3.2.6"], candidates=[])
+    monkeypatch.setenv("AVIBE_RELEASE_INDEX_URL", (tmp_path / "missing.json").as_uri())
+
+    info = get_latest_version_info("3.2.5", prereleases=True)
+
+    assert info == {"current": "3.2.5", "latest": "3.2.6", "has_update": True, "error": None}
+
+
+@pytest.mark.parametrize(
+    ("config", "enabled"),
+    [
+        (None, False),
+        ({"update": {"auto_update": True}}, False),
+        ({"update": {"prereleases": True}}, True),
+        ({"update": {"prereleases": "yes"}}, False),
+    ],
+)
+def test_prerelease_updates_follow_the_instance_setting(monkeypatch, tmp_path, config, enabled):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    if config is not None:
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    assert vibe_upgrade.prerelease_updates_enabled() is enabled
 
 
 def test_get_latest_version_info_ignores_prerelease_for_stable_current(monkeypatch, tmp_path):

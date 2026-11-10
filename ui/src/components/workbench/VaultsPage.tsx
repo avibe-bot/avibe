@@ -203,7 +203,7 @@ const SecretRow: React.FC<{
                     setMenuOpen(false);
                     openVaultsInBrowser({ kind: 'reveal', secretName: s.name, field: selectedField });
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash"
                 >
                   <ExternalLink className="size-4 text-muted" />
                   {t('vaults.reveal.showInBrowser')}
@@ -223,7 +223,7 @@ const SecretRow: React.FC<{
                     setMenuOpen(false);
                     onReveal(s, selectedField);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 >
                   {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Eye className="size-4 text-muted" />}
                   {t('vaults.reveal.show')}
@@ -237,7 +237,7 @@ const SecretRow: React.FC<{
                     setMenuOpen(false);
                     onReveal(s, selectedField);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 >
                   {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Copy className="size-4 text-muted" />}
                   {t('vaults.reveal.copy')}
@@ -253,7 +253,7 @@ const SecretRow: React.FC<{
                 setMenuOpen(false);
                 onEdit(s);
               }}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash"
             >
               <Pencil className="size-4 text-muted" />
               {t('vaults.editSecret')}

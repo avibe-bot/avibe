@@ -2167,22 +2167,26 @@ def test_config_reload_keeps_legacy_hub_subscription_backend_specific(monkeypatc
 
 
 @pytest.mark.parametrize("supply_channel", ["native_cli", "hub"])
+@pytest.mark.parametrize(
+    ("alias", "older_id", "newer_id"),
+    [("opus", "claude-opus-4-6", "claude-opus-5-20260724"),
+     ("fable", "claude-fable-5-1", "claude-fable-5-2")],
+)
 def test_config_reload_preserves_legacy_claude_alias_resolution(
     monkeypatch,
     tmp_path,
     supply_channel,
+    alias,
+    older_id,
+    newer_id,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     source["supply_channel"] = supply_channel
     if supply_channel == "hub":
         source["credential_ref"] = "cred_anthropic_hub"
-    older = source["models"][0]
-    newer = {
-        **older,
-        "id": "claude-opus-5-20260724",
-        "display_name": "Opus 5",
-    }
+    older = {**source["models"][0], "id": older_id}
+    newer = {**older, "id": newer_id, "display_name": newer_id}
     source["models"] = [older, newer]
     for model in source["models"]:
         model["provenance"] = model.pop("origin")
@@ -2200,7 +2204,7 @@ def test_config_reload_preserves_legacy_claude_alias_resolution(
 
     loaded = V2Config.load(config_path=config_path)
 
-    route = loaded.model_hub.agents["claude"].routes["opus"]
+    route = loaded.model_hub.agents["claude"].routes[alias]
     assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
         (source["id"], newer["id"]),
     ]

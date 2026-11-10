@@ -538,8 +538,12 @@ only from the native locale catalog. A run banner's title names its source
 (`Project · Session`, the IM channel, or the task/watch name) from the run
 detail; those Runtime labels pass one sanitizer (`RunDetail::source`) that
 strips control, bidi, and zero-width formatting characters and bounds length,
-and the SSE payload itself is never shown. No notification capability is
-granted to web content. OS notification permissions and Do Not Disturb remain OS-managed.
+and the SSE payload itself is never shown. The Workbench on the local Runtime
+origin may read and set the persisted preference through
+`desktop_notifications_state` and `desktop_notifications_set_enabled`. Those
+commands do not show, schedule, or deliver OS notifications. The SSE connection,
+native catalog, and `tauri-plugin-notification` remain shell-owned. OS
+notification permissions and Do Not Disturb remain OS-managed.
 v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.
@@ -655,16 +659,21 @@ checks silently and lets the badge provide the prompt. A native dialog is used
 only when there is no reachable Workbench window or the fixed popover event
 cannot be dispatched, such as a check that finishes before the webview loads.
 Native state changes are pushed to the Workbench, including checks started by
-the **Use TEST Updates** menu item. The state marks whether an available release
+the **Get Pre-release Updates** menu item. The state marks whether an available release
 came from an explicit check, so an automatic check honors **Skip this version**
 while an explicit check can offer the same release again. If a newer Workbench
 runs under an older shell that rejects `desktop_update_state`, the Workbench
 uses Runtime version reads and the legacy `avibe://updates` native path until
 the shell is upgraded. The tray/menu shows checking, current, available,
 downloading, installing, disabled, and error states.
-The **Use TEST Updates** toggle persists beside the private Runtime, defaults on
-for prerelease app versions and off for stable versions, and never downgrades.
-Browsers and Python installations retain their existing update behavior.
+The **Get Pre-release Updates** toggle (the `test` channel) persists beside the
+private Runtime, defaults on for prerelease app versions and off for stable
+versions, and never downgrades. On, it offers the newest of the stable and
+pre-release releases; off, stable releases only. The Workbench version popover
+shows the same setting as a switch through `desktop_update_prereleases_set`; a
+shell without that command reports no `prereleases` state, and the Workbench
+hides the switch. Python installations follow the Runtime's own
+`update.prereleases` setting instead.
 
 The provider discovers published releases of `avibe-bot/avibe` from the
 `dl.avibe.bot` release index, which also lists each tag's peeled commit

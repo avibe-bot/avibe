@@ -23,6 +23,10 @@ _VAPID_FILE = "web_push_vapid.json"
 DEFAULT_WEB_PUSH_TIMEOUT_SECONDS = 10.0
 DEFAULT_WEB_PUSH_TTL_SECONDS = 12 * 60 * 60
 _VAPID_CREATE_LOCK = threading.Lock()
+MAX_NOTIFICATION_PLAINTEXT_BYTES = 2800
+MAX_NOTIFICATION_TITLE_SCALARS = 80
+MAX_NOTIFICATION_BODY_SCALARS = 240
+MAX_NOTIFICATION_TAG_BYTES = 64
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,55 @@ class VapidKeys:
 
 def _b64url_no_padding(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _truncate_scalars(value: str, limit: int) -> str:
+    return "".join(list(value)[:limit])
+
+
+def _truncate_utf8_bytes(value: str, limit: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def serialize_notification_payload(payload: dict[str, Any]) -> str:
+    """Serialize one notification under the shared browser/iOS byte contract."""
+
+    normalized = dict(payload)
+    for key, limit in (
+        ("title", MAX_NOTIFICATION_TITLE_SCALARS),
+        ("body", MAX_NOTIFICATION_BODY_SCALARS),
+    ):
+        value = normalized.get(key)
+        if isinstance(value, str):
+            normalized[key] = _truncate_scalars(value, limit)
+
+    tag = normalized.get("tag")
+    if isinstance(tag, str):
+        if any(ord(character) < 0x20 or ord(character) == 0x7F for character in tag):
+            raise ValueError("notification_tag_contains_control_character")
+        normalized["tag"] = _truncate_utf8_bytes(tag, MAX_NOTIFICATION_TAG_BYTES)
+
+    while True:
+        serialized = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(serialized.encode("utf-8")) <= MAX_NOTIFICATION_PLAINTEXT_BYTES:
+            return serialized
+
+        body = normalized.get("body")
+        if isinstance(body, str) and body:
+            normalized["body"] = body[:-1]
+            continue
+        title = normalized.get("title")
+        if isinstance(title, str) and title:
+            normalized["title"] = title[:-1]
+            continue
+        raise ValueError("notification_payload_too_large")
 
 
 def vapid_key_path() -> Path:
@@ -145,7 +198,7 @@ def send_web_push(
     }
     webpush(
         subscription_info=subscription_info,
-        data=json.dumps(payload, separators=(",", ":")),
+        data=serialize_notification_payload(payload),
         vapid_private_key=vapid_signer,
         vapid_claims={"sub": subject},
         timeout=timeout,

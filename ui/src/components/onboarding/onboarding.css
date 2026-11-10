@@ -1392,12 +1392,13 @@ details.onboarding-assistant-error > summary { margin-top: 0; }
 }
 
 /* "Stack the assistant cards below 760px and allow natural scrolling."
-   Both steps stack, not only the connection's. That is the same rule the rest of this
-   sheet is built on — the two steps are one composition seen twice — and it is also
-   what lets the shared reservation keep working here: the reference reaches the same
-   action anchor on a phone by drawing the introduction's stacked cards taller than the
-   connection's by exactly the import band, rather than by leaving a gap where the
-   capsule would be. The floor below says the same thing in one number. */
+   Both steps stack, not only the connection's: the two steps are one composition seen
+   twice. What a phone does NOT share with the desktop is the reservation. A desktop
+   holds its action still by giving every screen the tallest screen's height; stacked
+   into one scrolling column, that same floor was the whole lineup's worst case, and
+   every shorter screen was centred inside it with hundreds of pixels of blank above
+   and below. On a phone each screen takes its own height and the action pair is pinned
+   to the bottom of the window instead (see "Phones" near the end of this file). */
 @media (max-width: 759px) {
   .onboarding-shell {
     --ob-gutter: 20px;
@@ -1423,20 +1424,13 @@ details.onboarding-assistant-error > summary { margin-top: 0; }
     --ob-sub-lh: 22px;
     --ob-cap-fs: 13px;
     --ob-heading-gap: 12px;
-    /* A phone reserves two title lines and one subtitle line: the English title
-       wraps here while the Chinese does not, and the two steps must not disagree
-       about where the cards start. */
-    --ob-heading-h: 138px;
-    --ob-h1-min: calc(2 * var(--ob-h1-lh));
-    --ob-p-min: var(--ob-sub-lh);
+    /* Nothing is reserved: the heading is as tall as its own lines, and the stage as
+       tall as what the screen draws. The action no longer depends on either, because
+       it is pinned to the window rather than placed under the composition. */
+    --ob-heading-h: 0px;
     --ob-band-gap: 27px;
     --ob-stack-gap: 16px;
-    /* The same reservation as the desktop rows, re-derived from the stack: the built-in
-       card at its tallest, then one of the taller card per other assistant, and the
-       gaps between them. `--ob-cards` is the lineup's own count, which the shell states. */
-    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
-      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-cards) - 1)
-      + var(--ob-permission-extra) + var(--ob-hint-row));
+    --ob-stage-h: 0px;
     --ob-main-top: 0px;
     --ob-access-w: 100%;
     --ob-access-pad: 24px;
@@ -1448,22 +1442,17 @@ details.onboarding-assistant-error > summary { margin-top: 0; }
   .onboarding-brand-mark { width: 38px; height: 38px; }
   .onboarding-brand-wordmark strong { font-size: 20px; line-height: 25px; }
   .onboarding-brand-wordmark span { font-size: 11px; line-height: 17px; }
-  /* Two lines reserved for both, so a heading that wraps in one language or one step
-     and not in the other still leaves the cards on the same line. In `em`, because the
-     size here is a tier variable rather than a number. The block's own reserve gives
-     way to these, which are the ones that can wrap. */
-
   /* The story becomes the stack the connection already is, one card per row. The wires
      and the return loop are already gone with the side-by-side row (the 1023 band).
-     The cards take the rest of the reserved height in equal rows, which is how the
-     introduction reaches the same floor as the connection. */
-  .onboarding-story { flex: 1; align-items: stretch; }
+     Each card is the stacked card the reference draws, not a share of a reserved
+     floor: stretched to one, the story's cards were a third empty. */
+  .onboarding-story { align-items: stretch; }
   .onboarding-collaboration { height: auto; display: flex; flex-direction: column; gap: 16px; }
   .onboarding-collaboration-cards, .onboarding-assistants-list { grid-template-columns: minmax(0, 1fr); }
-  .onboarding-collaboration-cards {
-    grid-auto-rows: minmax(0, 1fr);
-    flex: 1;
-  }
+  .onboarding-collaboration-cards { grid-auto-rows: var(--ob-card-h); }
+  /* Stacked, an assistant card has no neighbour to stand level with, so it is as tall
+     as what it says; the floor would only push its actions away from its note. */
+  .onboarding-assistant { min-height: 0; }
   /* Six 52px logos cannot sit on one 350px row, so the row folds into two of three —
      the reference's own mobile arrangement — and gives up the fixed 560 span with it. */
   .onboarding-access-grid { width: min(300px, 100%); grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
@@ -1521,9 +1510,13 @@ details.onboarding-assistant-error > summary { margin-top: 0; }
 .onboarding-screens > [data-setup-screen-root] { grid-area: 1 / 1; min-width: 0; }
 /* Inside the base layer, and important, because that is the weight the framework hides
    `[hidden]` with: a screen keeps the attribute — and with it its place outside the
-   accessibility tree and out of tab order — while still holding its share of the cell. */
-@layer base {
-  .onboarding-screens > [data-setup-screen-root][hidden] { display: block !important; }
+   accessibility tree and out of tab order — while still holding its share of the cell.
+   Not on a phone, where nothing is held by the cell (see "Phones" below): there a screen
+   that is not the current one is simply not drawn, and the cell is the current screen. */
+@media (min-width: 760px) {
+  @layer base {
+    .onboarding-screens > [data-setup-screen-root][hidden] { display: block !important; }
+  }
 }
 .onboarding-screens > [data-setup-screen-root][hidden] { visibility: hidden; pointer-events: none; }
 /* A screen nobody is reading draws nothing, so nothing in it plays either — a pending
@@ -1584,6 +1577,77 @@ details.onboarding-assistant-error > summary { margin-top: 0; }
 .onboarding-setup-hint-line, .onboarding-setup-hint-line > * { font-size: var(--ob-cap-fs); line-height: 1.5; }
 .onboarding-setup-hint-line > span { grid-column: 2; }
 .onboarding-setup-hint-line > :not(span) { grid-column: 3; justify-self: start; }
+
+/* ---- Phones: one scrolling column ----------------------------------------- */
+
+/* Owner, 2026-11-10: the phone setup must not be the desktop composition stacked.
+   Everything above that holds the action still does it by reserving room — a shared
+   cell as tall as the tallest screen, a stage floor sized for the lineup's worst case,
+   two title lines — and centring each screen inside it. On a phone that room is a
+   scroll, not a window, so it read as blank screens with the action at their far end.
+   Here each screen is exactly as tall as what it draws, top-aligned under its heading,
+   and the action pair is a bar pinned to the bottom of the window: the same box on
+   every screen and always in reach, which is what the shared anchor was for. */
+@media (max-width: 759px) {
+  .onboarding-shell {
+    /* The pinned bar: its padding, the action, the gap and the way back. */
+    --ob-bar-h: calc(12px + var(--ob-action-h) + 4px + 40px + max(12px, env(safe-area-inset-bottom)));
+    /* Focus and scroll-into-view stop above the bar and its fade, not under them. */
+    scroll-padding-bottom: calc(var(--ob-bar-h) + 24px);
+  }
+  .onboarding-shell-content {
+    flex-direction: column;
+    align-items: center;
+    padding-bottom: 0;
+  }
+  .onboarding-shell-content > * { margin-block: 0; }
+  /* The column fills the window, so on a screen shorter than it the bar still rests
+     on the window's bottom edge rather than under the last card. */
+  .onboarding-step { flex: 1 0 auto; }
+  .onboarding-screens { flex: 1 0 auto; align-content: start; }
+  .onboarding-welcome, .onboarding-setup { min-height: 0; }
+  .onboarding-stage { flex: none; justify-content: flex-start; }
+  /* The post-action slot is a row under the current screen, in flow: nothing it holds
+     can move a pinned bar, so it no longer needs a capped band of blank to grow into —
+     a long diagnostic lengthens the scroll instead. */
+  .onboarding-screens > .onboarding-action-aside {
+    grid-area: 2 / 1;
+    align-self: start;
+    margin: 0 0 16px;
+    max-height: none;
+    overflow: visible;
+  }
+  .onboarding-screens > .onboarding-action-aside:empty { display: none; }
+  /* Above the bar, not under it, where only the end of the scroll could show it. */
+  .onboarding-flow-error { order: 1; margin: 0 0 16px; }
+  /* Full-bleed across the gutters, on the page's own background, with a short fade
+     above it so a card scrolling under the bar is seen leaving rather than cut. */
+  .onboarding-setup-footer {
+    order: 2;
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    width: calc(100% + 2 * var(--ob-gutter));
+    gap: 4px;
+    padding: 12px var(--ob-gutter) max(12px, env(safe-area-inset-bottom));
+    background: var(--background);
+  }
+  .onboarding-setup-footer::before {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    bottom: 100%;
+    height: 24px;
+    background: linear-gradient(to bottom, transparent, var(--background));
+    pointer-events: none;
+  }
+  /* The way back is the quiet row under the action; at the action's full height the
+     pinned bar spent a sixth of the window on two buttons. Where there is no way back
+     (the first screen) the bar drops the row rather than holding blank under the action:
+     pinned to the window, the bar no longer needs it to keep the action still. */
+  .onboarding-setup-footer .onboarding-back-action { height: 40px; }
+  .onboarding-setup-footer .onboarding-back-action[data-absent] { display: none; }
+}
 
 /* Provider tiers are consumed by L2; their bands are the same C3 bands as the shell. */
 .onboarding-shell {

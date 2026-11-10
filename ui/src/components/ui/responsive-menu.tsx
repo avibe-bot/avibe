@@ -105,7 +105,7 @@ export const ResponsiveMenu: React.FC<{
           tabIndex={-1}
           className={cn(
             // `motion-sheet` (index.css): rises on the sheet spring, leaves faster. It casts upward,
-            // from the bottom edge (ui/design: system/elevation/phone-menu).
+            // from the bottom edge (ui/design: system/overlays/menu-phone).
             'motion-sheet fixed inset-x-0 bottom-0 z-50 flex max-h-[88dvh] flex-col rounded-t-2xl border-t border-edge bg-card pb-[env(safe-area-inset-bottom)] shadow-elevation-3-up outline-none',
           )}
         >
@@ -131,7 +131,7 @@ export const ResponsiveMenu: React.FC<{
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto border-t border-border">{children}</div>
 
           <div className="shrink-0 px-4 pb-4 pt-3">
-            <DialogPrimitive.Close ref={closeRef} className="flex h-12 w-full items-center justify-center rounded-xl border border-edge bg-surface text-[14px] font-semibold text-foreground shadow-elevation-0 transition-colors hover:bg-surface-2">
+            <DialogPrimitive.Close ref={closeRef} className="flex h-12 w-full items-center justify-center rounded-xl border border-edge bg-surface text-[14px] font-semibold text-foreground shadow-elevation-0 transition-colors hover:bg-surface-wash">
               {sheetCloseLabel ?? t('common.cancel')}
             </DialogPrimitive.Close>
           </div>

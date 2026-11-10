@@ -92,7 +92,7 @@ const SidebarNavRow: React.FC<{
         'group flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
         isActive
           ? 'border-(--nav-selected-border) bg-(--nav-selected-bg) text-foreground'
-          : 'border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+          : 'border-transparent text-muted hover:bg-wash hover:text-foreground',
       )
     }
   >
@@ -248,7 +248,7 @@ export const SessionRow: React.FC<{
             // already reserved above, so the row's contents do not move.
             active
               ? 'border-mint bg-mint-soft font-semibold text-foreground'
-              : 'border-transparent hover:bg-foreground/[0.04]',
+              : 'border-transparent hover:bg-wash',
           )}
         >
           <button
@@ -356,7 +356,7 @@ const ProjectSessionList: React.FC<{
           type="button"
           data-flip-id={`more:${projectId}`}
           onClick={onLoadMore}
-          className="flex items-center gap-1.5 rounded-md py-1.5 pl-[30px] pr-2.5 text-left text-[11px] font-medium text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+          className="flex items-center gap-1.5 rounded-md py-1.5 pl-[30px] pr-2.5 text-left text-[11px] font-medium text-muted transition hover:bg-wash hover:text-foreground"
         >
           <ChevronDown className="size-3" />
           {t('workbench.sessionsLoadMore')}
@@ -451,7 +451,7 @@ const ProjectRow: React.FC<{
         data-flip-id={`project:${project.id}`}
         // The folder sits in the sidebar's icon column (the capability rows' icons);
         // the sessions below line up under the project's name.
-        className="group flex items-center gap-1.5 rounded-md py-1.5 pl-[13px] pr-2 transition hover:bg-foreground/[0.04]"
+        className="group flex items-center gap-1.5 rounded-md py-1.5 pl-[13px] pr-2 transition hover:bg-wash"
         title={project.folder_path}
         onContextMenu={(e) => {
           // Right-click opens the same menu as the ⋯ button (anchored to it).
@@ -513,7 +513,7 @@ const ProjectRow: React.FC<{
                   aria-label={t('workbench.projectActions')}
                   className={clsx(
                     'flex size-5 shrink-0 items-center justify-center rounded-md text-muted transition',
-                    'opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-foreground/[0.06]',
+                    'opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-wash',
                     menuOpen && 'opacity-100',
                   )}
                 >
@@ -532,7 +532,7 @@ const ProjectRow: React.FC<{
                     setRenaming(true);
                     setRenameDraft(project.display_name);
                   }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash"
                 >
                   <Pencil className="size-3 text-muted" />
                   {t('workbench.projectRename')}
@@ -543,7 +543,7 @@ const ProjectRow: React.FC<{
                     setMenuOpen(false);
                     setSettingsOpen(true);
                   }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash"
                 >
                   <Settings2 className="size-3 text-muted" />
                   {t('workbench.projectSettings')}
@@ -555,7 +555,7 @@ const ProjectRow: React.FC<{
                       setMenuOpen(false);
                       setAgentsMdOpen(true);
                     }}
-                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash"
                   >
                     <FileText className="size-3 text-muted" />
                     {t('workbench.projectEditAgents')}
@@ -570,7 +570,7 @@ const ProjectRow: React.FC<{
                       // the explorer root only). Desktop-only surface, so the floating window is right.
                       wm.openApp('editor', { title: project.display_name, params: { rootDir: project.folder_path } });
                     }}
-                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash"
                   >
                     <CodeXml className="size-3 text-muted" />
                     {t('workbench.projectOpenInEditor')}
@@ -602,7 +602,7 @@ const ProjectRow: React.FC<{
               disabled={creatingSession}
               className={clsx(
                 'flex size-5 shrink-0 items-center justify-center rounded-md text-muted transition',
-                'opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-foreground/[0.06]',
+                'opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-wash',
                 creatingSession && 'opacity-100',
               )}
             >
@@ -813,7 +813,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     // for sessions / projects so the two reads stay distinct.
                     isActive
                       ? 'border-cyan/40 bg-cyan-soft'
-                      : 'border-transparent hover:bg-foreground/[0.04]',
+                      : 'border-transparent hover:bg-wash',
                   )
                 }
               >
