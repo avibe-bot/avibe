@@ -172,8 +172,8 @@ running Harness Watch and scheduled Task runs. If the controller cannot answer,
 the endpoint fails closed and requires explicit interruption confirmation.
 
 The existing Member-level `POST /api/upgrade` remains the non-desktop packaged
-installer. A new Workbench may send optional `confirm_interrupt: false` and
-receive the same `confirmation_required` response before retrying with `true`.
+installer. A client may send optional `confirm_interrupt: false` and receive
+the same `confirmation_required` response before retrying with `true`.
 An omitted field preserves the legacy behavior and response shape so an old
 cached Workbench continues to upgrade. This PR does not change the endpoint's
 permission level.
@@ -211,8 +211,12 @@ fails fast as `requires_host` when the installation needs elevation.
 
 For `managed_by: "desktop"` without a Tauri bridge:
 
-- Members and Owners see **Update on host**, confirmation, interruption counts,
-  delivery mode, progress, restart/reconnect state, and the terminal result.
+- Members and Owners see **Update on host**, delivery mode, progress,
+  restart/reconnect state, and the terminal result.
+- Clicking an update action is the decision to update and to interrupt active
+  work, so the Workbench sends `confirm_interrupt: true` with that click and
+  shows no confirmation step (owner decision, 2026-11-10). This applies to
+  both endpoints.
 - Editors and Viewers see guidance to update in the desktop app on the host and
   no mutation control.
 - During restart, the browser retries `/api/version` and confirms completion by
@@ -225,7 +229,7 @@ older shells hide the setting when the capability is absent.
 For non-desktop builds:
 
 - a package install keeps the existing Install action and `/api/upgrade` path;
-- a new Workbench shares interruption confirmation and the existing
+- Install sends the request at once, as above, and keeps the existing
   restart/reconnect reload behavior;
 - an old Workbench remains valid because confirmation is opt-in;
 - a source checkout keeps the existing revision refresh and has no install

@@ -2,7 +2,6 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   useApi,
-  type UpdateInterruptionCounts,
   type VersionInfo,
   type UpgradeResult,
 } from '../context/ApiContext';
@@ -28,7 +27,6 @@ import {
 } from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 
 // Dev / regression builds carry long versions like
@@ -84,12 +82,6 @@ function releaseNotesUrl(version: string): string {
   return `https://github.com/avibe-bot/avibe/releases/tag/${encodeURIComponent(tag)}`;
 }
 
-type RemoteUpdateConfirmation = {
-  target: string;
-  delivery: 'prompt' | 'install' | 'runtime';
-  counts?: UpdateInterruptionCounts;
-};
-
 const REMOTE_RECONNECT_POLL_MS = 2000;
 const REMOTE_RECONNECT_TIMEOUT_MS = 120_000;
 const REMOTE_REQUEST_TIMEOUT_MS = 35 * 60_000;
@@ -113,7 +105,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [upgrading, setUpgrading] = React.useState(false);
   const [restarting, setRestarting] = React.useState(false);
   const [upgradeResult, setUpgradeResult] = React.useState<UpgradeResult | null>(null);
-  const [remoteConfirmation, setRemoteConfirmation] = React.useState<RemoteUpdateConfirmation | null>(null);
   const [remoteRequesting, setRemoteRequesting] = React.useState(false);
   const [remoteRequestError, setRemoteRequestError] = React.useState<string | null>(null);
   const [remoteUpdateTimedOut, setRemoteUpdateTimedOut] = React.useState(false);
@@ -335,18 +326,61 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       }
       return;
     }
-    if (!capabilities.can_manage_instance || (isDesktopManaged && !canRequestRemoteUpdate)) return;
+    if (!capabilities.can_manage_instance) return;
+    // Clicking Update is the decision to update, interruption included: the
+    // request carries that consent, so the server's active-work check never
+    // asks a second time.
+    const options = { confirmInterrupt: true };
+    if (!isDesktopManaged) {
+      if (upgrading) return;
+      setUpgrading(true);
+      setUpgradeResult(null);
+      try {
+        const result = await api.doUpgrade(options);
+        setUpgradeResult(result);
+        if (result.ok && result.restarting) {
+          setRestarting(true);
+          scheduleUpgradeReload(() => window.location.reload());
+        } else if (result.ok) {
+          void checkVersion(true);
+        }
+      } catch (error) {
+        setUpgradeResult({ ok: false, message: String(error), output: null, restarting: false });
+      } finally {
+        setUpgrading(false);
+      }
+      return;
+    }
+    if (!canRequestRemoteUpdate || remoteRequesting) return;
     // Preserve the exact manifest target on the wire; normalization is display-only.
     const target = versionInfo?.latest;
     if (!target) return;
+    setRemoteRequesting(true);
     setRemoteRequestError(null);
-    setIsPopupOpen(false);
-    setRemoteConfirmation({
-      target,
-      delivery: isDesktopManaged
-        ? versionInfo?.remote_install_allowed === true ? 'install' : 'prompt'
-        : 'runtime',
-    });
+    try {
+      const result = await api.requestDesktopUpdate(target, options);
+      if (!result.ok) {
+        setRemoteRequestError(result.error);
+        if (result.error === 'update_in_progress') void checkVersion(true);
+      } else {
+        setRemoteDelivery(result.delivery);
+        setRemoteUpdateTimedOut(false);
+        // Keep tracking this receipt even if the host disconnects before its
+        // next version response. An acknowledgement is not installation success.
+        setVersionInfo((previous) => previous && ({
+          ...previous,
+          remote_request: {
+            request_id: result.request_id, target,
+            phase: 'acknowledged', progress: null, error_code: null,
+            updated_at: new Date().toISOString(),
+          },
+        }));
+      }
+    } catch {
+      setRemoteRequestError('request_failed');
+    } finally {
+      setRemoteRequesting(false);
+    }
   };
 
   const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
@@ -430,61 +464,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const handleBadgeClick = () => {
     if (inDesktopShell && desktopUpdaterStatus !== 'available') {
       window.location.href = 'avibe://updates';
-    }
-  };
-
-  const submitRemoteUpdateRequest = async () => {
-    if (!remoteConfirmation || !capabilities.can_manage_instance || remoteRequesting) return;
-    const confirmation = remoteConfirmation;
-    setRemoteRequesting(true);
-    setRemoteRequestError(null);
-    try {
-      const options = { confirmInterrupt: Boolean(confirmation.counts) };
-      if (confirmation.delivery === 'runtime') {
-        // Old clients can still omit confirmation. New clients explicitly opt in.
-        const result = await api.doUpgrade(options);
-        if (result.error === 'confirmation_required') {
-          setRemoteConfirmation({ ...confirmation, counts: result.counts });
-          return;
-        }
-        setUpgradeResult(result);
-        if (result.ok && result.restarting) {
-          setRestarting(true);
-          scheduleUpgradeReload(() => window.location.reload());
-        } else if (result.ok) {
-          void checkVersion(true);
-        }
-      } else {
-        if (!isDesktopManaged || desktopActions) return;
-        const result = await api.requestDesktopUpdate(confirmation.target, options);
-        if (!result.ok) {
-          if (result.error === 'confirmation_required') {
-            setRemoteConfirmation({ ...confirmation, counts: result.counts });
-            return;
-          }
-          setRemoteRequestError(result.error);
-          if (result.error === 'update_in_progress') void checkVersion(true);
-        } else {
-          setRemoteDelivery(result.delivery);
-          setRemoteUpdateTimedOut(false);
-          // Keep tracking this receipt even if the host disconnects before its
-          // next version response. An acknowledgement is not installation success.
-          setVersionInfo((previous) => previous && ({
-            ...previous,
-            remote_request: {
-              request_id: result.request_id, target: confirmation.target,
-              phase: 'acknowledged', progress: null, error_code: null,
-              updated_at: new Date().toISOString(),
-            },
-          }));
-        }
-      }
-      setRemoteConfirmation(null);
-      setIsPopupOpen(true);
-    } catch {
-      setRemoteRequestError('request_failed');
-    } finally {
-      setRemoteRequesting(false);
     }
   };
 
@@ -579,7 +558,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           : t('dashboard.desktopRemoteUpdateError');
 
   return (
-    <>
     <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
@@ -723,7 +701,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   )}
                 </div>
               )}
-              {remoteRequestError && !remoteConfirmation && (
+              {remoteRequestError && (
                 <p role="alert" className="text-sm text-destructive-ink">{remoteErrorText}</p>
               )}
 
@@ -889,61 +867,5 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         )}
       </div>
     </Popover>
-
-    <Dialog
-      open={remoteConfirmation !== null && capabilities.can_manage_instance}
-      onOpenChange={(open) => {
-        if (!open && !remoteRequesting) setRemoteConfirmation(null);
-      }}
-    >
-      <DialogContent className="max-w-md" closeLabel={t('common.close')}>
-        <DialogHeader>
-          <DialogTitle>{t('dashboard.desktopRemoteUpdateConfirmTitle', {
-            target: remoteConfirmation?.target ?? latestVersion ?? '',
-          })}</DialogTitle>
-          <DialogDescription>
-            {t('dashboard.desktopRemoteUpdateConfirmDescription', {
-              delivery: remoteConfirmation?.delivery === 'runtime'
-                ? t('dashboard.runtimeUpdateDelivery')
-                : remoteConfirmation?.delivery === 'install'
-                ? t('dashboard.desktopRemoteUpdateDeliveryInstall')
-                : t('dashboard.desktopRemoteUpdateDeliveryPrompt'),
-            })}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2 text-sm text-muted">
-          <p>{remoteConfirmation?.counts
-            ? t('dashboard.desktopRemoteUpdateInterruptions', remoteConfirmation.counts)
-            : t('dashboard.desktopRemoteUpdateCheckWork')}</p>
-          {remoteConfirmation?.counts?.unknown && <p>{t('dashboard.desktopRemoteUpdateUnknownWork')}</p>}
-          <p>{t('dashboard.updateInterruptWarning')}</p>
-          {remoteRequestError && <p role="alert" className="text-destructive-ink">{t('dashboard.desktopRemoteUpdateError')}</p>}
-
-        </div>
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => setRemoteConfirmation(null)}
-            disabled={remoteRequesting}
-          >
-            {t('common.cancel')}
-          </Button>
-          <Button
-            type="button"
-            variant="brand"
-            onClick={() => void submitRemoteUpdateRequest()}
-            disabled={remoteRequesting}
-          >
-            {remoteRequesting
-              ? t('dashboard.desktopRemoteUpdateRequesting')
-              : remoteConfirmation?.counts
-                ? t('dashboard.desktopRemoteUpdateConfirmInterrupt')
-                : t('dashboard.desktopRemoteUpdateConfirm')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-    </>
   );
 };
