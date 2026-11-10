@@ -41,11 +41,11 @@ const part = (name: string, title: string, height: number, node: ReactNode, onPh
 
 const designFrames = frames([
   part('create-generate', '添加密钥 · 签名密钥选 Solana · 生成', 260, <SolanaKeyBuilder source="generate" />),
-  part('create-import', '添加密钥 · 签名密钥选 Solana · 导入', 360, <SolanaKeyBuilder source="import" />),
-  part('create-import-failed', '添加密钥 · Solana 导入 · avault 没有导入粘贴的内容', 360, <SolanaKeyBuilder source="import" importText="[12, 34, 56]" importFailed />),
+  part('create-import', '添加密钥 · 签名密钥选 Solana · 导入', 330, <SolanaKeyBuilder source="import" />),
+  part('create-import-failed', '添加密钥 · Solana 导入 · avault 没有导入粘贴的内容', 330, <SolanaKeyBuilder source="import" importText="[12, 34, 56]" importFailed />),
   part('create-protected', '添加密钥 · 选了保护档的 Solana 密钥（保护档上线前）', 120, <SolanaProtectedNotice />),
   part('create-generate-phone', '添加密钥 · Solana · 生成 · 手机', 280, <SolanaKeyBuilder source="generate" />, true),
-  part('create-import-phone', '添加密钥 · Solana · 导入 · 手机', 400, <SolanaKeyBuilder source="import" />, true),
+  part('create-import-phone', '添加密钥 · Solana · 导入 · 手机', 360, <SolanaKeyBuilder source="import" />, true),
   part('address', '密钥列表 · Solana 密钥只有这一行地址', 80, <SigningAddressRow label="Solana" value={address} />),
   part('address-phone', '密钥列表 · Solana 地址 · 手机', 80, <SigningAddressRow label="Solana" value={address} />, true),
   part('approval', '审批 · 标准档 Solana 密钥签名 · 摘要（详情收起）', 230, <SolanaSignRows address={address} session={session} messageHex={transfer} />),

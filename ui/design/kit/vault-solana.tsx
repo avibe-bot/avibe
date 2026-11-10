@@ -22,6 +22,7 @@ const noop = () => {};
 /**
  * The Add dialog's signing-key builder with Solana chosen. It sits where the secp256k1 builder sits
  * today, below Name. avault creates or checks the key, so nothing here shows an address before saving.
+ * A generated key never reaches this browser; an imported one is pasted here and encrypted for avault.
  */
 export function SolanaKeyBuilder({ source, importText = '', importFailed = false }: {
   source: 'generate' | 'import';
@@ -50,12 +51,15 @@ export function SolanaKeyBuilder({ source, importText = '', importFailed = false
       </div>
 
       <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2 p-3 shadow-elevation-0">
-        <span className="text-xs text-muted">
-          {d(
-            'Solana 密钥由本机 avault 生成并就地封存，Avibe 和浏览器只会看到它的地址。',
-            'avault creates the Solana key on this computer and seals it there. Avibe and this browser only see its address.',
-          )}
-        </span>
+        {/* True of a generated key only: an imported key is pasted here, so this browser reads it. */}
+        {source === 'generate' ? (
+          <span className="text-xs text-muted">
+            {d(
+              'Solana 密钥由本机 avault 生成并就地封存，Avibe 和浏览器只会看到它的地址。',
+              'avault creates the Solana key on this computer and seals it there. Avibe and this browser only see its address.',
+            )}
+          </span>
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
           {(['generate', 'import'] as const).map((src) => (
             <Button key={src} type="button" size="sm" variant={source === src ? 'secondary' : 'ghost'}>
