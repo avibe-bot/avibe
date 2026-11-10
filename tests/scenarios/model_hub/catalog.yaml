@@ -2861,11 +2861,13 @@ scenarios:
     missing_layer: e2e
     test: tests/test_model_hub_engine_channel.py::test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_its_named_safe_fallback
   - id: MH-ENGINE-CHANNEL-005
-    name: An Avibe release that ships no channel key makes no channel request, runs no verifier and selects nothing
+    name: An Avibe release that ships no readable channel key makes no channel request, runs no verifier and adopts nothing, and still blocks an engine this machine recorded as withdrawn
     status: covered
     kind: guard
     layer: unit
-    test: tests/test_model_hub_engine_channel_client.py::test_this_avibe_ships_no_channel_key_so_the_channel_is_off
+    test:
+      - tests/test_model_hub_engine_channel_client.py::test_this_avibe_ships_no_channel_key_so_the_channel_is_off
+      - tests/test_model_hub_engine_channel_client.py::test_a_recorded_withdrawal_stays_in_force_when_this_avibe_has_no_readable_key
   - id: MH-ENGINE-CHANNEL-006
     name: A manifest override opts out of the channel, and offline mode adopts nothing while a recorded withdrawal still applies
     status: partial
@@ -2874,6 +2876,7 @@ scenarios:
     missing_layer: e2e
     test:
       - tests/test_model_hub_engine_channel_client.py::test_an_engine_manifest_override_opts_out_of_the_channel
+      - tests/test_model_hub_engine_channel_client.py::test_a_manifest_override_leaves_the_channel_even_with_a_recorded_withdrawal
       - tests/test_model_hub_engine_channel_client.py::test_offline_mode_uses_no_network_and_keeps_recorded_withdrawals_in_force
   - id: MH-ENGINE-CHANNEL-007
     name: The index signature is checked with avault's keyless verify alone, and anything but exit 0 with a true boolean is a failed verification

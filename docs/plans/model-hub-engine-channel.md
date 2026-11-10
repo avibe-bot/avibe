@@ -407,8 +407,9 @@ sections above left open. Release-side procedure is in `docs/release.md`.
   recovery now cover every release the index lists.
 
 **Uncommissioned by default.** `engine_channel_roots.json` ships with no root.
-A client with no root makes no channel request and runs no verifier; every
-publication step stops before the network, the bucket, or avault.
+A client with no root makes no channel request, runs no verifier and adopts
+nothing; every publication step stops before the network, the bucket, or
+avault. A missing or damaged roots document counts as no root.
 
 **Wire details fixed by the client.**
 
@@ -463,14 +464,18 @@ no published release (a source checkout, a dev or local version) cannot prove
 any fallback compatible, so a withdrawn engine there is `blocked`, never
 kept; with an engine nobody withdrew it simply adopts nothing.
 
-If the recorded index cannot be authenticated when it is read, for example
-because avault is missing, nothing is adopted from it. If the recorded state
-names the engine in effect as withdrawn, the result is `blocked`: the engine
-is not kept, and no fallback is taken from an index that could not be
-checked.
+If the recorded index cannot be authenticated when it is read, nothing is
+adopted from it. That covers avault being missing or too old, and an Avibe
+build with no readable root: a downgrade to a release that ships none, or a
+roots document that is missing or damaged. If the recorded state names the
+engine in effect as withdrawn, the result is `blocked`: the engine is not
+kept, and no fallback is taken from an index that could not be checked. The
+keyless case reads the record and nothing else: no request, no verifier. A
+machine with no record, which is every machine before commissioning, keeps
+its engine and creates no state.
 
 A manifest override is the one documented way out of the channel, withdrawals
-included.
+included. It takes precedence whether or not this Avibe ships a root.
 
 **Publication.** Desired state is a ledger on the signer host, not the
 published index. It holds the next sequence, the exact payload last

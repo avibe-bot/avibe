@@ -256,6 +256,76 @@ def test_an_engine_this_machine_recorded_as_withdrawn_is_not_kept_when_the_index
     assert channel.resolve(current=BUNDLED).action is ResolutionAction.KEEP
 
 
+def _damaged_roots(root: Path) -> Path:
+    path = root / "roots.json"
+    path.write_text('{"schema_version": 1, "sequence_floor": 0, "roots": [{"key_id": "k"}]}', encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "keyless",
+    [
+        # A downgrade to an Avibe release that ships no key.
+        lambda root, monkeypatch: {"roots": TrustRoots()},
+        # The shipped document is damaged, or missing from the installation.
+        lambda root, monkeypatch: monkeypatch.setattr(engine_channel, "SHIPPED_TRUST_ROOTS_PATH", _damaged_roots(root)),
+        lambda root, monkeypatch: monkeypatch.setattr(engine_channel, "SHIPPED_TRUST_ROOTS_PATH", root / "absent.json"),
+    ],
+    ids=["no-shipped-key", "damaged-roots", "missing-roots"],
+)
+def test_a_recorded_withdrawal_stays_in_force_when_this_avibe_has_no_readable_key(tmp_path, monkeypatch, keyless) -> None:
+    """MH-ENGINE-CHANNEL-005: losing the key stops adoption; it does not bring a withdrawn engine back."""
+
+    signer = Signer()
+    fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    recorded, _ = _channel(tmp_path, signer, _index(signer, 5, revoked=[tombstone(NEWER, fallback)]))
+    assert recorded.refresh().state == "accepted"
+    assert recorded.resolve(current=NEWER).action is ResolutionAction.WITHDRAW
+    state_path = tmp_path / "engine" / "channel" / "state.json"
+    before = state_path.read_bytes()
+    verifier = LocalVerifier()
+    channel, fetch = _channel(tmp_path, None, _index(signer, 6), verifier=verifier, **(keyless(tmp_path, monkeypatch) or {}))
+
+    status = channel.refresh()
+    blocked = channel.resolve(current=NEWER)
+
+    assert (status.state, status.reason) == ("uncommissioned", "uncommissioned")
+    # No key can authenticate the record, so no fallback is taken from it and nothing may be downloaded.
+    assert (blocked.action, blocked.reason, blocked.target) == (ResolutionAction.BLOCKED, "uncommissioned", None)
+    assert blocked.tombstone.asset_release_tag == NEWER and blocked.download_authorized is False
+    # An engine with no recorded withdrawal is left alone, as on a machine that never had a channel.
+    kept = channel.resolve(current=BUNDLED)
+    assert (kept.action, kept.reason) == (ResolutionAction.KEEP, "uncommissioned")
+    assert channel.snapshot() is None
+    assert fetch.calls == 0 and verifier.calls == 0
+    assert state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("commissioned", [True, False], ids=["shipped-key", "no-shipped-key"])
+def test_a_manifest_override_leaves_the_channel_even_with_a_recorded_withdrawal(tmp_path, commissioned) -> None:
+    """MH-ENGINE-CHANNEL-006: the override is the one authorized way out, whatever keys this Avibe ships."""
+
+    signer = Signer()
+    fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    recorded, _ = _channel(tmp_path, signer, _index(signer, 5, revoked=[tombstone(NEWER, fallback)]))
+    assert recorded.refresh().state == "accepted"
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "engine", manifest_path=tmp_path / "override.json")
+    verifier = LocalVerifier()
+    roots = signer.roots() if commissioned else TrustRoots()
+    channel, fetch = _channel(tmp_path, None, _index(signer, 6), manager=manager, roots=roots, verifier=verifier)
+
+    status = channel.refresh()
+    resolution = channel.resolve(current=NEWER)
+
+    assert (status.state, status.reason) == ("opted_out", "manifest_override")
+    assert (resolution.action, resolution.reason, resolution.tombstone) == (
+        ResolutionAction.KEEP,
+        "manifest_override",
+        None,
+    )
+    assert fetch.calls == 0 and verifier.calls == 0
+
+
 def test_a_withdrawal_applies_whatever_else_would_stop_adoption(tmp_path, monkeypatch) -> None:
     signer = Signer()
     fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"

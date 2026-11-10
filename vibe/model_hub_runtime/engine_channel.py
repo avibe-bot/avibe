@@ -9,6 +9,11 @@ questions and changes nothing else:
 - ``snapshot()``: the last accepted index, re-authenticated from disk;
 - ``resolve()``: what that index means for the engine in effect.
 
+A withdrawal this machine recorded outlives the ability to check it. When the
+recorded index cannot be authenticated, because avault cannot run or because
+this Avibe build ships no readable key, an engine recorded as withdrawn is
+blocked, not kept. Only a manifest override leaves the channel entirely.
+
 Nothing in Avibe calls this yet. Adoption, activation, scheduling and recovery
 belong to the engine lifecycle, which decides when to act on a resolution. A
 resolution is a decision, never an installed engine.
@@ -56,8 +61,10 @@ _FETCH_TIMEOUT_SECONDS = 15.0
 def shipped_trust_roots() -> TrustRoots:
     """The channel keys this Avibe release ships; none means no channel.
 
-    A missing or damaged document is the same as an empty one: the channel
-    stays off rather than trusting anything it cannot read.
+    A missing or damaged document is the same as an empty one: nothing is
+    downloaded, verified or adopted rather than trusting what cannot be read.
+    Withdrawals this machine already recorded stay in force either way
+    (``EngineChannel.resolve``).
     """
 
     try:
@@ -158,15 +165,16 @@ class EngineChannel:
     def opt_out_reason(self) -> str | None:
         """Why this installation does not take part in the channel, if it does not.
 
-        An Avibe release with no shipped key has no channel. An engine manifest
-        override, from a test or a local build, names the engine by itself and
-        opts out of every channel decision.
+        An engine manifest override, from a test or a local build, names the
+        engine by itself and opts out of every channel decision, whatever keys
+        this release ships. An Avibe release with no shipped key downloads,
+        verifies and adopts nothing.
         """
 
-        if not self.roots.commissioned:
-            return "uncommissioned"
         if self.manager.manifest_path is not None or self.manager.manifest_url:
             return "manifest_override"
+        if not self.roots.commissioned:
+            return "uncommissioned"
         return None
 
     def refresh(self) -> ChannelStatus:
@@ -226,14 +234,18 @@ class EngineChannel:
         """What the last accepted index means for the engine release in effect.
 
         ``current`` is that engine's asset release tag. Offline mode keeps
-        every recorded withdrawal in force and authorizes no download. A
-        manifest override is the one documented way out of the channel,
-        withdrawals included.
+        every recorded withdrawal in force and authorizes no download. So does
+        an Avibe build with no readable key, such as a downgrade to a release
+        that ships none: it reads the record and nothing else. A manifest
+        override is the one documented way out of the channel, withdrawals
+        included.
         """
 
         reason = self.opt_out_reason()
-        if reason is not None:
+        if reason == "manifest_override":
             return Resolution(ResolutionAction.KEEP, reason)
+        if reason is not None:
+            return self._unverifiable(current, reason)
         try:
             snapshot = self.snapshot()
         except ChannelError as exc:
@@ -255,11 +267,14 @@ class EngineChannel:
         )
 
     def _unverifiable(self, current: str, reason: str) -> Resolution:
-        """The decision when the recorded index cannot be authenticated right now.
+        """The decision when the recorded index cannot be authenticated.
 
-        Nothing can be adopted from it. But if this machine already recorded
-        that the engine in effect was withdrawn, that engine is not kept: with
-        no index to name a safe fallback from, Model Hub is blocked.
+        Either avault cannot verify it right now, or this Avibe build has no
+        key to verify it with. Nothing can be adopted from it. But if this
+        machine already recorded that the engine in effect was withdrawn, that
+        engine is not kept: with no index to name a safe fallback from, Model
+        Hub is blocked. This reads the record only: no network, no verifier,
+        and nothing is created where no record exists.
         """
 
         try:
