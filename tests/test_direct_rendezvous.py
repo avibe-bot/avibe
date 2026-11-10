@@ -122,11 +122,12 @@ def test_offer_describes_the_endpoint_and_admits_the_client():
 
 def test_generation_changes_exactly_when_the_endpoint_or_its_addresses_change():
     rendezvous = DirectRendezvous(_Clock())
-    lan = DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",))
-    rendezvous.publish(lan)
+    addresses = ("192.168.1.20:51234", "[240e:b86:551:7700::1]:51234", "10.0.0.5:51234")
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, addresses))
     first = _offer(rendezvous)["generation"]
 
-    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234", "127.0.0.1:1")))
+    # The same set in another order, with a withheld address and a repeat.
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (*reversed(addresses), "127.0.0.1:1", addresses[0])))
     unchanged = _offer(rendezvous)["generation"]
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.7.7:51234",)))
     moved = _offer(rendezvous)["generation"]

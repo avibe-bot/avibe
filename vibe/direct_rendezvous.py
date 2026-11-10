@@ -35,6 +35,7 @@ _SOCKET_ADDRESS_RE = re.compile(r"(?:\[(?P<v6>[0-9A-Fa-f:.]+)\]|(?P<v4>[0-9.]+))
 
 _LAN_NETWORKS_V4 = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 _UNIQUE_LOCAL_V6 = ipaddress.ip_network("fc00::/7")
+_KIND_ORDER = {"lan": 0, "ipv6": 1}
 
 
 def is_endpoint_id(value: Any) -> bool:
@@ -122,7 +123,10 @@ class DirectRendezvous:
                 candidate = classify_address(address)
                 if candidate is not None:
                     seen.setdefault(candidate["address"], candidate)
-            candidates = tuple(seen.values())[:_MAX_ADDRESSES]
+            # One canonical order, so the order a transport happens to list
+            # its sockets in is not a change of address set.
+            ordered = sorted(seen.values(), key=lambda item: (_KIND_ORDER[item["kind"]], item["address"]))
+            candidates = tuple(ordered[:_MAX_ADDRESSES])
         with self._lock:
             previous_id = self._endpoint.endpoint_id if self._endpoint is not None else None
             current_id = endpoint.endpoint_id if endpoint is not None else None
