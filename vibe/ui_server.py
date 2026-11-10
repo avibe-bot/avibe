@@ -85,6 +85,7 @@ from modules.agents.catalog import (
     is_agent_backend,
     supports_runtime_refresh,
 )
+from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -828,7 +829,28 @@ def _has_forwarded_metadata() -> bool:
     return _has_cloudflare_forwarded_metadata()
 
 
+def _is_direct_ingress_request() -> bool:
+    """The request entered through the strict direct ingress (``vibe/direct_ingress.py``).
+
+    Such a request came from a device on the network, relayed by this process
+    over loopback. It is remote by construction: no local, proxy, setup-host,
+    or Docker trust path may apply to it, whatever its headers say.
+    """
+
+    return getattr(request, "direct_ingress", None) is not None
+
+
+def _direct_ingress_host_is_current(config: V2Config | None) -> bool:
+    """The ingress hostname is still this instance's enabled managed hostname."""
+
+    if config is None or not config.remote_access.vibe_cloud.enabled:
+        return False
+    return _normalized_host(request.host) == _remote_access_public_host(config)
+
+
 def _is_loopback_origin_proxy_request() -> bool:
+    if _is_direct_ingress_request():
+        return False
     if not _is_loopback_peer() or not _is_loopback_host(request.host):
         return False
     if _has_trusted_forwarded_metadata():
@@ -1432,6 +1454,8 @@ def _is_tunnel_wildcard_bind(config: V2Config) -> bool:
 
 
 def _is_local_request(config: V2Config | None = None) -> bool:
+    if _is_direct_ingress_request():
+        return False
     if _has_untrusted_forwarded_metadata():
         return False
     if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is None:
@@ -2415,6 +2439,11 @@ def _auth_client_id() -> str:
     otherwise set/rotate forwarded headers to dodge the limit, so for such peers
     we key on the real connecting address instead.
     """
+    direct_ingress = getattr(request, "direct_ingress", None)
+    if direct_ingress is not None:
+        # The socket peer is this process's own relay; key on the transport peer.
+        return f"direct:{direct_ingress.get('peer') or 'unknown'}"
+
     if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is not None:
         forwarded_client = _trusted_forwarded_client_address()
         if forwarded_client is not None:
@@ -2484,6 +2513,11 @@ def reject_disabled_model_hub_api():
 @app.before_request
 def enforce_remote_access_cookie():
     config = _load_remote_access_config()
+    if _is_direct_ingress_request() and not _direct_ingress_host_is_current(config):
+        # The ingress serves one hostname. Once that is no longer this
+        # instance's enabled managed hostname, no route may answer for it,
+        # including the ones exempt from host validation below.
+        return jsonify({"ok": False, "error": "direct_ingress_host_mismatch"}), 421
     markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
         return None
@@ -4389,6 +4423,9 @@ def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_sch
 
 
 def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) -> bool:
+    if (getattr(websocket, "scope", None) or {}).get(DIRECT_INGRESS_SCOPE_KEY) is not None:
+        # Same rule as _is_direct_ingress_request: never local.
+        return False
     if _websocket_has_untrusted_forwarded_metadata(websocket):
         return False
     if _websocket_has_trusted_forwarded_metadata(websocket) and _websocket_trusted_forwarded_host(websocket) is None:
