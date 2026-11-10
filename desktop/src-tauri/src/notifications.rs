@@ -292,7 +292,10 @@ pub fn toggle(app: &AppHandle) {
     let notifications = app.state::<Notifications>();
     match notifications.toggle() {
         Ok(enabled) => publish_enabled(app, enabled),
-        Err(error) => eprintln!("{error}"),
+        Err(error) => {
+            eprintln!("{error}");
+            sync_native_menu(app, notifications.enabled());
+        }
     }
 }
 

@@ -538,8 +538,12 @@ only from the native locale catalog. A run banner's title names its source
 (`Project · Session`, the IM channel, or the task/watch name) from the run
 detail; those Runtime labels pass one sanitizer (`RunDetail::source`) that
 strips control, bidi, and zero-width formatting characters and bounds length,
-and the SSE payload itself is never shown. No notification capability is
-granted to web content. OS notification permissions and Do Not Disturb remain OS-managed.
+and the SSE payload itself is never shown. The Workbench on the local Runtime
+origin may read and set the persisted preference through
+`desktop_notifications_state` and `desktop_notifications_set_enabled`. Those
+commands do not show, schedule, or deliver OS notifications. The SSE connection,
+native catalog, and `tauri-plugin-notification` remain shell-owned. OS
+notification permissions and Do Not Disturb remain OS-managed.
 v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.
