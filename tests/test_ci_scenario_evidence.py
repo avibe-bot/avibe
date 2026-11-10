@@ -18,6 +18,7 @@ from scripts.ci_scope import make_plan
 from scripts.ci_scenario_evidence import (
     LINT_WORKFLOW,
     RELEASE_SELECTIONS,
+    RELEASE_SHARD_VERSIONS,
     RELEASE_WORKFLOWS,
     UNIT_SHARD_ARGS,
     UNIT_SHARD_JOB,
@@ -122,6 +123,17 @@ XFAILED = '<skipped type="pytest.xfail" message="known gap"/>'
 FAILED = '<failure message="assertion failed"/>'
 
 
+def _junit(report: dict[str, str], again: str = "") -> str:
+    """A JUnit report with one record for each case, and a second for ``again``."""
+
+    cases = "".join(
+        f'<testcase classname="{nodeid.partition("::")[0][:-3].replace("/", ".")}" '
+        f'name="{nodeid.partition("::")[2]}">{result}</testcase>'
+        for nodeid, result in [*report.items(), *((again, report[again]) for _ in [again] if again)]
+    )
+    return f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
+
+
 @dataclass
 class _ShardedRun:
     """A release run shared out over two shard jobs: everything its join reads, before it is written.
@@ -197,12 +209,7 @@ class _ShardedRun:
         evidence.mkdir()
         for job, report in self.reports.items():
             if report is not None:
-                cases = "".join(
-                    f'<testcase classname="{nodeid.partition("::")[0][:-3].replace("/", ".")}" '
-                    f'name="{nodeid.partition("::")[2]}">{result}</testcase>'
-                    for nodeid, result in report.items()
-                )
-                self.extra_evidence[f"{job}/junit.xml"] = f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
+                self.extra_evidence.setdefault(f"{job}/junit.xml", _junit(report))
         for job, record in self.provenance.items():
             if record is not None:
                 self.extra_evidence[f"{job}/provenance.json"] = record if isinstance(record, str) else json.dumps(record)
@@ -218,6 +225,7 @@ class _ShardedRun:
             source_sha="a" * 40,
             run_id="77",
             run_attempt="2",
+            version_names=("codex", "opencode", "engine"),
             expected_versions={"engine": "v1 sha256:abc"},
             scenario_root=scenarios,
         )
@@ -229,6 +237,11 @@ def _no_evidence(run: _ShardedRun, job: str) -> None:
 
 def _swapped_reports(run: _ShardedRun) -> None:
     run.reports["shard-a"], run.reports["shard-b"] = run.reports["shard-b"], run.reports["shard-a"]
+
+
+def _only_the_engine_named(run: _ShardedRun) -> None:
+    for record in run.provenance.values():
+        record["versions"] = {"engine": "v1 sha256:abc"}
 
 
 def _same_wrong_engine(run: _ShardedRun) -> None:
@@ -264,11 +277,21 @@ def _new_file_in_no_shard(run: _ShardedRun) -> None:
         ),
         pytest.param(lambda run: run.provenance.update({"shard-b": None}), "shard-b: could not read release shard provenance", id="no-provenance"),
         pytest.param(lambda run: run.provenance.update({"shard-b": "{"}), "shard-b: could not read release shard provenance", id="malformed-provenance"),
-        pytest.param(lambda run: run.provenance["shard-b"].update(versions={}), "shard-b: release shard provenance is incomplete", id="no-versions"),
+        pytest.param(lambda run: run.provenance["shard-b"].pop("versions"), "shard-b: release shard provenance is incomplete", id="no-versions"),
         pytest.param(
             lambda run: run.provenance["shard-b"]["versions"].update(codex=""),
-            "shard-b: release shard provenance is incomplete",
+            "shard-b: release shard provenance names no version of codex",
             id="blank-version",
+        ),
+        pytest.param(
+            _only_the_engine_named,
+            "shard-a: release shard provenance must name a version of exactly codex, engine, opencode, not engine",
+            id="both-shards-name-no-cli",
+        ),
+        pytest.param(
+            lambda run: run.provenance["shard-b"]["versions"].pop("opencode"),
+            "shard-b: release shard provenance must name a version of exactly codex, engine, opencode, not codex, engine",
+            id="version-recorded-by-one-shard-only",
         ),
         # Which run each shard belongs to, and what it ran against.
         pytest.param(lambda run: run.provenance["shard-b"].update(sha="b" * 40), "shard-b recorded sha bbbb", id="another-commit"),
@@ -282,11 +305,6 @@ def _new_file_in_no_shard(run: _ShardedRun) -> None:
             lambda run: run.provenance["shard-b"]["versions"].update(codex="codex-cli 1.2.4"),
             "shard-b and shard-a ran against different versions: codex 'codex-cli 1.2.4' != 'codex-cli 1.2.3'",
             id="cli-version-drifted-between-shards",
-        ),
-        pytest.param(
-            lambda run: run.provenance["shard-b"]["versions"].pop("opencode"),
-            "shard-b and shard-a ran against different versions: opencode None != '4.5.6'",
-            id="version-recorded-by-one-shard-only",
         ),
         pytest.param(_same_wrong_engine, "shard-a ran against engine 'v0 sha256:old', but this checkout pins 'v1 sha256:abc'", id="both-shards-off-the-pinned-engine"),
         # How the shards share the selection out.
@@ -306,6 +324,11 @@ def _new_file_in_no_shard(run: _ShardedRun) -> None:
         pytest.param(lambda run: run.reports["shard-b"].pop(B_REQUIRED), f"shard-b did not run 1 case(s) it selects: {B_REQUIRED}", id="required-case-not-run"),
         pytest.param(lambda run: run.reports["shard-b"].pop(B_OPTIONAL), f"shard-b did not run 1 case(s) it selects: {B_OPTIONAL}", id="other-case-not-run"),
         pytest.param(_swapped_reports, "shard-a reported 2 case(s) it does not select", id="reports-swapped"),
+        pytest.param(
+            lambda run: run.extra_evidence.update({"shard-b/junit.xml": _junit(run.reports["shard-b"], again=B_OPTIONAL)}),
+            f"shard-b: release JUnit report records {B_OPTIONAL} more than once",
+            id="case-reported-twice",
+        ),
         pytest.param(lambda run: run.reports["shard-b"].update({B_REQUIRED: SKIPPED}), f"{B_REQUIRED} did not pass in the release run", id="required-case-skipped"),
         pytest.param(lambda run: run.reports["shard-a"].update({A_REQUIRED: XFAILED}), f"{A_REQUIRED} did not pass in the release run", id="required-case-xfailed"),
         pytest.param(lambda run: run.reports["shard-a"].update({A_REQUIRED: FAILED}), f"{A_REQUIRED} did not pass in the release run", id="required-case-failed"),
@@ -549,6 +572,8 @@ def test_release_workflows_select_only_current_contracts() -> None:
         assert '--junitxml="$RUNNER_TEMP/model-hub-e2e-evidence/junit.xml"' in gate
     # What the shards are compared with is fixed in the checker, as the one-job command was written.
     assert RELEASE_SELECTIONS == {"model-hub-e2e.yml": ("-m", "e2e_model_hub", "tests/e2e")}
+    # So is what each shard must name: both agent CLIs, the SDK that carries Claude Code, and the engine.
+    assert RELEASE_SHARD_VERSIONS == {"model-hub-e2e.yml": ("codex", "opencode", "claude-agent-sdk", "model-hub-engine")}
     # The join is the last word: it waits for both shards and runs whatever they concluded.
     join = jobs["model-hub-e2e"]
     assert sorted(join["needs"]) == ["model-hub-e2e-remaining", "model-hub-e2e-wire-mock"] and join["if"] == "always()"

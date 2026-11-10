@@ -26,9 +26,10 @@ that shares its release selection out over several jobs ends in this join:
 ``<evidence-dir>/<job>`` holds each job's one JUnit report and its
 ``provenance.json``. The join passes only when those jobs, between them, ran
 every case of the workflow's entry in ``RELEASE_SELECTIONS`` exactly once in
-this run attempt, at this commit and against the same versions, and every
-covered case passed. The selection is fixed here, not passed by the workflow,
-so an edit to the shards cannot also shrink what they are compared with.
+this run attempt, at this commit and against the same version of everything
+its entry in ``RELEASE_SHARD_VERSIONS`` names, and every covered case passed.
+Both are fixed here, not passed by the workflow, so an edit to the shards
+cannot also shrink what they are compared with or what they must name.
 """
 
 from __future__ import annotations
@@ -54,6 +55,8 @@ LINT_WORKFLOW = "lint.yml"
 RELEASE_WORKFLOWS = ("model-hub-e2e.yml", "publish.yml")
 # The whole selection a release workflow owes, however its jobs share it out.
 RELEASE_SELECTIONS = {"model-hub-e2e.yml": ("-m", "e2e_model_hub", "tests/e2e")}
+# What each of its shards must name a version of: the agent CLIs it installed and the engine it ran.
+RELEASE_SHARD_VERSIONS = {"model-hub-e2e.yml": ("codex", "opencode", "claude-agent-sdk", "model-hub-engine")}
 # What scripts/ci_unit_tests.sh runs: every test file outside tests/e2e, without the integration marker.
 UNIT_SHARD_ARGS = ("-m", "not integration", "--ignore=tests/e2e", "tests")
 # The launchers that run it: the serial runner, or its concurrent lanes on one runner.
@@ -224,7 +227,8 @@ def read_release_report(junit_dir: Path, repo_root: Path = REPO_ROOT) -> dict[st
             outcome = ("skipped", skipped.get("message", "") or skipped.get("type", ""))
         else:
             outcome = ("passed", "")
-        if nodeid in outcomes and outcomes[nodeid] != outcome:
+        # One record a case: pytest writes a second only for a failure in the call and another in teardown.
+        if nodeid in outcomes:
             raise ReleaseEvidenceError(f"release JUnit report records {nodeid} more than once")
         outcomes[nodeid] = outcome
 
@@ -429,8 +433,8 @@ def release_shards(workflow: Path, pytest_root: Path, selection: list[str]) -> d
     return shards
 
 
-def _read_provenance(shard_dir: Path) -> dict:
-    """A shard's own record of its commit, run, attempt and the versions it ran against."""
+def _read_provenance(shard_dir: Path, version_names: Iterable[str]) -> dict:
+    """A shard's own record of its commit, run, attempt and a version for each of ``version_names``."""
 
     path = shard_dir / PROVENANCE
     try:
@@ -438,11 +442,19 @@ def _read_provenance(shard_dir: Path) -> dict:
     except (OSError, ValueError) as exc:
         raise ReleaseEvidenceError(f"could not read release shard provenance {path}: {exc}") from exc
     versions = record.get("versions") if isinstance(record, dict) else None
-    named = isinstance(versions, dict) and versions and all(
-        isinstance(value, str) and value.strip() for value in versions.values()
-    )
-    if not named or not all(isinstance(record.get(key), str) and record[key] for key in ("sha", "run_id", "run_attempt")):
+    if not isinstance(versions, dict) or not all(
+        isinstance(record.get(key), str) and record[key] for key in ("sha", "run_id", "run_attempt")
+    ):
         raise ReleaseEvidenceError(f"release shard provenance is incomplete: {path}")
+    names = sorted(version_names)
+    if sorted(versions) != names:
+        raise ReleaseEvidenceError(
+            f"release shard provenance must name a version of exactly {', '.join(names)}, "
+            f"not {', '.join(sorted(versions)) or 'nothing'}: {path}"
+        )
+    blank = [name for name in names if not (isinstance(versions[name], str) and versions[name].strip())]
+    if blank:
+        raise ReleaseEvidenceError(f"release shard provenance names no version of {', '.join(blank)}: {path}")
     return record
 
 
@@ -456,6 +468,7 @@ def check_release_join(
     source_sha: str,
     run_id: str,
     run_attempt: str,
+    version_names: Iterable[str],
     expected_versions: dict[str, str] | None = None,
     scenario_root: Path = SCENARIO_ROOT,
 ) -> dict[str, list[str]]:
@@ -464,9 +477,9 @@ def check_release_join(
     Every job that runs a pytest command must be one the join waited for and must
     have succeeded. Each must have left, under ``evidence_dir/<job>``, one JUnit
     report holding exactly the cases its command selects, none failed, and a
-    provenance record naming this commit, run and attempt, the same versions as
-    the other shards, and each of ``expected_versions``: what the join's own
-    checkout pins. The shards must share ``selection`` out exactly, and every
+    provenance record naming this commit, run and attempt, a version of exactly
+    ``version_names`` that is the same as the other shards', and each of
+    ``expected_versions``: what the join's own checkout pins. The shards must share ``selection`` out exactly, and every
     covered case in it must have passed; any other case may skip or xfail, as in
     one job. Returns each shard's cases.
     """
@@ -499,7 +512,7 @@ def check_release_join(
     for job in jobs:
         try:
             reports[job] = read_release_report(evidence_dir / job, pytest_root)
-            provenance[job] = _read_provenance(evidence_dir / job)
+            provenance[job] = _read_provenance(evidence_dir / job, version_names)
         except ReleaseEvidenceError as exc:
             problems.append(f"{job}: {exc}")
     for job, record in provenance.items():
@@ -512,9 +525,9 @@ def check_release_join(
                 problems.append(f"{job} ran against {name} {versions.get(name)!r}, but this checkout pins {expected!r}")
         first, first_versions = next((other, found["versions"]) for other, found in provenance.items())
         differing = sorted(
-            f"{name} {versions.get(name)!r} != {first_versions.get(name)!r}"
-            for name in set(versions) | set(first_versions)
-            if versions.get(name) != first_versions.get(name)
+            f"{name} {version!r} != {first_versions[name]!r}"
+            for name, version in versions.items()
+            if version != first_versions[name]
         )
         if differing:
             problems.append(f"{job} and {first} ran against different versions: {'; '.join(differing)}")
@@ -650,8 +663,9 @@ def main(argv: list[str]) -> int:
     args = _parse_args(argv)
     if args.release_join:
         selection = RELEASE_SELECTIONS.get(args.workflow.name) if args.workflow else None
-        if selection is None:
-            print(f"::error::release join mode requires a --workflow named in RELEASE_SELECTIONS: {sorted(RELEASE_SELECTIONS)}")
+        version_names = RELEASE_SHARD_VERSIONS.get(args.workflow.name) if args.workflow else None
+        if selection is None or version_names is None:
+            print(f"::error::release join mode requires a --workflow that RELEASE_SELECTIONS and RELEASE_SHARD_VERSIONS name: {sorted(RELEASE_SELECTIONS)}")
             return 1
         expected_versions = dict(pin.split("=", 1) for pin in args.expect_version if "=" in pin)
         if len(expected_versions) != len(args.expect_version) or not all(expected_versions.values()):
@@ -676,12 +690,13 @@ def main(argv: list[str]) -> int:
                 source_sha=source_sha,
                 run_id=run_id,
                 run_attempt=run_attempt,
+                version_names=version_names,
                 expected_versions=expected_versions,
             )
         except ReleaseEvidenceError as exc:
             print(f"::error::{exc}")
             return 1
-        versions = _read_provenance(evidence_dir / next(iter(shards)))["versions"]
+        versions = _read_provenance(evidence_dir / next(iter(shards)), version_names)["versions"]
         print(
             f"Release join passed for {sum(map(len, shards.values()))} case(s) of `{' '.join(selection)}` "
             f"at {source_sha}, run {run_id} attempt {run_attempt}."
