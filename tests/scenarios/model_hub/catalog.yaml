@@ -957,6 +957,17 @@ scenarios:
     kind: determinism
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_002_matching_tie_break_is_independent_of_inventory_order
+  - id: MH-MATCH-003
+    name: A Claude family alias resolves to the newest full id a Hub Source lists, so the launch and its gateway credential name the id the CLI sends
+    status: covered
+    kind: selection
+    layer: turn-gateway
+    test: tests/test_model_hub_l3.py::test_mh_match_003_claude_alias_launches_and_routes_on_its_observed_full_id
+    related_tests:
+      - tests/test_model_hub_resolution.py::test_claude_alias_selects_the_newest_observed_family_member_on_a_hub_source
+      - tests/test_model_hub_resolution.py::test_claude_alias_without_an_observed_family_member_keeps_literal_identity
+      - tests/test_model_hub_resolution.py::test_claude_alias_inherits_its_full_ids_route_and_yields_to_an_explicit_one
+      - tests/test_model_hub_background_discovery.py::test_alias_follows_a_newly_listed_family_member_without_a_manual_refresh
   - id: MH-MENU-ADD-001
     name: Adding a provider menu model projects overlapping suppliers in default order without persisting automatic hops
     status: covered

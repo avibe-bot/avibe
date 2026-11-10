@@ -5371,17 +5371,27 @@ class ModelHubService:
         updated: ModelHubConfig,
     ) -> list[dict]:
         # Inventory evidence narrows speculative candidates without deleting routes.
-        return [
-            item for item in self._removed_effective_hops(previous, updated)
-            if not (
-                effective_model_route(
-                    previous, cast(BackendName, item["backend"]), item["menu_model"],
-                ).route_origin == "passthrough"
-                and effective_model_route(
-                    updated, cast(BackendName, item["backend"]), item["menu_model"],
-                ).route_origin == "automatic"
+        # It also re-targets an inherited hop on a Source that still serves the
+        # same row, which is not a removal: a Claude family alias follows the
+        # newest member its Source lists. Literal matching inherits only the
+        # row's own id, so no other inherited hop can move this way.
+        removed = self._removed_effective_hops(previous, updated)
+        serving = {
+            (item["backend"], item["menu_model"], item["source_id"])
+            for item in (self._effective_hop_refs(updated) if removed else ())
+        }
+
+        def moved_supply(item: dict) -> bool:
+            backend, menu_model = cast(BackendName, item["backend"]), item["menu_model"]
+            origins = (
+                effective_model_route(previous, backend, menu_model).route_origin,
+                effective_model_route(updated, backend, menu_model).route_origin,
             )
-        ]
+            if origins == ("passthrough", "automatic"):
+                return False
+            return "manual" in origins or (backend, menu_model, item["source_id"]) not in serving
+
+        return [item for item in removed if moved_supply(item)]
 
     def _guard_inventory_mutation(
         self,
