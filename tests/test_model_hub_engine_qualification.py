@@ -797,15 +797,77 @@ def test_the_recorder_changes_nothing_else_about_the_process_it_runs_in(tmp_path
 
     # No metadata, path or threading library is loaded ahead of the product.
     assert with_recorder - with_json_only == {"avibe_qualification_origins"}
-    # A log that cannot be written for a while loses nothing and fails no import.
-    away = f"{recorded.origins}.away"
+
+
+# What a process under test does to its own log. The log is found by this process's id.
+_OWN_LOG = "import glob, os; (log,) = glob.glob(os.path.join({origins!r}, f'{{os.getpid()}}-*.jsonl')); "
+# The log cannot be appended to, while the directory it is in can still be written.
+_BLOCK_LOG = "os.rename(log, log + '.held'); os.mkdir(log); "
+_UNBLOCK_LOG = "os.rmdir(log); os.rename(log + '.held', log); "
+_MARKED = "glob.glob(os.path.join({origins!r}, '*.incomplete'))"
+
+
+def test_a_log_that_falls_behind_is_marked_incomplete_until_it_catches_up(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: a log is evidence only if it holds every import of its process."""
+
+    recorded = RecordedEnvironment(tmp_path)
+    origins = str(recorded.origins)
+
     recorded.run(
-        f"import os; os.rename({str(recorded.origins)!r}, {away!r}); import vibe.handlers.deep; "
-        f"os.rename({away!r}, {str(recorded.origins)!r}); import core"
+        (_OWN_LOG + _BLOCK_LOG + "import vibe.handlers.deep; assert " + _MARKED + "; "
+         + _UNBLOCK_LOG + "import core; assert not " + _MARKED).format(origins=origins)
     )
-    (process,) = [process for process in recorded.processes() if process.modules]
+
+    # Nothing was lost and no import failed; the mark went with the last unwritten record.
+    (process,) = recorded.processes()
     assert sorted(process.modules) == ["core", "vibe", "vibe.handlers", "vibe.handlers.deep"]
     assert not any("outside" in problem for problem in recorded.problems())
+
+
+def test_a_log_that_never_catches_up_is_refused_although_what_it_holds_reads_as_complete(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: the last import of a process is not lost silently."""
+
+    recorded = RecordedEnvironment(tmp_path)
+    origins = str(recorded.origins)
+
+    # The checkout's module is the last import, its record cannot be written, and the process ends normally.
+    recorded.run(
+        ("import vibe; " + _OWN_LOG + _BLOCK_LOG + "import core.leak; print(log)").format(origins=origins),
+        recorded.checkout,
+    )
+    (log,) = [path for path in recorded.origins.iterdir() if path.is_dir() and path.suffix == ".jsonl"]
+    log.rmdir()
+    log.with_name(log.name + ".held").rename(log)
+
+    # What is left parses as one process that imported only from the environment.
+    assert [json.loads(line).get("module") for line in log.read_text().splitlines()] == [None, "vibe"]
+    with pytest.raises(QualificationError, match="import log is incomplete: 1 processes could not record every import"):
+        recorded.processes()
+    with pytest.raises(QualificationError, match="import log is incomplete"):
+        recorded.problems()
+
+
+def test_an_import_that_can_be_neither_recorded_nor_marked_does_not_happen(tmp_path) -> None:
+    recorded = RecordedEnvironment(tmp_path)
+    origins, away = str(recorded.origins), f"{recorded.origins}.away"
+    attempt = "\ntry:\n    import vibe\nexcept ImportError as refused:\n    print('refused', refused.name)\nelse:\n    print('imported')\n"
+
+    # The log's directory is gone for a while: no write, and nowhere to leave a mark.
+    during = recorded.run(
+        f"import os, sys; os.rename({origins!r}, {away!r})" + attempt
+        + f"assert 'vibe' not in sys.modules; os.rename({away!r}, {origins!r}); import vibe.handlers.deep"
+    )
+    # A process that cannot log from its first moment: the log directory is a file.
+    blocked = tmp_path / "blocked"
+    qualification.install_origin_recorder(recorded.environment, blocked)
+    blocked.rmdir()
+    blocked.write_text("")
+    never = recorded.run("pass" + attempt)
+
+    assert (during, never) == ("refused vibe\n", "refused vibe\n")
+    # The first process's log is whole again: the refused import is in it only from when it went through.
+    (process,) = recorded.processes()
+    assert sorted(process.modules) == ["vibe", "vibe.handlers", "vibe.handlers.deep"]
 
 
 @pytest.mark.parametrize("recorder_first", [False, True], ids=["after-the-suite-finder", "ahead-of-the-suite-finder"])

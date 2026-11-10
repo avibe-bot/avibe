@@ -405,8 +405,18 @@ class ProcessOrigins:
 
 
 def read_origin_logs(directory: Path) -> list[ProcessOrigins]:
-    """Parse the per-process logs the origin recorder wrote. Unreadable logs are an error."""
+    """Parse the per-process logs the origin recorder wrote.
 
+    An unreadable log is an error. So is a log its process marked incomplete:
+    what such a log holds is a prefix of what the process imported, not all of it.
+    """
+
+    incomplete = sorted(path.name for path in directory.glob("*.incomplete"))
+    if incomplete:
+        raise QualificationError(
+            f"an import log is incomplete: {len(incomplete)} processes could not record every import, "
+            f"such as {incomplete[0]}"
+        )
     processes: list[ProcessOrigins] = []
     for log in sorted(directory.glob("*.jsonl")):
         header: dict[str, Any] | None = None

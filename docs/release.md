@@ -202,7 +202,9 @@ environment and runs **that release tag's own tests** from a directory that
 holds no product package. The service starts from the wheel's own entry
 script. Every Python process in that environment logs where it imported each
 Avibe module from, and the run is refused if any module, in the test runner,
-the service or a helper, came from anywhere else.
+the service or a helper, came from anywhere else. A module is imported only
+once its process's log accounts for it, and a run is also refused if any
+process's log is marked as not holding every import.
 
 `Rehearse the released-wheel Model Hub E2E` runs the same shared steps against
 one pinned release candidate, so the harness is exercised before the stable
