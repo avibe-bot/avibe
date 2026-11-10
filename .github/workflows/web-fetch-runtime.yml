@@ -1,0 +1,68 @@
+name: web-fetch-runtime
+
+on:
+  workflow_call:
+    inputs:
+      platforms:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  runtime:
+    name: web-fetch-runtime (${{ matrix.os }}, ${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platforms) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: vibe-wheel-linux
+          path: dist
+      - name: Prepare frozen requirements
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv export --frozen --no-dev --no-emit-project --output-file fetch-requirements.txt
+          python -c "from pathlib import Path; p=Path('ui/dist'); p.mkdir(parents=True,exist_ok=True); (p/'index.html').touch()"
+      # Every Python gets the same wheel and frozen dependencies, in its own
+      # interpreter. Do not stop at the first failed version.
+      - name: Verify native resources, pinned transports and disposable workers offline
+        env:
+          PYTHON_VERSIONS: ${{ matrix.python }}
+        run: |
+          failed=""
+          for version in $PYTHON_VERSIONS; do
+            echo "::group::Python $version"
+            if python_bin="$(uv python find --system --no-project --python-preference only-system "$version")" \
+              && "$python_bin" -c "import sys; print(sys.executable, sys.version)" \
+              && uv pip install --system --python "$python_bin" --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt \
+              && uv pip install --system --python "$python_bin" --no-deps dist/*.whl \
+              && uv pip install --system --python "$python_bin" pytest pytest-asyncio jsonschema \
+              && "$python_bin" -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
+            then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::web-fetch-runtime failed on Python $version"
+              failed="$failed $version"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "web-fetch-runtime failed on Python:$failed"
+            exit 1
+          fi

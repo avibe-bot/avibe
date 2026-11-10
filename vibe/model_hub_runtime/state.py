@@ -37,6 +37,9 @@ _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
 _PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google", "search"}
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
+# CLIProxyAPI v8.0.63 keeps its Codex refresh state in this private directory
+# beside the managed OAuth files. It is not an OAuth credential entry.
+_CODEX_REFRESH_DIRECTORY = ".codex-refresh"
 # The engine writes its file log to ``logs`` under its working directory, the instance directory, only
 # when that directory already exists; otherwise it falls back to ``<auth-dir>/logs``, among the
 # credentials (CLIProxyAPI internal/logging/global_logger.go ResolveLogDirectory).
@@ -1194,15 +1197,32 @@ class EngineStateStore:
             raise EngineStateError("engine auth directory is unsafe")
         if not private_fs.is_private(self.auth_dir, auth_mode):
             raise EngineStateError("engine auth directory permissions are unsafe")
-        for entry in self.auth_dir.iterdir():
-            mode = entry.lstat().st_mode
-            if not stat.S_ISREG(mode):
-                raise EngineStateError("engine auth directory contains an unsafe entry")
-            if private_fs.is_private(entry, mode):
-                continue
-            if not enforce:
-                raise EngineStateError("engine auth credential permissions are unsafe")
-            private_fs.make_private_file(entry)
+        self._audit_auth_entries(self.auth_dir, enforce=enforce)
+
+    def _audit_auth_entries(self, directory: Path, *, enforce: bool, journal: bool = False) -> None:
+        for entry in directory.iterdir():
+            try:
+                mode = entry.lstat().st_mode
+                if journal or entry.name == _CODEX_REFRESH_DIRECTORY:
+                    if stat.S_ISDIR(mode):
+                        if not private_fs.is_private(entry, mode):
+                            raise EngineStateError("engine auth refresh directory is unsafe")
+                        self._audit_auth_entries(entry, enforce=enforce, journal=True)
+                        continue
+                    if not journal:
+                        raise EngineStateError("engine auth refresh directory is unsafe")
+                if not stat.S_ISREG(mode):
+                    raise EngineStateError("engine auth directory contains an unsafe entry")
+                if private_fs.is_private(entry, mode):
+                    continue
+                if not enforce:
+                    raise EngineStateError("engine auth credential permissions are unsafe")
+                private_fs.make_private_file(entry)
+            except FileNotFoundError:
+                # CPA atomically renames .receipt-* to receipt while running.
+                # A vanished journal entry has nothing left to audit.
+                if not journal:
+                    raise
 
     def _credential_path(self, credential_ref: str) -> Path:
         _credential_ref_auth_scheme(credential_ref)

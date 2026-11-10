@@ -25,12 +25,12 @@ export function SkillRow({ skill, selected, inherited, updateAvailable, onSelect
       className={clsx(
         'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
         selected
-          ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
-          : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
+          ? 'border-mint/40 bg-mint-soft'
+          : 'border-edge bg-surface hover:bg-surface-wash shadow-elevation-0',
         inherited && 'opacity-[0.66]',
       )}
     >
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-edge bg-surface-3 shadow-elevation-0">
         <WandSparkles className={clsx('size-4', selected ? 'text-mint-ink' : 'text-muted')} />
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1">

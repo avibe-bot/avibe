@@ -185,6 +185,11 @@ def test_update_notification_release_url_normalizes_github_tags():
         update_checker._github_release_url("gh-v2.2.8rc1")
         == "https://github.com/avibe-bot/avibe/releases/tag/gh-v2.2.8rc1"
     )
+    # An offered release candidate is a GitHub-only gh-v tag, never a v tag.
+    assert (
+        update_checker._github_release_url("3.2.6rc2")
+        == "https://github.com/avibe-bot/avibe/releases/tag/gh-v3.2.6rc2"
+    )
 
 
 def test_update_notification_policy_marker_parses_hidden_release_metadata():

@@ -117,7 +117,7 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
   })();
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-foreground/[0.025] p-4">
+    <div className="flex flex-col gap-2.5 rounded-xl border border-edge bg-foreground/[0.025] p-4 shadow-elevation-0">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="flex size-8 shrink-0 items-center justify-center rounded-[8px] border border-mint/30 bg-mint-soft">
@@ -174,7 +174,7 @@ export const OpencodeProviderTestPanel: React.FC<OpencodeProviderTestPanelProps>
         </p>
       )}
       {lastResult?.ok && lastResult.excerpt && (
-        <div className="rounded-md border border-border bg-background px-3 py-2">
+        <div className="rounded-md border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <p className="font-mono text-[10px] uppercase tracking-wide text-muted">
             {t('settings.backends.testConnectionResponseLabel')}
           </p>

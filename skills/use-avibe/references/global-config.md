@@ -129,7 +129,8 @@ Important config payload shape:
     "auto_update": true,
     "check_interval_minutes": 60,
     "idle_minutes": 30,
-    "notify_admins": true
+    "notify_admins": true,
+    "prereleases": false
   },
   "ack_mode": "typing",
   "language": "en",
@@ -167,6 +168,7 @@ Per-platform fields worth knowing about:
 - `telegram.allowed_chat_ids` / `allowed_user_ids` restrict which chats and users Telegram will respond to.
 - `wechat.cdn_base_url` controls the CDN host used for fetching WeChat media; the default `novac2c.cdn.weixin.qq.com` is the official c2c CDN.
 - `update.auto_update`, `check_interval_minutes`, and `idle_minutes` control unattended upgrades; `notify_admins` posts the upgrade announcement to bound admins.
+- `update.prereleases` (default `false`) also offers GitHub-only release candidates (`gh-vX.Y.ZrcN`): the version dialog, `vibe check-update`, `vibe upgrade`, notifications, and auto-update then offer the newest of stable and pre-release. Turning it off never downgrades; the next newer stable release is offered. The desktop app keeps this switch in its own update channel instead.
 - `agents.<backend>.auto_update` (default `true`) installs a newer backend CLI release on the same check once `idle_minutes` have passed without a message and no turn is using that backend; messages that arrive during the install run afterwards. Each release is tried once unattended, and `check_interval_minutes = 0` stops it as well.
 - `ui.setup_host`, `setup_port`, and `open_browser` configure the local Web UI server; changing host or port requires `POST /api/ui/reload`.
 

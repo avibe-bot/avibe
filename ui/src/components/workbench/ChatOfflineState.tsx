@@ -13,7 +13,7 @@ export function ChatOfflineNotice() {
   return (
     <div
       role="status"
-      className="mx-auto mt-3 flex w-full max-w-[1080px] items-center gap-2 rounded-md border border-border bg-surface-2 px-3 py-2 text-[12px] text-muted"
+      className="mx-auto mt-3 flex w-full max-w-[1080px] items-center gap-2 rounded-md border border-edge bg-surface-2 px-3 py-2 text-[12px] text-muted shadow-elevation-0"
     >
       <CloudOff aria-hidden className="size-3.5 shrink-0" />
       {t('chat.offline.notice')}

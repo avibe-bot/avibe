@@ -197,7 +197,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
       <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
         <DialogContent
           closeLabel={t('common.close')}
-          className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-7 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+          className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl p-7"
         >
           <div className="flex min-w-0 items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
@@ -234,7 +234,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                     active ? `${cc.border} ${cc.bg}` : 'border-border-strong bg-surface-2 hover:bg-foreground/[0.04]',
                   )}
                 >
-                  <div className={clsx('flex size-8 items-center justify-center rounded-lg border', active ? cc.border + ' ' + cc.bg : 'border-border-strong')}>
+                  <div className={clsx('flex size-8 items-center justify-center rounded-lg border', active ? cc.border + ' ' + cc.bg : 'border-edge shadow-elevation-0')}>
                     <BackendAvatar backend={opt.key} className={clsx('size-4', active ? cc.text : 'text-muted')} />
                   </div>
                   <span className={clsx('text-[12px] font-bold', active ? cc.text : 'text-foreground')}>
@@ -307,7 +307,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                 {t('agents.detail.effort')}
               </div>
               <div
-                className="grid min-h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
+                className="grid min-h-[38px] gap-0.5 rounded-md border border-edge bg-surface-2 p-0.5 shadow-elevation-0"
                 style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
               >
                 {effortOptions.map((opt) => (
@@ -372,7 +372,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md border border-border-strong px-4 py-1.5 text-[12px] font-medium text-foreground hover:bg-foreground/[0.04]"
+            className="rounded-md border border-edge px-4 py-1.5 text-[12px] font-medium text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
           >
             {t('common.cancel')}
           </button>

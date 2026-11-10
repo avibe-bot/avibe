@@ -157,11 +157,12 @@ AGENT_RUN_DELIVERY_INTENTS = frozenset(
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
 AGENT_RUN_CLOSE_AFTER_METADATA_KEY = "close_after"
-#: What a run's ``callback_session_id`` is told (``docs/plans/bots.md`` D4). Absent, as on every row written
-#: before it, the run's result: a callback. ``failure``: only a run that did not complete, so a failure always
-#: reaches the Session that sent the request even when it asked for no callback.
+#: Legacy rows without a mode return their final reply; new Agent Runs use the internal
+#: failure-only route, so a run that fails, is canceled, or is interrupted still tells its sender.
 AGENT_RUN_CALLBACK_MODE_METADATA_KEY = "callback_mode"
 AGENT_RUN_CALLBACK_FAILURE_ONLY = "failure"
+#: A new Agent Run may suppress the accepted delegation projection and its read receipt.
+AGENT_RUN_NO_REPLY_METADATA_KEY = "no_reply"
 #: ``source_actor`` of the notice a failure-only route sends: ``<run>:notice:<status>``.
 AGENT_RUN_FAILURE_NOTICE_ACTOR_MARKER = ":notice:"
 FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE = "session_turn_gate_unavailable"
@@ -11785,6 +11786,7 @@ class ScheduledTaskService:
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
                 "callback_mode": (metadata or {}).get(AGENT_RUN_CALLBACK_MODE_METADATA_KEY),
+                "no_reply": bool((metadata or {}).get(AGENT_RUN_NO_REPLY_METADATA_KEY)),
                 "suppress_report_hint": suppress_report_hint,
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (

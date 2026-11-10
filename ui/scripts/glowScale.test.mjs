@@ -22,7 +22,7 @@ import { eachStylesheet } from './stylesheets.mjs';
 //
 // The scale is not three loose triples. It is one shape (index.css, drawn in
 // ui/design: system/shape/glows): a glow is centred, its spread is a quarter of
-// its blur, and its colour is the accent at #5BFFA070 -- 16/-4, 24/-6, 32/-8,
+// its blur, and its colour is the theme's accent at 44% -- 16/-4, 24/-6, 32/-8,
 // 48/-12 -- and a wider glow still holds -12, so -12 is the cap rather than a
 // fifth data point.
 //
@@ -53,9 +53,14 @@ const CSS = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf8'
 // the wire's 4px become 40px with the suite green. An exception names
 // the field it excuses and fixes the rest.
 const OFF_RULE = {
+  // A dot is live light in the theme's own accent (ui/design: system/elevation/*):
+  // in Dark the 8px at 0.9 it always was, in Light a smaller, softer 6px at 0.6.
   dot: {
-    why: 'a spreadless status dot at blur 8, clamped to 0.9 because ours sit on lit panels',
-    holds: /^0 0 8px rgba\(\d+, \d+, \d+, 0\.9\)$/,
+    why: 'a spreadless status dot, clamped below full alpha because ours sit on lit panels, smaller and softer in Light',
+    holds: {
+      dark: /^0 0 8px color-mix\(in srgb, var\(--[a-z]+\) 90%, transparent\)$/,
+      light: /^0 0 6px color-mix\(in srgb, var\(--[a-z]+\) 60%, transparent\)$/,
+    },
   },
   wire: {
     why: 'a drop-shadow() filter at blur 4, which takes no spread at all',
@@ -64,17 +69,6 @@ const OFF_RULE = {
   cta: {
     why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, off the scale\'s rule',
     holds: /^0 0 \d+px -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
-  },
-  // The sidebar's selected nav row keeps the general rule's geometry and alpha --
-  // spread = -blur/4 and 0.44 -- and departs on one field only: the design table
-  // gives it #10B98170 in Light beside #5BFFA070 in Dark, so its hue is mixed from
-  // the live accent instead of spelled out. `holds` therefore pins the two fields
-  // the general rule would have pinned, in the one spelling that can carry them
-  // through a palette; only the hue is excused, and its blur is asserted from
-  // ROLE_BLUR like every other role's.
-  nav: {
-    why: 'the approved sidebar selection halo: the scale\'s own 16/-4 and 0.44, themed through var(--mint) for #10B98170 in light and #5BFFA070 in dark',
-    holds: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
   },
   // The onboarding card's active and hovered halo is the one shadow the design
   // draws with an offset, so centring cannot describe it: `0 2px 12px #5BFFA038`
@@ -115,7 +109,7 @@ const OFF_RULE = {
 // excused entirely: "themed" was being read as "unasserted", so the owner's two
 // numbers were the only blurs in this file that nothing checked.
 const ROLE_BLUR = {
-  dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48, nav: 16,
+  dot: { dark: 8, light: 6 }, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48,
   cta: { dark: 16, light: 20 },
   onboarding: { dark: 12, light: 16 },
   selected: { dark: 24, light: 20 },
@@ -308,10 +302,12 @@ describe('the accent glow scale', () => {
     expect(Number(geometry.groups.spread)).toBe(-Math.min(SPREAD_CAP, blur / 4));
   });
 
+  // The hue is mixed from the theme's accent, so the alpha is the mix's share.
   it.each(sized)('$token carries the design alpha', ({ value }) => {
-    const alpha = value.match(/rgba\([^)]*,\s*([\d.]+)\)/);
-    expect(alpha, `${value} is not an rgba() literal`).not.toBeNull();
-    expect(Number(alpha[1])).toBe(GLOW_ALPHA);
+    const mixed = value.match(/color-mix\(in srgb, var\(--[a-z]+\) ([\d.]+)%, transparent\)/);
+    const written = value.match(/rgba\([^)]*,\s*([\d.]+)\)/);
+    expect(mixed ?? written, `${value} is neither a color-mix() nor an rgba() literal`).not.toBeNull();
+    expect(mixed ? Number(mixed[1]) / 100 : Number(written[1])).toBe(GLOW_ALPHA);
   });
 
   // Every rung, not just the sized ones: `dot` and `cta` pin their alpha in

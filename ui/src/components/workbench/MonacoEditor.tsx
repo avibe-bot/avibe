@@ -217,7 +217,7 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
   };
 
   const accessoryBtn =
-    'shrink-0 rounded-md border border-border-strong px-2.5 py-1.5 font-mono text-[12px] text-foreground active:bg-foreground/[0.08]';
+    'shrink-0 rounded-md border border-edge px-2.5 py-1.5 font-mono text-[12px] text-foreground active:bg-wash-press shadow-elevation-0';
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -280,7 +280,7 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
         <button
           type="button"
           onClick={selectAll}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2.5 py-1.5 text-[12px] text-foreground active:bg-foreground/[0.08]"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-[12px] text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
         >
           <TextSelect className="size-3.5" />
           {t('apps.editor.selectAll')}
@@ -288,7 +288,7 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
         <button
           type="button"
           onClick={copyAll}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong px-2.5 py-1.5 text-[12px] text-foreground active:bg-foreground/[0.08]"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2.5 py-1.5 text-[12px] text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
         >
           <ClipboardCopy className="size-3.5" />
           {t('apps.editor.copyAll')}

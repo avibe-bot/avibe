@@ -141,7 +141,7 @@ export const TagInput: React.FC<TagInputProps> = ({
       <div
         className={cn(
           'flex flex-wrap items-center gap-1.5 rounded-md border bg-surface px-2 py-1.5',
-          draftInvalid ? 'border-destructive' : 'border-border focus-within:border-mint',
+          draftInvalid ? 'border-destructive' : 'border-field-edge focus-within:border-mint bg-field',
           className,
         )}
       >
@@ -190,7 +190,7 @@ export const TagInput: React.FC<TagInputProps> = ({
         <ul
           id={listId}
           role="listbox"
-          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-surface py-1 shadow-lg"
+          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-md border border-edge bg-popover py-1 shadow-elevation-2"
         >
           {matches.map((option, index) => (
             <li key={option} role="option" aria-selected={index === highlight}>

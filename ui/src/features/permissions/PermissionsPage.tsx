@@ -291,7 +291,7 @@ function Notice({
         tone === 'warning' && 'border-gold/40 bg-gold/10',
         tone === 'danger' && 'border-destructive/35 bg-destructive/10',
         tone === 'info' && 'border-cyan/35 bg-cyan/10',
-        tone === 'neutral' && 'border-border bg-foreground/[0.025]',
+        tone === 'neutral' && 'border-edge bg-foreground/[0.025] shadow-elevation-0',
       )}
       role={tone === 'danger' ? 'alert' : 'status'}
     >
@@ -807,7 +807,7 @@ function ProjectAccessDialog({
                 ]}
               />
             </div>
-            <p className="rounded-lg border border-border bg-foreground/[0.025] p-3 text-[12px] leading-5 text-muted">
+            <p className="rounded-lg border border-edge bg-foreground/[0.025] p-3 text-[12px] leading-5 text-muted shadow-elevation-0">
               {t(`permissions.projects.modeHelp.${mode}`)}
             </p>
             {mode === 'restricted' ? (
@@ -823,7 +823,7 @@ function ProjectAccessDialog({
                       ))
                     : undefined;
                   return (
-                    <div key={`${index}:${binding.principal_kind}`} className="grid gap-2 rounded-lg border border-border p-3 sm:grid-cols-[150px_minmax(0,1fr)_110px_36px]">
+                    <div key={`${index}:${binding.principal_kind}`} className="grid gap-2 rounded-lg border border-edge p-3 sm:grid-cols-[150px_minmax(0,1fr)_110px_36px] shadow-elevation-0">
                       <Select
                         aria-label={t('permissions.fields.principalType')}
                         value={binding.principal_kind}
@@ -1063,8 +1063,8 @@ export function PermissionsPage() {
   if (state.kind === 'loading') {
     return (
       <div className="space-y-4" aria-label={t('permissions.states.loadingTitle')}>
-        <div className="h-20 animate-pulse rounded-lg border border-border bg-card/70" />
-        <div className="h-64 animate-pulse rounded-lg border border-border bg-card/70" />
+        <div className="h-20 animate-pulse rounded-lg border border-edge bg-card/70 shadow-elevation-0" />
+        <div className="h-64 animate-pulse rounded-lg border border-edge bg-card/70 shadow-elevation-0" />
       </div>
     );
   }
@@ -1194,7 +1194,7 @@ export function PermissionsPage() {
         </div>
       </header>
 
-      <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card px-4 py-4 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-edge bg-card px-4 py-4 sm:flex-row sm:items-center shadow-elevation-0">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-mint/10 text-sm font-semibold text-mint-ink" aria-hidden="true">
             {instanceInitial}
@@ -1317,7 +1317,7 @@ export function PermissionsPage() {
               />
             )
           ) : (
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <div className="overflow-hidden rounded-lg border border-edge bg-card shadow-elevation-0">
               {projection.access.entries.map((entry) => {
                 const Icon = principalIcon(entry.kind);
                 const entryKey = accessEntryKey(entry);
@@ -1350,7 +1350,7 @@ export function PermissionsPage() {
           {filteredProjects.length === 0 ? (
             <EmptyState icon={FolderKey} title={t('permissions.projects.emptyTitle')} body={t('permissions.projects.emptyBody')} />
           ) : (
-            <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <div className="overflow-hidden rounded-lg border border-edge bg-card shadow-elevation-0">
               {filteredProjects.map((project) => {
                 const mode = projectMode(project);
                 return (

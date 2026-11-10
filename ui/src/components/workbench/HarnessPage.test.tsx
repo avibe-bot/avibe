@@ -285,6 +285,16 @@ describe('RunDetail report route', () => {
     expect(html).toContain('>skipped<');
   });
 
+  it('shows no-reply without losing the immediate failure route', () => {
+    const html = render(
+      <RunDetail run={run({ ...route, metadata: { callback_mode: 'failure', no_reply: true } })} />,
+    );
+    expect(html).toContain('>No reply needed<');
+    expect(html).toContain('>Notify on failure<');
+    expect(html).not.toContain('>Callback<');
+    expect(render(<RunDetail run={run({ metadata: {} })} />)).not.toContain('>No reply needed<');
+  });
+
   it('shows a run without a callback as notifying on failure, without a skipped callback', () => {
     const quiet = render(
       <RunDetail run={run({ ...route, callback_status: 'skipped', metadata: { callback_mode: 'failure' } })} />,

@@ -32,8 +32,8 @@ const cardsSheet = () => (
           </CardFooter>
         </Card>
       </Specimen>
-      <Specimen name="Card · shadow-mint-card" use="主卡片，带品牌光" className="w-72">
-        <Card className="flex items-start gap-3 p-5 shadow-mint-card">
+      <Specimen name="Card · 带图标" use="主卡片" className="w-72">
+        <Card className="flex items-start gap-3 p-5">
           <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-mint/30 bg-mint-soft text-mint-ink shadow-glow-sm-mint">
             <Cpu className="size-5" />
           </span>

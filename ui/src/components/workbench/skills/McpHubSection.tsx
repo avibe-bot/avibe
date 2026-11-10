@@ -105,7 +105,7 @@ function McpToolCard({
 
   if (!description) {
     return (
-      <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2">
+      <div className="rounded-[10px] border border-edge bg-surface-3 px-3 py-2 shadow-elevation-0">
         <div className="font-mono text-[12px] text-foreground">{name}</div>
       </div>
     );
@@ -119,7 +119,7 @@ function McpToolCard({
       aria-expanded={interactive ? expanded : undefined}
       onClick={() => interactive && onToggle()}
       className={clsx(
-        'w-full rounded-[10px] border border-border bg-surface-3 px-3 py-2 text-left',
+        'w-full rounded-[10px] border border-edge px-3 py-2 text-left bg-field hover:bg-field-hover',
         interactive ? 'hover:border-border-strong' : 'cursor-default',
       )}
     >
@@ -180,9 +180,9 @@ export function McpServerDetail({
   // A project server has tools (and can be refreshed) once approved and configured.
   const usable = !['pending_approval', 'needs_config'].includes(state);
   return (
-    <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-border-strong bg-surface p-5">
+    <div className="flex min-w-0 flex-col gap-3.5 self-start rounded-2xl border border-edge bg-surface p-5 shadow-elevation-0">
       <div className="flex items-start gap-3">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-border bg-surface-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-[10px] border border-edge bg-surface-3 shadow-elevation-0">
           {current.transport === 'stdio' ? <Terminal className="size-5" /> : <Globe className="size-5" />}
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
@@ -230,7 +230,7 @@ export function McpServerDetail({
           />
         ))}
       </div>
-      <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted">
+      <div className="rounded-[10px] border border-edge bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted shadow-elevation-0">
         {t('mcpHub.callHint', { name: current.name })}
       </div>
       <div className="font-mono text-[10px] text-muted">
@@ -445,7 +445,7 @@ export function McpApproveDialog({ server, busy, onConfirm, onCancel }: McpAppro
         <DialogDescription>
           {t(stdio ? 'mcpHub.approveCommandHint' : 'mcpHub.approveUrlHint', { path: server?.sourcePath ?? '' })}
         </DialogDescription>
-        <div className="break-all rounded-[10px] border border-border bg-surface-3 px-3 py-2 font-mono text-[12px] text-foreground">
+        <div className="break-all rounded-[10px] border border-edge bg-surface-3 px-3 py-2 font-mono text-[12px] text-foreground shadow-elevation-0">
           {server?.command || server?.url}
         </div>
         <DialogFooter>
@@ -567,12 +567,12 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
       className={clsx(
         'group flex w-full items-center gap-3 rounded-lg border px-[14px] py-3 text-left transition',
         selected
-          ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
-          : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
+          ? 'border-mint/40 bg-mint-soft'
+          : 'border-edge bg-surface hover:bg-surface-wash shadow-elevation-0',
         inherited && 'opacity-[0.66]',
       )}
     >
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-border bg-surface-3 text-muted">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-[9px] border border-edge bg-surface-3 text-muted shadow-elevation-0">
         {server.transport === 'stdio' ? <Terminal className="size-4" /> : <Globe className="size-4" />}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
@@ -599,7 +599,7 @@ function McpRow({ server, inherited, selected, loginLink, onSelect, onActivateLo
           <LoginLink
             name={server.name}
             project={projectId}
-            className="inline-flex h-6 items-center rounded-md border border-border bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-2"
+            className="inline-flex h-6 items-center rounded-md border border-edge bg-surface px-2 font-mono text-[10px] font-semibold uppercase text-foreground hover:bg-surface-wash shadow-elevation-0"
             onActivate={onActivateLogin}
           >
             {t('mcpHub.login')}
@@ -927,7 +927,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2.5">
-        {searchQuery === undefined ? (<div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
+        {searchQuery === undefined ? (<div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}

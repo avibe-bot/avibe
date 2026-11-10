@@ -1579,7 +1579,7 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
   // The summary is a card, matching the agent detail panel's rounded-2xl +
   // strong-border shell, rather than a full-bleed band with only edge rules.
   return (
-    <section className={clsx('rounded-2xl border border-border-strong bg-surface-2/60 p-4', className)}>
+    <section className={clsx('rounded-2xl border border-edge bg-surface-2/60 p-4 shadow-elevation-0', className)}>
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -2174,7 +2174,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
                         if (e.key === 'Escape') cancelFieldEdit('name', serverSnapshotRef.current.name);
                       }}
                       disabled={renaming}
-                      className="field-sizing-content min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-surface-2 focus:bg-surface-2 focus:ring-2 focus:ring-ring"
+                      className="field-sizing-content min-w-0 max-w-full rounded-md bg-transparent text-lg font-bold text-foreground outline-none transition hover:bg-wash focus:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     <Pencil className="size-3 shrink-0 text-muted" aria-hidden="true" />
                   </>
@@ -2240,7 +2240,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
           treatment. */}
       <Field label={t('agents.detail.model')}>
         {!canEdit ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
+          <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface-3 px-3 py-2 shadow-elevation-0">
             <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
               {model || t('agents.noConfig')}
             </span>
@@ -2292,7 +2292,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
         labelRight={effortRefreshOut ? <Loader2 aria-label={t('common.loading')} className="size-3 animate-spin text-muted" /> : undefined}
       >
         <div
-          className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
+          className="grid gap-0.5 rounded-lg border border-edge bg-surface-2 p-0.5 shadow-elevation-0"
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
           data-effort-field
           ref={effortFieldRef}
@@ -2356,7 +2356,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
           <button
             type="button"
             onClick={() => setSystemPromptOpen((prev) => !prev)}
-            className="flex flex-1 items-center gap-2.5 rounded-lg border border-border bg-foreground/[0.015] px-3 py-2.5 text-left transition hover:bg-foreground/[0.04]"
+            className="flex flex-1 items-center gap-2.5 rounded-lg border border-edge px-3 py-2.5 text-left transition bg-field hover:bg-field-hover active:bg-field-hover"
           >
             <ChevronRight
               className={clsx(

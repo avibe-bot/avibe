@@ -12,8 +12,8 @@ export const StepShell: React.FC<StepShellProps> = ({ active, children }) => (
     className={clsx(
       'overflow-hidden rounded-xl border transition-colors',
       active
-        ? 'border-mint/35 bg-surface-2 shadow-mint-card-sm'
-        : 'border-border bg-background'
+        ? 'border-mint/35 bg-surface-2'
+        : 'border-edge bg-surface shadow-elevation-0'
     )}
   >
     {children}
@@ -39,7 +39,7 @@ export const StepHeader: React.FC<StepHeaderProps> = ({
 }) => (
   <button
     onClick={onToggle}
-    className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-foreground/[0.02]"
+    className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-wash"
   >
     <div className="flex items-center gap-3">
       <span

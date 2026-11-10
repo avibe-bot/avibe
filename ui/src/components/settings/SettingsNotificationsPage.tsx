@@ -1,10 +1,15 @@
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useBots } from '@/context/BotsContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useNotificationPreferences } from '@/context/NotificationPreferencesContext';
-import { isDesktopShell } from '@/lib/desktopShell';
-import { isNativeShell } from '@/lib/native';
+import {
+  desktopNotificationsActions,
+  isDesktopShell,
+  listenDesktopNotifications,
+  type DesktopNotificationsActions,
+} from '@/lib/desktopShell';
 import { WebPushControl } from '../workbench/WebPushControl';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel, SettingsRow, ToggleSwitch } from './SettingsPrimitives';
@@ -21,7 +26,57 @@ export const SettingsNotificationsPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const off = !preferences.enabled;
   const desktop = isDesktopShell();
-  const native = isNativeShell();
+  const [desktopActions, setDesktopActions] = useState<DesktopNotificationsActions | null>(null);
+  const [desktopEnabled, setDesktopEnabled] = useState<boolean | null>(null);
+  const [desktopSaving, setDesktopSaving] = useState(false);
+  const [desktopSaveFailed, setDesktopSaveFailed] = useState(false);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const candidate = desktopNotificationsActions();
+    let active = true;
+    let probeSucceeded = false;
+    const stopListening = listenDesktopNotifications((enabled) => {
+      if (!active || !probeSucceeded) return;
+      setDesktopEnabled(enabled);
+      setDesktopSaveFailed(false);
+    });
+    if (!candidate) {
+      return () => {
+        active = false;
+        stopListening();
+      };
+    }
+    void candidate.get().then((enabled) => {
+      if (!active) return;
+      probeSucceeded = true;
+      setDesktopActions(candidate);
+      setDesktopEnabled(enabled);
+    }).catch(() => {
+      if (!active) return;
+      setDesktopActions(null);
+      setDesktopEnabled(null);
+    });
+    return () => {
+      active = false;
+      stopListening();
+    };
+  }, [desktop]);
+
+  const desktopSwitchReady = desktopActions !== null && desktopEnabled !== null;
+  const saveDesktopNotifications = async () => {
+    if (!desktopActions || desktopEnabled === null || desktopSaving) return;
+    setDesktopSaving(true);
+    setDesktopSaveFailed(false);
+    try {
+      const saved = await desktopActions.set(!desktopEnabled);
+      setDesktopEnabled(saved);
+    } catch {
+      setDesktopSaveFailed(true);
+    } finally {
+      setDesktopSaving(false);
+    }
+  };
 
   return (
     <SettingsPageShell
@@ -71,9 +126,9 @@ export const SettingsNotificationsPage: React.FC = () => {
         )}
       </SettingsPanel>
 
-      {((capabilities.can_read_instance && !native) || desktop) && (
+      {(capabilities.can_read_instance || desktop) && (
         <SettingsPanel title={t('settings.notifications.deviceTitle')}>
-          {capabilities.can_read_instance && !native && (
+          {capabilities.can_read_instance && !desktop && (
             <SettingsRow
               title={t('settings.notifications.pushTitle')}
               description={t('settings.notifications.pushHint')}
@@ -83,7 +138,21 @@ export const SettingsNotificationsPage: React.FC = () => {
           {desktop && (
             <SettingsRow
               title={t('settings.notifications.desktopTitle')}
-              description={t('settings.notifications.desktopHint')}
+              description={
+                desktopSwitchReady && desktopSaveFailed
+                  ? t('settings.notifications.desktopSaveFailed')
+                  : desktopSwitchReady
+                    ? t('settings.notifications.desktopHint')
+                    : t('settings.notifications.desktopHintMenuBar')
+              }
+              control={desktopSwitchReady ? (
+                <ToggleSwitch
+                  enabled={desktopEnabled === true}
+                  disabled={desktopSaving}
+                  onClick={() => void saveDesktopNotifications()}
+                  label={t('settings.notifications.desktopTitle')}
+                />
+              ) : undefined}
             />
           )}
         </SettingsPanel>

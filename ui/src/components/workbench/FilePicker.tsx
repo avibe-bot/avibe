@@ -175,7 +175,7 @@ export const FilePicker: React.FC<{
       <div className="absolute inset-0 z-30 grid place-items-center bg-black/50 p-5" role="presentation">
         <DialogPrimitive.Content
           aria-describedby={undefined}
-          className="relative z-10 flex h-[420px] w-[600px] max-w-full max-h-full flex-col overflow-hidden rounded-xl border border-border-strong bg-surface-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.7)] focus:outline-none"
+          className="relative z-10 flex h-[420px] w-[600px] max-w-full max-h-full flex-col overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-3 focus:outline-none"
           onOpenAutoFocus={() => {
             previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
           }}
@@ -213,7 +213,7 @@ export const FilePicker: React.FC<{
                 <button
                   type="button"
                   onClick={() => navigate(c.path)}
-                  className="max-w-[150px] truncate rounded px-1.5 py-0.5 text-[12px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+                  className="max-w-[150px] truncate rounded px-1.5 py-0.5 text-[12px] text-muted transition hover:bg-wash hover:text-foreground"
                 >
                   {c.label}
                 </button>
@@ -274,7 +274,7 @@ export const FilePicker: React.FC<{
                 // picker (which blurs the input first) can't silently makeDir a folder.
                 onBlur={() => setNewFolder(null)}
                 placeholder={t('apps.picker.newFolderName')}
-                className="mb-1 w-full rounded-md border border-cyan/50 bg-surface px-2 py-1.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
+                className="mb-1 w-full rounded-md border border-cyan/50 px-2 py-1.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none bg-field"
               />
             )}
             {loading && entries === null && (
@@ -295,7 +295,7 @@ export const FilePicker: React.FC<{
                   onClick={() => isDir && navigate(joinPath(cwd, e.name))}
                   className={clsx(
                     'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition',
-                    isDir ? 'text-foreground hover:bg-foreground/[0.06]' : 'cursor-default text-muted/60',
+                    isDir ? 'text-foreground hover:bg-wash' : 'cursor-default text-muted/60',
                   )}
                 >
                   {isDir ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
@@ -318,7 +318,7 @@ export const FilePicker: React.FC<{
                 if (e.key === 'Enter') confirm();
               }}
               placeholder={t('apps.picker.fileName')}
-              className="min-w-0 flex-1 rounded-md border border-border bg-surface px-2.5 py-1.5 font-mono text-[12.5px] text-foreground placeholder:text-muted focus:border-cyan/60 focus:outline-none"
+              className="min-w-0 flex-1 rounded-md border border-field-edge px-2.5 py-1.5 font-mono text-[12.5px] text-foreground placeholder:text-muted focus:border-cyan/60 focus:outline-none bg-field"
             />
           )}
           {mode === 'open-directory' && <span className="flex-1" />}
@@ -346,7 +346,7 @@ const RailRow: React.FC<{ label: string; active: boolean; onClick: () => void }>
     onClick={onClick}
     className={clsx(
       'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition',
-      active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+      active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-wash hover:text-foreground',
     )}
   >
     <Folder className="size-3.5 shrink-0 text-muted" />

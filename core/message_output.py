@@ -13,6 +13,9 @@ from typing import Any, Mapping
 
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_STOPPED
 
+# Default inline final-reply budget, also used by Harness read receipts.
+DEFAULT_RESULT_MAX_CHARS = 30_000
+
 # Every trigger kind whose dispatch created an ``agent_runs`` row. Scheduled
 # tasks, watches, webhooks, hooks and recovered Activities are all Harness runs
 # and must reach the same result recorders as a direct ``vibe agent run``.

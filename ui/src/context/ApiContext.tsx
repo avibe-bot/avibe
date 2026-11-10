@@ -1611,7 +1611,7 @@ export type SessionActivityState = {
   label?: string | null;
   since?: string;
   schedule_type?: 'at' | 'cron' | null;
-  // A delegated run only: its final reply returns to this Session, or its target reports back.
+  // A historical final-callback route returns here; false is not a promise to report.
   returns_here?: boolean | null;
 };
 
@@ -1929,8 +1929,7 @@ export type HarnessRun = HarnessSessionSummary & {
   source_session_id: string | null;
   source_session: HarnessSessionSummary | null;
   parent_run_id: string | null;
-  // Callback (report-back) lineage — serialized by the backend run row but
-  // previously unrendered; the run detail surfaces these (Part B).
+  // Legacy final-callback and internal failure/Vault delivery lineage; retained for old rows.
   callback_session_id: string | null;
   callback_run_id: string | null;
   callback_status: string | null;

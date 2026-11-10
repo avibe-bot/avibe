@@ -110,11 +110,11 @@ export const SearchPage: React.FC = () => {
           size="icon"
           onClick={goBack}
           aria-label={t('common.back')}
-          className="size-9 shrink-0 rounded-lg border border-border-strong bg-foreground/[0.04] hover:bg-foreground/[0.08]"
+          className="size-9 shrink-0 rounded-lg border border-edge bg-field hover:bg-field-hover"
         >
           <ChevronLeft className="size-5" />
         </Button>
-        <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border border-edge bg-foreground/[0.04] px-3 py-2.5 shadow-elevation-0">
           <Search className="size-4 shrink-0 text-mint-ink" />
           <Input
             ref={inputRef}

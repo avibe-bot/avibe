@@ -2953,10 +2953,10 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
     result = api.claude_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][0] == "claude-fable-5-1"
-    assert result["models"][1] == "claude-fable-5"
-    assert result["models"][2] == "claude-opus-5-5"
-    assert result["models"][3] == "claude-opus-5"
+    assert result["models"][:5] == [
+        "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
+    ]
+    assert "fable" in result["models"]
     assert "opus" in result["models"]
     assert "sonnet" in result["models"]
     assert "haiku" in result["models"]
@@ -3014,11 +3014,12 @@ def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tm
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:7] == [
+    assert result["models"][:8] == [
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6-sol",
         "gpt-6-luna",
+        "gpt-6.1-terra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
@@ -3052,11 +3053,12 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:7] == [
+    assert result["models"][:8] == [
         "gpt-6-astra",
         "gpt-6.1-sol",
         "gpt-6-sol",
         "gpt-6-luna",
+        "gpt-6.1-terra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",

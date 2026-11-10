@@ -49,7 +49,7 @@ export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
                 'press-surface h-auto w-full justify-start gap-2.5 px-2.5 py-2 text-left font-normal',
                 selected
                   ? 'bg-mint-soft ring-1 ring-inset ring-mint/40 hover:bg-mint-soft active:bg-mint-soft'
-                  : 'hover:bg-foreground/[0.04] active:bg-foreground/[0.04]',
+                  : 'hover:bg-wash active:bg-wash-press',
               )}
             >
               {result.kind === 'showpage' && result.sessionId ? (
@@ -63,7 +63,7 @@ export const AppSearchResultSection: React.FC<AppSearchResultSectionProps> = ({
                 />
               ) : (
                 <span
-                  className="grid size-7 shrink-0 place-items-center rounded-md border border-border bg-foreground/[0.03]"
+                  className="grid size-7 shrink-0 place-items-center rounded-md border border-edge bg-foreground/[0.03] shadow-elevation-0"
                   style={{ color: `var(${def.accent})` }}
                 >
                   <Icon className="size-3.5" />

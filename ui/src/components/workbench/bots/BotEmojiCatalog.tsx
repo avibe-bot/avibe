@@ -186,7 +186,7 @@ function SkinToneButton({ toneLabels }: { toneLabels: Record<SkinTone, string> }
         setTone(next);
         rememberSkinTone(next);
       }}
-      className="grid size-8 shrink-0 place-items-center rounded-lg text-[17px] leading-none transition hover:bg-foreground/[0.06]"
+      className="grid size-8 shrink-0 place-items-center rounded-lg text-[17px] leading-none transition hover:bg-wash"
     >
       {/* Empty only until the data loads. */}
       {shown?.emoji}
@@ -275,7 +275,7 @@ export default function BotEmojiCatalog({ current, onPick, onBack, columns, auto
               onClick={onBack}
               aria-label={t('bots.emojiPicker.back')}
               title={t('bots.emojiPicker.back')}
-              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+              className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-wash hover:text-foreground"
             >
               <ChevronLeft className="size-4" />
             </button>
@@ -288,7 +288,7 @@ export default function BotEmojiCatalog({ current, onPick, onBack, columns, auto
               autoFocus={autoFocus}
               placeholder={t('bots.emojiPicker.search')}
               aria-label={t('bots.emojiPicker.search')}
-              className="h-8 w-full min-w-0 rounded-lg border border-border bg-surface pl-8 pr-2.5 text-[13px] text-foreground outline-none transition placeholder:text-muted focus-visible:border-mint/60 focus-visible:ring-2 focus-visible:ring-mint/30 [&::-webkit-search-cancel-button]:hidden"
+              className="h-8 w-full min-w-0 rounded-lg border border-field-edge bg-field pl-8 pr-2.5 text-[13px] text-foreground outline-none transition placeholder:text-muted focus-visible:border-mint/60 focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-search-cancel-button]:hidden"
             />
           </label>
           <SkinToneButton toneLabels={toneLabels} />
@@ -305,7 +305,7 @@ export default function BotEmojiCatalog({ current, onPick, onBack, columns, auto
                   onClick={() => pick(emoji)}
                   className={clsx(
                     cellClass,
-                    emoji === current ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-foreground/[0.06]',
+                    emoji === current ? 'bg-mint-soft ring-[1.5px] ring-inset ring-mint' : 'hover:bg-wash',
                   )}
                 >
                   {emoji}

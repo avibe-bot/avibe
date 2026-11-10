@@ -164,7 +164,8 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-pet-settings",
             "main-computer-use",
             "main-desktop-update",
-            "main-app-windows"
+            "main-app-windows",
+            "main-desktop-notifications"
         ])
     );
 }
@@ -250,6 +251,7 @@ fn desktop_update_commands_are_workbench_scoped() {
             "allow-desktop-update-check",
             "allow-desktop-update-install",
             "allow-desktop-update-skip",
+            "allow-desktop-update-prereleases-set",
             "allow-desktop-remote-install-allowed",
             "allow-desktop-remote-install-set",
             "allow-desktop-update-remote-decline"
@@ -261,6 +263,7 @@ fn desktop_update_commands_are_workbench_scoped() {
         "updater::desktop_update_check",
         "updater::desktop_update_install",
         "updater::desktop_update_skip",
+        "updater::desktop_update_prereleases_set",
         "updater::desktop_remote_install_allowed",
         "updater::desktop_remote_install_set",
         "updater::desktop_update_remote_decline",
@@ -271,7 +274,7 @@ fn desktop_update_commands_are_workbench_scoped() {
 }
 
 #[test]
-fn notifications_are_native_only_without_workbench_callable_commands() {
+fn notifications_are_native_only_and_workbench_scoped() {
     let source = shipping_source("src/lib.rs");
     let native = shipping_source("src/notifications.rs");
     let build = shipping_source("build.rs");
@@ -279,7 +282,8 @@ fn notifications_are_native_only_without_workbench_callable_commands() {
     assert!(native.contains("NotificationExt"));
     assert!(native.contains(".notification()"));
     assert!(native.contains("sink.gate().allows()"));
-    assert!(!build.contains("notification"));
+    assert!(build.contains("\"desktop_notifications_state\""));
+    assert!(build.contains("\"desktop_notifications_set_enabled\""));
     let commands = source
         .split(".invoke_handler(tauri::generate_handler![")
         .nth(1)
@@ -287,13 +291,16 @@ fn notifications_are_native_only_without_workbench_callable_commands() {
         .split("])")
         .next()
         .unwrap();
-    assert!(!commands.contains("notification"));
-    for forbidden in ["#[tauri::command]", "invoke_handler", ".listen(", ".emit(", ".eval("] {
+    assert!(commands.contains("notifications::desktop_notifications_state"));
+    assert!(commands.contains("notifications::desktop_notifications_set_enabled"));
+    for forbidden in ["invoke_handler", ".listen(", ".emit("] {
         assert!(
             !native.contains(forbidden),
             "notification path must not use {forbidden}"
         );
     }
+    assert!(native.contains("#[tauri::command]"));
+    assert!(native.contains(".eval("));
     for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|extension| extension == "json") {
@@ -588,12 +595,15 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "desktop_update_check",
         "desktop_update_install",
         "desktop_update_skip",
+        "desktop_update_prereleases_set",
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",
         "pet_reset_shortcuts",
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
+        "desktop_notifications_state",
+        "desktop_notifications_set_enabled",
         "desktop_remote_install_allowed",
         "desktop_remote_install_set",
         "desktop_update_remote_decline",
@@ -919,6 +929,7 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(marker.contains("if (window.self === window.top)"));
     assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true })"));
     assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
+    assert!(builder.contains(".initialization_script(DESKTOP_NOTIFICATIONS_MARKER)"));
     let settings_marker = pet_source
         .split("const DESKTOP_PET_SETTINGS_MARKER: &str =")
         .nth(1)
@@ -940,6 +951,10 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_APP_WINDOWS__ === true"),
         "the Workbench must probe the native app window marker"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_NOTIFICATIONS__ === true"),
+        "the Workbench must probe the native notification marker"
     );
     assert!(
         shipping_source("src/app_windows.rs").contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true })"),
@@ -1524,6 +1539,48 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         ] {
             let url = url::Url::parse(rejected).unwrap();
             assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
+    }
+}
+
+#[test]
+fn desktop_notifications_are_main_only_and_loopback_scoped() {
+    let grant = read_json(crate_dir().join("capabilities/main-desktop-notifications.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(grant["local"], false);
+    assert_eq!(
+        grant["permissions"],
+        serde_json::json!([
+            "allow-desktop-notifications-state",
+            "allow-desktop-notifications-set-enabled"
+        ])
+    );
+    let patterns = loopback_patterns(&grant);
+    for allowed in ["http://127.0.0.1:5123/settings/notifications", "http://[::1]:6174/"] {
+        let url = url::Url::parse(allowed).unwrap();
+        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for rejected in [
+        "https://example.com/settings/notifications",
+        "http://127.0.0.1.example.com/",
+        "http://192.168.1.2:5123/settings/notifications",
+        "http://localhost:5123/settings/notifications",
+    ] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+
+    for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|name| name != "main-desktop-notifications.json")
+        {
+            assert!(
+                !read_to_string(&path).contains("allow-desktop-notifications-"),
+                "{} must not grant desktop notification commands",
+                path.display()
+            );
         }
     }
 }

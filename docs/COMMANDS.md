@@ -1011,8 +1011,8 @@ Important options:
 - `--model`
 - `--reasoning-effort`
 - `--close-after`
-- `--callback`
-- `--callback-session-id`
+- `--no-reply`
+- `--callback`, `--callback-session-id`, `--no-callback` (deprecated no-ops)
 - `--sync`
 - `--message`
 - `--message-file`
@@ -1021,11 +1021,18 @@ Without `--session-id` or a fork, the run creates a new Session for `--agent`.
 It is background by default, which suits sub-agent style calls; `--visible`
 makes it user-facing, and `--same-scope` or `--scope-id` places it.
 
-Runs are asynchronous by default: the command queues the run, prints one `run`
-object with its `id` and `session_id`. The final result returns to a Session
-only with `--callback` (the caller) or `--callback-session-id`; a run that does
-not complete always tells the caller Session. Use `--sync` only when the terminal
-should wait for completion.
+Runs are asynchronous by default: the command queues the run and prints one
+`run` object with its `id` and `session_id`. Recipients are told how to report
+explicitly; if one handles a message without writing back and becomes idle with
+no pending work, Avibe sends the sender a read receipt with its last reply.
+Failed, cancelled, or interrupted runs still notify the caller immediately.
+Use `--sync` only when the terminal should wait for completion.
+
+Use `--no-reply` on an existing `--session-id` or `--bot` message for
+informational work: it creates no delegation or receipt, leaves existing
+pairs unchanged, and tells the receiver no reply is needed. It rejects `--sync`
+and new/forked Sessions. The three callback flags remain accepted no-ops with
+one stderr deprecation line; old pending callbacks are honored once.
 
 `--close-after` applies to a new or forked Session. It releases that Agent
 runtime after the Run settles while keeping the Session, transcript, and Run

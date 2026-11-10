@@ -81,7 +81,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
         <h1 className="text-[18px] font-semibold text-foreground">{t('apps.terminal.label')}</h1>
         <p className="text-[12px] text-muted">{t('apps.terminal.tagline')}</p>
       </div>
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
+      <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
         {terminal}
       </div>
     </div>

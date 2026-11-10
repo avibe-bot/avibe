@@ -59,12 +59,23 @@ impl Channel {
         }
         Ok(version)
     }
-    /// The highest SemVer release in this channel; publication order never counts.
+    /// The channel a published release belongs to.
+    pub fn of(prerelease: bool) -> Self {
+        if prerelease {
+            Self::Test
+        } else {
+            Self::Stable
+        }
+    }
+    /// The highest SemVer release this channel offers; publication order never
+    /// counts. Stable offers stable releases only. Test (pre-releases on)
+    /// offers the newest of stable and pre-release, so a stable release that
+    /// supersedes its candidates is still offered.
     pub fn latest(self, releases: Vec<Release>) -> Option<(Version, Release)> {
         releases
             .into_iter()
-            .filter(|release| release.prerelease == (self == Self::Test))
-            .filter_map(|release| Some((self.version(&release.tag).ok()?, release)))
+            .filter(|release| self == Self::Test || !release.prerelease)
+            .filter_map(|release| Some((Self::of(release.prerelease).version(&release.tag).ok()?, release)))
             .max_by(|a, b| a.0.cmp(&b.0))
     }
 }

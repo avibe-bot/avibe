@@ -1,0 +1,12 @@
+{
+  "fixture_id": "instance-webpush-nonascii-v1",
+  "test_clock": 1794096000,
+  "method": "POST",
+  "endpoint": "https://avibe.bot/api/push/apns/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "headers": {
+    "authorization": "vapid t=eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2F2aWJlLmJvdCIsImV4cCI6MTc5NDEzOTIwMCwic3ViIjoibWFpbHRvOm5vdGlmaWNhdGlvbnNAYXZpYmUuYm90In0.y4e3jFhhDkUWItlwwM95Jps7sfvjPm2ToEYOn5_tGI5CpR0uJ4lKuXH1HJx670hL0o2ndPjhNZortMuH-8_yDg,k=BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8",
+    "content-encoding": "aes128gcm",
+    "ttl": "43200"
+  },
+  "body_base64url": "AAECAwQFBgcICQoLDA0ODwAAEABBBLK0oxw5z9sOqlYIXVOGmYwt0FgZRjuZ8shu2I21NSMAXbO_fqPH9inFm7_HkUkJs0-97Z7IsUtdgDnJoXXOKKAND2i1VLPpkzSFA4gaK3mz7GOQjVSKG1raGdM8X8pfBG__UPCeMTkdoFlTdHO-fwC0UStjXUyz_JVEE0rJx3wgDlctI9pjTIxwzfVlkV4CMJt3qtJrmlq21qURGlIM7ztKsZQ-x1gWkLBkpTzRZYKHHZHu58WtleH9IVc9YxU1WpPNecq6PhcY5wVBQQnUwZk0z16sJWIUmE0Tyg1KfKATCMyjkS6hSrzQM9hz1rzqyhzPL_z3hjRqwo8-dXaPhSFi4-LBWi6x6mde0-Sl-Zzx6SzJRXxwlAjmdI_5nrk0x9Hjine9I49ntHjC0wnCIJV3Vro"
+}

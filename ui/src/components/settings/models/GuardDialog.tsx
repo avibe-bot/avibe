@@ -35,7 +35,7 @@ export const GuardDialog: React.FC<{
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
-          className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-border-strong bg-surface outline-none"
+          className="model-hub-guard-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto border border-edge bg-popover outline-none"
           onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
           onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
         >

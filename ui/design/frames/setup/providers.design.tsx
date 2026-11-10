@@ -53,7 +53,7 @@ const designFrames = frames([
     hover: undefined,
   }),
   screen('gateway-failed', '设置向导 · 模型供应商 · 模型网关未能启动', { health: 'down' }),
-  screen('phone', '设置向导 · 模型供应商 · 手机', {}, { width: 390, height: 1790 }),
+  screen('phone', '设置向导 · 模型供应商 · 手机（一屏放下，操作栏固定在底部）', {}, { width: 390, height: 844 }),
 ]);
 
 export default designFrames;

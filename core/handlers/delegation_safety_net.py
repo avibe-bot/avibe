@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import select, update
 
+from core.message_output import DEFAULT_RESULT_MAX_CHARS
 from core.runtime_work import RuntimeWorkItem, RuntimeWorkLane
 from storage.agent_session_rows import reserve_write_lock
 from storage.background import enqueue_run_in_connection, run_update_event_transaction
@@ -20,18 +21,22 @@ if TYPE_CHECKING:
 
 
 def notice_message(session_id: str, reply: str) -> str:
-    excerpt = " ".join(reply.split())
-    if len(excerpt) > 300:
-        excerpt = excerpt[:299] + "…"
-    # The id is runtime-owned. Bot Sessions use the same address as ordinary
-    # Harness report hints; other Sessions keep the explicit --session-id form.
+    """Build the durable receipt using the same 30,000-character Avibe result cap.
+
+    The last reply is useful information now that successful callbacks are gone. Keep
+    its formatting, and give the sender a read-only query escape hatch when the stored
+    reply exceeds the inline cap.
+    """
     from core.agent_input import _address
 
-    _, command = _address(session_id)
+    body = str(reply or "") or "(no reply recorded)"
+    pointer = f"\n\n[Reply truncated; use `vibe data query` to read #{session_id}'s transcript in full.]"
+    if len(body) > DEFAULT_RESULT_MAX_CHARS:
+        body = body[:DEFAULT_RESULT_MAX_CHARS] + pointer
     return (
         "[It handled your message without writing back; its last reply is below. "
-        f"Follow up with {command} only if you were waiting on it.]\n"
-        f"{excerpt or '(no reply recorded)'}"
+        f"Follow up with {_address(session_id)[1]} only if you were waiting on it.]\n"
+        f"{body}"
     )
 
 

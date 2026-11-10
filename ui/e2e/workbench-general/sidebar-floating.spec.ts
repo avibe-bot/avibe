@@ -263,7 +263,8 @@ for (const theme of ['dark', 'light'] as const) {
       await expect.poll(() => receivesPointer(popup.getByText(text, { exact: true }))).toBe(true);
     }
     const background = await popup.evaluate((element) => getComputedStyle(element).backgroundColor);
-    expect(background).toBe(theme === 'dark' ? 'rgb(17, 17, 28)' : 'rgb(255, 255, 255)');
+    // The floating fill (`--popover`, ui/design: system/elevation/scale), opaque in both themes.
+    expect(background).toBe(theme === 'dark' ? 'rgb(22, 22, 34)' : 'rgb(255, 255, 255)');
     await page.screenshot({
       path: `e2e/.artifacts/workbench-general/shots/version-dock-${theme}.png`, scale: 'css', animations: 'disabled',
     });

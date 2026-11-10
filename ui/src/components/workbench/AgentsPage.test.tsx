@@ -421,7 +421,7 @@ describe('Organization access summary presentation', () => {
     // A card is enclosed on every side: a radius plus one full border. The
     // full-bleed band it replaced had edge rules only, which `border-y` states.
     expect(card?.className).toContain('rounded-2xl');
-    expect(card?.className).toContain('border-border-strong');
+    expect(card?.className).toContain('border-edge');
     expect(card?.className).not.toContain('border-y');
     view.unmount();
   });

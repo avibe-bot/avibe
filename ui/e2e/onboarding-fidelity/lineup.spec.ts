@@ -171,13 +171,20 @@ for (const [width, height] of [[1200, 800], [1440, 900], [1920, 1080], [1280, 10
         await expect(page.locator('.onboarding-assistant[data-backend="vibey"] .onboarding-model-offer')).toBeVisible();
         await expect(caption).toContainText('Pick a model for Vibey');
       }
+      // A phone pins the bar to the window instead of reserving room for it, so the caption
+      // is read where the scroll ends, and the bar's claim is that it is on the window's edge.
+      const phone = width < 760;
+      if (phone) {
+        await page.locator('.onboarding-shell').evaluate((node) => { node.scrollTop = node.scrollHeight; });
+      }
       const captionBox = (await boxes(page, '[data-setup-screen="assistants"] .onboarding-setup-aside'))[0];
       const footer = (await boxes(page, '.onboarding-setup-footer'))[0];
       for (const card of await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant')) {
         expect(overlaps(card, captionBox)).toBe(false);
       }
       expect(overlaps(footer, captionBox)).toBe(false);
-      expect(await actionTop(page)).toBeCloseTo(introAction, 0);
+      if (phone) expect(Math.abs(footer.y + footer.height - height)).toBeLessThanOrEqual(1);
+      else expect(await actionTop(page)).toBeCloseTo(introAction, 0);
     });
   }
 }

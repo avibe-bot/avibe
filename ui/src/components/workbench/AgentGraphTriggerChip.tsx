@@ -43,7 +43,7 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
       className={clsx(
         'flex h-full w-full items-center gap-2 rounded-xl border bg-violet-soft px-3 py-2 text-left transition hover:brightness-110',
         // Selected mirrors the session card's colored-border + glow (violet here).
-        selected ? 'border-violet shadow-glow-md-violet' : 'border-violet/40',
+        selected ? 'border-violet' : 'border-violet/40',
         faded ? 'opacity-25' : disabled && 'opacity-60',
         className,
       )}

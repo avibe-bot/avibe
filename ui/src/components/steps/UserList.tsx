@@ -200,7 +200,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
   return (
     <>
       <div
-        className="flex flex-col gap-5 rounded-2xl border bg-surface-2/40 p-5 shadow-[0_24px_48px_-30px_rgba(91,255,160,0.20)] md:flex-row md:flex-wrap md:items-stretch md:justify-between md:gap-6 md:p-6"
+        className="flex flex-col gap-5 rounded-2xl border bg-surface-2/40 p-5 shadow-elevation-0 md:flex-row md:flex-wrap md:items-stretch md:justify-between md:gap-6 md:p-6"
         style={{ borderColor: 'rgba(91,255,160,0.33)' }}
       >
         {/* Actions area — appears first on mobile, right on desktop */}
@@ -325,14 +325,14 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                   return (
                     <div key={bc.code} className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5">
                       <div className="flex flex-wrap items-center gap-2">
-                        <code className="rounded border border-border bg-surface px-2 py-0.5 font-mono text-[12px] text-foreground">bind {bc.code}</code>
+                        <code className="rounded border border-edge bg-surface px-2 py-0.5 font-mono text-[12px] text-foreground shadow-elevation-0">bind {bc.code}</code>
                         <span
                           className={clsx(
                             'rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold tracking-[0.12em]',
                             status === 'active' && 'border-mint/40 bg-mint-soft text-mint-ink',
-                            status === 'used' && 'border-border bg-foreground/[0.04] text-muted',
+                            status === 'used' && 'border-edge text-muted bg-field',
                             status === 'expired' && 'border-gold/40 bg-gold/10 text-gold-ink',
-                            status === 'inactive' && 'border-border bg-foreground/[0.04] text-muted',
+                            status === 'inactive' && 'border-edge text-muted bg-field',
                           )}
                         >
                           {t(`bindCode.${status}`)}
@@ -419,7 +419,7 @@ const Modal: React.FC<{ title: string; onClose: () => void; children: React.Reac
     <DialogContent
       aria-describedby={undefined}
       closeLabel={title}
-      className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-y-auto rounded-2xl border border-border bg-surface-2 p-0 shadow-[0_42px_80px_-42px_rgba(0,0,0,0.85)]"
+      className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-y-auto rounded-2xl p-0"
     >
       <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
         <DialogTitle className="min-w-0 flex-1 break-words text-base font-semibold text-foreground [overflow-wrap:anywhere]">
@@ -735,10 +735,10 @@ export const UserList: React.FC = () => {
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
-                      ? 'border-mint/30 bg-surface-2/70 shadow-glow-lg-mint'
+                      ? 'border-mint/30 bg-surface-2/70'
                       : userConfig.enabled
-                        ? 'border-border bg-background hover:border-border-strong'
-                        : 'border-border bg-background/60 opacity-70'
+                        ? 'border-edge bg-surface shadow-elevation-0'
+                        : 'border-edge bg-background/60 opacity-70 shadow-elevation-0'
                   )}
                 >
                   {/* Master row — matches /groups layout */}
@@ -777,7 +777,7 @@ export const UserList: React.FC = () => {
                         )}
                       </span>
                       <span
-                        className="absolute -bottom-1 -right-1 flex size-[20px] items-center justify-center rounded-full border border-border bg-background shadow-[0_0_0_2px_var(--color-background)]"
+                        className="absolute -bottom-1 -right-1 flex size-[20px] items-center justify-center rounded-full border border-edge shadow-[0_0_0_2px_var(--color-background)] bg-background"
                         title={platformText(t, u.platform, 'title')}
                       >
                         <PlatformIcon platform={u.platform} size={13} />
@@ -796,7 +796,7 @@ export const UserList: React.FC = () => {
 
                     {/* Admin badge — clickable; bot renders as static label */}
                     {isBot ? (
-                      <span className="inline-flex shrink-0 items-center rounded-full border border-border bg-foreground/[0.04] px-2 py-0.5 text-[11px] font-semibold text-muted">
+                      <span className="inline-flex shrink-0 items-center rounded-full border border-edge px-2 py-0.5 text-[11px] font-semibold text-muted bg-field">
                         {t('userList.bot')}
                       </span>
                     ) : (
@@ -820,7 +820,7 @@ export const UserList: React.FC = () => {
                           'inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors',
                           userConfig.is_admin
                             ? 'border-gold/40 bg-gold/10 font-bold text-gold-ink hover:bg-gold/15'
-                            : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
+                            : 'border-edge text-muted hover:text-foreground bg-field'
                         )}
                       >
                         <Shield size={11} strokeWidth={2.4} />

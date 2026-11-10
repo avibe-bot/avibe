@@ -25,6 +25,7 @@ from config.v2_config import (
     CONFIG_LOCK,
     KEYLESS_EXA_DISPLAY_NAME,
     KEYLESS_EXA_SOURCE_ID,
+    KEYLESS_EXA_SERVICE_ID,
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
@@ -1665,7 +1666,11 @@ class ModelHubService:
         self._service_cooldowns = ServiceCooldowns()
         # Exa's anonymous endpoint is per-IP limited; cap active MCP calls
         # without serializing a turn or the session's independent JSON-RPC ids.
-        self._keyless_exa_call_semaphore = asyncio.Semaphore(3)
+        self._keyless_exa_call_semaphore = asyncio.Semaphore(
+            search_service("exa-mcp", "search")["limits"]["max_concurrent"]
+        )
+        # Exa search/fetch share the existing IP budget; unrelated MCP hosts do not.
+        self._keyless_call_semaphores = {KEYLESS_EXA_SERVICE_ID: self._keyless_exa_call_semaphore}
         self._jina_fetch_sent_at: deque[datetime] = deque()
         self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
@@ -8602,13 +8607,17 @@ class ModelHubService:
             return result
 
     @staticmethod
-    def models_dev_matches(query: object) -> list[dict]:
+    def models_dev_matches(
+        query: object,
+        *,
+        refresh_if_stale: bool = False,
+    ) -> list[dict]:
         if not isinstance(query, str) or not query.strip():
             raise ModelHubError("mapping_target_unavailable")
         from vibe.models_dev_catalog import search_models_dev
 
         try:
-            return search_models_dev(query)
+            return search_models_dev(query, refresh_if_stale=refresh_if_stale)
         except (OSError, RuntimeError, ValueError):
             raise ModelHubError("models_dev_unavailable", status=502) from None
 

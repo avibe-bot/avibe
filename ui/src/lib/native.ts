@@ -4,11 +4,27 @@ export type NativeCapability =
   | 'app'
   | 'haptics'
   | 'keyboardResizesViewport'
+  | 'push'
   | 'viewport'
   | 'voice';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
+export type NativePushSubscription = {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+};
+export type NativePushRevokeState = 'active' | 'absent' | 'pending';
+export type NativePushStatus =
+  | {
+      state: 'unavailable' | 'off';
+      revokeState?: NativePushRevokeState;
+      endpoint?: string;
+    }
+  | ({
+      state: 'on';
+      revokeState?: NativePushRevokeState;
+    } & NativePushSubscription);
 
 export type NativeBridgeError = {
   code: string;
@@ -172,4 +188,107 @@ export async function nativeVoicePermission(): Promise<NativeVoicePermission | n
   } catch {
     return null;
   }
+}
+
+export async function nativePushStatus(
+  vapidPublicKey?: string,
+): Promise<NativePushStatus | null> {
+  const outcome = await nativePushStatusOutcome(vapidPublicKey);
+  return outcome.status === 'ok' ? outcome.value : null;
+}
+
+export type NativePushStatusOutcome =
+  | { status: 'ok'; value: NativePushStatus }
+  | { status: 'failed' };
+
+export async function nativePushStatusOutcome(
+  vapidPublicKey?: string,
+): Promise<NativePushStatusOutcome> {
+  try {
+    const value = await callNative<NativePushStatus>(
+      'push',
+      'push.status',
+      vapidPublicKey ? { vapidPublicKey } : {},
+    );
+    return value ? { status: 'ok', value } : { status: 'failed' };
+  } catch {
+    return { status: 'failed' };
+  }
+}
+
+export async function nativePushSubscribe(
+  vapidPublicKey: string,
+  forceResubscribe = false,
+): Promise<NativePushSubscription | null> {
+  try {
+    return await callNative<NativePushSubscription>(
+      'push',
+      'push.subscribe',
+      forceResubscribe
+        ? { vapidPublicKey, forceResubscribe: true }
+        : { vapidPublicKey },
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function nativePushUnsubscribe(): Promise<boolean> {
+  const status = (await nativePushUnsubscribeOutcome()).status;
+  return status === 'confirmed' || status === 'not_needed';
+}
+
+export type NativePushUnsubscribeOutcome =
+  | { status: 'confirmed' }
+  | { status: 'pending' }
+  | { status: 'not_needed' }
+  | { status: 'failed' };
+
+/**
+ * New shells include `revoke`; `revoked` keeps older Web bundles compatible.
+ */
+export async function nativePushUnsubscribeOutcome(): Promise<NativePushUnsubscribeOutcome> {
+  try {
+    const result = await callNative<{
+      revoked: boolean;
+      revoke?: 'confirmed' | 'pending' | 'not_needed';
+    }>(
+      'push',
+      'push.unsubscribe',
+    );
+    if (!result) return { status: 'failed' };
+    if (
+      result.revoke === 'confirmed'
+      || result.revoke === 'pending'
+      || result.revoke === 'not_needed'
+    ) {
+      return { status: result.revoke };
+    }
+    return result.revoked ? { status: 'confirmed' } : { status: 'pending' };
+  } catch {
+    return { status: 'failed' };
+  }
+}
+
+export function onNativePushOpened(
+  handler: (path: string) => void,
+): () => void {
+  const native = bridge();
+  if (!native || (native.capabilities.push ?? 0) < 1) return () => undefined;
+  return native.on('push.opened', (payload) => {
+    if (
+      payload
+      && typeof payload === 'object'
+      && 'url' in payload
+      && typeof payload.url === 'string'
+    ) {
+      try {
+        const parsed = new URL(payload.url, window.location.origin);
+        if (parsed.origin !== window.location.origin) return;
+        handler(parsed.pathname + parsed.search + parsed.hash);
+      } catch {
+        // Ignore malformed navigation payloads from the native shell.
+      }
+    }
+  });
 }

@@ -347,7 +347,7 @@ scenarios:
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_open_project_binds_the_signed_editor
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_every_producer_refuses_an_unreachable_target
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_callers_own_session_is_an_effective_target
-      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_callback_is_admitted_before_the_run_is_reserved
+      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_deprecated_callback_flags_never_add_a_destination
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_forbidden_project_target_is_refused
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_unusable_agent_refuses_the_turn
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_permitted_editor_still_queues_the_turn
@@ -366,5 +366,5 @@ scenarios:
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_callers_that_could_still_retarget_per_run_work
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_saved_control_keeps_the_definitions_own_authority
     given: A signed caller names a Session it may not drive, by Session id or by defaulting to its own, or repoints a stored definition at a destination it may or may not use
-    when: A Run, a callback route, and a Task or Watch definition are produced or retargeted through the real CLI
-    then: Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, work that becomes per-run admits the Agent each future fire will select with its follow-the-Session marker read from the edit's final policy, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority
+    when: A Run and a Task or Watch definition are produced or retargeted through the real CLI, including a deprecated callback flag naming an inaccessible Session
+    then: Deprecated callback flags add no destination and cannot bypass actual target admission. Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, work that becomes per-run admits the Agent each future fire will select with its follow-the-Session marker read from the edit's final policy, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority

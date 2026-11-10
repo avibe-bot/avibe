@@ -148,7 +148,7 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
         'md:justify-start',
         active
           ? 'bg-mint-soft font-semibold text-foreground'
-          : 'font-medium text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+          : 'font-medium text-muted hover:bg-wash hover:text-foreground',
       )}
     >
       <Icon className={clsx('size-3.5 shrink-0', active ? 'text-mint-ink' : 'text-muted')} />
@@ -185,7 +185,7 @@ const SettingsNavGroup: React.FC<{ item: SettingsItem }> = ({ item }) => {
           'md:justify-start',
           childActive
             ? 'text-foreground'
-            : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+            : 'text-muted hover:bg-wash hover:text-foreground',
         )}
       >
         <Icon className={clsx('size-3.5 shrink-0', childActive ? 'text-mint-ink' : 'text-muted')} />
@@ -338,7 +338,7 @@ export const SettingsLayout: React.FC = () => {
 
   // One class string for both branches below, so the touch target and the
   // chevron cannot drift apart depending on where the control points.
-  const mobileBackClassName = '-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:hidden';
+  const mobileBackClassName = '-ml-2 grid size-11 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-wash hover:text-foreground md:hidden';
 
   const mobileBackLabel = setupOrigin ? t('common.back') : mobileBackTarget === '/'
     ? t('settings.backToWorkbench')
@@ -422,7 +422,7 @@ export const SettingsLayout: React.FC = () => {
           )}
           <ReturnToApp
             aria-label={t('settings.close')}
-            className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-foreground/[0.05] hover:text-foreground md:grid"
+            className="hidden size-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-wash hover:text-foreground md:grid"
           >
             <X className="size-4" />
           </ReturnToApp>
@@ -447,7 +447,7 @@ export const SettingsLayout: React.FC = () => {
         >
           <ReturnToApp
             aria-label={t('settings.backToApp')}
-            className="mb-2 hidden min-h-10 shrink-0 items-center gap-2.5 rounded-[9px] px-2.5 text-[14px] text-foreground transition-colors hover:bg-foreground/[0.05] md:flex md:justify-start"
+            className="mb-2 hidden min-h-10 shrink-0 items-center gap-2.5 rounded-[9px] px-2.5 text-[14px] text-foreground transition-colors hover:bg-wash md:flex md:justify-start"
           >
             <ArrowLeft className="size-[17px] shrink-0" />
             <span className="truncate">{t('settings.backToApp')}</span>

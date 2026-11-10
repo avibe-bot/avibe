@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { webFetchTool } from './webFetch';
 import { AddSearchServiceDialog } from './AddSearchServiceDialog';
-import { searchServicesActive, webSearchTool, KEYLESS_EXA_SOURCE_ID, keylessExaSource } from './searchServices';
+import { searchServicesActive, webSearchTool, builtinSearchSource } from './searchServices';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
@@ -361,7 +361,7 @@ const DirectHome: React.FC<{
   return (
     <div className="model-hub-direct">
       <div className="model-hub-direct-grid grid">
-        <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
+        <section className="model-hub-direct-card overflow-hidden border border-edge bg-surface shadow-elevation-0">
           <div className="model-hub-direct-head flex items-center gap-3 border-b border-border px-5 py-3">
             <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
           </div>
@@ -387,7 +387,7 @@ const DirectHome: React.FC<{
             })}
           </div>
         </section>
-        <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
+        <section className="model-hub-direct-card overflow-hidden border border-edge bg-surface shadow-elevation-0">
           <div className="model-hub-direct-head flex items-center border-b border-border px-5 py-3"><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.benefits.title')}</h2></div>
           <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex items-start gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span className="model-hub-direct-benefit-copy"><span className="model-hub-direct-benefit-title-row flex items-center gap-1.5"><span className="text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span></span><span className="model-hub-direct-benefit-detail">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
         </section>
@@ -1203,25 +1203,29 @@ export const SettingsModelsPage: React.FC = () => {
       // its own stale treatment and Retry, and raises the page's refresh toast.
     }
   }, [selectSource, showToast, t]);
-  const selectedSource = sources.find((source) => source.id === selectedSourceId)
-    ?? (selectedSourceId === KEYLESS_EXA_SOURCE_ID
-      ? { ...keylessExaSource(), display_name: t('settings.models.searchServices.vendorName.exa-mcp') as string }
-      : null);
+  // A built-in search service has no Source row: the hosted read below names it
+  // (only an old read's Exa resolves without it), so that read is not gated on it.
+  const rowSource = sources.find((source) => source.id === selectedSourceId);
+  const earlySource = rowSource ?? builtinSearchSource(selectedSourceId);
   // Read while the tab is open, or while a Source's detail shows its capability
   // chips, and again when that Source changes: an edit can change its identity,
   // which drops its evidence on the server.
   // The open Source's identity as evidence follows it (`retry.source_identity`).
-  const selectedSourceIdentity = selectedSource
+  const selectedSourceIdentity = earlySource
     ? JSON.stringify([
-        selectedSource.id, selectedSource.kind, selectedSource.vendor, selectedSource.protocol, selectedSource.supply_channel,
-        selectedSource.base_url ?? null, selectedSource.credential_ref ?? null, selectedSource.credential_generation ?? null,
+        earlySource.id, earlySource.kind, earlySource.vendor, earlySource.protocol, earlySource.supply_channel,
+        earlySource.base_url ?? null, earlySource.credential_ref ?? null, earlySource.credential_generation ?? null,
       ])
     : null;
-  const hostedTools = useHostedTools(runtimeConfigurationVisible && (tab === 'tools' || tab === 'sources' || selectedSource !== null), selectedSourceIdentity, tab);
+  const hostedTools = useHostedTools(runtimeConfigurationVisible && (tab === 'tools' || tab === 'sources' || selectedSourceId !== null), selectedSourceIdentity, tab);
   const hostedStatus = foldRegionRead(hostedTools.read, {
     loading: () => null, unread: () => null, ready: (data) => data, degraded: (data) => data,
   });
   const searchTool = webSearchTool(hostedStatus);
+  const builtinSource = rowSource ? null : builtinSearchSource(selectedSourceId, searchTool);
+  const selectedSource = rowSource ?? (builtinSource
+    ? { ...builtinSource, display_name: t(`settings.models.searchServices.vendorName.${builtinSource.vendor}`, { defaultValue: builtinSource.display_name }) as string }
+    : null);
   const fetchTool = webFetchTool(hostedStatus);
   const openSearchServices = (opener: HTMLButtonElement) => {
     apiKeyTriggerRef.current = opener;
@@ -1645,7 +1649,7 @@ export const SettingsModelsPage: React.FC = () => {
                             align="start"
                             sideOffset={8}
                             collisionPadding={12}
-                            className="flex w-[300px] max-w-[calc(100vw-24px)] flex-col gap-0.5 rounded-[10px] border-border-strong bg-surface p-1.5 text-foreground !shadow-[var(--model-hub-menu-shadow)]"
+                            className="flex w-[300px] max-w-[calc(100vw-24px)] flex-col gap-0.5 rounded-[10px] p-1.5 text-foreground"
                             onOpenAutoFocus={(event) => {
                               event.preventDefault();
                               window.requestAnimationFrame(() => {
@@ -1738,7 +1742,7 @@ export const SettingsModelsPage: React.FC = () => {
         <DialogContent
           mobileSheetHeight="tall"
           closeLabel={t('settings.models.sourceDetail.close') as string}
-          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
+          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             sourceDetailHeadingRef.current?.focus();
@@ -1793,7 +1797,7 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
       </Dialog>
-      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog tool={searchTool} fetchTool={fetchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onViewOrder={() => { setSearchServiceOpen(false); setTab('tools'); }} onOpenSource={(sourceId) => {
+      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog onEnableService={(sourceId) => { void hostedTools.save('web_search', { services: { [sourceId]: { enabled: true } } }); setSearchServiceOpen(false); }} tool={searchTool} fetchTool={fetchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onViewOrder={() => { setSearchServiceOpen(false); setTab('tools'); }} onOpenSource={(sourceId) => {
         setSearchServiceOpen(false);
         selectSource({ sourceId, returnFocus: () => apiKeyTriggerRef.current, serviceView: true });
       }} />}

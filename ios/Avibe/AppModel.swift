@@ -40,6 +40,15 @@ enum AppRoute: Equatable {
     }
 }
 
+private struct PendingPushOpened {
+    let id: String
+    let accountID: String
+    let instanceOrigin: String
+    let url: String
+    let runtimeIdentity: Int
+    let createdAt: Date
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var route: AppRoute = .loading
@@ -51,10 +60,20 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
+    private let pushKeychain: PushKeychainStoring
+    private let pushGenerationStore: PushGenerationStoring
+    private let pushInstallationMarker: PushInstallationMarkerStoring
+    private let pushNotificationCenter: PushNotificationCentering?
+    private let pushOpenedNow: () -> Date
+    private let pushOpenedLifetime: TimeInterval
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
+    private var hasCompletedBootstrap = false
+    private var pendingPushTap: PushNotificationTap?
+    private var pendingPushOpened: PendingPushOpened?
+    private var pendingPushOpenedExpiryTask: Task<Void, Never>?
 
     private lazy var sessionCoordinator = MobileSessionCoordinator(
         defaults: defaults,
@@ -65,11 +84,42 @@ final class AppModel: ObservableObject {
         },
         onPrepareAccountTransition: { [weak self] in
             self?.prepareForAccountTransition() ?? []
+        },
+        onPreparePushLogout: { [weak self] in
+            await self?.nativePushCoordinator.prepareForLogout()
+        }
+    )
+
+    private lazy var nativePushCoordinator = NativePushCoordinator(
+        keychain: pushKeychain,
+        generationStore: pushGenerationStore,
+        managementRequest: { [weak self] request in
+            guard let self else {
+                throw NativePushError.unavailable
+            }
+            return try await self.mobileSessionCoordinator.pushManagementRequest(
+                request
+            )
+        },
+        accountProvider: { [weak self] in
+            self?.mobileSessionCoordinator.currentAccount
+        },
+        installationMarker: pushInstallationMarker,
+        notificationCenter: pushNotificationCenter,
+        onTap: { [weak self] tap in
+            self?.handlePushTap(tap)
+        },
+        onTapRecovery: { [weak self] in
+            self?.showInstancePicker()
         }
     )
 
     var mobileSessionCoordinator: MobileSessionCoordinator {
         sessionCoordinator
+    }
+
+    var pushCoordinator: NativePushCoordinator {
+        nativePushCoordinator
     }
 
     var runtimeWebsiteDataStore: WKWebsiteDataStore {
@@ -78,11 +128,27 @@ final class AppModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
-        controlPlane: MobileControlPlaneConfiguration = MobileControlPlaneConfiguration()
+        controlPlane: MobileControlPlaneConfiguration =
+            MobileControlPlaneConfiguration(),
+        pushKeychain: PushKeychainStoring = PushKeychainStore(),
+        pushGenerationStore: PushGenerationStoring =
+            SharedPushGenerationStore(),
+        pushInstallationMarker: PushInstallationMarkerStoring =
+            UserDefaultsPushInstallationMarkerStore(),
+        pushNotificationCenter: PushNotificationCentering? = nil,
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        pushOpenedLifetime: TimeInterval = 120
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
+        self.pushKeychain = pushKeychain
+        self.pushGenerationStore = pushGenerationStore
+        self.pushInstallationMarker = pushInstallationMarker
+        self.pushNotificationCenter = pushNotificationCenter
+        self.pushOpenedNow = pushOpenedNow
+        self.pushOpenedLifetime = pushOpenedLifetime
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
+        _ = nativePushCoordinator
 
         Task { [weak self] in
             await self?.bootstrap()
@@ -151,6 +217,7 @@ final class AppModel: ObservableObject {
     }
 
     func showInstancePicker() {
+        clearPendingPushOpened()
         stopRuntime()
         route = .onboarding(.instances)
     }
@@ -169,6 +236,11 @@ final class AppModel: ObservableObject {
         } catch {
             route = .onboarding(.instances)
         }
+        hasCompletedBootstrap = true
+        if let pendingPushTap {
+            self.pendingPushTap = nil
+            handlePushTap(pendingPushTap)
+        }
     }
 
     private func stopRuntime() {
@@ -184,14 +256,146 @@ final class AppModel: ObservableObject {
         guard sessionCoordinator.isCurrentRuntime(runtime) else {
             return
         }
+        if let pendingPushOpened,
+           pendingPushOpened.instanceOrigin
+                != WebOrigin(url: runtime.instance.url)?.serialized
+        {
+            clearPendingPushOpened()
+        }
+        nativePushCoordinator.resumeAfterAccountActivation()
         stopRuntime()
         runtimeIdentity += 1
         route = .browser(runtime)
     }
 
+    func didFinishRuntimeLoading() {
+        guard
+            let pendingPushOpened,
+            let runtimeController
+        else {
+            return
+        }
+        guard pendingPushOpened.createdAt.addingTimeInterval(
+            pushOpenedLifetime
+        ) > pushOpenedNow(),
+              pendingPushOpened.runtimeIdentity == runtimeIdentity,
+              sessionCoordinator.currentAccount?.id == pendingPushOpened.accountID,
+              sessionCoordinator.currentInstances.contains(where: {
+                  $0.available
+                      && WebOrigin(url: $0.url)?.serialized
+                          == pendingPushOpened.instanceOrigin
+              })
+        else {
+            clearPendingPushOpened()
+            return
+        }
+        runtimeController.deliverPushOpened(
+            id: pendingPushOpened.id,
+            path: pendingPushOpened.url
+        )
+    }
+
+    @discardableResult
+    func acknowledgePushOpened(id: String, origin: WebOrigin) -> Bool {
+        guard
+            let pendingPushOpened,
+            pendingPushOpened.id == id,
+            pendingPushOpened.instanceOrigin == origin.serialized,
+            pendingPushOpened.runtimeIdentity == runtimeIdentity,
+            pendingPushOpened.createdAt.addingTimeInterval(
+                pushOpenedLifetime
+            ) > pushOpenedNow(),
+            sessionCoordinator.currentAccount?.id == pendingPushOpened.accountID,
+            let runtime = route.runtime,
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
+        else {
+            if pendingPushOpened?.id == id {
+                clearPendingPushOpened()
+            }
+            return false
+        }
+        clearPendingPushOpened()
+        return true
+    }
+
+    private func handlePushTap(_ tap: PushNotificationTap) {
+        guard hasCompletedBootstrap else {
+            pendingPushTap = tap
+            return
+        }
+        guard
+            let account = sessionCoordinator.currentAccount,
+            account.id == tap.accountID,
+            let instance = sessionCoordinator.currentInstances.first(where: {
+                $0.available
+                    && WebOrigin(url: $0.url)?.serialized == tap.instanceOrigin
+            }),
+            Self.isSafeInstancePath(tap.url)
+        else {
+            clearPendingPushOpened()
+            showInstancePicker()
+            return
+        }
+        let pending = PendingPushOpened(
+            id: UUID().uuidString,
+            accountID: tap.accountID,
+            instanceOrigin: tap.instanceOrigin,
+            url: tap.url,
+            runtimeIdentity: runtimeIdentity + 1,
+            createdAt: pushOpenedNow()
+        )
+        pendingPushOpened = pending
+        pendingPushOpenedExpiryTask?.cancel()
+        let lifetime = pushOpenedLifetime
+        pendingPushOpenedExpiryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(lifetime))
+            guard !Task.isCancelled else {
+                return
+            }
+            self?.expirePendingPushOpened(id: pending.id)
+        }
+        do {
+            _ = try sessionCoordinator.selectInstance(id: instance.id)
+        } catch {
+            clearPendingPushOpened()
+            showInstancePicker()
+        }
+    }
+
+    private func expirePendingPushOpened(id: String) {
+        guard pendingPushOpened?.id == id else {
+            return
+        }
+        clearPendingPushOpened()
+    }
+
+    private func clearPendingPushOpened() {
+        pendingPushOpenedExpiryTask?.cancel()
+        pendingPushOpenedExpiryTask = nil
+        pendingPushOpened = nil
+    }
+
+    private static func isSafeInstancePath(_ value: String) -> Bool {
+        guard
+            !value.isEmpty,
+            value.first == "/",
+            !value.contains("\\"),
+            !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+            let components = URLComponents(string: value),
+            components.scheme == nil,
+            components.host == nil,
+            components.user == nil,
+            components.password == nil
+        else {
+            return false
+        }
+        return true
+    }
+
     private func prepareForAccountTransition() -> [
         WebsiteDataStoreReleaseBarrier
     ] {
+        clearPendingPushOpened()
         stopRuntime()
         switch route {
         case .browser:

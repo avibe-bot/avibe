@@ -2,8 +2,9 @@ name: desktop-self-contained-package
 
 # Release (tag) builds Developer ID sign and notarize every macOS layer. The
 # Windows NSIS build is intentionally unsigned here; a downstream job binds the
-# `windows-signing` environment, signs exactly the final installer, and then
-# rebuilds all release metadata from those signed bytes.
+# `windows-signing` environment for TEST and stable release tags, signs exactly
+# the final installer, and then rebuilds all release metadata from those signed
+# bytes.
 #
 # Only reruns of the same tag can read a tag's caches, so release builds
 # restore caches but never save them. The unsigned cache warm-up (a master push
@@ -446,7 +447,7 @@ jobs:
           if ($signature.Status -ne 'NotSigned') { throw "Expected an unsigned TEST installer" }
 
       - name: Stage unsigned Windows installer for Certum
-        if: runner.os == 'Windows' && startsWith(inputs.release_tag, 'gh-v')
+        if: runner.os == 'Windows' && (startsWith(inputs.release_tag, 'gh-v') || startsWith(inputs.release_tag, 'v'))
         shell: pwsh
         run: |
           $installers = @(Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe)
@@ -457,7 +458,7 @@ jobs:
           Copy-Item desktop/src-tauri/resources/runtime/* windows-signing-input/runtime/ -Force
 
       - name: Record artifact hashes
-        if: runner.os != 'Windows' || !startsWith(inputs.release_tag, 'gh-v')
+        if: runner.os != 'Windows' || (!startsWith(inputs.release_tag, 'gh-v') && !startsWith(inputs.release_tag, 'v'))
         shell: bash
         env:
           AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
@@ -489,7 +490,7 @@ jobs:
             --signing "$signing" ${driver_args[@]+"${driver_args[@]}"}
 
       - name: Sign and verify final updater artifacts
-        if: inputs.updater_enabled && (runner.os != 'Windows' || !startsWith(inputs.release_tag, 'gh-v'))
+        if: inputs.updater_enabled && (runner.os != 'Windows' || (!startsWith(inputs.release_tag, 'gh-v') && !startsWith(inputs.release_tag, 'v')))
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -511,7 +512,7 @@ jobs:
           retention-days: 14
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        if: runner.os == 'Windows' && startsWith(inputs.release_tag, 'gh-v') && env.DESKTOP_CACHE_WARMUP != 'true'
+        if: runner.os == 'Windows' && (startsWith(inputs.release_tag, 'gh-v') || startsWith(inputs.release_tag, 'v')) && env.DESKTOP_CACHE_WARMUP != 'true'
         with:
           name: avibe-desktop-unsigned-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
           path: windows-signing-input/
@@ -519,7 +520,7 @@ jobs:
           retention-days: 14
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        if: runner.os == 'Windows' && !startsWith(inputs.release_tag, 'gh-v') && env.DESKTOP_CACHE_WARMUP != 'true'
+        if: runner.os == 'Windows' && !startsWith(inputs.release_tag, 'gh-v') && !startsWith(inputs.release_tag, 'v') && env.DESKTOP_CACHE_WARMUP != 'true'
         with:
           name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
           path: desktop-package/

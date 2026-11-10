@@ -114,12 +114,12 @@ const LiveSecretRequest: React.FC<{ name: string; requestId?: string }> = ({ nam
         request={resolvedRequest}
         notice={
           !requestLoaded ? (
-            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+            <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
               <Loader2 className="size-4 animate-spin" />
               {t('common.loading')}
             </div>
           ) : requestAmbiguous ? (
-            <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+            <div className="rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
               {t('vaults.request.ambiguousProvision')}
             </div>
           ) : undefined

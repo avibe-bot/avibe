@@ -1771,7 +1771,7 @@ describe('ChatPage transcript hydration', () => {
 
     const disable = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
     expect(disable.className).toContain('size-6');
-    expect(disable.className).toContain('border-border');
+    expect(disable.className).toContain('border-edge');
     act(() => disable.click());
 
     await waitFor(() => expect(mocks.api.mutateConfig).toHaveBeenCalledWith([

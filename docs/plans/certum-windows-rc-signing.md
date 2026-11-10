@@ -21,12 +21,19 @@ channel is enabled, the Tauri updater signature is produced in a separate
 - Only the outer NSIS installer is Authenticode-signed in this first RC. The
   embedded application and bundled third-party binaries are not claimed to be
   independently signed.
-- Stable `v*` releases and manual unsigned builds retain their existing paths;
-  this change does not publish or retrofit a stable release.
+- Stable `v*` releases use the same Certum-signed Windows installer path as RC
+  `gh-v*` releases. Manual unsigned builds retain their existing path; this
+  migration applies to future stable releases and does not retrofit a release
+  that has already been published.
+
+## Owner approval
+
+The owner approved migrating stable `v*` releases to Certum Authenticode
+signing on 2026-11-10 at 01:53 (UTC+08:00).
 
 ## Acceptance
 
 A release is not final until the public Windows installer has been downloaded
-from the new GitHub-only RC and independently checked for Authenticode validity,
-expected publisher and timestamp, final public hash, updater manifest (when
-enabled), and tamper rejection.
+from the new GitHub-only RC or stable release and independently checked for
+Authenticode validity, expected publisher and timestamp, final public hash,
+updater manifest (when enabled), and tamper rejection.

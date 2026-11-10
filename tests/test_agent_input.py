@@ -147,28 +147,34 @@ def test_every_harness_input_names_its_source_on_its_first_line(tmp_path, trigge
         pytest.param(
             {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main",
              "callback_mode": "failure"},
-            "No callback. When the work is done or you need a decision, you can report to @<bot:main> with "
+            "When the work is done or you need a decision, you can report to @<bot:main> with "
             "`vibe agent run --bot main --message ...`.",
             id="bot-sender",
         ),
         pytest.param(
             {"source_kind": "agent", "source_actor": "sescaller01", "callback_session_id": "sescaller01",
              "callback_mode": "failure"},
-            "No callback. When the work is done or you need a decision, you can report to #sescaller01 with "
+            "When the work is done or you need a decision, you can report to #sescaller01 with "
             "`vibe agent run --session-id sescaller01 --message ...`.",
             id="session-sender",
         ),
         pytest.param(
             {"source_kind": "agent", "source_actor": "ses_main", "callback_session_id": "ses_main"},
-            "Callback: your final reply returns to @<bot:main> automatically.",
-            id="callback",
+            "When the work is done or you need a decision, you can report to @<bot:main> with "
+            "`vibe agent run --bot main --message ...`.",
+            id="legacy-callback",
         ),
         pytest.param(
             {"source_kind": "cli", "callback_session_id": "sescaller01"},
-            "Callback: your final reply returns to #sescaller01 automatically.",
-            id="cli-with-callback",
+            None,
+            id="cli-with-legacy-callback",
         ),
         pytest.param({"source_kind": "cli"}, None, id="cli-without-callback"),
+        pytest.param({"source_kind": "agent", "source_actor": "ses_main", "no_reply": True},
+                     "No reply needed.", id="no-reply-from-bot"),
+        pytest.param({"source_kind": "cli", "no_reply": True}, "No reply needed.", id="no-reply-from-cli"),
+        pytest.param({"source_kind": "agent", "source_actor": "seschild01", "no_reply": True,
+                      "suppress_report_hint": True}, "No reply needed.", id="no-reply-from-own-delegate"),
         pytest.param(
             {"source_kind": "callback", "source_actor": "run-0", "parent_run_id": "run-0",
              "source_session_id": "seschild01", "callback_session_id": "sescaller01"},
@@ -198,7 +204,7 @@ def test_harness_hint_omits_reverse_dispatch_report_target():
         "source_actor": "sescaller01",
     }
     assert harness_hint(spec, receiver="sesreceiver01") == (
-        "No callback. When the work is done or you need a decision, you can report to #sescaller01 with "
+        "When the work is done or you need a decision, you can report to #sescaller01 with "
         "`vibe agent run --session-id sescaller01 --message ...`."
     )
     spec["suppress_report_hint"] = True
@@ -208,7 +214,7 @@ def test_harness_hint_omits_reverse_dispatch_report_target():
 def test_a_merged_batch_names_each_distinct_report_target_once():
     from core.agent_input import harness_hints
 
-    bot = "No callback. When the work is done or you need a decision, you can report to @<bot:main> with `vibe agent run --bot main --message ...`."
+    bot = "When the work is done or you need a decision, you can report to @<bot:main> with `vibe agent run --bot main --message ...`."
     assert harness_hints({"harness_hints": [bot, "", bot]}) == (bot,)
 
 

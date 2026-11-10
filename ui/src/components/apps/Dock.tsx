@@ -198,7 +198,7 @@ export const Dock: React.FC = () => {
       {/* Bound the panel to the viewport and scroll horizontally: with many pinned
           apps the resident row would otherwise run off-screen (the popover sits at
           the bottom-left), leaving later tiles unreachable for open/reorder/unpin. */}
-      <div className="relative flex max-w-[min(88vw,880px)] items-end gap-2 overflow-x-auto overscroll-x-contain rounded-2xl border border-border-strong bg-surface-2/95 p-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)] backdrop-blur-xl">
+      <div className="relative flex max-w-[min(88vw,880px)] items-end gap-2 overflow-x-auto overscroll-x-contain rounded-2xl border border-edge bg-surface-2/95 p-2 shadow-elevation-2 backdrop-blur-xl">
         <Reorder.Group axis="x" values={localOrder} onReorder={reorder} as="div" className="flex items-end gap-2">
           {localOrder.map((id, index) => {
             const item = resolveItem(id);
@@ -265,7 +265,7 @@ export const Dock: React.FC = () => {
                       // borderless — the accent lives in the tint + letter color.
                       'grid size-10 place-items-center overflow-hidden rounded-lg text-[15px] font-bold leading-none transition',
                       item.kind === 'builtin' &&
-                        (active ? 'border-2 bg-foreground/[0.07]' : 'border border-border bg-foreground/[0.03] hover:bg-foreground/[0.07]'),
+                        (active ? 'border-2 bg-foreground/[0.07]' : 'border border-edge bg-foreground/[0.03] hover:bg-foreground/[0.07]'),
                     )}
                     style={
                       item.kind === 'builtin'
@@ -308,7 +308,7 @@ export const Dock: React.FC = () => {
                     }}
                     // Don't let a press on ＋ start a tile drag.
                     onPointerDown={(e) => e.stopPropagation()}
-                    className="absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-border-strong bg-surface-2 text-muted opacity-0 shadow transition hover:text-foreground group-hover/tile:opacity-100"
+                    className="absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-edge text-muted opacity-0 shadow-elevation-1 transition hover:text-foreground group-hover/tile:opacity-100 bg-popover"
                   >
                     <Plus className="size-2.5" strokeWidth={3} />
                   </button>
@@ -367,7 +367,7 @@ export const Dock: React.FC = () => {
               onClick={() => wm.restore(w.id)}
               className="group/min flex w-[64px] shrink-0 flex-col items-center gap-1"
             >
-              <span className="flex h-9 w-14 flex-col overflow-hidden rounded-md border border-border-strong bg-surface shadow-sm transition group-hover/min:border-foreground/40">
+              <span className="flex h-9 w-14 flex-col overflow-hidden rounded-md border border-edge bg-surface shadow-elevation-1 transition group-hover/min:border-foreground/40">
                 {/* Faux window titlebar with the three traffic lights. */}
                 <span className="flex h-2.5 shrink-0 items-center gap-[3px] border-b border-border/70 bg-surface-2 px-1">
                   <span className="size-1 rounded-full" style={{ backgroundColor: '#ff5f57' }} />

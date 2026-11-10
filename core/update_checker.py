@@ -30,11 +30,11 @@ from vibe.build_identity import get_build_identity
 from vibe.i18n import t as i18n_t
 from vibe.upgrade import (
     PACKAGE_NAME,
+    get_latest_version_info,
     get_running_vibe_path,
-    get_update_metadata_url,
     has_newer_version,
     is_desktop_managed_runtime,
-    select_latest_update_version,
+    prerelease_updates_enabled,
 )
 
 if TYPE_CHECKING:
@@ -70,6 +70,7 @@ UPDATE_NOTIFICATION_POLICY_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 _STABLE_PACKAGE_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[.-]?post\d+)?$")
+_PRERELEASE_VERSION_RE = re.compile(r"\d+\.\d+\.\d+rc\d+")
 
 
 def _fetch_pypi_version_sync() -> Dict[str, Any]:
@@ -81,31 +82,20 @@ def _fetch_pypi_version_sync() -> Dict[str, Any]:
     if get_build_identity().kind == "source" or is_desktop_managed_runtime():
         return result
 
-    try:
-        url = get_update_metadata_url()
-        req = urllib.request.Request(url, headers={"User-Agent": PACKAGE_NAME})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            latest = select_latest_update_version(data, current)
-            result["latest"] = latest
-
-            if latest and latest != current:
-                result["has_update"] = has_newer_version(latest, current)
-    except Exception as e:
-        result["error"] = str(e)
-
-    return result
+    # The same offer as the version dialog: pre-releases follow `update.prereleases`.
+    return get_latest_version_info(current, prereleases=prerelease_updates_enabled())
 
 
 def _github_release_url(version: str) -> str:
-    version_text = str(version).strip()
-    tag = version_text if version_text.startswith(("v", "gh-v")) else f"v{version_text}"
-    return f"{GITHUB_RELEASE_TAG_BASE_URL}/{urllib.parse.quote(tag, safe='')}"
+    return f"{GITHUB_RELEASE_TAG_BASE_URL}/{urllib.parse.quote(_github_release_tag(version), safe='')}"
 
 
 def _github_release_tag(version: str) -> str:
     version_text = str(version).strip()
-    return version_text if version_text.startswith(("v", "gh-v")) else f"v{version_text}"
+    if version_text.startswith(("v", "gh-v")):
+        return version_text
+    # Release candidates are GitHub-only `gh-vX.Y.ZrcN` releases (docs/release.md).
+    return f"gh-v{version_text}" if _PRERELEASE_VERSION_RE.fullmatch(version_text) else f"v{version_text}"
 
 
 def _github_release_api_url(version: str) -> str:

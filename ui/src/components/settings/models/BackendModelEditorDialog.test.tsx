@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -73,9 +73,8 @@ const spy = () => vi.spyOn(modelsApi, 'searchModelsDev');
 let search: ReturnType<typeof spy>;
 
 beforeEach(() => {
-  // The first field is a search now, so every keystroke in it asks models.dev.
-  // Stubbed by default so a test that is about something else neither reaches
-  // the network nor has to say so.
+  // The first field is a debounced search now, so tests about other fields do
+  // not reach the network or have to say so.
   search = spy().mockResolvedValue([]);
 });
 
@@ -437,6 +436,28 @@ describe('BackendModelEditorDialog', () => {
 
     await act(async () => { pending.get('sonnet-4-5')?.([match({ display_name: 'Sonnet, current' })]); });
     expect(await screen.findByRole('option', { name: /Sonnet, current/ })).toBeTruthy();
+  });
+
+  it('debounces rapid model ID typing into one search request', async () => {
+    vi.useFakeTimers();
+    try {
+      renderEditor();
+      const field = modelField();
+      fireEvent.change(field, { target: { value: 's' } });
+      fireEvent.change(field, { target: { value: 'so' } });
+      fireEvent.change(field, { target: { value: 'sonnet' } });
+
+      expect(search).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(249); });
+      expect(search).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(1); });
+
+      expect(search).toHaveBeenCalledTimes(1);
+      expect(search).toHaveBeenCalledWith('sonnet', expect.any(AbortSignal));
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('lets the user name their own model while models.dev is slow', async () => {

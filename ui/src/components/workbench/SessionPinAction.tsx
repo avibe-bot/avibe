@@ -41,7 +41,7 @@ export const SessionPinAction: React.FC<SessionPinActionProps> = ({
         className={clsx(
           'group/pin grid shrink-0 place-items-center transition-[opacity,transform,background-color,color,box-shadow] duration-150 ease-out',
           SESSION_ROW_ACTION_BUTTON_CLASS,
-          'hover:-translate-y-px hover:scale-105 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 motion-reduce:transform-none',
+          'hover:-translate-y-px hover:scale-105 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transform-none',
           pending
             ? 'cursor-wait text-muted opacity-100 hover:translate-y-0 hover:scale-100'
             : pinned

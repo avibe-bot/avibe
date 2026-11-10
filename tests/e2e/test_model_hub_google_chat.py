@@ -3,7 +3,7 @@
 The existing Google matrix proves a one-response text path, not a tool-result
 round trip or the exact finish/usage fields a Chat consumer must interpret.
 Only the Gemini upstream is a fixture; router, gateway, adapter and CPA are real.
-This is a characterization of CPA c404af96, including its lossy behavior, not
+This is a characterization of the pinned CPA, including its lossy behavior, not
 an assertion that it is a lossless substitute for a native Google adapter.
 It extends MH-VIBEY-001/002 with Google-primary/Chat-ingress evidence, without
 claiming coverage of their CLI-overlay or cross-hop-failover cases.
@@ -149,12 +149,12 @@ async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-
 @pytest.mark.parametrize(("finish", "buffered_reason", "stream_reason"), [
     ("STOP", "stop", "stop"),
     ("MAX_TOKENS", "max_tokens", "max_tokens"),
-    ("SAFETY", "safety", "stop"),
+    ("SAFETY", "content_filter", "content_filter"),
 ])
 async def test_chat_google_text_finish_reason_and_usage(
     tmp_path, monkeypatch, stream, finish, buffered_reason, stream_reason,
 ):
-    """Record native_finish_reason too: CPA's public length/safety values are not standard Chat."""
+    """Record native_finish_reason too: CPA's public length value is not standard Chat; SAFETY maps to content_filter."""
     requests = []
 
     async def upstream(request):
@@ -205,7 +205,7 @@ async def test_chat_google_colon_model_is_not_a_google_frontend_skip(tmp_path, m
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("supply_signature", [False, True])
-async def test_chat_google_tool_round_trip_loses_signature_but_explicit_carrier_survives(
+async def test_chat_google_tool_round_trip_restores_signature_and_explicit_carrier_survives(
     tmp_path, monkeypatch, stream, supply_signature,
 ):
     """Replay the actual first response, not a fake that supplies CPA's missing fields.
@@ -241,8 +241,9 @@ async def test_chat_google_tool_round_trip_loses_signature_but_explicit_carrier_
         )
         tool = copy.deepcopy(call_message["tool_calls"][0])
         tool.pop("index", None)
-        # The real output lacks the signature. The input-carrier control below
-        # is deliberately separate and is NOT evidence of round-trip retention.
+        # The Chat output still lacks the signature; since v8.0.63 the engine
+        # restores it on replay itself. The input-carrier control below is
+        # deliberately separate.
         assert THOUGHT_SIGNATURE not in json.dumps(frames)
         assert "extra_content" not in tool
         assert tool["type"] == "function"
@@ -275,9 +276,7 @@ async def test_chat_google_tool_round_trip_loses_signature_but_explicit_carrier_
         # CPA wraps the tool content's JSON string encoding as result, instead
         # of converting the JSON text into functionResponse.response fields.
         assert json.loads(results[0]["functionResponse"]["response"]["result"]) == TOOL_RESULT, results
-        assert calls[0]["thoughtSignature"] == (
-            THOUGHT_SIGNATURE if supply_signature else "skip_thought_signature_validator"
-        ), (tool, calls)
+        assert calls[0]["thoughtSignature"] == THOUGHT_SIGNATURE, (tool, calls)
 
 
 @pytest.mark.parametrize("ending", [
@@ -285,7 +284,7 @@ async def test_chat_google_tool_round_trip_loses_signature_but_explicit_carrier_
     "missing_finish", "missing_finish_and_usage",
 ])
 async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, ending):
-    """Without traceId, split finish/usage is lost, and CPA ends that stream with an error."""
+    """CPA v8.0.63 joins a finishReason and usage split across frames; a stream with no finishReason ends in an error."""
     requests = []
     content = _gemini_reply([{"text": "streamed answer"}], usage=False)
     content["candidates"][0].pop("finishReason")
@@ -304,7 +303,7 @@ async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, end
         frames = [content] + tails[ending]
         return web.Response(body=b"".join(_sse(frame) for frame in frames), content_type="text/event-stream")
 
-    complete = ending == "same_frame"
+    complete = ending not in {"missing_finish", "missing_finish_and_usage"}
     async with _chat_gateway(tmp_path, monkeypatch, upstream, complete=complete) as post:
         frames = await post(
             [{"role": "user", "content": "Finish boundary fixture"}],
@@ -317,14 +316,14 @@ async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, end
             for frame in frames for choice in frame.get("choices", [])
             if choice.get("finish_reason") is not None
         ]
-        # CPA filters usage on frames without their own finishReason, then the
-        # Chat translator only emits a finish when both fields are available.
-        expected = [("max_tokens", "max_tokens")] if ending == "same_frame" else []
-        assert reasons == expected, frames
+        # A finishReason completes the stream whether usage shares its frame,
+        # follows it, or never arrives; usage alone does not.
+        assert reasons == ([("max_tokens", "max_tokens")] if complete else []), frames
         usages = [frame["usage"] for frame in frames if "usage" in frame]
-        assert usages == ([CHAT_USAGE] if ending == "same_frame" else []), frames
+        with_usage = {"same_frame", "usage_with_candidate", "usage_only"}
+        assert usages == ([CHAT_USAGE] if ending in with_usage else []), frames
         if not complete:
             assert frames[-1] == {"error": {
-                "message": "upstream stream closed before any chunk carried finish_reason",
+                "message": "upstream stream closed before finishReason",
                 "type": "server_error", "code": "internal_server_error",
             }}, frames

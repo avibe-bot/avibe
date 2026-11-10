@@ -2,7 +2,7 @@
 name: agent-prompt-audit
 slug: agent-prompt-audit
 description: Audit and improve the prompt surface of Avibe Agents across backends (Claude, Codex/GPT, OpenCode) — global and project rules, Agent system prompts, Skills, delegation briefs, and Task and Watch messages — using real run evidence. Use when an Agent misbehaves (stalls, over-asks, over-reaches, ignores or over-applies a rule), after a model or backend change, or when the user asks to review, clean up, or tighten prompts.
-version: 0.1.2
+version: 0.1.3
 ---
 
 # Agent Prompt Audit
@@ -104,7 +104,7 @@ earlier injected prompt snapshots in its native history, so text since removed
 may still have been in view. Where the text may have changed since the run and
 no history covers it, say the attribution is unconfirmed.
 
-`vibe runs show <id>` gives one run's message, result, and callback state;
+`vibe runs show <id>` gives one run's message, result, and delivery metadata;
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
 `messages`. Keep evidence to the Session the user reported, plus any others they point
 to — a channel's `scope_id` can hold other people's threads; the user's
@@ -113,9 +113,11 @@ recurring Task or Watch, `vibe runs list --global --definition-id <id>` gathers 
 fires across per-run Sessions. A stuck delegated turn stays `running`, so include
 long-running rows when the complaint is a stall; ordinary IM turns have no
 `agent_runs` row, so read that Session's messages instead. A delegated run can succeed while
-its report never arrives. Without `--callback` the result returns only if the receiver
-reports back; with one, check `callback_status` and `callback_error` when the
-complaint is a missing result. Two starting points, each run
+its report never arrives. Check explicit return messages and `session_delegations`:
+an idle recipient with no pending work sends a read receipt unless `no_reply`
+was set. An armed Watch, pending Task, or open delegate defers that receipt.
+`callback_status` and `callback_error` still describe legacy pending callbacks and
+internal failure notices, not a new successful-result promise. Two starting points, each run
 with `vibe data query --sql-file <file>` (or `--sql-file -` for stdin):
 
 ```sql
