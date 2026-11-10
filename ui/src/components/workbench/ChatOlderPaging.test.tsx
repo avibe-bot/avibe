@@ -260,7 +260,7 @@ describe('transcript older-page loading', () => {
     expect(write).toHaveBeenCalledTimes(1);
   });
 
-  it('retains the native setter remainder without retrying a same-value fractional write', () => {
+  it('retains the native setter remainder through its queued scroll event without retrying a fractional write', () => {
     const { scroller, scrollTo, geometry } = renderTranscript({ hasOlder: false });
     geometry.wholeCssPixels = true;
     // Let the overflow observer install the end-of-history slot before anchoring.
@@ -272,6 +272,7 @@ describe('transcript older-page loading', () => {
     expect(write).toHaveBeenCalledExactlyOnceWith(1001.75);
     expect(scroller.scrollTop).toBe(1001);
     act(TestResizeObserver.resize);
+    fireEvent.scroll(scroller);
     expect(write).toHaveBeenCalledTimes(1);
     geometry.extraAbove = 2;
     act(TestResizeObserver.resize);

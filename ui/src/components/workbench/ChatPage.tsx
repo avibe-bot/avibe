@@ -5629,9 +5629,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
     setFollowingTail(pinned);
     setShowJump(distance > 240 || needsLatestReload);
     // Only track an anchor while reading history; following needs none (the bottom
-    // is free to grow). Re-capturing here keeps it current as the user scrolls.
+    // is free to grow). Re-capture as the reader moves, not for our own queued
+    // scroll event: that would discard the fractional debt the restore retained.
     if (pinned) anchorRef.current = null;
-    else captureAnchor();
+    else if (!ownWrite || !anchorRef.current) captureAnchor();
     if (top > olderPrefetchBand(el)) setOlderLoadFailed(false);
     if (movingUp) maybeLoadOlder();
   };
