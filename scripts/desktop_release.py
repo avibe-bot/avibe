@@ -549,6 +549,33 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
     return [directory / name for name in sorted(expected)]
 
 
+def stage(directory: Path, tag: str, source_sha: str, repo: str, *, updater_enabled: bool = False) -> None:
+    """Attach verified desktop bytes to the existing release, without overwriting assets."""
+    paths = verify(directory, tag, source_sha, updater_enabled=updater_enabled)
+    state = _github["get_release"](repo, tag)
+    if state is None:
+        raise ValueError("Release is missing before desktop finalization")
+    remote = json.loads(subprocess.check_output(
+        ["gh", "release", "view", tag, "--repo", repo, "--json", "assets"], text=True,
+    ))
+    existing = {asset["name"] for asset in remote["assets"]}
+    missing = []
+    with tempfile.TemporaryDirectory(prefix="desktop-release-stage-") as temporary:
+        for path in paths:
+            if path.name in existing:
+                subprocess.run([
+                    "gh", "release", "download", tag, "--repo", repo,
+                    "--pattern", path.name, "--dir", temporary,
+                ], check=True)
+                if digest(Path(temporary) / path.name) != digest(path):
+                    raise ValueError(f"Immutable desktop release asset differs: {path.name}")
+            else:
+                missing.append(str(path))
+        if missing:
+            subprocess.run(["gh", "release", "upload", tag, "--repo", repo, *missing], check=True)
+    check_remote(directory, tag, source_sha, repo, complete=True, updater_enabled=updater_enabled)
+
+
 def check_remote(directory: Path, tag: str, source_sha: str, repo: str, *, complete: bool,
                  updater_enabled: bool = False) -> None:
     paths = verify(directory, tag, source_sha, updater_enabled=updater_enabled)
@@ -622,14 +649,15 @@ def main() -> None:
     verifier.add_argument("--target", choices=TARGETS, required=True)
     verifier.add_argument("--driver", type=Path, required=True)
     verifier.add_argument("--provenance-path", type=Path, required=True)
-    for command in ("verify", "check-remote"):
+    for command in ("verify", "check-remote", "stage"):
         consumer = sub.add_parser(command)
         consumer.add_argument("--directory", type=Path, required=True)
         consumer.add_argument("--updater-enabled", action="store_true")
         consumer.add_argument("--tag", required=True)
         consumer.add_argument("--source-sha", required=True)
-        if command == "check-remote":
+        if command in {"check-remote", "stage"}:
             consumer.add_argument("--repo", required=True)
+        if command == "check-remote":
             consumer.add_argument("--complete", action="store_true")
     args = vars(parser.parse_args())
     command = args.pop("command")
@@ -656,6 +684,8 @@ def main() -> None:
         )
     elif command == "verify":
         verify(**args)
+    elif command == "stage":
+        stage(**args)
     else:
         check_remote(**args)
 

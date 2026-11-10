@@ -255,10 +255,10 @@ def test_preview_python_assets_build_from_the_desktop_source_sha():
     # The desktop packages are built from the resolved TEST source; the Python
     # assets published beside them must come from that same commit.
     checkout = _step(_job("release_ai.yml", "build-assets"), "Checkout")
-    assert checkout["with"]["ref"] == "${{ needs.resolve-desktop-release.outputs.source_sha }}"
+    assert checkout["with"]["ref"] == "${{ needs.release-backstop.outputs.source_sha }}"
 
 
-@pytest.mark.parametrize("workflow", ["publish.yml", "release_ai.yml"])
+@pytest.mark.parametrize("workflow", ["publish.yml", "release_ai.yml", "desktop-release.yml"])
 def test_release_shell_steps_parse(workflow):
     document = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
     for job in document["jobs"].values():
@@ -278,9 +278,7 @@ def test_preview_upload_validates_all_existing_bytes_before_runtime_then_package
              "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz"]
     for name in names:
         (dist / name).write_bytes(b"immutable asset")
-    desktop_asset = "desktop-dist/Avibe-1.0.0rc1-macos-aarch64.dmg"
     (tmp_path / "desktop-dist").mkdir()
-    (tmp_path / desktop_asset).write_bytes(b"desktop asset")
     binaries = tmp_path / "bin"
     binaries.mkdir()
     log = tmp_path / "calls.jsonl"
@@ -316,7 +314,6 @@ elif args[:2] == ["release", "download"]:
         assert uploads[0][-2:] == [f"dist/{name}" for name in names[:2]]
         assert uploads[1][6:] == [
             *(f"dist/{name}" for name in names[2:] if existing == "none" or name != names[-1]),
-            desktop_asset,
         ]
         assert "finalize" in calls[-1]
 
@@ -424,6 +421,8 @@ def _evaluate_release_ai_if(
     """Evaluate the small GitHub expression subset used by release_ai jobs."""
     input_tag = tag if event == "workflow_dispatch" else ""
     ref = ref or ("master" if event == "workflow_dispatch" else tag)
+    if "inputs.tag" in expression:
+        input_tag = tag
     expression = expression.strip().removeprefix("${{").removesuffix("}}").strip()
     replacements = {
         "needs.release-backstop.result": "backstop_result",
@@ -435,6 +434,7 @@ def _evaluate_release_ai_if(
         "needs.certum-windows-sign.result": "certum_result",
         "needs.windows-updater-finalize.result": "updater_result",
         "github.event.inputs.tag": "input_tag",
+        "inputs.tag": "input_tag",
         "github.ref_name": "ref",
     }
     for source, target in replacements.items():
@@ -540,13 +540,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
         for name, data in assets.items():
             (directory / name).write_bytes(data)
     desktop = {}
-    if workflow_name == "release_ai.yml":
-        desktop_dir = workspace / "desktop-dist"
-        desktop_dir.mkdir()
-        desktop = {"Avibe_3.1.0-rc.1_aarch64-apple-darwin.dmg": b"desktop installer"}
-        for name, data in desktop.items():
-            (desktop_dir / name).write_bytes(data)
-    all_assets = {**packages, **runtimes, **desktop}
+    all_assets = {**packages, **runtimes}
     existing = dict(all_assets) if state == "identical" else {}
     if state not in {"empty", "identical"}:
         existing = {name: all_assets[name] for name in (
@@ -640,7 +634,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     ],
 )
 def test_certum_job_condition_covers_rc_and_stable_only(tag, event, ref, expected):
-    condition = _job("release_ai.yml", "certum-windows-sign")["if"]
+    condition = _job("desktop-release.yml", "certum-windows-sign")["if"]
     assert _evaluate_release_ai_if(
         condition,
         tag=tag,
@@ -650,123 +644,43 @@ def test_certum_job_condition_covers_rc_and_stable_only(tag, event, ref, expecte
     ) is expected
 
 
-def test_release_ai_dry_evaluation_table_for_rc_and_stable_tags():
-    """Show which release_ai jobs run after the stable signing migration."""
-    jobs = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
-    cases = [
-        (
-            "gh-v3.2.6rc1",
-            False,
-            {
-                "release-backstop",
-                "resolve-desktop-release",
-                "desktop-packages",
-                "certum-windows-sign",
-                "resolve-show-runtime-ref",
-                "show-runtime-bundles",
-                "build-assets",
-                "release",
-            },
-        ),
-        (
-            "v3.2.5",
-            True,
-            {
-                "release-backstop",
-                "resolve-desktop-release",
-                "desktop-packages",
-                "certum-windows-sign",
-                "windows-updater-finalize",
-                "release",
-            },
-        ),
-    ]
-    for tag, updater_enabled, expected in cases:
-        ran = {"release-backstop", "resolve-desktop-release"}
-        if _evaluate_release_ai_if(
-            jobs["desktop-packages"]["if"], tag=tag, desktop_enabled=True,
-        ):
-            ran.add("desktop-packages")
-        certum = _evaluate_release_ai_if(
-            jobs["certum-windows-sign"]["if"], tag=tag, desktop_enabled=True,
-        )
-        if certum:
-            ran.add("certum-windows-sign")
-        if _evaluate_release_ai_if(
-            jobs["windows-updater-finalize"]["if"],
-            tag=tag,
-            desktop_enabled=True,
-            updater_enabled=updater_enabled,
-            certum_result="success" if certum else "skipped",
-        ):
-            ran.add("windows-updater-finalize")
-        show_runtime = _evaluate_release_ai_if(
-            jobs["resolve-show-runtime-ref"]["if"], tag=tag, desktop_enabled=True,
-        )
-        if show_runtime:
-            ran.update({"resolve-show-runtime-ref", "show-runtime-bundles", "build-assets"})
-        build_result = "success" if show_runtime else "skipped"
-        updater_result = "success" if updater_enabled and certum else "skipped"
-        if _evaluate_release_ai_if(
-            jobs["release"]["if"],
-            tag=tag,
-            build_result=build_result,
-            desktop_result="success",
-            desktop_enabled=True,
-            certum_result="success" if certum else "skipped",
-            updater_result=updater_result,
-        ):
-            ran.add("release")
-        assert ran == expected, tag
-
-
-@pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
-@pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
-@pytest.mark.parametrize("desktop_result", ["success", "skipped", "failure", "cancelled"])
-@pytest.mark.parametrize("resolve_result", ["success", "skipped", "failure", "cancelled"])
-@pytest.mark.parametrize("desktop_enabled", [False, True])
-@pytest.mark.parametrize("cancelled", [False, True])
-@pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
-def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
-    tag, build_result, desktop_result, resolve_result, desktop_enabled, cancelled, event,
-):
-    workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
-    jobs = workflow["jobs"]
-    preview_condition = "needs.release-backstop.result == 'success' && startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
-    for name in ("resolve-show-runtime-ref",):
-        assert jobs[name]["if"] == preview_condition
-    assert jobs["show-runtime-bundles"]["needs"] == ["release-backstop", "resolve-show-runtime-ref"]
-    assert jobs["build-assets"]["needs"] == ["release-backstop", "resolve-desktop-release", "show-runtime-bundles"]
-    assert jobs["release"]["needs"] == [
-        "release-backstop", "build-assets", "resolve-desktop-release", "desktop-packages",
+def test_release_workflows_split_core_publication_from_desktop_stage():
+    stage1 = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
+    stage2 = yaml.safe_load((ROOT / ".github/workflows/desktop-release.yml").read_text())["jobs"]
+    assert set(stage1) == {
+        "release-backstop", "resolve-show-runtime-ref", "resolve-show-runtime-canonical",
+        "show-runtime-bundles", "build-assets", "release",
+    }
+    assert stage1["release"]["needs"] == ["release-backstop", "build-assets"]
+    assert "Dispatch desktop Stage 2" in {
+        step.get("name") for step in stage1["release"]["steps"]
+    }
+    assert set(stage2) == {
+        "release-backstop", "resolve-desktop-release", "desktop-packages",
+        "certum-windows-sign", "windows-updater-finalize", "stage-desktop",
+    }
+    assert stage2["stage-desktop"]["needs"] == [
+        "release-backstop", "resolve-desktop-release", "desktop-packages",
         "certum-windows-sign", "windows-updater-finalize",
     ]
-    # Evaluate the actual bounded job expression for both event kinds. This
-    # catches skipped-needs propagation without replacing the condition itself.
-    certum_result = "success" if (
-        (tag.startswith("gh-v") or tag.startswith("v")) and desktop_enabled and
-        desktop_result == "success" and resolve_result == "success"
-    ) else "skipped"
-    result = _evaluate_release_ai_if(
-        jobs["release"]["if"],
+    attach = next(step for step in stage2["stage-desktop"]["steps"]
+                  if step.get("name") == "Attach verified desktop assets to the same release")
+    assert "desktop_release.py stage" in attach["run"]
+    assert "--repo \"$GITHUB_REPOSITORY\"" in attach["run"]
+
+
+@pytest.mark.parametrize("tag", ["v3.1.0", "gh-v3.2.0rc1"])
+@pytest.mark.parametrize("desktop_enabled", [False, True])
+def test_desktop_stage_requires_complete_signed_build(tag, desktop_enabled):
+    condition = _job("desktop-release.yml", "stage-desktop")["if"]
+    assert _evaluate_release_ai_if(
+        condition,
         tag=tag,
-        event=event,
-        build_result=build_result,
-        desktop_result=desktop_result,
-        resolve_result=resolve_result,
         desktop_enabled=desktop_enabled,
-        certum_result=certum_result,
+        desktop_result="success",
+        certum_result="success",
         updater_result="skipped",
-        cancelled=cancelled,
-    )
-    expected = not cancelled and resolve_result == "success" and (
-        build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
-    ) and (not desktop_enabled or desktop_result == "success") and (
-        not desktop_enabled or certum_result == "success"
-    )
-    if tag.startswith("gh-v") and not desktop_enabled:
-        expected = False
-    assert result == expected
+    ) is desktop_enabled
 
 
 def test_release_condition_rejects_failed_backstop():
@@ -774,18 +688,12 @@ def test_release_condition_rejects_failed_backstop():
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("needs.release-backstop.result", "backstop_result")
     expression = expression.replace("needs.build-assets.result", "build_result")
-    expression = expression.replace("needs.desktop-packages.result", "desktop_result")
-    expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
-    expression = expression.replace("needs.resolve-desktop-release.outputs.enabled", "desktop_enabled")
-    expression = expression.replace("needs.certum-windows-sign.result", "certum_result")
-    expression = expression.replace("needs.windows-updater-finalize.result", "updater_result")
     expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
     expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
-        "backstop_result": "failure", "build_result": "success", "desktop_result": "success",
-        "resolve_result": "success", "desktop_enabled": "false", "certum_result": "skipped",
-        "updater_result": "skipped", "input_tag": "", "ref": "v4.2.0",
-        "cancelled": lambda: False, "startsWith": lambda value, prefix: value.startswith(prefix),
+        "backstop_result": "failure", "build_result": "success", "input_tag": "",
+        "ref": "v4.2.0", "cancelled": lambda: False,
+        "startsWith": lambda value, prefix: value.startswith(prefix),
     })
     assert result is False

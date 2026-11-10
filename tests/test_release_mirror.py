@@ -292,7 +292,13 @@ def test_a_completed_reconcile_is_a_no_op_on_the_next_run():
     selected = releases(
         github_release(
             "v1.0.0", published_at="2026-01-01T00:00:00Z",
-            assets=("a.tgz", "b+local.whl", "Avibe_1.0.0_aarch64-apple-darwin.dmg"),
+            assets=(
+                "a.tgz",
+                "b+local.whl",
+                "Avibe_1.0.0_aarch64-apple-darwin.dmg",
+                "Avibe_1.0.0_x86_64-apple-darwin.dmg",
+                "Avibe_1.0.0_x86_64-pc-windows-msvc.exe",
+            ),
         ),
         github_release("gh-v1.0.1rc1", published_at="2026-01-02T00:00:00Z", prerelease=True),
     )
@@ -309,17 +315,19 @@ def test_a_completed_reconcile_is_a_no_op_on_the_next_run():
 
 def test_latest_installers_follow_the_highest_stable_release_that_ships_them():
     installers = (
-        "aarch64-apple-darwin.dmg", "aarch64-apple-darwin.app.tar.gz", "x86_64-pc-windows-msvc.exe",
+        "aarch64-apple-darwin.dmg", "x86_64-apple-darwin.dmg", "x86_64-pc-windows-msvc.exe",
     )
     selected = releases(
         github_release(
             "v1.10.0", published_at="2026-01-01T00:00:00Z",
             assets=(*(f"Avibe_1.10.0_{name}" for name in installers), "desktop-update-aarch64-apple-darwin.json"),
         ),
-        # Publication order never counts: a later patch to an older line is not the latest.
+        # A newer stable release with only one installer is not eligible to
+        # replace the complete alias set.
         github_release("v1.9.1", published_at="2026-01-05T00:00:00Z",
                        assets=tuple(f"Avibe_1.9.1_{name}" for name in installers)),
-        github_release("v1.11.0", published_at="2026-01-06T00:00:00Z", assets=("avibe_os-1.11.0.tar.gz",)),
+        github_release("v1.11.0", published_at="2026-01-06T00:00:00Z",
+                       assets=("avibe_os-1.11.0.tar.gz", "Avibe_1.11.0_aarch64-apple-darwin.dmg")),
         github_release("gh-v1.12.0rc1", published_at="2026-01-07T00:00:00Z", prerelease=True,
                        assets=tuple(f"Avibe_1.12.0-rc.1_{name}" for name in installers)),
     )
@@ -332,17 +340,28 @@ def test_latest_installers_follow_the_highest_stable_release_that_ships_them():
 
     assert [(key, source) for key, source, _ in result.aliases] == [
         ("latest/Avibe_aarch64-apple-darwin.dmg", "releases/v1.10.0/Avibe_1.10.0_aarch64-apple-darwin.dmg"),
+        ("latest/Avibe_x86_64-apple-darwin.dmg", "releases/v1.10.0/Avibe_1.10.0_x86_64-apple-darwin.dmg"),
         ("latest/Avibe_x86_64-pc-windows-msvc.exe", "releases/v1.10.0/Avibe_1.10.0_x86_64-pc-windows-msvc.exe"),
     ]
-    assert result.deletions == ("latest/Avibe_x86_64-apple-darwin.dmg",)
+    assert result.deletions == ()
     # Only Avibe's root carries latest installers.
     assert mirror.plan("avibe-bot/askill", selected, {}, None, latest).aliases == ()
 
 
 def test_latest_installers_are_copied_from_their_verified_source_and_stale_ones_removed(monkeypatch):
     item = github_release("v1.0.0", published_at="2026-01-01T00:00:00Z",
-                          assets=("Avibe_1.0.0_aarch64-apple-darwin.dmg",))
-    bucket = RecordingBucket({"latest/Avibe_x86_64-pc-windows-msvc.exe": 1}, None)
+                          assets=(
+                              "Avibe_1.0.0_aarch64-apple-darwin.dmg",
+                              "Avibe_1.0.0_x86_64-apple-darwin.dmg",
+                              "Avibe_1.0.0_x86_64-pc-windows-msvc.exe",
+                          ))
+    bucket = RecordingBucket(
+        {
+            "latest/Avibe_x86_64-pc-windows-msvc.exe": 1,
+            "latest/Avibe_obsolete.exe": 1,
+        },
+        None,
+    )
     monkeypatch.setattr(mirror, "github_releases", lambda repository: [item])
     monkeypatch.setattr(mirror, "tag_commits", lambda repository: {"v1.0.0": "0" * 40})
     monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
@@ -350,11 +369,21 @@ def test_latest_installers_are_copied_from_their_verified_source_and_stale_ones_
     assert mirror.reconcile(REPOSITORY, bucket, keep_prereleases=20, dry_run=False) == 0
     source = "releases/v1.0.0/Avibe_1.0.0_aarch64-apple-darwin.dmg"
     assert bucket.writes == [
-        source, "latest/Avibe_aarch64-apple-darwin.dmg", "index/releases.json",
+        source,
+        "releases/v1.0.0/Avibe_1.0.0_x86_64-apple-darwin.dmg",
+        "releases/v1.0.0/Avibe_1.0.0_x86_64-pc-windows-msvc.exe",
+        "latest/Avibe_aarch64-apple-darwin.dmg",
+        "latest/Avibe_x86_64-apple-darwin.dmg",
         "latest/Avibe_x86_64-pc-windows-msvc.exe",
+        "index/releases.json",
+        "latest/Avibe_obsolete.exe",
     ]
-    ((copied, metadata),) = bucket.copies
-    assert copied == source
+    assert [copied for copied, _ in bucket.copies] == [
+        source,
+        "releases/v1.0.0/Avibe_1.0.0_x86_64-apple-darwin.dmg",
+        "releases/v1.0.0/Avibe_1.0.0_x86_64-pc-windows-msvc.exe",
+    ]
+    metadata = bucket.copies[0][1]
     assert metadata["cache_control"] == "public, max-age=60"
     assert metadata["content_disposition"] == 'attachment; filename="Avibe_1.0.0_aarch64-apple-darwin.dmg"'
     assert metadata["sha256"] == hashlib.sha256(b"Avibe_1.0.0_aarch64-apple-darwin.dmg").hexdigest()

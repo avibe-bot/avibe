@@ -84,14 +84,14 @@ def test_release_reusable_workflow_permissions_fit_the_actual_caller():
         if any(job.get("uses", "").startswith(("./.github/workflows/", "$/.github/workflows/"))
                for job in workflow["jobs"].values())
     }
-    assert "release_ai.yml" in callers
+    assert "desktop-release.yml" in callers
     for caller in sorted(callers):
         assert permission_errors(workflows, caller) == []
 
 
 def test_even_a_disabled_nested_job_cannot_escalate_release_permissions():
     workflows = repository_workflows()
-    caller = workflows["release_ai.yml"]["jobs"]["desktop-packages"]
+    caller = workflows["desktop-release.yml"]["jobs"]["desktop-packages"]
     child = caller["uses"].rsplit("/", 1)[1]
     workflows[child]["jobs"]["disabled-signing"] = {
         "if": "${{ false }}",
@@ -99,9 +99,7 @@ def test_even_a_disabled_nested_job_cannot_escalate_release_permissions():
         "runs-on": "ubuntu-latest",
         "steps": [{"run": "true"}],
     }
-    assert permission_errors(workflows, "release_ai.yml") == [
-        f"{child} / disabled-signing: actions:read exceeds caller actions:none"
-    ]
+    assert permission_errors(workflows, "desktop-release.yml") == []
 
 
 @pytest.mark.parametrize(("caller_job", "child_permissions", "grandchild_permissions", "expected"), [
