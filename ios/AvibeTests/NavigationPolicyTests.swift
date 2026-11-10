@@ -2620,20 +2620,24 @@ final class NavigationPolicyTests: XCTestCase {
         )
         webView.navigationDelegate = controller
         let directoriesBeforeDownload = temporaryDownloadDirectories()
+        // The controller takes the download inside WebKit's start callback, as
+        // `beginDownload` does in production. WebKit asks for a destination in
+        // a later message; a delegate registered after an `await` can miss it,
+        // and a download with no delegate gets no destination and is cancelled.
         let download = await withCheckedContinuation { continuation in
             webView.startDownload(
                 using: URLRequest(
                     url: baseURL.appending(path: "account-export.txt")
                 )
-            ) {
-                continuation.resume(returning: $0)
+            ) { download in
+                controller.webView(
+                    webView,
+                    navigationResponse: navigationResponse,
+                    didBecome: download
+                )
+                continuation.resume(returning: download)
             }
         }
-        controller.webView(
-            webView,
-            navigationResponse: navigationResponse,
-            didBecome: download
-        )
         await fulfillment(
             of: [headersSent.expectation],
             timeout: 30
