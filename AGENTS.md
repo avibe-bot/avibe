@@ -110,7 +110,8 @@ Hard rule:
 When the user says `回归测试`, update the latest code into the existing **local**
 Incus regression environment, preserve accumulated product state unless reset is
 explicitly requested, then let the user verify Slack, Discord, Feishu/Lark, and
-WeChat behavior.
+WeChat behavior. The post-merge update under PR Delivery is the standing
+exception and runs without that request.
 
 Entry points:
 
