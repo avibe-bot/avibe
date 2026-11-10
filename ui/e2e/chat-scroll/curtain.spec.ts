@@ -275,11 +275,14 @@ for (const cell of cells) {
       }, selector);
       await page.waitForTimeout(900);
     };
-    // A chip's steps load the first time it opens (its skeleton gives way to them, and its curtain goes on by as
-    // much): that is its own, not what this is about, so they are loaded first.
-    if (cell.host === 'chip') {
-      await tap(HOSTS.chip);
-      await tap(HOSTS.chip);
+    // Every chip used by this cell must have its steps loaded, including the source above/below the host.
+    // Otherwise "both grow" also contains the source's skeleton shrinking into its empty body, so a row can
+    // legitimately pass its final resting place. Loading motion has separate coverage in motion.spec.ts.
+    const chips = [...(cell.host === 'chip' ? [HOSTS.chip] : []), ...(cell.source !== 'inside' ? [source] : [])];
+    for (const chip of chips) {
+      await tap(chip);
+      await expect(transcript(page).locator(chip).locator('[aria-busy="true"]')).toHaveCount(0);
+      await tap(chip);
     }
     // What is open before what is watched: the host when it folds; the other one when it shrinks (a member's
     // body inside a group that still opens is opened two frames before it closes, as the group opens).
