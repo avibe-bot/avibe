@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -16,7 +18,7 @@ import psutil
 
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs
-from vibe import runtime
+from vibe import internal_client, macos_session_diagnostics, runtime
 from vibe.desktop_runtime import (
     DESKTOP_BACKENDS_ROOT_ENV,
     DESKTOP_NODE_BIN_ENV,
@@ -28,6 +30,7 @@ from vibe.desktop_runtime import (
     desktop_runtime_id,
     is_private_desktop_runtime_path,
 )
+from vibe.launcher_path import CURRENT_VIBE_EXECUTABLE_ENV, is_usable_command_path, resolve_command_path
 from vibe.upgrade import (
     DESKTOP_MANAGED_RUNTIME_ENV,
     RestartState,
@@ -36,6 +39,7 @@ from vibe.upgrade import (
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    is_desktop_managed_runtime,
 )
 
 
@@ -54,6 +58,11 @@ _DESKTOP_IDENTITY_ENV = (
     DESKTOP_NPM_CLI_ENV,
 )
 _DESKTOP_LAUNCH_ENV = (*_DESKTOP_IDENTITY_ENV, DESKTOP_NODE_BIN_ENV, "PATH")
+OUTSIDE_DESKTOP_SESSION_WARNING = (
+    "Warning: Avibe will run outside this Mac's desktop session, so credentials kept in the Keychain "
+    "(GitHub CLI, Vault) will be unavailable until `vibe restart` is run from a terminal on this Mac's desktop."
+)
+_HANDED_OVER_NOTE = "scheduled by the running service for a caller outside the desktop session"
 
 
 class StartedRuntime(NamedTuple):
@@ -637,6 +646,45 @@ def _run_restart_job(
         return 0
 
 
+def outside_desktop_session() -> bool:
+    """Whether this Mac has a desktop session and this process is not in it.
+
+    A process joins the login session of whatever starts it, and only the
+    desktop session reaches the Keychain. False wherever that is not in
+    question or cannot be told: off macOS, in a desktop-managed Runtime, with
+    nobody logged in at the desktop, and when the probe is inconclusive.
+    """
+
+    if platform.system() != "Darwin" or is_desktop_managed_runtime():
+        return False
+    try:
+        context = macos_session_diagnostics.MacOSSessionProbe().capture_context()
+    except Exception:  # noqa: BLE001 - a session that cannot be read never blocks a start
+        return False
+    return context.asid_match is False
+
+
+def _hand_over_to_service(arguments: Mapping[str, object]) -> dict | None:
+    """Have the running service seed this restart, when it is in the desktop session.
+
+    ``None`` when it did not: no service answers, it is not in the desktop
+    session itself, it is a desktop-managed Runtime, it predates the hand-over,
+    or the request failed.
+    """
+
+    identity = internal_client.health_identity_sync()
+    if (
+        identity is None
+        or identity.get("macos_login_session_state") != "healthy"
+        or identity.get("desktop_runtime_id") is not None
+    ):
+        return None
+    payload = internal_client.schedule_restart_sync(dict(arguments))
+    if payload is None:
+        return None
+    return {**payload, "handed_over": True}
+
+
 def schedule_restart(
     *,
     delay_seconds: float = 0.0,
@@ -646,19 +694,80 @@ def schedule_restart(
     prepare_show_runtime: bool = False,
     python_executable: str | None = None,
 ) -> dict:
-    """Serialize restart seeding with staged install activation."""
+    """Serialize restart seeding with staged install activation.
+
+    The job, and the service it starts, join the login session of the process
+    that seeds it. On macOS a caller outside the user's desktop session
+    therefore hands the seeding to the running service when that is inside it,
+    and the result carries ``handed_over``. Otherwise it seeds the job itself,
+    as a caller in the desktop session always does, and says what the service
+    will be missing.
+    """
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
     guard_source_checkout_default_state_bootstrap()
+    arguments = {
+        "delay_seconds": delay_seconds,
+        "vibe_path": vibe_path,
+        "trigger": trigger,
+        "scope": scope,
+        "prepare_show_runtime": prepare_show_runtime,
+        "python_executable": python_executable,
+    }
+    outside = outside_desktop_session()
     with atomic_upgrade_lock():
+        if outside:
+            # Activation stays held here until the service answers: its seed is
+            # serialized by this lock, which it therefore does not take.
+            handed_over = _hand_over_to_service(arguments)
+            if handed_over is not None:
+                return handed_over
+            print(OUTSIDE_DESKTOP_SESSION_WARNING, file=sys.stderr)
         return _schedule_restart_locked(
-            delay_seconds=delay_seconds,
-            vibe_path=vibe_path,
-            trigger=trigger,
-            scope=scope,
-            prepare_show_runtime=prepare_show_runtime,
-                python_executable=python_executable,
+            **arguments,
+            note=OUTSIDE_DESKTOP_SESSION_WARNING if outside else None,
         )
+
+
+def schedule_handed_over_restart(request: Mapping[str, object]) -> dict:
+    """Seed a restart that a caller outside the desktop session handed to this service.
+
+    That caller holds activation until this returns, so the lock is not taken
+    here: taking it would wait on the caller, which is waiting on this. Nothing
+    is handed on either, whatever session this process is in. Raises
+    ``ValueError`` for a request that does not carry ``schedule_restart``'s
+    arguments.
+    """
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    delay_seconds = request.get("delay_seconds", 0.0)
+    vibe_path = request.get("vibe_path")
+    trigger = request.get("trigger", "cli")
+    scope = request.get("scope", "all")
+    prepare_show_runtime = request.get("prepare_show_runtime", False)
+    python_executable = request.get("python_executable")
+    if (
+        isinstance(delay_seconds, bool)
+        or not isinstance(delay_seconds, (int, float))
+        or not math.isfinite(delay_seconds)
+        or delay_seconds < 0
+        or not (vibe_path is None or isinstance(vibe_path, str))
+        or not isinstance(trigger, str)
+        or scope not in ("all", "service")
+        or not isinstance(prepare_show_runtime, bool)
+        or not (python_executable is None or isinstance(python_executable, str))
+    ):
+        raise ValueError("invalid restart request")
+    guard_source_checkout_default_state_bootstrap()
+    return _schedule_restart_locked(
+        delay_seconds=float(delay_seconds),
+        vibe_path=vibe_path or None,
+        trigger=trigger,
+        scope=scope,
+        prepare_show_runtime=prepare_show_runtime,
+        python_executable=python_executable or None,
+        note=_HANDED_OVER_NOTE,
+    )
 
 
 def _schedule_restart_locked(
@@ -669,8 +778,13 @@ def _schedule_restart_locked(
     scope: str,
     prepare_show_runtime: bool,
     python_executable: str | None,
+    note: str | None = None,
 ) -> dict:
-    """Spawn the detached restart job while the caller owns activation."""
+    """Spawn the detached restart job while the caller owns activation.
+
+    ``note`` is recorded in the job's log: who seeded it, or what its service
+    will be missing.
+    """
     job_id = uuid.uuid4().hex[:12]
     invocation = (
         [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
@@ -693,6 +807,13 @@ def _schedule_restart_locked(
         env = dict(os.environ if env is None else env)
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
+    env = runtime.independent_process_env(env)
+    # A caller's environment already names the launcher it passes. The service
+    # seeding a job for another caller was started from its own, which a later
+    # restart from the Web UI would otherwise go back to.
+    launcher = resolve_command_path(vibe_path)
+    if is_usable_command_path(launcher):
+        env[CURRENT_VIBE_EXECUTABLE_ENV] = launcher
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Seed the status BEFORE spawning the job so the child's own writes (which set
@@ -719,6 +840,8 @@ def _schedule_restart_locked(
     try:
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"{_now_iso()} spawning restart supervisor job_id={job_id} delay_seconds={delay_seconds!r}\n")
+            if note:
+                log.write(f"{_now_iso()} {note}\n")
             log.flush()
             process = subprocess.Popen(
                 command,
@@ -727,7 +850,7 @@ def _schedule_restart_locked(
                 stderr=subprocess.STDOUT,
                 close_fds=True,
                 cwd=get_safe_cwd(),
-                env=runtime.independent_process_env(env),
+                env=env,
                 **isolated_subprocess_kwargs(),
             )
     except OSError as exc:

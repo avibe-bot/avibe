@@ -220,6 +220,8 @@ vibe restart --allow-downgrade
 - With `--delay-seconds N`, schedules the restart `N` seconds in the future so an active conversation can receive its reply before the restart lands. Prefer this form when an agent is triggering the restart from inside Slack, Discord, Telegram, Lark/Feishu, or WeChat.
 - Refuses, like `vibe start`, to restart onto an install older than the last activated one unless you pass `--allow-downgrade`
 - Run from inside a desktop app's Runtime, restarts only that Runtime; otherwise it stops nothing, explains why, and exits with status 3. A restart from the Web UI shows the same refusal instead of restarting.
+- On macOS, Avibe runs in the login session of whatever started it, and only your desktop session reaches the Keychain. A restart requested from outside that session, for example over SSH, is therefore carried out by the running Avibe when it is inside the desktop session: the command prints the job ID and says that the running Avibe performs the restart, and Avibe comes back in the desktop session with the environment it already had. The caller's environment is not applied; to change it, restart from a terminal on the Mac's desktop.
+- When no Avibe inside the desktop session can do that (none is running, the running one is itself outside the desktop session, or it predates this behavior), the restart still runs from the caller, and a warning says that Avibe will run outside the desktop session: credentials kept in the Keychain (GitHub CLI, Vault) are unavailable until you run `vibe restart` from a terminal on the Mac's desktop. `vibe start` prints the same warning when it starts Avibe from outside the desktop session. A Runtime managed by the desktop app is not affected.
 
 ### `vibe status`
 

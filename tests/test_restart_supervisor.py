@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import threading
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
+import httpx
 import pytest
 
 from config import paths
+from core.control_ipc import ControlIpcClientEndpoint
+from vibe import internal_client
 from vibe import restart_supervisor
 from vibe import runtime
+from vibe.macos_session_diagnostics import CommandResult, MacOSSessionProbe
 
 
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
@@ -1067,3 +1074,165 @@ def test_terminal_restart_failure_does_not_block_a_subsequent_attempt(monkeypatc
     assert status["job_id"] == admitted["job_id"]
     assert status["state"] == "scheduled"
     assert status["error"] is None
+
+
+_DESKTOP_ASID = 105819
+_SSH_ASID = 106269
+_HEALTH = {"ok": True, "service": "vibe-remote-internal", "version": 1}
+_HEALTHY = {**_HEALTH, "macos_login_session_state": "healthy"}
+_ASKED_HEALTH = ("GET /internal/health",)
+_ASKED_TO_RESTART = (*_ASKED_HEALTH, "POST /internal/restart")
+_RESTART_ARGUMENTS = {
+    "delay_seconds": 60.0,
+    "vibe_path": "/bin/vibe",
+    "trigger": "upgrade",
+    "scope": "service",
+    "prepare_show_runtime": True,
+    "python_executable": "/generation/python",
+}
+_SERVICE_JOB = {"ok": None, "job_id": "seeded-by-service", "state": "scheduled", "supervisor_pid": 999}
+
+
+class _RestartCase(NamedTuple):
+    """One caller of ``schedule_restart``, the service it finds, and where the job is seeded."""
+
+    system: str = "Darwin"
+    desktop_managed: bool = False
+    caller_asid: int | None = _SSH_ASID
+    gui_asid: int | None = _DESKTOP_ASID
+    # What ``GET /internal/health`` answers; ``None`` when no service is reachable.
+    health: dict | None = _HEALTHY
+    # The status ``POST /internal/restart`` answers with, or the failure it raises.
+    restart: int | Exception = 200
+    handed_over: bool = False
+    warned: bool = False
+    asked: tuple[str, ...] = ()
+    probed: bool = True
+
+
+@pytest.mark.real_desktop_session_probe
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(_RestartCase(caller_asid=_DESKTOP_ASID), id="in-the-desktop-session"),
+        pytest.param(_RestartCase(gui_asid=None), id="no-desktop-session"),
+        pytest.param(_RestartCase(caller_asid=None), id="probe-inconclusive"),
+        pytest.param(_RestartCase(handed_over=True, asked=_ASKED_TO_RESTART), id="outside-and-service-inside"),
+        pytest.param(_RestartCase(health=None, warned=True), id="outside-and-no-service"),
+        pytest.param(
+            _RestartCase(
+                health={**_HEALTH, "macos_login_session_state": "stale_login_session"},
+                warned=True,
+                asked=_ASKED_HEALTH,
+            ),
+            id="outside-and-service-in-an-ended-session",
+        ),
+        pytest.param(_RestartCase(health=_HEALTH, warned=True, asked=_ASKED_HEALTH), id="outside-and-service-predates-the-state"),
+        pytest.param(
+            _RestartCase(health={**_HEALTHY, "desktop_runtime_id": "a" * 64}, warned=True, asked=_ASKED_HEALTH),
+            id="outside-and-service-desktop-managed",
+        ),
+        pytest.param(_RestartCase(restart=404, warned=True, asked=_ASKED_TO_RESTART), id="outside-and-service-predates-the-endpoint"),
+        pytest.param(_RestartCase(restart=500, warned=True, asked=_ASKED_TO_RESTART), id="outside-and-service-fails"),
+        pytest.param(
+            _RestartCase(restart=httpx.ReadTimeout("no answer"), warned=True, asked=_ASKED_TO_RESTART),
+            id="outside-and-request-fails",
+        ),
+        pytest.param(_RestartCase(system="Linux", probed=False), id="not-macos"),
+        pytest.param(_RestartCase(desktop_managed=True, probed=False), id="desktop-managed-runtime"),
+    ],
+)
+def test_a_restart_from_outside_the_desktop_session_is_seeded_by_the_service_inside_it(
+    monkeypatch, tmp_path, capsys, case,
+):
+    """The job joins the login session of whoever seeds it, so only a caller outside hands it over."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.setattr("platform.system", lambda: case.system)
+    if case.desktop_managed:
+        monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    else:
+        monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+    events: list[str] = []
+    probes: list[str] = []
+    handed_over: list[dict] = []
+
+    def launchctl_print(command, _timeout):
+        target = command[-1]
+        probes.append(target)
+        asid = case.caller_asid if target.startswith("pid/") else case.gui_asid
+        if asid is None:
+            return CommandResult(113, f"Could not find domain for {target}")
+        session = "" if target.startswith("pid/") else "    session = Aqua\n"
+        context = f"    security context = {{\n        uid = 501\n        asid = {asid}\n    }}\n"
+        return CommandResult(0, f"{target} = {{\n{session}{context}}}\n")
+
+    monkeypatch.setattr(
+        "vibe.macos_session_diagnostics.MacOSSessionProbe",
+        partial(
+            MacOSSessionProbe,
+            service_pid=4242,
+            service_uid=501,
+            command_runner=launchctl_print,
+            console_user_reader=lambda: ("owner", None),
+            service_user_reader=lambda uid: ("owner", None),
+        ),
+    )
+
+    def service(request: httpx.Request) -> httpx.Response:
+        events.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/internal/health":
+            return httpx.Response(200, json=case.health)
+        if isinstance(case.restart, Exception):
+            raise case.restart
+        if case.restart != 200:
+            return httpx.Response(case.restart, json={"detail": "Not Found"})
+        handed_over.append(json.loads(request.content))
+        return httpx.Response(200, json=_SERVICE_JOB)
+
+    def resolve_endpoint(_socket_path):
+        if case.health is None:
+            raise internal_client.InternalServerUnavailable("dispatch socket missing")
+        return ControlIpcClientEndpoint(transport="unix", socket_path=tmp_path / "dispatch.sock")
+
+    monkeypatch.setattr(internal_client, "_resolve_endpoint", resolve_endpoint)
+    monkeypatch.setattr("vibe.internal_client.httpx.HTTPTransport", lambda **kwargs: httpx.MockTransport(service))
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock-enter")
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+
+    monkeypatch.setattr(restart_supervisor, "atomic_upgrade_lock", Lock)
+    monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    monkeypatch.setattr(
+        restart_supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: events.append("spawn") or SimpleNamespace(pid=45678),
+    )
+
+    result = restart_supervisor.schedule_restart(**_RESTART_ARGUMENTS)
+
+    # Whoever seeds the job does so while the caller holds activation.
+    seeded = () if case.handed_over else ("spawn",)
+    assert events == ["lock-enter", *case.asked, *seeded, "lock-exit"]
+    assert bool(probes) is case.probed
+    warning = capsys.readouterr().err
+    if case.handed_over:
+        assert handed_over == [_RESTART_ARGUMENTS]
+        assert result == {**_SERVICE_JOB, "handed_over": True}
+        assert runtime.read_json(runtime.get_restart_status_path()) is None
+    else:
+        assert handed_over == []
+        assert result["supervisor_pid"] == 45678
+        assert "handed_over" not in result
+        assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
+        log = Path(result["log_path"]).read_text(encoding="utf-8")
+        assert log.count("outside this Mac's desktop session") == (1 if case.warned else 0)
+    assert warning.count("outside this Mac's desktop session") == (1 if case.warned else 0)
+    assert ("Keychain" in warning) is case.warned

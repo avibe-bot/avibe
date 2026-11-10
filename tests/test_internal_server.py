@@ -506,6 +506,139 @@ def test_health_endpoint_reports_the_controller_runtime_identity(monkeypatch):
     }
 
 
+@pytest.mark.real_desktop_session_probe
+def test_restart_endpoint_seeds_the_job_in_this_process_off_the_loop(monkeypatch, tmp_path):
+    """A caller outside the desktop session hands its restart to the service, which seeds it itself."""
+    from functools import partial
+
+    from config import paths
+    from core.control_ipc import ControlIpcClientEndpoint
+    from vibe import internal_client, restart_supervisor, runtime
+    from vibe.macos_session_diagnostics import CommandResult, MacOSSessionProbe
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+    # Everything a hand-over needs is here: this process is outside the desktop
+    # session and a service inside it answers. A seed that handed on would ask
+    # that service, which is this one, and never spawn the job.
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+    def launchctl_print(command, _timeout):
+        target = command[-1]
+        session, asid = ("", 106269) if target.startswith("pid/") else ("    session = Aqua\n", 105819)
+        context = f"    security context = {{\n        uid = 501\n        asid = {asid}\n    }}\n"
+        return CommandResult(0, f"{target} = {{\n{session}{context}}}\n")
+
+    monkeypatch.setattr(
+        "vibe.macos_session_diagnostics.MacOSSessionProbe",
+        partial(
+            MacOSSessionProbe,
+            service_pid=4242,
+            service_uid=501,
+            command_runner=launchctl_print,
+            console_user_reader=lambda: ("owner", None),
+            service_user_reader=lambda uid: ("owner", None),
+        ),
+    )
+    handed_on: list[str] = []
+
+    def service(request: httpx.Request) -> httpx.Response:
+        handed_on.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/internal/health":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "service": "vibe-remote-internal",
+                    "version": 1,
+                    "macos_login_session_state": "healthy",
+                },
+            )
+        return httpx.Response(200, json={"job_id": "handed-on"})
+
+    monkeypatch.setattr(
+        internal_client,
+        "_resolve_endpoint",
+        lambda _socket_path: ControlIpcClientEndpoint(transport="unix", socket_path=tmp_path / "dispatch.sock"),
+    )
+    monkeypatch.setattr("vibe.internal_client.httpx.HTTPTransport", lambda **kwargs: httpx.MockTransport(service))
+
+    class CallerHoldsActivation:
+        # The caller waits for this answer with the activation lock held.
+        def __enter__(self):
+            raise AssertionError("the service waited for the lock its caller holds")
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(restart_supervisor, "atomic_upgrade_lock", CallerHoldsActivation)
+    # This service was started from another launcher than the caller's.
+    monkeypatch.setattr(
+        restart_supervisor,
+        "get_restart_environment",
+        lambda vibe_path=None: {"PATH": "/bin", "VIBE_CURRENT_EXECUTABLE": "/service/vibe"},
+    )
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    spawned: list[tuple[list[str], dict, int]] = []
+    monkeypatch.setattr(
+        restart_supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: spawned.append((command, kwargs["env"], threading.get_ident()))
+        or SimpleNamespace(pid=45678),
+    )
+    caller_launcher = str(Path(sys.executable).resolve())
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            malformed = await client.post("/internal/restart", json={"python_executable": ["/generation/python"]})
+            seeded = await client.post(
+                "/internal/restart",
+                json={
+                    "delay_seconds": 60.0,
+                    "vibe_path": caller_launcher,
+                    "trigger": "upgrade",
+                    "scope": "service",
+                    "prepare_show_runtime": True,
+                    "python_executable": "/generation/python",
+                },
+            )
+        return threading.get_ident(), malformed, seeded
+
+    loop_thread, malformed, seeded = asyncio.run(_go())
+
+    assert malformed.status_code == 400
+    assert seeded.status_code == 200
+    job = seeded.json()
+    assert job["supervisor_pid"] == 45678
+    assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == job["job_id"]
+    assert handed_on == []
+    # Only the well-formed request spawned, with every argument the caller gave.
+    [(command, environment, spawn_thread)] = spawned
+    assert spawn_thread != loop_thread
+    assert environment == {"PATH": "/bin", "VIBE_CURRENT_EXECUTABLE": caller_launcher}
+    assert command == [
+        "/generation/python",
+        "-c",
+        "from vibe.cli import main; main()",
+        "__restart-supervisor",
+        "--job-id",
+        job["job_id"],
+        "--delay-seconds",
+        "60.0",
+        "--trigger",
+        "upgrade",
+        "--scope",
+        "service",
+        "--vibe-path",
+        caller_launcher,
+        "--prepare-show-runtime",
+    ]
+
+
 @pytest.mark.parametrize("env_value", [None, "1"])
 def test_model_hub_rpc_uses_controller_owned_service(monkeypatch, env_value):
     if env_value is None:

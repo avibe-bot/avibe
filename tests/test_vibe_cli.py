@@ -1212,19 +1212,22 @@ def test_cli_stop_fallback_stops_tool_commands_with_the_opencode_server(tmp_path
         server.stdout.close()
 
 
-def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
+@pytest.mark.parametrize("handed_over", [False, True])
+def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys, handed_over):
     scheduled = {}
     stop_called = []
     start_called = []
+    # What the scheduler returns when the running service seeded the job.
+    job = {"job_id": "job123", **({"handed_over": True} if handed_over else {})}
 
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/usr/local/bin/vibe")
     monkeypatch.setattr(
         vibe.api,
         "schedule_restart",
-        lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"},
+        lambda **kwargs: scheduled.update(kwargs) or job,
         raising=False,
     )
-    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or {"job_id": "job123"})
+    monkeypatch.setattr(vibe.restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.update(kwargs) or job)
     monkeypatch.setattr(cli, "cmd_stop", lambda: stop_called.append(True))
     monkeypatch.setattr(cli, "cmd_vibe", lambda: start_called.append(True))
 
@@ -1240,6 +1243,7 @@ def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Restart scheduled in 1 minute." in output
     assert "Job ID: job123" in output
+    assert ("The running Avibe, which is in this Mac's desktop session, performs the restart." in output) is handed_over
     assert "restart supervisor will run in the background" in output
 
 
@@ -1522,6 +1526,24 @@ def test_cmd_start_reports_the_web_ui_whether_it_spawned_or_reused_the_runtime(
     assert bool(start_runtime.opened) == (open_browser is None)
     assert "Web UI:\n  http://127.0.0.1:5123\n" in output
     assert "Run: vibe remote" in output
+
+
+@pytest.mark.parametrize("reused", [False, True])
+def test_cmd_start_warns_when_it_starts_the_service_outside_the_desktop_session(
+    monkeypatch, capsys, start_runtime, reused,
+):
+    if reused:
+        start_runtime.service_path.write_text("1234", encoding="utf-8")
+        start_runtime.ui_path.write_text("5678", encoding="utf-8")
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: None if reused else 1234)
+    monkeypatch.setattr(vibe.restart_supervisor, "outside_desktop_session", lambda: True)
+
+    assert cli.cmd_start(open_browser=False) == 0
+
+    # A service that was already running stays in the session it started in.
+    warning = capsys.readouterr().err
+    assert warning.count("outside this Mac's desktop session") == (0 if reused else 1)
+    assert ("`vibe restart` is run from a terminal on this Mac's desktop" in warning) is not reused
 
 
 @pytest.mark.parametrize("reused", [False, True])

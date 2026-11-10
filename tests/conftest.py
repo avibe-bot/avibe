@@ -691,6 +691,28 @@ def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_desktop_session_probe(request: pytest.FixtureRequest, monkeypatch):
+    """Keep a restart or start from asking macOS which login session the test runs in.
+
+    ``schedule_restart`` and ``vibe start`` ask ``launchctl`` whether the caller
+    is in the user's desktop session, and a caller outside it hands its restart
+    to the running service. The answer would depend on where the developer
+    started pytest, so here the caller is never outside. ``real_desktop_session_probe``
+    opts out a test that drives the decision with a probe of its own.
+    """
+
+    if request.node.get_closest_marker("real_desktop_session_probe"):
+        yield
+        return
+
+    def stub(restart_supervisor) -> None:
+        monkeypatch.setattr(restart_supervisor, "outside_desktop_session", lambda: False)
+
+    with _stubbed_for_this_test("vibe.restart_supervisor", stub):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _seed_sqlite_state_template(
     request: pytest.FixtureRequest,
     _isolate_vibe_remote_home,

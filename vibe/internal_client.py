@@ -1375,6 +1375,39 @@ def health_identity_sync(socket_path: Optional[Path] = None) -> dict[str, Any] |
         return None
 
 
+def schedule_restart_sync(
+    arguments: dict[str, Any],
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any] | None:
+    """Ask the running service to schedule its own restart; ``None`` when it did not.
+
+    ``arguments`` are ``schedule_restart``'s. A service that predates the
+    endpoint answers 404, and every other refusal or failure reads the same
+    here: the caller schedules the restart itself. The read deadline is far
+    outside the work, which writes one status file and spawns one process, so
+    that a service which is merely slow is not also restarted by the caller.
+    """
+
+    try:
+        endpoint = _resolve_endpoint(socket_path)
+        with httpx.Client(
+            transport=_sync_transport(endpoint),
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(30.0, connect=2.0),
+        ) as client:
+            response = client.post("/internal/restart", json=arguments)
+            _validate_response(response, endpoint)
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("job_id"), str):
+        return None
+    return payload
+
+
 async def health(socket_path: Optional[Path] = None) -> bool:
     """Probe ``GET /internal/health``. Returns False on any failure.
 
