@@ -82,9 +82,9 @@ impl Channel {
     pub fn latest_for_target(self, releases: Vec<Release>, target: &str) -> Option<(Version, Release)> {
         releases
             .into_iter()
-            .filter(|release| release.prerelease == (self == Self::Test))
+            .filter(|release| self == Self::Test || !release.prerelease)
             .filter_map(|release| {
-                let version = self.version(&release.tag).ok()?;
+                let version = Self::of(release.prerelease).version(&release.tag).ok()?;
                 let manifest = manifest_name(target);
                 let required = [
                     manifest.clone(),

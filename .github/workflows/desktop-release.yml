@@ -318,6 +318,7 @@ jobs:
           SOURCE_SHA: ${{ needs.resolve-desktop-release.outputs.source_sha }}
           UPDATER_ENABLED: ${{ needs.resolve-desktop-release.outputs.updater_enabled }}
           AVIBE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.DESKTOP_UPDATER_PUBLIC_KEY }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail

@@ -233,6 +233,28 @@ fn target_selection_skips_newer_partial_release_until_signed_set_is_complete() {
         .latest_for_target(vec![complete("gh-v3.1.2rc7", true, "3.1.2-rc.7"), partial], target)
         .unwrap();
     assert_eq!(selected.1.tag, "gh-v3.1.2rc7");
+    assert_eq!(
+        Channel::Test
+            .latest_for_target(
+                vec![
+                    complete("gh-v3.1.2rc7", true, "3.1.2-rc.7"),
+                    complete("v3.1.2", false, "3.1.2"),
+                ],
+                target,
+            )
+            .unwrap()
+            .1
+            .tag,
+        "v3.1.2"
+    );
+    assert_eq!(
+        Channel::Stable
+            .latest_for_target(vec![complete("v3.1.2", false, "3.1.2")], target)
+            .unwrap()
+            .1
+            .tag,
+        "v3.1.2"
+    );
     assert!(Channel::Test
         .latest_for_target(
             vec![Release {

@@ -70,6 +70,11 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 # The desktop updater's stable channel: canonical ``vX.Y.Z`` full releases.
 _STABLE_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+_LATEST_INSTALLER_TARGETS = frozenset({
+    "aarch64-apple-darwin.dmg",
+    "x86_64-apple-darwin.dmg",
+    "x86_64-pc-windows-msvc.exe",
+})
 # The release-notes marker asking clients not to announce a release, read as
 # ``core/update_checker.py`` reads it: the first well-formed marker decides.
 _UPDATE_NOTIFICATION_RE = re.compile(
@@ -223,7 +228,10 @@ def latest_installers(releases: Sequence[Release]) -> dict[str, tuple[str, Asset
             for asset in release.assets
             if asset.name.startswith(prefix) and asset.name.endswith(INSTALLER_SUFFIXES)
         }
-        if installers:
+        installer_targets = {
+            key.removeprefix(f"{LATEST_PREFIX}Avibe_") for key in installers
+        }
+        if installer_targets >= _LATEST_INSTALLER_TARGETS:
             return installers
     return {}
 
