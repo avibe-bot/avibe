@@ -62,19 +62,20 @@ unchanged.
    is the degraded state `outside_gui_session` on the surfaces that show
    `stale_login_session`: the Web banner, Doctor, and `vibe status`. A service
    in that state is not `healthy`, so step 2 does not hand it a restart.
-4. **Self-recovery (macOS), separate.** A service that finds itself stale while
-   a new desktop session exists restarts itself once into that session. Step 2
-   cannot do this: a restart seeded by a stale service copies the ended
-   session. It needs a way into the new session that keeps the privacy
-   permissions, which the SSH probe did not find, and stays open until then.
+4. **Launch at login (macOS), separate.** This replaces self-recovery by the
+   service, which step 2 cannot give: a restart seeded by a stale service
+   copies the ended session. Launch at login is being built as `vibe autostart`,
+   an opt-in LaunchAgent that fires once per desktop login and starts Avibe, or
+   restarts a service that is stale or in another audit session. See
+   `macos-stale-session-auto-recovery.md`.
 
 Rejected: only warning or refusing (a remote restart would never work);
 `launchctl asuser` (keeps the caller's `PATH`, and cannot cross sessions from
 SSH, see the probe below); a one-shot launchd job in `gui/<uid>` (it enters the
 desktop session, but loses the privacy permissions the terminal was granted,
-see the probe below); a resident LaunchAgent (a second lifecycle owner, which
-is the launch-at-login feature in `macos-stale-session-auto-recovery.md`, not
-needed for these failures); hard-coded `PATH` additions (misses nvm, bun, cargo);
+see the probe below); a kept-alive LaunchAgent (a second lifecycle owner that
+runs between logins; the login-only agent of step 4 is not one); hard-coded
+`PATH` additions (misses nvm, bun, cargo);
 starting every service through launchd (the same loss of permissions, and it
 changes the working terminal path for no gain).
 
@@ -89,7 +90,7 @@ mechanism:
   the Keychain reachable. But a process launchd starts is its own responsible
   process for macOS privacy permissions: it loses what the terminal, or sshd,
   was granted, such as Full Disk Access, and with it workspaces on an external
-  volume. So launchd is not used.
+  volume. So step 2 does not use launchd.
 - The running service is in the desktop session with the right environment and
   permissions, which is what step 2 builds on.
 
@@ -109,7 +110,7 @@ mechanism:
       running service.
 - [ ] Step 2 verified by a real restart over SSH.
 - [x] Step 3: the `outside_gui_session` state and its notice.
-- [ ] Step 4: a way into a new desktop session that keeps the privacy
-      permissions, then the log-out/log-in verification.
+- [ ] Step 4: launch at login (`vibe autostart`), then the log-out/log-in
+      verification.
 - [ ] Update the stale-session guidance in the `use-avibe` playbook and the
-      Doctor action text once step 4 lets a restart repair it.
+      Doctor action text once step 4 repairs a stale service at login.
