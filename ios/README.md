@@ -441,6 +441,32 @@ but cannot exercise a system passkey. That check needs a signed build on a
 device (or a simulator with the domain in developer mode) and an account with a
 passkey, and remains manual.
 
+### Protected Vault passkeys
+
+The entitlement also lists `webcredentials:sandbox.avibe.bot`, the relying
+party of the Protected Vault passkey
+(`docs/plans/2026-11-10-ios-protected-vault-passkey.md`). WKWebView offers a
+passkey to a third-party app only when the relying party is one of the app's
+associated domains, so without this entry the system refuses every Vault
+ceremony before a passkey sheet appears. `sandbox.avibe.bot` serves an
+`apple-app-site-association` listing `68B2SQ6YK3.bot.avibe.ios` (vault-sandbox
+`hosting/`).
+
+The shell adds no Vault code and no bridge method. Setup, unlock, approvals,
+signing, and reveal run the Web flow unchanged: the sandbox iframe in the
+instance page, and the sandbox's own top-level setup and authorization
+windows, which the shell shows as ordinary child WebViews. The sandbox calls
+`navigator.credentials`, and WebKit presents the system passkey sheet. Native
+code never receives the assertion or the PRF output, and
+`MobilePasskeyAuthenticator` still asserts only for `avibe.bot`.
+
+The protected tier needs the PRF extension, which iOS provides from 18.0; the
+deployment target does not change. `ios/scripts/testflight.py` requires the
+archived app to carry exactly the two domains. The device check is manual and
+listed in the plan: passkey creation and assertion in the top-level sandbox
+window, the window's result reaching the requesting iframe, and a PRF
+assertion inside the sandbox iframe.
+
 ### Password sign-in
 
 An account that set a password on avibe.bot (Account security) can sign in

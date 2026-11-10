@@ -612,17 +612,22 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
     ) in project
 
 
-def test_ios_app_builds_carry_the_avibe_bot_webcredentials_domain() -> None:
-    """Native passkeys for avibe.bot need this entitlement on every app build.
+def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
+    """Passkeys need these entitlements on every app build.
 
-    Simulator CI builds without signing, so a configuration that loses it still
-    passes there while passkeys fail on a device. avibe-backend's
-    apple-app-site-association lists this app under the same domain.
+    avibe.bot is the account passkey's relying party, used natively.
+    sandbox.avibe.bot is the Protected Vault passkey's, used by the sandbox in
+    the web view. Simulator CI builds without signing, so a configuration that
+    loses one still passes there while that passkey fails on a device. Each
+    host's apple-app-site-association lists this app.
     """
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
     assert entitlements == {
         "aps-environment": "development",
-        "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+        "com.apple.developer.associated-domains": [
+            "webcredentials:avibe.bot",
+            "webcredentials:sandbox.avibe.bot",
+        ],
         "com.apple.security.application-groups": ["group.bot.avibe.ios"],
         "keychain-access-groups": [
             "$(AppIdentifierPrefix)bot.avibe.ios",
