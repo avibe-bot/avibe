@@ -12,4 +12,5 @@ lent = SimpleNamespace(
     watch_store=None,
     watch_runtime_store=None,
     session_turns=None,
+    model_hub_service=None,
 )

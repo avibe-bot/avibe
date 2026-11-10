@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _AGENT_RUN_STRINGS = frozenset({
     "agent", "bot", "session_id", "fork_session", "scope_id", "project", "visibility",
-    "model", "reasoning_effort", "cwd", "callback_session_id", "message", "message_file",
+    "model", "reasoning_effort", "speed", "cwd", "callback_session_id", "message", "message_file",
 })
 _AGENT_RUN_BOOLS = frozenset({
     "queue", "fork_self", "same_scope", "callback", "no_callback", "no_reply", "close_after", "sync_run", "json",
@@ -243,6 +243,12 @@ class WarmCliStores:
     def session_turns(self):
         return getattr(self._controller, "session_turns", None)
 
+    @property
+    def hub_agent_reader(self):
+        """Model Hub's Agent payload, the route menu the Web picker reads; None without a Model Hub service."""
+        service = getattr(self._controller, "model_hub_service", None)
+        return service.get_agent_sources if service is not None else None
+
     def close(self) -> None:
         with self._lock:
             reader, self._reader = self._reader, None
@@ -389,6 +395,7 @@ async def _agent_run_request(controller, request: ControlRequest, args, run_sync
                 response, callback_session_id = cli._enqueue_agent_run(
                     args, caller_env=request.caller_env, invocation_cwd=request.cwd,
                     agent_store=agent_store, request_store=request_store, run_id=sync_run_id,
+                    hub_agent_reader=_warm_stores(controller).hub_agent_reader,
                 )
                 return result(response), (authority, request_store, callback_session_id)
         except Exception as exc:
