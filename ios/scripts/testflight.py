@@ -190,12 +190,8 @@ def check_profile(
                 actual_values = actual
             else:
                 actual_values = []
-            grants_are_relevant = all(
-                any(
-                    keychain_profile_grant_covers(required_group, grant)
-                    for required_group in required
-                )
-                for grant in actual_values
+            grants_are_well_formed = all(
+                isinstance(grant, str) for grant in actual_values
             )
             requirements_are_covered = all(
                 any(
@@ -204,10 +200,14 @@ def check_profile(
                 )
                 for required_group in required
             )
-            if not actual_values or not grants_are_relevant or not requirements_are_covered:
+            if (
+                not actual_values
+                or not grants_are_well_formed
+                or not requirements_are_covered
+            ):
                 raise TestFlightError(
-                    "The profile must grant exactly the required "
-                    "keychain-access-groups values or covering wildcards"
+                    "The profile must cover every required keychain-access-groups "
+                    "value with an exact grant or same-Team wildcard"
                 )
             continue
         if isinstance(actual, str):
