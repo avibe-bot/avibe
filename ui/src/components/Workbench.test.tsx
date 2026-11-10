@@ -178,6 +178,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
   vi.clearAllMocks();
   // The Session writers are module state shared with the conversation; each case starts clean.
   resetCoalescedWrites();
@@ -185,6 +186,15 @@ afterEach(() => {
 });
 
 describe('the Owner home (ui/design: home/home/c-ready-desktop)', () => {
+  it('does not offer the browser download CTA inside the native desktop shell', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    renderHome();
+
+    await waitFor(() => expect(screen.queryByRole('heading', {
+      name: en.workbench.home.desktopDownload.title,
+    })).toBeNull());
+  });
+
   it('talks to the main Bot: the route is its own, and a message lands in its conversation, which opens', async () => {
     const user = userEvent.setup();
     renderHome();
