@@ -381,7 +381,12 @@ Source cooldown through the real engine) fails on stock v8.0.30 and passes
 with the patch. On v8.0.63 the shared `statusErr` also carries
 `streamTruncated`, `transientRateLimit` and a log-only `diagnostic`; the
 `headers` field sits beside them, and every Claude upstream HTTP error still
-comes from `classifyClaudeUpstreamErrorWithCooling`.
+comes from `classifyClaudeUpstreamErrorWithCooling`. v8.0.63 also marks an
+upstream attempt's error with CPA's own trusted Retry-After. For Anthropic that
+is the upstream reset plus the executor's 1-30 s fuzz, the cooldown the engine
+itself enforces on that credential. Under this patch's rule that value reaches
+the client, so D3, D4 and D6 see a Source cooldown up to 30 s past the
+upstream's Retry-After.
 
 Drop when upstream merges #6700 and Avibe adopts a release that contains it.
 
