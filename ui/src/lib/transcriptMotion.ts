@@ -931,15 +931,33 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
   const gap = () => (probe && anchor ? layoutBox(column, probe).top - layoutBox(column, anchor).top : 0);
   const before = gap();
   const settled = entry;
+  // How much of what closed the layout has let go of so far, and the rows have taken on.
+  let taken = 0;
   const settle = new MutationObserver(() => {
-    if (nodes.some((node) => node.isConnected)) return;
+    const known = probe?.isConnected && anchor?.isConnected;
+    if (nodes.some((node) => node.isConnected)) {
+      // Part of what closed has left before the rest (a member's body, which closes with its group on a timer of
+      // its own, can go a frame before the members): the layout moved the rows up by that much at once. Each
+      // row's share takes it on, so the row stays drawn where it was and goes on as it went; the curtain is laid
+      // where it belongs again.
+      const delta = known ? before - gap() - taken : 0;
+      if (Math.abs(delta) < 0.5) return;
+      taken += delta;
+      for (const row of rows) {
+        const own = settled.moves.get(row);
+        if (!row.isConnected) continue;
+        noteShift(row, -delta);
+        if (own) setShare(settled.moves, row, { ...own, from: own.from + delta, to: own.to + delta });
+      }
+      drawCurtains(column);
+      return;
+    }
     settle.disconnect();
     removeCurtain(settled);
     unlift(settled.trail);
-    // The layout let go of what closed: its share in each row becomes what is left of the way to where the
-    // layout puts the row now, and that glides out; what other disclosures add goes on as it was.
-    const known = probe?.isConnected && anchor?.isConnected;
-    const shrink = known ? before - gap() : 0;
+    // The layout let go of (the rest of) what closed: its share in each row becomes what is left of the way to
+    // where the layout puts the row now, and that glides out; what other disclosures add goes on as it was.
+    const shrink = known ? before - gap() - taken : 0;
     const now = clockNow();
     rows.forEach((row) => {
       const own = settled.moves.get(row);

@@ -14,6 +14,8 @@ import type { LabWrite } from './recorder';
 // - the uppermost row tapped keeps its place on screen to the pixel (nothing in the cell lies above it to move
 //   it; the rows under it move only as the disclosures draw them, never by a jump);
 // - nothing writes the scroll position.
+// The folding host also covers the order in which what closed leaves: a member's body that closes with its group
+// leaves a frame before the members do (`leaves first`), and the rows below take that in without a jump.
 //
 // The disclosures watched run three times slower (their duration tokens, which the motion and the content's
 // unmount both read), and the cell's taps and reads are paced in time, not in frames: what is checked is geometry, which
@@ -27,7 +29,11 @@ import type { LabWrite } from './recorder';
 const transcript = (page: Page) => page.getByTestId('chat-transcript');
 
 type Host = 'group' | 'chip' | 'row';
-type Cell = { host: Host; source: 'above' | 'inside' | 'below'; bar?: 'on screen' | 'below the screen'; phase: 'opening' | 'folding'; change: 'grows' | 'shrinks' };
+/** `leaves first`: the other one (a member's body) closes with the host, and its content leaves a frame before the
+ *  host's does (the two leave on timers of their own, which a busy page can let a frame fall between). */
+/** `turned back`: the host opens, the other one opens inside it once the host's edge is past it, and the host is
+ *  closed while it still opens: it turns back from where its edge is drawn. */
+type Cell = { host: Host; source: 'above' | 'inside' | 'below'; bar?: 'on screen' | 'below the screen'; phase: 'opening' | 'folding' | 'turned back'; change: 'grows' | 'shrinks' | 'leaves first' };
 
 // Chips of their own before replies 371 (right above the group), 377 and 381 (above and below the Harness row
 // msg_00380), 383 and 387 (above and below the chip before msg_00386).
@@ -64,6 +70,10 @@ for (const phase of ['opening', 'folding'] as const) {
     }
   }
 }
+for (const bar of ['on screen', 'below the screen'] as const) {
+  cells.push({ host: 'group', source: 'inside', bar, phase: 'folding', change: 'leaves first' });
+  cells.push({ host: 'group', source: 'inside', bar, phase: 'turned back', change: 'grows' });
+}
 
 /** Places the item matching `selector` (the first) `y` px below the transcript's top, once any older page the
  *  place asks for has come in (the scroller holds the reader through it, which is not what is watched here). */
@@ -83,11 +93,14 @@ async function place(page: Page, selector: string, y: number) {
   await page.waitForTimeout(400);
 }
 
-type Frame = { box: number | null; edge: number | null };
+/** `exact`: two takes in a row read the same (WebKit samples a running animation at each read: a take that spans
+ *  a millisecond mixes moments, and only reads taken at one moment are judged). */
+type Frame = { box: number | null; edge: number | null; exact: boolean };
 
-/** Runs the cell's taps (`steps`: whose control, after how many ms) and reads every frame from the first
+/** Runs the cell's taps (`steps`: whose control, after how many ms, and not before the host's edge is past the
+ *  top of what it covers at `edgePast`, an index) and reads every frame from the first
  *  tap on, at one moment. */
-async function watch(page: Page, host: Host, sourceSelector: string, steps: { who: 'host' | 'source'; after: number }[]) {
+async function watch(page: Page, host: Host, sourceSelector: string, steps: { who: 'host' | 'source'; after: number; edgePast?: number }[]) {
   return page.evaluate(async ({ hostSelector, sourceSelector, hostKind, steps, readFor }) => {
     const scroller = document.querySelector('[data-testid="chat-transcript"]')!;
     const column = scroller.firstElementChild!.firstElementChild!;
@@ -123,7 +136,7 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     let laid: { top: number; bottom: number }[] = [];
     // Where the layout put the collapse bar while the curtain was down.
     let barTop = null as number | null;
-    const take = (): Frame => {
+    const take = (): Omit<Frame, 'exact'> => {
       const down = curtainOf();
       if (!down) return { box: null, edge: null };
       const { nodes, curtain, clip } = down;
@@ -144,11 +157,12 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
       const carried = tops[at].top - top - laid[at].top;
       return { box, edge: band - (top + slide + carried) };
     };
-    const read = () => {
+    const read = (): Frame => {
       for (let attempt = 0; ; attempt += 1) {
         const value = take();
         const again = take();
-        if (JSON.stringify(value) === JSON.stringify(again) || attempt === 4) return value;
+        const exact = JSON.stringify(value) === JSON.stringify(again);
+        if (exact || attempt === 7) return { ...value, exact };
       }
     };
     const out: Frame[] = [];
@@ -164,18 +178,61 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
       const playing = sourceItem()?.getAnimations({ subtree: true }).some((animation) => animation.id === 'transcript-disclose' && animation.playState === 'running');
       if (playing && curtainOf()) overlap.push(stamp);
     };
+    // Frames in which the other one's content had left while the host's was still there (a member's body before
+    // its group's members); and where the item after what the host covers was drawn, at every frame.
+    let innerFirst = 0;
+    const afterTops: number[] = [];
+    const besides = () => {
+      const nodes = content();
+      if (nodes.length > 0 && sourceItem() && !sourceItem()!.querySelector('[data-transcript-reveal]')) innerFirst += 1;
+      const last = nodes.at(-1) ?? hostItem();
+      let next = last.nextElementSibling;
+      while (next && !(next as HTMLElement).dataset.messageId && !(next as HTMLElement).dataset.transcriptKey) next = next.nextElementSibling;
+      if (next) afterTops.push(next.getBoundingClientRect().top);
+    };
+    // Where the host's edge is drawn from the top of what it covers: just before a tap that turns it back, and
+    // just after (in the same task, the commit in between).
+    const edgeFromTop = () => {
+      const down = curtainOf();
+      return down ? down.curtain.getBoundingClientRect().top - down.nodes[0].getBoundingClientRect().top : null;
+    };
+    // How far the edge was drawn from its place before, besides how far it moves on its own in the time between
+    // the two reads (WebKit samples a running animation at each read, and the commit between them takes a few ms):
+    // its speed over the last two frames before the tap, times that time.
+    const turns: number[] = [];
+    const edgeTrail: { at: number; edge: number }[] = [];
+    const edgeIsPast = (index: number | undefined) => {
+      if (index === undefined) return true;
+      const down = curtainOf();
+      const at = edgeFromTop();
+      return !!down && at !== null && down.nodes[index] !== undefined && at > down.nodes[index].getBoundingClientRect().top - down.nodes[0].getBoundingClientRect().top;
+    };
     let lastTap = performance.now();
-    for (const { who, after } of steps) {
-      for (let count = 0; count === 0 ? after > 0 : performance.now() - lastTap < after; count += 1) {
+    for (const { who, after, edgePast } of steps) {
+      for (let count = 0; count === 0 ? after > 0 || !edgeIsPast(edgePast) : performance.now() - lastTap < after || !edgeIsPast(edgePast); count += 1) {
         const stamp = await frame();
         const value = read();
         out.push(value);
         follow();
         sourceMoved(stamp);
+        besides();
         if (value.box !== null) down.push(stamp);
+        const edgeNow = edgeFromTop();
+        if (edgeNow !== null) edgeTrail.push({ at: performance.now(), edge: edgeNow });
       }
       const item = who === 'host' ? hostItem() : sourceItem();
+      const before = who === 'host' ? edgeFromTop() : null;
+      const beforeAt = performance.now();
       item.querySelector<HTMLElement>('button[aria-expanded]')!.click();
+      // React commits a click's update in a microtask: read once it has (still before any frame is drawn).
+      for (let tick = 0; tick < 6; tick += 1) await Promise.resolve();
+      const after_ = who === 'host' ? edgeFromTop() : null;
+      if (before !== null && after_ !== null) {
+        const [a, b] = edgeTrail.slice(-2);
+        const speed = a && b && b.at > a.at ? Math.abs(b.edge - a.edge) / (b.at - a.at) : 0;
+        const own = speed * (performance.now() - beforeAt);
+        turns.push(Math.max(0, Math.abs(after_ - before) - own));
+      }
       lastTap = performance.now();
       if (!tapped.some((row) => row.el === item)) tapped.push({ el: item, at: item.getBoundingClientRect().top, moved: [] });
     }
@@ -185,12 +242,13 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
       out.push(value);
       follow();
       sourceMoved(stamp);
+      besides();
       if (value.box !== null) down.push(stamp);
     }
     const span = (stamps: number[]) => (stamps.length > 1 ? stamps.at(-1)! - stamps[0] : 0);
     // The uppermost row tapped: nothing tapped in the cell lies above it.
     const uppermost = tapped.reduce((top, row) => (row.el.compareDocumentPosition(top.el) & Node.DOCUMENT_POSITION_FOLLOWING ? row : top));
-    return { frames: out, down: span(down), overlap: span(overlap), overlapFrames: overlap.length, barTop, bottom, tappedMoved: uppermost.moved };
+    return { frames: out, down: span(down), overlap: span(overlap), overlapFrames: overlap.length, innerFirst, afterTops, turns, barTop, bottom, tappedMoved: uppermost.moved };
   }, { hostSelector: HOSTS[host], sourceSelector, hostKind: host, steps, readFor: READ_MS });
 }
 
@@ -224,13 +282,18 @@ for (const cell of cells) {
     // What is open before what is watched: the host when it folds; the other one when it shrinks (a member's
     // body inside a group that still opens is opened two frames before it closes, as the group opens).
     if (cell.phase === 'folding') await tap(HOSTS[cell.host]);
-    if (cell.change === 'shrinks' && !(cell.source === 'inside' && cell.phase === 'opening')) await tap(source);
-    const steps: { who: 'host' | 'source'; after: number }[] =
-      cell.phase === 'opening'
+    // (Turned back: nothing is open before.)
+    if (cell.change !== 'grows' && !(cell.source === 'inside' && cell.phase !== 'folding')) await tap(source);
+    const steps: { who: 'host' | 'source'; after: number; edgePast?: number }[] =
+      cell.phase === 'turned back'
+        ? [{ who: 'host', after: 0 }, { who: 'source', after: APART_MS, edgePast: 2 }, { who: 'host', after: APART_MS }]
+        : cell.phase === 'opening'
         ? cell.change === 'shrinks' && cell.source === 'inside'
           ? [{ who: 'host', after: 0 }, { who: 'source', after: APART_MS }, { who: 'source', after: APART_MS }]
           : [{ who: 'host', after: 0 }, { who: 'source', after: APART_MS }]
-        : [{ who: 'source', after: 0 }, { who: 'host', after: APART_MS }];
+        : cell.change === 'leaves first'
+          ? [{ who: 'host', after: 0 }]
+          : [{ who: 'source', after: 0 }, { who: 'host', after: APART_MS }];
     // What is watched runs SLOWER times slower (what set it up ran at the product's speed).
     const slowed = await page.evaluate((factor) => {
       const root = document.documentElement;
@@ -241,6 +304,26 @@ for (const cell of cells) {
       });
     }, SLOWER);
     expect(slowed.every((ms) => ms > 0)).toBe(true);
+    if (cell.change === 'leaves first') {
+      // Of the removal timers one commit starts with the closing duration, each after the first fires 120 ms (a few
+      // frames) later. React starts a commit's effects from the innermost, so the body's goes first, then its group's.
+      await page.evaluate((close) => {
+        const original = window.setTimeout.bind(window);
+        let batch = 0;
+        let open = false;
+        window.setTimeout = ((handler: TimerHandler, delay?: number, ...rest: unknown[]) => {
+          if (delay !== close) return original(handler, delay, ...rest);
+          if (!open) {
+            open = true;
+            batch = 0;
+            queueMicrotask(() => { open = false; });
+          }
+          const later = batch * 120;
+          batch += 1;
+          return original(handler, delay + later, ...rest);
+        }) as typeof window.setTimeout;
+      }, slowed[1]);
+    }
     await page.evaluate(() => { window.__scrollLab.pinRef(0.4); window.__scrollLab.start(); });
     const result = await watch(page, cell.host, source, steps);
     await page.evaluate(() => window.__scrollLab.stop());
@@ -249,17 +332,33 @@ for (const cell of cells) {
     // What the cell is about: the other one played its disclosure while the host's curtain was down, for a good
     // part of the way (an opening takes 440 ms, a fold 350, both SLOWER times here), read in a few frames at least, and the
     // collapse bar lay where the cell says.
-    expect(result.overlap).toBeGreaterThanOrEqual(150 * SLOWER);
-    expect(result.overlapFrames).toBeGreaterThanOrEqual(3);
+    if (cell.change === 'leaves first') {
+      // The body left while the members were still there, for a frame at least.
+      expect(result.innerFirst).toBeGreaterThan(0);
+    } else {
+      expect(result.overlap).toBeGreaterThanOrEqual(150 * SLOWER);
+      expect(result.overlapFrames).toBeGreaterThanOrEqual(3);
+    }
     expect(result.down).toBeGreaterThanOrEqual(200 * SLOWER);
     if (cell.bar === 'on screen') expect(result.barTop!).toBeLessThan(result.bottom);
     if (cell.bar === 'below the screen') expect(result.barTop!).toBeGreaterThan(result.bottom);
-    const boxes = result.frames.map(({ box }) => box).filter((box): box is number => box !== null);
-    const edges = result.frames.map(({ edge }) => edge).filter((edge): edge is number => edge !== null);
-    expect(edges.length).toBeGreaterThan(0);
+    // Judged at the reads taken at one moment (two takes in a row read the same), a few at least.
+    const exact = result.frames.filter((frame) => frame.exact);
+    const boxes = exact.map(({ box }) => box).filter((box): box is number => box !== null);
+    const edges = exact.map(({ edge }) => edge).filter((edge): edge is number => edge !== null);
+    expect(edges.length).toBeGreaterThanOrEqual(3);
     expect(Math.max(...boxes.map(Math.abs))).toBeLessThanOrEqual(1);
     expect(Math.max(...edges.map(Math.abs))).toBeLessThanOrEqual(1);
     expect(Math.max(...result.tappedMoved.map(Math.abs))).toBeLessThanOrEqual(1);
     expect(writes.filter((write) => write.site?.startsWith('restoreScrollPosition'))).toEqual([]);
+    // What the host folded away gives back room once, in one movement: the row after it rises to where it comes
+    // to rest and never past it, however many commits what closed leaves in.
+    if (cell.change === 'leaves first') expect(Math.min(...result.afterTops) - result.afterTops.at(-1)!).toBeGreaterThanOrEqual(-1);
+    // Turned back while what it covers grew inside it: it turns from where its edge is drawn, not from where that
+    // was before what it covers grew.
+    if (cell.phase === 'turned back') {
+      expect(result.turns.length).toBe(1);
+      expect(Math.abs(result.turns[0])).toBeLessThanOrEqual(2);
+    }
   });
 }
