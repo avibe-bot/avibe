@@ -157,6 +157,31 @@ def test_models_dev_search_falls_back_to_stale_cache(monkeypatch, tmp_path):
 
 
 @pytest.mark.real_catalog_refresh
+def test_models_dev_search_without_refresh_revalidates_stale_cache(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "fetched_at": 0,
+                "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+                "catalog": _catalog(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    replacement = {
+        "openai": {
+            "name": "OpenAI",
+            "models": {"replacement-model": {"name": "Replacement model"}},
+        }
+    }
+    monkeypatch.setattr(models_dev_catalog, "load_models_dev_catalog", lambda: replacement)
+
+    assert models_dev_catalog.search_models_dev("replacement-model")[0]["model_id"] == "replacement-model"
+
+
+@pytest.mark.real_catalog_refresh
 def test_models_dev_stale_cache_is_scoped_to_its_url(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)

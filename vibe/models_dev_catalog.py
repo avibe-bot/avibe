@@ -586,10 +586,8 @@ def _catalog_for_search(*, refresh_if_stale: bool) -> dict[str, Any]:
         _refresh_in_background(
             retry_after_seconds=MODELS_DEV_SEARCH_REFRESH_AFTER_SECONDS,
         )
-    if catalog is not None:
-        return catalog
     if refresh_if_stale:
-        return {}
+        return catalog or {}
     return load_models_dev_catalog()
 
 
