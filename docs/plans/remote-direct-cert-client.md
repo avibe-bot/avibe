@@ -38,8 +38,12 @@ only after successful selection. Interrupted unpublished files are cleaned
 before another allocation. Corrupt/unsupported manifests warn and discard the
 optional files rather than fail startup. There is no released older schema to
 migrate; future changes must preserve this versioned shape or degrade safely.
-
-## Caller and backend contract
+The client checks that the leaf matches its local key, exact hostname and
+validity, and that the returned PEM chain parses. It deliberately does **not**
+validate the chain to a trusted root; the browser's normal public-trust
+verification does that, and a bogus chain can only cost the direct path.
+Deleting key files is an ordinary filesystem delete, like removing the tunnel
+token from configuration; this module does not claim secure wiping.
 
 All entry points are **synchronous and worker-thread-only**. Constructing
 `DirectCertificateClient` does nothing. Each `poll(allowed=...)` makes at most
@@ -57,12 +61,13 @@ instance again. `retry=True` retries a terminal failed order, while
 - First issuance and explicit rotation POST the locally persisted CSR with one
   exact DNS SAN: the host of the pairing's `public_url`. Lost replies/restarts
   resend the same CSR. Fingerprints are unpadded base64url SHA-256 of DER SPKI.
-- Pending orders advance no sooner than `next_poll_at`; errors honor `retry_at`,
-  including the seven-day rotation cap. Order-admission/CA backoff fences order
-  POSTs, while a separate current-leaf lower bound fences only current GETs;
-  neither can starve the other. Transport and credential backoff fences every
-  request. Local retry backoff grows from one minute to one hour; successful
-  order polls have a 30-second floor.
+- Pending orders advance no sooner than `next_poll_at`; when the backend supplies
+  it, the client uses that deadline with only a five-second safety floor; when it
+  is absent, the client uses a 30-second conservative floor. Errors honor
+  `retry_at`, including the seven-day rotation cap. Order-admission/CA backoff
+  fences order POSTs, while a separate current-leaf lower bound fences only
+  current GETs; neither can starve the other. Transport and credential backoff
+  fences every request. Local retry backoff grows from one minute to one hour.
 - A conflict resumes the supplied order if its key is still held (an active-key
   conflict abandons the pending local rotation). Otherwise it cancels the
   supplied order once, then retries admission at the backend's deadline while

@@ -54,6 +54,8 @@ class Backend:
         self.current = None
         self.error = None
         self.lose_start = False
+        self.advance_response = None
+        self.start_next_poll = 120
         self.ca_key = ec.generate_private_key(ec.SECP256R1())
         self.ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Hermetic certificate test CA")])
         now = datetime.fromtimestamp(clock.now, timezone.utc)
@@ -111,12 +113,18 @@ class Backend:
             if self.lose_start:
                 self.lose_start = False
                 raise TimeoutError("synthetic lost start response")
-            return {"order_id": self.orders[fp]["id"], "status": "queued", "hostname": HOST,
-                    "public_key_fingerprint": fp, "certificate_pem": None, "certificate_not_after": None,
-                    "next_poll_at": datetime.fromtimestamp(self.clock.now + 120, timezone.utc).isoformat()}
+            response = {"order_id": self.orders[fp]["id"], "status": "queued", "hostname": HOST,
+                        "public_key_fingerprint": fp, "certificate_pem": None, "certificate_not_after": None}
+            if self.start_next_poll is not None:
+                response["next_poll_at"] = datetime.fromtimestamp(
+                    self.clock.now + self.start_next_poll, timezone.utc
+                ).isoformat()
+            return response
         assert suffix.endswith("/advance") and method == "POST" and payload is None
         order = next(order for order in self.orders.values() if order["id"] == suffix.split("/")[-2])
         self.current = self.issue(order["csr"].public_key())
+        if self.advance_response is not None:
+            return {**self.advance_response, "order_id": order["id"], "hostname": HOST}
         return {**self.current, "order_id": order["id"], "hostname": HOST, "status": "issued", "next_poll_at": None}
 
 
@@ -161,6 +169,20 @@ AwBoSuuvp3E1xcvJVobl+aNNp6tMByJ5TupmdROp/Tg2kCYAZ0eo85R0QA==
 -----END PUBLIC KEY-----
 """)
     assert certificates._public_fingerprint(key) == "t25CGk8zgvqwtE3DKL27jeWKBiNqUvVC7CZpPRChs98"
+
+
+def test_order_server_deadline_uses_five_second_floor_and_missing_deadline_keeps_thirty_seconds(setup):
+    """Backend scheduling is authoritative when present; absent means the conservative floor."""
+    env = setup
+    env.backend.start_next_poll = 2
+    queued = env.client.poll(allowed=True)
+    assert queued.next_poll_at - env.clock.now == 5
+    env.backend.advance_response = {
+        "status": "pending", "public_key_fingerprint": queued.public_key_fingerprint,
+        "certificate_pem": None, "next_poll_at": None,
+    }
+    pending = due(env, queued)
+    assert pending.next_poll_at - env.clock.now == 30
 
 
 def test_first_issuance_and_restart_reuse_exact_csr_and_never_send_a_key(setup, caplog):

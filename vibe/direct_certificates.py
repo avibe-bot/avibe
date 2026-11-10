@@ -41,6 +41,7 @@ from vibe.direct_ingress import _load_certificate_context, normalize_ingress_hos
 
 logger = logging.getLogger(__name__)
 _MIN_POLL = 30.0
+_SERVER_POLL_FLOOR = 5.0
 _MAX_BACKOFF = 3600.0
 _CURRENT_INTERVAL = 6 * 3600.0
 _MAX_DOCUMENT = 256 * 1024
@@ -597,7 +598,7 @@ class DirectCertificateClient:
                 raise ValueError("invalid order")
             next_poll = now + _MIN_POLL
             if response.get("next_poll_at") is not None:
-                next_poll = max(next_poll, _timestamp(response["next_poll_at"]))
+                next_poll = max(now + _SERVER_POLL_FLOOR, _timestamp(response["next_poll_at"]))
         pem = response.get("certificate_pem")
         fingerprint = response.get("public_key_fingerprint")
         accepted_keys = {state.public_key_fingerprint}
