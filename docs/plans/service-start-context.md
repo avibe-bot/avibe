@@ -64,11 +64,21 @@ unchanged.
    in that state is not `healthy`, so step 2 does not hand it a restart.
 4. **Launch at login (macOS), separate.** This replaces self-recovery by the
    service, which step 2 cannot give: a restart seeded by a stale service
-   copies the ended session. Launch at login is `vibe autostart` (#3515), an
-   opt-in LaunchAgent that fires once per desktop login and starts Avibe, or
-   restarts a service that is stale or in another audit session. It runs in the
-   desktop session, so the restart it schedules is seeded there, as step 2
-   leaves any caller inside to do. See `macos-stale-session-auto-recovery.md`.
+   copies the ended session. What starts Avibe at the next desktop login
+   replaces such a service instead, as the next paragraph describes; for a CLI
+   install that is `vibe autostart` (#3515), an opt-in LaunchAgent that fires
+   once per desktop login. It runs in the desktop session, so the restart it
+   schedules is seeded there, as step 2 leaves any caller inside to do.
+
+**Replacement at the next desktop login (macOS), built.** A service left in
+another login session is replaced by whatever starts Avibe in the new desktop
+session. For a CLI install that is the opt-in `vibe autostart` login entry
+(`vibe/login_autostart.py`, decided in `macos-stale-session-auto-recovery.md`).
+Its desktop counterpart is the app's own launch: opening the app replaces the
+app's own Runtime instead of adopting it (`desktop/README.md`, step 3). Both
+act on one decision, `service_outside_desktop_session`: the service reports an
+ended login session, or its audit session is known to differ from the desktop
+session's; anything inconclusive is left alone.
 
 Rejected: only warning or refusing (a remote restart would never work);
 `launchctl asuser` (keeps the caller's `PATH`, and cannot cross sessions from
@@ -102,6 +112,12 @@ mechanism:
   restart, the startup diagnostic of the new service records `asid_match: true`,
   and `gh` reads its token.
 - Step 4 needs one real log-out and log-in on a Mac.
+- The desktop app's replacement needs a packaged build and one real log-out and
+  log-in: open the app, log out and in, and open it again. The Workbench opens
+  with no stale-session banner, and the app's `bootstrap.log` (in its local
+  data directory, `~/Library/Application Support/bot.avibe.desktop/`) has an
+  `endpoint.query` line carrying `replace_runtime="true"` with the reason,
+  followed by a `runtime.start` line.
 
 ## Todo
 
@@ -111,7 +127,8 @@ mechanism:
       running service.
 - [ ] Step 2 verified by a real restart over SSH.
 - [x] Step 3: the `outside_gui_session` state and its notice.
-- [x] Step 4: launch at login (`vibe autostart`, #3515).
+- [x] Step 4, replacement at the next desktop login: `vibe autostart` (#3515)
+      for CLI installs, the app's launch for the desktop app.
 - [ ] Step 4 verified by a real log-out and log-in.
 - [ ] Update the stale-session guidance in the `use-avibe` playbook and the
       Doctor action text once step 4 repairs a stale service at login.

@@ -15441,11 +15441,48 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
-    """Replace a different desktop-managed Controller before service reuse.
+def _own_desktop_runtime_outside_session(controller_identity: Mapping[str, Any] | None = None) -> str | None:
+    """Why the desktop host replaces its own running Runtime instead of adopting it, or None to keep it.
 
-    Returns 0 to go on starting, 3 when this start does not take the home over,
-    and 2 when the superseded Runtime may be left partly running.
+    ``controller_identity`` is the running Controller's health answer, asked
+    for here when the caller has none. Only a Controller carrying this caller's
+    Runtime id is judged: another desktop Runtime is a handover, and a
+    user-managed Avibe is never this caller's to stop. The desktop host runs in
+    the user's desktop session, and so does this command; the answer is the one
+    the launch-at-login entry acts on for a CLI install
+    (``login_autostart.service_outside_desktop_session``). A probe that fails
+    keeps the Runtime. A caller that is not a desktop host on macOS asks
+    nothing.
+    """
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    runtime_id = desktop_runtime_id()
+    if sys.platform != "darwin" or runtime_id is None:
+        return None
+    try:
+        from vibe import internal_client, login_autostart, runtime
+
+        if controller_identity is None:
+            controller_identity = internal_client.health_identity_sync()
+        if controller_identity is None or controller_identity.get("desktop_runtime_id") != runtime_id:
+            return None
+        service_pid = runtime.resolve_service_owner_pid(include_starting=False)
+        if service_pid is None:
+            return None
+        replace, reason = login_autostart.service_outside_desktop_session(service_pid, controller_identity)
+    except Exception:  # noqa: BLE001 - a failed session probe must not fail a start or discovery
+        logger.warning("Could not compare the desktop Runtime's login session with this one", exc_info=True)
+        return None
+    return reason if replace else None
+
+
+def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
+    """Replace a desktop-managed Controller this start must not reuse, before service reuse.
+
+    That is another desktop Runtime, or this caller's own left in a login
+    session other than the user's desktop session. Returns 0 to go on starting,
+    3 when this start does not take the home over, and 2 when the superseded
+    Runtime may be left partly running.
     """
     from vibe import runtime
 
@@ -15459,22 +15496,33 @@ def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
     if controller_identity is None:
         return 0
     actual_runtime_id = controller_identity.get("desktop_runtime_id")
-    if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
+    if actual_runtime_id is None:
         return 0
-
-    # Only the desktop host asks for a handover, when a user launches or
-    # retries its app; any other start leaves another desktop Runtime alone.
-    if not allowed:
+    if actual_runtime_id == expected_runtime_id:
+        # This caller's own Runtime is reused, as every start does, unless the
+        # desktop host launches from a desktop session the Runtime is not in.
+        # There the Keychain is out of reach, and after an ended login name
+        # resolution too; only a start from the current session repairs that.
+        reason = _own_desktop_runtime_outside_session(controller_identity) if allowed else None
+        if reason is None:
+            return 0
+        superseded = f"desktop-managed Avibe Runtime that {reason}"
+        print(f"Replacing this app's {superseded}.", file=sys.stderr)
+    elif not allowed:
+        # Only the desktop host asks for a handover, when a user launches or
+        # retries its app; any other start leaves another desktop Runtime alone.
         print("Another desktop-managed Avibe Runtime is running here; this start does not replace it.", file=sys.stderr)
         return 3
+    else:
+        superseded = "superseded desktop-managed Avibe Runtime"
     # Health names the Runtime that answered; the stop signals only processes
     # that carry its id.
     result = runtime.stop_desktop_runtime(actual_runtime_id)
     if result.refusal is not None:
-        print(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}", file=sys.stderr)
+        print(f"Refused to stop the {superseded}: {result.refusal}", file=sys.stderr)
         return 3
     if result.failure is not None:
-        print(f"Failed to stop the superseded desktop-managed Avibe Runtime: {result.failure}", file=sys.stderr)
+        print(f"Failed to stop the {superseded}: {result.failure}", file=sys.stderr)
         return 2
     # Anything still running is not the superseded Runtime's; the start claims
     # only what carries this Runtime's id.
@@ -15746,7 +15794,12 @@ def cmd_start(
 
 
 def cmd_desktop_endpoint() -> int:
-    """Print the desktop shell's loopback endpoint descriptor."""
+    """Print the desktop shell's loopback endpoint descriptor.
+
+    The shell adopts its own Runtime when it is ready, without starting
+    anything. The descriptor therefore also tells the shell when that Runtime
+    is one its start would replace, so it starts instead of adopting.
+    """
     from vibe import runtime
 
     from vibe.desktop_runtime import desktop_endpoint_payload
@@ -15754,7 +15807,11 @@ def cmd_desktop_endpoint() -> int:
     _guard_cli_default_state_migration()
     config = _ensure_config()
     bind_host = runtime.effective_ui_bind_host(config)
-    payload = desktop_endpoint_payload(bind_host, config.ui.setup_port)
+    replaced = _own_desktop_runtime_outside_session()
+    if replaced is not None:
+        # The shell keeps this command's stderr in its bootstrap log.
+        print(f"This app's Runtime {replaced}; its start replaces it.", file=sys.stderr)
+    payload = desktop_endpoint_payload(bind_host, config.ui.setup_port, replace_runtime=replaced is not None)
     print(json.dumps(payload, separators=(",", ":")))
     return 0
 

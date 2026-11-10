@@ -28,7 +28,8 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
-from vibe import cli, internal_client, runtime
+from vibe import cli, internal_client, login_autostart, runtime
+from vibe.macos_session_diagnostics import CommandResult
 from vibe.desktop_runtime import (
     desktop_caller_provenance,
     desktop_runtime_id,
@@ -1374,6 +1375,247 @@ def test_desktop_endpoint_cli_parser_requires_explicit_json():
     with pytest.raises(SystemExit) as exc:
         cli.build_parser().parse_args(["desktop", "endpoint"])
     assert exc.value.code == 2
+
+
+# What the desktop shell parses (`desktop/runtime-host/src/launcher.rs` reads the same file).
+REPLACE_RUNTIME_ENDPOINT = (Path(__file__).parent / "fixtures" / "desktop_endpoint_replace_runtime.json").read_text(
+    encoding="utf-8"
+)
+# The descriptor every shell accepts; a shell that predates `replace_runtime` refuses any other field.
+FROZEN_ENDPOINT = '{"schema_version":1,"origin":"http://127.0.0.1:5123"}\n'
+OWN_RUNTIME = "b" * 64
+OTHER_DESKTOP_RUNTIME = "a" * 64
+SERVICE_PID = 4242
+OUTLIVED = "outlived its login session"
+OTHER_SESSION = "runs in another login session"
+
+
+def _launchctl_print(target: str, asid: int) -> str:
+    aqua = "    session = Aqua\n" if target.startswith("gui/") else ""
+    return f"{target} = {{\n{aqua}    security context = {{\n        uid = 501\n        asid = {asid}\n    }}\n}}\n"
+
+
+def _session_case(
+    case_id: str,
+    *,
+    reported: str | None,
+    service_asid: int | None,
+    desktop_asid: int | None,
+    why: str | None,
+    controller: str | None = OWN_RUNTIME,
+    caller: str | None = OWN_RUNTIME,
+    platform: str = "darwin",
+    answers: bool = True,
+    stopped: str | None = None,
+    compared: bool = True,
+):
+    """One running Avibe as a desktop start finds it.
+
+    ``why`` is the reason this caller's own Runtime is replaced, or None when
+    it is kept. ``stopped`` is the Runtime a hand-over stops; ``compared`` says
+    whether the audit sessions are read at all.
+    """
+
+    identity = None
+    if answers:
+        identity = {"ok": True}
+        if controller is not None:
+            identity["desktop_runtime_id"] = controller
+        if reported is not None:
+            identity["macos_login_session_state"] = reported
+    return pytest.param(
+        SimpleNamespace(
+            identity=identity,
+            service_asid=service_asid,
+            desktop_asid=desktop_asid,
+            why=why,
+            caller=caller,
+            platform=platform,
+            stopped=OWN_RUNTIME if why is not None else stopped,
+            compared=compared,
+        ),
+        id=case_id,
+    )
+
+
+SESSION_CASES = [
+    _session_case(
+        "own-outlived-its-login",
+        reported="stale_login_session",
+        service_asid=100,
+        desktop_asid=100,
+        why=OUTLIVED,
+        compared=False,
+    ),
+    _session_case(
+        "own-in-another-session",
+        reported="outside_gui_session",
+        service_asid=77,
+        desktop_asid=100,
+        why=OTHER_SESSION,
+    ),
+    # The Controller's report is up to a minute old: right after a login it
+    # still describes the logged-out interval.
+    _session_case(
+        "own-report-out-of-date",
+        reported="no_gui_session",
+        service_asid=77,
+        desktop_asid=100,
+        why=OTHER_SESSION,
+    ),
+    _session_case("own-in-this-session", reported="healthy", service_asid=100, desktop_asid=100, why=None),
+    # A Runtime that reports no session state, and whose audit session cannot
+    # be read, is kept.
+    _session_case("own-silent-session-unknown", reported=None, service_asid=None, desktop_asid=100, why=None),
+    # A report other than an ended login replaces nothing: the comparison decides.
+    _session_case(
+        "own-desktop-session-unknown",
+        reported="outside_gui_session",
+        service_asid=77,
+        desktop_asid=None,
+        why=None,
+    ),
+    # A CLI install's Avibe is never a desktop app's to stop; its banner speaks.
+    _session_case(
+        "user-managed-outlived-its-login",
+        reported="stale_login_session",
+        service_asid=77,
+        desktop_asid=100,
+        why=None,
+        controller=None,
+        compared=False,
+    ),
+    # Another desktop Runtime is handed over by its identity, as before, and
+    # needs no cue.
+    _session_case(
+        "another-desktop-runtime",
+        reported="stale_login_session",
+        service_asid=77,
+        desktop_asid=100,
+        why=None,
+        controller=OTHER_DESKTOP_RUNTIME,
+        stopped=OTHER_DESKTOP_RUNTIME,
+        compared=False,
+    ),
+    _session_case(
+        "controller-silent",
+        reported=None,
+        service_asid=77,
+        desktop_asid=100,
+        why=None,
+        answers=False,
+        compared=False,
+    ),
+    # A caller that is not a desktop host, as the installed CLI an older or a
+    # development shell runs, gets the frozen descriptor.
+    _session_case(
+        "caller-without-a-runtime-id",
+        reported="stale_login_session",
+        service_asid=77,
+        desktop_asid=100,
+        why=None,
+        caller=None,
+        compared=False,
+    ),
+    _session_case(
+        "not-macos",
+        reported="stale_login_session",
+        service_asid=77,
+        desktop_asid=100,
+        why=None,
+        platform="linux",
+        compared=False,
+    ),
+]
+
+
+@pytest.fixture
+def desktop_start(monkeypatch, request):
+    """A desktop start facing the running Avibe of one session case, with every probe faked."""
+
+    case = request.param
+    gui = f"gui/{os.getuid()}"
+    service = f"pid/{SERVICE_PID}"
+    answers = {}
+    if case.service_asid is not None:
+        answers[("print", service)] = CommandResult(0, _launchctl_print(service, case.service_asid))
+    if case.desktop_asid is not None:
+        answers[("print", gui)] = CommandResult(0, _launchctl_print(gui, case.desktop_asid))
+    asked: list[list[str]] = []
+
+    def launchctl(command, timeout):
+        assert command[0] == "/bin/launchctl"
+        asked.append(list(command[1:]))
+        return answers.get(tuple(command[1:]), CommandResult(113, "Could not find service"))
+
+    stopped: list[str] = []
+    health_asked: list[bool] = []
+    monkeypatch.setattr(sys, "platform", case.platform)
+    if case.caller is None:
+        monkeypatch.delenv("AVIBE_DESKTOP_RUNTIME_ID", raising=False)
+    else:
+        monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", case.caller)
+    monkeypatch.setattr(login_autostart, "run_bounded_command", launchctl)
+    monkeypatch.setattr(internal_client, "health_identity_sync", lambda: health_asked.append(True) or case.identity)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda *, include_starting=True: SERVICE_PID)
+    monkeypatch.setattr(
+        runtime,
+        "stop_desktop_runtime",
+        lambda runtime_id: stopped.append(runtime_id) or runtime.DesktopRuntimeStopResult(),
+    )
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=5123)))
+    monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    return SimpleNamespace(
+        case=case,
+        asked=asked,
+        stopped=stopped,
+        health_asked=health_asked,
+        compared=[["print", service], ["print", gui]] if case.compared else [],
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="launchd is faked on any POSIX host; there is no uid on Windows")
+@pytest.mark.parametrize("desktop_start", SESSION_CASES, indirect=True)
+def test_the_endpoint_asks_the_shell_to_replace_only_its_own_runtime_left_in_another_login_session(
+    desktop_start, capsys
+):
+    case = desktop_start.case
+
+    assert cli.cmd_desktop_endpoint() == 0
+
+    captured = capsys.readouterr()
+    # The shell adopts a ready Runtime without starting anything, so this is its only cue.
+    assert captured.out == (REPLACE_RUNTIME_ENDPOINT if case.why is not None else FROZEN_ENDPOINT)
+    # The reason lands in the shell's bootstrap log, which keeps this command's stderr.
+    assert (case.why in captured.err) if case.why is not None else captured.err == ""
+    assert desktop_start.asked == desktop_start.compared
+    # Discovery costs every other caller nothing new: no health round trip, no launchctl.
+    assert bool(desktop_start.health_asked) is (case.caller is not None and case.platform == "darwin")
+    assert desktop_start.stopped == [], "discovery never stops anything"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="launchd is faked on any POSIX host; there is no uid on Windows")
+@pytest.mark.parametrize("desktop_start", SESSION_CASES, indirect=True)
+def test_a_handover_replaces_the_desktop_hosts_own_runtime_left_in_another_login_session(desktop_start):
+    case = desktop_start.case
+
+    assert cli._handover_superseded_desktop_runtime(allowed=True) == 0
+
+    # Scoped to the id health named: this caller's own, or the predecessor's.
+    assert desktop_start.stopped == ([case.stopped] if case.stopped is not None else [])
+    assert desktop_start.asked == desktop_start.compared
+
+
+@pytest.mark.skipif(os.name == "nt", reason="launchd is faked on any POSIX host; there is no uid on Windows")
+@pytest.mark.parametrize("desktop_start", SESSION_CASES[:1], indirect=True)
+def test_a_start_not_asked_to_hand_over_keeps_its_own_runtime_whatever_its_session(desktop_start):
+    # A recovery launch, an Agent's `vibe start` and a restart job all start
+    # without `--hand-over`: only the desktop host's launch or retry replaces.
+    assert cli._handover_superseded_desktop_runtime(allowed=False) == 0
+
+    assert desktop_start.stopped == []
+    assert desktop_start.asked == []
 
 
 def _ready_response(

@@ -32,7 +32,6 @@ from vibe.macos_session_diagnostics import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
     CommandResult,
     MacOSSessionProbe,
-    SessionContext,
     run_bounded_command,
 )
 
@@ -338,13 +337,27 @@ def render(action: str, state: Mapping[str, object]) -> list[str]:
     return lines
 
 
-def _login_decision(identity: Mapping[str, object], context: SessionContext) -> tuple[bool, str]:
-    """Whether the running service is to be replaced from this desktop session, and why."""
+def service_outside_desktop_session(service_pid: int, identity: Mapping[str, object]) -> tuple[bool, str]:
+    """Whether a caller in the user's desktop session is to replace the running service, and why.
 
-    if identity.get("desktop_runtime_id"):
-        return False, "belongs to the Avibe desktop app, which has its own launch at login"
+    ``identity`` is the service's own health answer, empty when it gave none.
+    The service is replaced when it reports that its login session ended, or
+    when its audit session is known to differ from the desktop session's. That
+    comparison is made now, from the caller, because the service's own report
+    is up to a minute old and a login is exactly when it is out of date.
+    Anything inconclusive leaves the service alone.
+
+    Two callers ask, each of the service it may replace: the launch-at-login
+    entry of a CLI install's, and the desktop app's start of its own Runtime.
+    """
+
     if identity.get("macos_login_session_state") == "stale_login_session":
         return True, "outlived its login session"
+    context = MacOSSessionProbe(
+        service_pid=service_pid,
+        service_pid_is_target=True,
+        command_runner=run_bounded_command,
+    ).capture_context()
     if context.service_asid is None or context.gui_asid is None:
         return False, (
             "could not be compared with this desktop session "
@@ -388,12 +401,11 @@ def run_login_entry(*, start: Callable[[], int]) -> int:
         return start()
 
     identity = internal_client.health_identity_sync() or {}
-    context = MacOSSessionProbe(
-        service_pid=service_pid,
-        service_pid_is_target=True,
-        command_runner=run_bounded_command,
-    ).capture_context()
-    replace, reason = _login_decision(identity, context)
+    if identity.get("desktop_runtime_id"):
+        # The app replaces its own Runtime when it is opened (`vibe start --hand-over`).
+        replace, reason = False, "belongs to the Avibe desktop app, which has its own launch at login"
+    else:
+        replace, reason = service_outside_desktop_session(service_pid, identity)
     if not replace:
         _log(f"the service (pid {service_pid}) {reason}; nothing to do")
         return 0

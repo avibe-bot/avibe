@@ -271,6 +271,63 @@ def test_pr_compares_actual_merge_tree_with_verified_parents_at_depth_two(repo: 
     assert classify("pull_request", wrong, merge, shallow) == classify("workflow_dispatch", {}, merge, shallow)
 
 
+@pytest.mark.parametrize(("paths", "expected", "docs"), [
+    (("docs/guide.md",), ("skip", "skip"), True),
+    (("core/feature.py",), ("skip", "run"), False),
+    (("ui/src/App.tsx",), ("run", "skip"), False),
+    ((".github/workflows/lint.yml",), FULL, False),
+])
+def test_pr_with_stale_event_base_uses_verified_merge_parent_at_depth_two(
+    repo: Path, tmp_path: Path, paths: tuple[str, ...], expected: tuple[str, str], docs: bool,
+) -> None:
+    """#3507: event base lagged the checked-out merge's first parent.
+
+    The old equality check fails closed even for docs/backend-only PRs. The
+    merge's complete diff, not the event base's intervening changes, owns scope.
+    """
+    recorded_base = git(repo, "rev-parse", "HEAD")
+    event, merge = synthetic_pr(repo, writes(*paths))
+    event["pull_request"]["base"]["sha"] = recorded_base
+    shallow = tmp_path / "stale-base-checkout"
+    subprocess.run(["git", "clone", "-q", "--depth=2", repo.as_uri(), str(shallow)], check=True)
+    assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    scope = classify("pull_request", event, merge, shallow)
+    assert scope.routable and scope.docs_only is docs
+    assert scope.paths == tuple(sorted(paths))
+    assert routes(scope) == expected
+
+
+@pytest.mark.parametrize("invalid", [
+    "unrelated-base", "newer-base", "wrong-head", "wrong-merge", "source-sha", "missing-history", "not-a-merge",
+])
+def test_stale_pr_base_never_authorizes_unverified_merges(repo: Path, tmp_path: Path, invalid: str) -> None:
+    recorded_base = git(repo, "rev-parse", "HEAD")
+    event, merge = synthetic_pr(repo, writes("docs/guide.md"))
+    event["pull_request"]["base"]["sha"] = recorded_base
+    sha = merge
+    if invalid == "unrelated-base":
+        event["pull_request"]["base"]["sha"] = event["pull_request"]["head"]["sha"]
+    elif invalid == "newer-base":
+        event["pull_request"]["base"]["sha"] = merge
+    elif invalid == "wrong-head":
+        event["pull_request"]["head"]["sha"] = recorded_base
+    elif invalid == "wrong-merge":
+        sha = recorded_base
+    elif invalid == "source-sha":
+        sha = event["pull_request"]["head"]["sha"]
+    elif invalid == "not-a-merge":
+        git(repo, "checkout", "-q", event["pull_request"]["head"]["sha"])
+        sha = git(repo, "rev-parse", "HEAD")
+    else:
+        shallow = tmp_path / "unavailable-history"
+        subprocess.run(["git", "clone", "-q", "--depth=2", repo.as_uri(), str(shallow)], check=True)
+        git(shallow, "remote", "set-url", "origin", str(tmp_path / "no-remote"))
+        repo = shallow
+    result = classify("pull_request", event, sha, repo)
+    assert not result.routable and not result.docs_only
+    assert result.windows_control_ipc and routes(result) == FULL
+
+
 UI_SOURCES = (
     "ui/src/App.tsx", "ui/src/i18n/en.json", "ui/e2e/pet-mini/mini.spec.ts",
     "ui/design/frames/home.design.tsx", "ui/playwright.pet-mini.config.ts", "ui/playwright.config.ts", "ui/tsconfig.tests.json",
