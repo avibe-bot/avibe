@@ -279,8 +279,15 @@ class EngineChannel:
 
         try:
             state = self.store.load()
-        except ChannelError:
-            return Resolution(ResolutionAction.KEEP, reason)
+        except ChannelError as exc:
+            # The record itself cannot be read, so nothing intact shows that the
+            # engine in effect was withdrawn. That is reported as what it is,
+            # not as the reason the index could not be checked. ``keep`` here
+            # means no channel change is authorized; it says nothing about the
+            # engine being current or fit to start.
+            if exc.reason != reason:
+                logger.warning("Model Hub engine channel state cannot be read: %s", exc)
+            return Resolution(ResolutionAction.KEEP, exc.reason)
         tombstone = next(
             (item for item in (state.revoked if state is not None else ()) if item.asset_release_tag == current), None
         )

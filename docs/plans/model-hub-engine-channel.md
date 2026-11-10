@@ -440,11 +440,24 @@ digest, the accepted envelope, every withdrawal, and the minimum and manifest
 digest of every release ever listed. A release that stops being listed keeps
 its recorded identity, so it cannot come back with other bytes. Acceptance
 runs under a cross-process lock against the file's current contents. A
-rejected index changes nothing. Damaged state fails closed; it is never
-treated as a fresh start. On read the stored envelope is authenticated again.
-One that has expired, or that is older than the sequence floor the running
-Avibe ships, is returned marked not fresh: its withdrawals still apply, and
-it authorizes no adoption.
+rejected index changes nothing. On read the stored envelope is authenticated
+again. One that has expired, or that is older than the sequence floor the
+running Avibe ships, is returned marked not fresh: its withdrawals still
+apply, and it authorizes no adoption.
+
+Damaged state is never treated as a fresh start. Every refresh is rejected as
+`state_unreadable`, including a newer index that would otherwise be accepted,
+and the damaged bytes stay as they are. `resolve` returns `keep` with the
+reason `state_unreadable`: no channel change is authorized. Nothing intact
+shows that the engine in effect was withdrawn, so a withdrawal is not
+invented. This step has no recovery from that state, and removing the file is
+not one: it would discard the replay and withdrawal memory the file exists to
+keep.
+
+The file is written by atomic replacement, with a directory flush that is
+best effort. That is enough while nothing acts on the channel. It is not
+proof that an accepted sequence or withdrawal survives power loss; step 3
+carries that obligation (below).
 
 **Selection.** `resolve` returns one of four actions. A withdrawal of the
 engine in effect is decided first and by itself.
@@ -508,3 +521,23 @@ then.
 effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
 and public documentation (step 4); and all commissioning, including whether
 renewals run unattended.
+
+**Obligations this step hands to step 3.** The client contract returns
+decisions; these are what a lifecycle that acts on them must hold.
+
+- `keep` means "no channel change is authorized". It is not a statement that
+  the engine is current, healthy or fit to start. It never stands in for the
+  lifecycle's own checks on the committed generation: its integrity, its
+  minimum Avibe, and any withdrawal the machine knows of.
+- A `keep` whose reason is `state_unreadable`, `uncommissioned`, or a verifier
+  that cannot run is a degraded state. What the user sees must say that
+  updates are blocked, not that Model Hub is ready.
+- Recovery from a damaged record needs its own supported trust protocol,
+  which decides what replaces the lost replay and withdrawal memory. Removing
+  the file is not that protocol and must not be documented as a remedy.
+- Before any consumer activates an engine on the channel's word, the accepted
+  sequence and history must be durable to the bar section 3 sets for the
+  activation journal: file flush, atomic replacement and parent-directory
+  flush on POSIX, tested native write-through on Windows, with crash recovery
+  tested by injected failure. The current write path does not meet that bar,
+  and a platform that cannot meet it blocks automatic activation.

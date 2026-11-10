@@ -674,6 +674,11 @@ class ChannelStateStore:
     the file's current contents, so concurrent refreshes cannot move it back,
     and a rejected payload never changes the file.
 
+    The file is replaced atomically, with a best-effort directory flush. That
+    suits a record nothing acts on yet; it is not proof that an accepted
+    sequence survives power loss, which a consumer that activates engines
+    must have first (docs/plans/model-hub-engine-channel.md).
+
     This is not a defense against whoever controls the OS account.
     """
 

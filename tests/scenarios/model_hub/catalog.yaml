@@ -2841,11 +2841,13 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_engine_channel.py::test_the_key_comes_from_the_shipped_roots_never_from_the_index
   - id: MH-ENGINE-CHANNEL-002
-    name: An index older than one already accepted, different at the same sequence, or rewriting a promoted release or a withdrawal is refused and leaves the recorded state unchanged
+    name: An index older than one already accepted, different at the same sequence, or rewriting a promoted release or a withdrawal is refused and leaves the recorded state unchanged; a damaged record refuses every index, is kept as it is, and is read neither as a fresh start nor as a withdrawal
     status: covered
     kind: security
     layer: unit
-    test: tests/test_model_hub_engine_channel.py::test_an_index_that_goes_back_or_rewrites_history_is_refused_and_leaves_state_untouched
+    test:
+      - tests/test_model_hub_engine_channel.py::test_an_index_that_goes_back_or_rewrites_history_is_refused_and_leaves_state_untouched
+      - tests/test_model_hub_engine_channel_client.py::test_a_damaged_record_authorizes_no_channel_change_and_is_kept_as_it_is
   - id: MH-ENGINE-CHANNEL-003
     name: Engine selection moves only forward, to the newest release whose minimum Avibe is met and that has an asset for this host, never below the bundled engine
     status: partial

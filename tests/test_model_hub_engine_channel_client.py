@@ -326,6 +326,41 @@ def test_a_manifest_override_leaves_the_channel_even_with_a_recorded_withdrawal(
     assert fetch.calls == 0 and verifier.calls == 0
 
 
+def test_a_damaged_record_authorizes_no_channel_change_and_is_kept_as_it_is(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-002: damaged state is neither a fresh start nor an invented withdrawal."""
+
+    signer = Signer()
+    fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    recorded, _ = _channel(tmp_path, signer, _index(signer, 5, revoked=[tombstone(NEWER, fallback)]))
+    assert recorded.refresh().state == "accepted"
+    state_path = tmp_path / "engine" / "channel" / "state.json"
+    damaged = state_path.read_bytes()[:-40]
+    state_path.write_bytes(damaged)
+    # A newer index that would be accepted on a machine with an intact record.
+    channel, fetch = _channel(tmp_path, signer, _index(signer, 6))
+
+    status = channel.refresh()
+
+    assert (status.state, status.reason) == ("rejected", "state_unreadable") and fetch.calls == 1
+    assert state_path.read_bytes() == damaged
+    with pytest.raises(ChannelError) as unreadable:
+        channel.snapshot()
+    assert unreadable.value.reason == "state_unreadable"
+    keyless, _ = _channel(tmp_path, None, roots=TrustRoots())
+    for reader in (channel, keyless):
+        for current in (BUNDLED, NEWER):
+            resolution = reader.resolve(current=current)
+            # Nothing is adopted and no fallback is taken; and a record that cannot
+            # be read does not show that this engine was withdrawn.
+            assert (resolution.action, resolution.reason, resolution.target, resolution.tombstone) == (
+                ResolutionAction.KEEP,
+                "state_unreadable",
+                None,
+                None,
+            )
+    assert state_path.read_bytes() == damaged
+
+
 def test_a_withdrawal_applies_whatever_else_would_stop_adoption(tmp_path, monkeypatch) -> None:
     signer = Signer()
     fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
