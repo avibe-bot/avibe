@@ -453,6 +453,9 @@ protocol MobileAuthTransporting: AnyObject {
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
     func logout() async throws
+    func pushManagementRequest(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse
     func cancelAll() async
     func invalidate() -> WebsiteDataStoreReleaseBarrier?
 }
@@ -481,6 +484,7 @@ final class MobileSessionCoordinator {
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
     ]
+    private let onPreparePushLogout: @MainActor () async -> Void
 
     private var transport: MobileAuthTransporting?
     private var snapshot: MobileSessionSnapshot?
@@ -498,10 +502,19 @@ final class MobileSessionCoordinator {
         case ready
         case operation(UUID)
         case resetting(UUID)
+        case pushLogout(UUID?)
     }
 
     var isAccountSurfaceActive: Bool {
         transport != nil
+    }
+
+    var currentAccount: MobileAccount? {
+        snapshot?.account
+    }
+
+    var currentInstances: [MobileInstance] {
+        snapshot?.instances ?? []
     }
 
     init(
@@ -515,7 +528,8 @@ final class MobileSessionCoordinator {
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
-        ]
+        ],
+        onPreparePushLogout: @escaping @MainActor () async -> Void = {}
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -525,6 +539,7 @@ final class MobileSessionCoordinator {
             ?? MobilePasskeyAuthenticator()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
+        self.onPreparePushLogout = onPreparePushLogout
         transport = nil
     }
 
@@ -555,11 +570,13 @@ final class MobileSessionCoordinator {
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
+                await self.preparePushLogout()
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
             if self.belongsToAnotherAccount(discovery) {
+                await self.preparePushLogout()
                 self.beginAccountTransition(clearSelection: true)
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
@@ -667,17 +684,24 @@ final class MobileSessionCoordinator {
 
     func refresh() async throws -> MobileSessionState {
         return try await runExclusive {
+            let previousAccountID = self.snapshot?.account.id
             let requestGeneration = self.beginAccountTransition(
                 clearSelection: false
             )
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
+                await self.preparePushLogout()
                 self.clearStoredSelection()
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
             }
-            if self.belongsToAnotherAccount(discovery) {
+            if
+                case .signedIn(let fresh) = discovery,
+                previousAccountID != nil,
+                previousAccountID != fresh.account.id
+            {
+                await self.preparePushLogout()
                 self.clearStoredSelection()
                 await self.replaceWithFreshSignedOutStore()
                 return .signedOut
@@ -790,6 +814,7 @@ final class MobileSessionCoordinator {
     }
 
     func logout() async throws -> MobileSessionState {
+        await preparePushLogout()
         let resetToken = try beginReset()
         defer { finishReset(resetToken) }
         beginAccountTransition(clearSelection: true)
@@ -807,6 +832,41 @@ final class MobileSessionCoordinator {
         return .signedOut
     }
 
+    func pushManagementRequest(
+        _ request: PushManagementRequest
+    ) async throws -> PushManagementResponse {
+        if case .pushLogout = phase {
+            let requestGeneration = generation
+            let wasActive = transport != nil
+            activateAccountSurface()
+            defer {
+                if !wasActive {
+                    deactivateAccountSurface()
+                }
+            }
+            let response = try await requireTransport().pushManagementRequest(
+                request
+            )
+            try requireCurrentGeneration(requestGeneration)
+            return response
+        }
+        let wasActive = transport != nil
+        return try await runExclusive {
+            let requestGeneration = self.generation
+            self.activateAccountSurface()
+            defer {
+                if !wasActive {
+                    self.deactivateAccountSurface()
+                }
+            }
+            let response = try await self.requireTransport().pushManagementRequest(
+                request
+            )
+            try self.requireCurrentGeneration(requestGeneration)
+            return response
+        }
+    }
+
     private func completeSecondFactor(
         generation requestGeneration: Int,
         _ operation: () async throws -> MobileSessionDiscovery
@@ -822,9 +882,32 @@ final class MobileSessionCoordinator {
             // The first-factor session ended while it owed the second factor:
             // an explicit signed-out answer, like a session read's `401`.
             try requireCurrentGeneration(requestGeneration)
+            await preparePushLogout()
             beginAccountTransition(clearSelection: true)
             await replaceWithFreshSignedOutStore()
             return .signedOut
+        }
+    }
+
+    private func preparePushLogout() async {
+        let resumePhase: UUID?
+        switch phase {
+        case .ready:
+            resumePhase = nil
+        case .operation(let token):
+            resumePhase = token
+        case .resetting, .pushLogout:
+            return
+        }
+        phase = .pushLogout(resumePhase)
+        await onPreparePushLogout()
+        guard phase == .pushLogout(resumePhase) else {
+            return
+        }
+        if let resumePhase {
+            phase = .operation(resumePhase)
+        } else {
+            phase = .ready
         }
     }
 

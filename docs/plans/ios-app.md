@@ -141,7 +141,7 @@ interface AvibeNative {
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
 | `viewport` | `viewport.setOuterScrollLocked({locked})` | - |
 | `composer` | **Not planned** (reserved; not implemented). The native composer (Phase 0b) was dropped on 2026-11-08 (section 5); its methods and events are in this file's git history. | - |
-| [`push`](ios-push-relay-contract.md) | `push.status({vapidPublicKey?: string})` → `{state: "unavailable" \| "off" \| "on", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` → `{revoked: boolean}` | `push.opened({url})` |
+| [`push`](ios-push-relay-contract.md) | `push.status({vapidPublicKey?: string})` → `{state: "unavailable" \| "off" \| "on", revokeState: "active" \| "absent" \| "pending", endpoint?: string, keys?: {p256dh: string, auth: string}}`, `push.subscribe({vapidPublicKey, forceResubscribe?: boolean})` → `{endpoint, keys:{p256dh, auth}}`, `push.unsubscribe()` → `{revoked: boolean, revoke: "confirmed" \| "pending" \| "not_needed"}` | `push.opened({url})` |
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |

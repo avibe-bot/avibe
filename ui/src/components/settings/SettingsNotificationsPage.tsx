@@ -4,7 +4,6 @@ import { useBots } from '@/context/BotsContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useNotificationPreferences } from '@/context/NotificationPreferencesContext';
 import { isDesktopShell } from '@/lib/desktopShell';
-import { isNativeShell } from '@/lib/native';
 import { WebPushControl } from '../workbench/WebPushControl';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel, SettingsRow, ToggleSwitch } from './SettingsPrimitives';
@@ -21,7 +20,6 @@ export const SettingsNotificationsPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const off = !preferences.enabled;
   const desktop = isDesktopShell();
-  const native = isNativeShell();
 
   return (
     <SettingsPageShell
@@ -71,9 +69,9 @@ export const SettingsNotificationsPage: React.FC = () => {
         )}
       </SettingsPanel>
 
-      {((capabilities.can_read_instance && !native) || desktop) && (
+      {(capabilities.can_read_instance || desktop) && (
         <SettingsPanel title={t('settings.notifications.deviceTitle')}>
-          {capabilities.can_read_instance && !native && (
+          {capabilities.can_read_instance && (
             <SettingsRow
               title={t('settings.notifications.pushTitle')}
               description={t('settings.notifications.pushHint')}

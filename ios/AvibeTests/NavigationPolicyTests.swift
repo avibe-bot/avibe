@@ -489,6 +489,364 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeBridgeQueuesPushOpenedUntilTheWebListenerSubscribes()
+        async throws
+    {
+        var acknowledgedID: String?
+        let configuration = NativeBridgeConfiguration.make(
+            instanceOrigin: instance,
+            setOuterScrollLocked: { _, _ in false },
+            pushOpenedAck: { id, origin in
+                XCTAssertEqual(origin, self.instance)
+                acknowledgedID = id
+                return true
+            }
+        )
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: configuration
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.dispatchEvent(new CustomEvent(
+                "avibe:native:push.opened",
+                { detail: { id: "tap-1", url: "/chat/queued" } }
+              ));
+            </script>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return new Promise((resolve) => {
+              window.avibeNative.on("push.opened", (payload) => {
+                resolve(payload.url);
+              });
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+
+        XCTAssertEqual(result as? String, "/chat/queued")
+        try await waitUntil { acknowledgedID == "tap-1" }
+    }
+
+    @MainActor
+    func testNativeBridgeKeepsOnlyTheLatestQueuedTapAndDeduplicatesItsID()
+        async throws
+    {
+        var acknowledgedIDs: [String] = []
+        let configuration = NativeBridgeConfiguration.make(
+            instanceOrigin: instance,
+            setOuterScrollLocked: { _, _ in false },
+            pushOpenedAck: { id, _ in
+                acknowledgedIDs.append(id)
+                return true
+            }
+        )
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: configuration
+        )
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              for (const detail of [
+                { id: "tap-old", url: "/chat/old" },
+                { id: "tap-new", url: "/chat/new" }
+              ]) {
+                window.dispatchEvent(new CustomEvent(
+                  "avibe:native:push.opened",
+                  { detail }
+                ));
+              }
+            </script>
+            """,
+            baseURL: instance.url,
+            in: webView
+        )
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return new Promise((resolve) => {
+              const received = [];
+              window.avibeNative.on("push.opened", (payload) => {
+                received.push(payload.url);
+                window.dispatchEvent(new CustomEvent(
+                  "avibe:native:push.opened",
+                  { detail: payload }
+                ));
+                queueMicrotask(() => resolve(received));
+              });
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+
+        XCTAssertEqual(result as? [String], ["/chat/new"])
+        try await waitUntil { acknowledgedIDs == ["tap-new"] }
+    }
+
+    @MainActor
+    func testPendingPushTapRedeliversAcrossNavigationUntilMatchingAck()
+        async throws
+    {
+        let appModel = try await makePushTapAppModel()
+        appModel.pushCoordinator.handleNotificationTap(
+            userInfo: [
+                "account_id": "account-1",
+                "instance_origin": "https://instance-one.example",
+                "url": "/chat/redelivered",
+            ]
+        )
+        let runtime = try await waitForPushRuntime(
+            appModel,
+            instanceID: "instance-1"
+        )
+        var acknowledgements: [Bool] = []
+        let (controller, webView, window) = try makePushRuntimeController(
+            appModel: appModel,
+            runtime: runtime,
+            origin: WebOrigin.parseConfigured(
+                "https://instance-one.example"
+            )!
+        ) { id, origin in
+            let accepted = appModel.acknowledgePushOpened(
+                id: id,
+                origin: origin
+            )
+            acknowledgements.append(accepted)
+            return accepted
+        }
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+
+        // The first attempt has no document yet. The next document has no
+        // listener, and navigation replaces its document-start queue.
+        appModel.didFinishRuntimeLoading()
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            "<!doctype html><title>no listener</title>",
+            baseURL: runtime.instance.url,
+            in: webView
+        )
+        appModel.didFinishRuntimeLoading()
+        XCTAssertTrue(acknowledgements.isEmpty)
+
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.receivedPushOpened = [];
+              window.avibeNative.on("push.opened", (payload) => {
+                window.receivedPushOpened.push(payload.url);
+              });
+            </script>
+            """,
+            baseURL: runtime.instance.url,
+            in: webView
+        )
+        appModel.didFinishRuntimeLoading()
+        try await waitUntil { acknowledgements == [true] }
+        let received = try await webView.evaluateJavaScript(
+            "window.receivedPushOpened"
+        )
+        XCTAssertEqual(received as? [String], ["/chat/redelivered"])
+
+        // A fresh document has an empty JS dedupe set. No second ack proves
+        // the matching first ack cleared the native pending tap.
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.avibeNative.on("push.opened", () => {});
+            </script>
+            """,
+            baseURL: runtime.instance.url,
+            in: webView
+        )
+        appModel.didFinishRuntimeLoading()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(acknowledgements, [true])
+        _ = controller
+    }
+
+    @MainActor
+    func testPendingPushTapKeepsOnlyLatestAndDropsOnInstanceSwitch()
+        async throws
+    {
+        let appModel = try await makePushTapAppModel()
+        for path in ["/chat/old", "/chat/new"] {
+            appModel.pushCoordinator.handleNotificationTap(
+                userInfo: [
+                    "account_id": "account-1",
+                    "instance_origin": "https://instance-one.example",
+                    "url": path,
+                ]
+            )
+        }
+        let latestRuntime = try await waitForPushRuntime(
+            appModel,
+            instanceID: "instance-1"
+        )
+        var receivedURLs: [String] = []
+        let (_, latestWebView, latestWindow) = try makePushRuntimeController(
+            appModel: appModel,
+            runtime: latestRuntime,
+            origin: WebOrigin.parseConfigured(
+                "https://instance-one.example"
+            )!
+        ) { _, _ in true }
+        defer {
+            latestWindow.rootViewController = nil
+            latestWindow.isHidden = true
+        }
+        let latestProbe = WebViewLoadProbe()
+        latestWebView.navigationDelegate = latestProbe
+        try await latestProbe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.avibeNative.on("push.opened", (payload) => {
+                window.webkit.messageHandlers.testTap.postMessage(payload.url);
+              });
+            </script>
+            """,
+            baseURL: latestRuntime.instance.url,
+            in: latestWebView
+        )
+        let tapHandler = ScriptMessageHandler { value in
+            if let path = value as? String {
+                receivedURLs.append(path)
+            }
+        }
+        latestWebView.configuration.userContentController.add(
+            tapHandler,
+            name: "testTap"
+        )
+        appModel.didFinishRuntimeLoading()
+        try await waitUntil { receivedURLs == ["/chat/new"] }
+
+        appModel.pushCoordinator.handleNotificationTap(
+            userInfo: [
+                "account_id": "account-1",
+                "instance_origin": "https://instance-one.example",
+                "url": "/chat/drop-on-switch",
+            ]
+        )
+        _ = try appModel.mobileSessionCoordinator.selectInstance(
+            id: "instance-2"
+        )
+        let switched = try await waitForPushRuntime(
+            appModel,
+            instanceID: "instance-2"
+        )
+        var switchedAckCount = 0
+        let (_, switchedWebView, switchedWindow) = try makePushRuntimeController(
+            appModel: appModel,
+            runtime: switched,
+            origin: WebOrigin.parseConfigured(
+                "https://instance-two.example"
+            )!
+        ) { _, _ in
+            switchedAckCount += 1
+            return true
+        }
+        defer {
+            switchedWindow.rootViewController = nil
+            switchedWindow.isHidden = true
+        }
+        let switchedProbe = WebViewLoadProbe()
+        switchedWebView.navigationDelegate = switchedProbe
+        try await switchedProbe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.avibeNative.on("push.opened", () => {});
+            </script>
+            """,
+            baseURL: switched.instance.url,
+            in: switchedWebView
+        )
+        appModel.didFinishRuntimeLoading()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(switchedAckCount, 0)
+    }
+
+    @MainActor
+    func testPendingPushTapExpiresAfterOneHundredTwentySeconds()
+        async throws
+    {
+        let clock = MutableDate(
+            Date(timeIntervalSince1970: 1_794_096_000)
+        )
+        let appModel = try await makePushTapAppModel(
+            pushOpenedNow: { clock.value }
+        )
+        appModel.pushCoordinator.handleNotificationTap(
+            userInfo: [
+                "account_id": "account-1",
+                "instance_origin": "https://instance-one.example",
+                "url": "/chat/expired",
+            ]
+        )
+        let runtime = try await waitForPushRuntime(
+            appModel,
+            instanceID: "instance-1"
+        )
+        clock.value = clock.value.addingTimeInterval(121)
+        var ackCount = 0
+        let (_, webView, window) = try makePushRuntimeController(
+            appModel: appModel,
+            runtime: runtime,
+            origin: WebOrigin.parseConfigured(
+                "https://instance-one.example"
+            )!
+        ) { _, _ in
+            ackCount += 1
+            return true
+        }
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.avibeNative.on("push.opened", () => {});
+            </script>
+            """,
+            baseURL: runtime.instance.url,
+            in: webView
+        )
+
+        appModel.didFinishRuntimeLoading()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(ackCount, 0)
+    }
+
+    @MainActor
     func testWebViewFactoryUsesTheSameKeyboardLayoutForPrimaryAndChild() {
         let factory = WebViewFactory(
             instanceOrigin: instance,
@@ -1332,7 +1690,7 @@ final class NavigationPolicyTests: XCTestCase {
             _ = await storeCleanup.remove()
         }
 
-        let appModel = AppModel(
+        let appModel = makeTestAppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: baseURL
@@ -1391,6 +1749,85 @@ final class NavigationPolicyTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testColdLaunchPushTapWaitsForAccountBootstrap() async throws {
+        let sessionHeaders = FixtureEvent(description: "session response headers")
+        let sessionRelease = DispatchSemaphore(value: 0)
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                let body = """
+                {
+                  "account": {
+                    "id": "account-1",
+                    "email": "max@example.com"
+                  },
+                  "instances": [
+                    {
+                      "id": "instance-1",
+                      "name": "Push target",
+                      "host": "instance.example",
+                      "url": "https://instance.example",
+                      "relationship": "owner",
+                      "owner_email": "max@example.com",
+                      "available": true
+                    }
+                  ]
+                }
+                """
+                return LocalHTTPResponse(
+                    status: 200,
+                    headers: [("Content-Type", "application/json")],
+                    body: Data(body.utf8),
+                    headersSentEvent: sessionHeaders,
+                    bodyRelease: sessionRelease
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            sessionRelease.signal()
+            server.stop()
+        }
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let appModel = makeTestAppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: baseURL
+            )
+        )
+        await fulfillment(of: [sessionHeaders.expectation], timeout: 15)
+
+        NotificationCenter.default.post(
+            name: .avibePushNotificationTapped,
+            object: nil,
+            userInfo: [
+                "payload": [
+                    "account_id": "account-1",
+                    "instance_origin": "https://instance.example",
+                    "url": "/chat/ses_1?from=notification",
+                ],
+            ]
+        )
+        sessionRelease.signal()
+
+        try await waitUntil {
+            guard case .browser(let runtime) = appModel.route else {
+                return false
+            }
+            return runtime.instance.id == "instance-1"
+        }
+    }
+
     /// SwiftUI's root hosting controller hands the status bar to its newest
     /// representable controller. The bundled sign-in page follows the system
     /// theme, and so does its status bar; over a runtime, the runtime
@@ -1440,7 +1877,7 @@ final class NavigationPolicyTests: XCTestCase {
         addTeardownBlock {
             _ = await storeCleanup.remove()
         }
-        let appModel = AppModel(
+        let appModel = makeTestAppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: baseURL
@@ -2459,7 +2896,7 @@ final class NavigationPolicyTests: XCTestCase {
         controlPlaneURL: URL,
         storeCleanups: [NamedDataStoreCleanup]
     ) async throws {
-        var appModel: AppModel? = AppModel(
+        var appModel: AppModel? = makeTestAppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: controlPlaneURL
@@ -2667,6 +3104,131 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    private func makeTestAppModel(
+        defaults: UserDefaults,
+        controlPlane: MobileControlPlaneConfiguration,
+        pushOpenedNow: @escaping () -> Date = Date.init
+    ) -> AppModel {
+        AppModel(
+            defaults: defaults,
+            controlPlane: controlPlane,
+            pushKeychain: InMemoryPushKeychainStore(),
+            pushGenerationStore: InMemoryPushGenerationStore(),
+            pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
+            pushNotificationCenter: NavigationTestPushNotificationCenter(),
+            pushOpenedNow: pushOpenedNow
+        )
+    }
+
+    @MainActor
+    private func makePushTapAppModel(
+        pushOpenedNow: @escaping () -> Date = Date.init
+    ) async throws -> AppModel {
+        let server = try LocalHTTPServer { request in
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json("{}")
+            case ("GET", "/api/mobile/session"):
+                return .json(
+                    """
+                    {
+                      "account": {
+                        "id": "account-1",
+                        "email": "max@example.com"
+                      },
+                      "instances": [
+                        {
+                          "id": "instance-1",
+                          "name": "One",
+                          "host": "instance-one.example",
+                          "url": "https://instance-one.example",
+                          "relationship": "owner",
+                          "owner_email": "max@example.com",
+                          "available": true
+                        },
+                        {
+                          "id": "instance-2",
+                          "name": "Two",
+                          "host": "instance-two.example",
+                          "url": "https://instance-two.example",
+                          "relationship": "owner",
+                          "owner_email": "max@example.com",
+                          "available": true
+                        }
+                      ]
+                    }
+                    """
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let suiteName = "NavigationPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let appModel = makeTestAppModel(
+            defaults: defaults,
+            controlPlane: MobileControlPlaneConfiguration(
+                testBaseURL: baseURL
+            ),
+            pushOpenedNow: pushOpenedNow
+        )
+        try await waitUntil {
+            if case .onboarding(.instances) = appModel.route {
+                return true
+            }
+            return false
+        }
+        return appModel
+    }
+
+    @MainActor
+    private func waitForPushRuntime(
+        _ appModel: AppModel,
+        instanceID: String
+    ) async throws -> MobileRuntimeContext {
+        try await waitUntil {
+            guard case .browser(let runtime) = appModel.route else {
+                return false
+            }
+            return runtime.instance.id == instanceID
+        }
+        guard case .browser(let runtime) = appModel.route else {
+            throw TestWaitError.timedOut
+        }
+        return runtime
+    }
+
+    @MainActor
+    private func makePushRuntimeController(
+        appModel: AppModel,
+        runtime: MobileRuntimeContext,
+        origin: WebOrigin,
+        pushOpenedAck: @escaping (String, WebOrigin) -> Bool
+    ) throws -> (WebViewController, WKWebView, UIWindow) {
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: appModel.runtimeWebsiteDataStore,
+            pushOpenedAck: pushOpenedAck,
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        appModel.registerRuntimeController(controller, for: runtime)
+        let window = host(controller)
+        let webView = try XCTUnwrap(
+            controller.view.subviews.compactMap { $0 as? WKWebView }.first
+        )
+        return (controller, webView, window)
+    }
+
+    @MainActor
     private func makeRuntimeController(
         instanceOrigin: WebOrigin? = nil,
         navigationPolicy: NavigationPolicy? = nil
@@ -2849,6 +3411,47 @@ final class NavigationPolicyTests: XCTestCase {
             }
         }
         return nil
+    }
+}
+
+@MainActor
+private final class NavigationTestPushNotificationCenter:
+    PushNotificationCentering
+{
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        []
+    }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] {
+        []
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
+}
+
+@MainActor
+private final class MutableDate {
+    var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+}
+
+private final class ScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    private let handler: (Any) -> Void
+
+    init(_ handler: @escaping (Any) -> Void) {
+        self.handler = handler
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        handler(message.body)
     }
 }
 

@@ -620,7 +620,26 @@ def test_ios_app_builds_carry_the_avibe_bot_webcredentials_domain() -> None:
     apple-app-site-association lists this app under the same domain.
     """
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
-    assert entitlements == {"com.apple.developer.associated-domains": ["webcredentials:avibe.bot"]}
+    assert entitlements == {
+        "aps-environment": "development",
+        "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+        "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+        "keychain-access-groups": [
+            "$(AppIdentifierPrefix)bot.avibe.ios",
+            "$(AppIdentifierPrefix)bot.avibe.ios.push",
+        ],
+    }
+    app_info = plistlib.loads((ROOT / "ios/Avibe/Resources/Info.plist").read_bytes())
+    extension_info = plistlib.loads((ROOT / "ios/NotificationService/Info.plist").read_bytes())
+    assert app_info["AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios.push"
+    )
+    assert app_info["AVIBE_PRIVATE_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios"
+    )
+    assert extension_info["AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios.push"
+    )
 
     project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
     app_configurations = [

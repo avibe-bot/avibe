@@ -1,65 +1,56 @@
 /** @vitest-environment jsdom */
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { WebPushControl } from './WebPushControl';
 
-const { api, push } = vi.hoisted(() => ({
-  api: { getWebPushStatus: vi.fn() },
+const { api, native, push, toast } = vi.hoisted(() => ({
+  api: {
+    getWebPushVapidPublicKey: vi.fn(),
+    sendWebPushTest: vi.fn(),
+  },
+  native: {
+    hasNativeCapability: vi.fn(),
+    nativePushStatus: vi.fn(),
+  },
   push: {
     disableWebPush: vi.fn(),
     enableWebPush: vi.fn(),
-    getWebPushDeviceId: vi.fn(),
-    getRememberedWebPushEndpoints: vi.fn(),
     getExistingWebPushSubscription: vi.fn(),
-    getWebPushSupportState: vi.fn(),
-    rememberWebPushEndpoint: vi.fn(),
-    webPushSubscriptionUsesVapidKey: vi.fn(),
+    reconcileWebPush: vi.fn(),
   },
+  toast: { showToast: vi.fn() },
 }));
+
+const support = {
+  supported: true as const,
+  standalone: false,
+  requiresStandalone: false,
+};
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({ capabilities: { can_read_instance: true } }),
 }));
-vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('@/context/ToastContext', () => ({ useToast: () => toast }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/lib/webPush', () => push);
-
-const oldEndpoint = 'https://push.example.test/sub/old';
-const newEndpoint = 'https://push.example.test/sub/new';
-const oldSubscription = {
-  endpoint: oldEndpoint,
-  toJSON: () => ({ endpoint: oldEndpoint }),
-};
-const newSubscription = {
-  endpoint: newEndpoint,
-  toJSON: () => ({ endpoint: newEndpoint }),
-};
-
-const status = (enabled: boolean, repairable = false) => ({
-  ok: true,
-  configured: true,
-  public_key: 'new-key',
-  subscription_count: enabled ? 1 : 0,
-  current_subscription_enabled: enabled,
-  current_subscription_repairable: repairable,
-});
+vi.mock('@/lib/native', () => native);
 
 beforeEach(() => {
+  vi.resetAllMocks();
   vi.stubGlobal('Notification', { permission: 'granted' });
-  push.getWebPushSupportState.mockReturnValue({
-    supported: true,
-    standalone: false,
-    requiresStandalone: false,
-  });
-  push.getWebPushDeviceId.mockResolvedValue('device-1');
-  push.getRememberedWebPushEndpoints.mockResolvedValue([oldEndpoint]);
-  push.getExistingWebPushSubscription.mockResolvedValue(null);
+  native.hasNativeCapability.mockReturnValue(false);
+  push.reconcileWebPush.mockResolvedValue({ support, status: 'disabled' });
   push.enableWebPush.mockResolvedValue(undefined);
-  push.rememberWebPushEndpoint.mockResolvedValue(undefined);
-  push.webPushSubscriptionUsesVapidKey.mockReturnValue(true);
-  api.getWebPushStatus.mockResolvedValue(status(false));
+  push.disableWebPush.mockResolvedValue({
+    accepted: true,
+    status: 'disabled',
+    remoteRevoked: true,
+    nativeRevoked: 'confirmed',
+  });
+  push.getExistingWebPushSubscription.mockResolvedValue(null);
+  api.sendWebPushTest.mockResolvedValue({ ok: true });
 });
 
 afterEach(() => {
@@ -68,92 +59,111 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('WebPushControl recovery', () => {
-  it('recreates a missing subscription only when its remembered endpoint is still enabled', async () => {
-    push.getExistingWebPushSubscription
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(newSubscription);
-    api.getWebPushStatus
-      .mockResolvedValueOnce(status(true))
-      .mockResolvedValueOnce(status(true));
+describe('WebPushControl', () => {
+  it('renders the shared reconciler result', async () => {
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
 
     render(<WebPushControl />);
 
     await screen.findByText('workbench.inbox.notifications.enabled');
-    expect(api.getWebPushStatus).toHaveBeenNthCalledWith(1, { endpoint: oldEndpoint });
-    expect(push.enableWebPush).toHaveBeenCalledWith(api, {
-      forceResubscribe: false,
-      recoverOnly: true,
-    });
-    expect(api.getWebPushStatus).toHaveBeenNthCalledWith(2, {
-      endpoint: newEndpoint,
-      subscription: newSubscription.toJSON(),
-      device_id: 'device-1',
-      previous_endpoints: [oldEndpoint],
-    });
+    expect(push.reconcileWebPush).toHaveBeenCalledOnce();
+    expect(push.reconcileWebPush).toHaveBeenCalledWith(api);
   });
 
-  it('keeps a missing subscription disabled after opt-out', async () => {
+  it('requests native push once from explicit enable', async () => {
+    native.hasNativeCapability.mockReturnValue(true);
     render(<WebPushControl />);
 
-    await screen.findByText('workbench.inbox.notifications.enable');
-    expect(api.getWebPushStatus).toHaveBeenCalledWith({ endpoint: oldEndpoint });
-    expect(push.enableWebPush).not.toHaveBeenCalled();
-  });
+    const enable = await screen.findByText('workbench.inbox.notifications.enable');
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
+    fireEvent.click(enable);
 
-  it('replaces an enabled subscription bound to an obsolete VAPID key', async () => {
-    push.getExistingWebPushSubscription
-      .mockResolvedValueOnce(oldSubscription)
-      .mockResolvedValueOnce(newSubscription);
-    push.webPushSubscriptionUsesVapidKey.mockReturnValue(false);
-    api.getWebPushStatus
-      .mockResolvedValueOnce(status(true))
-      .mockResolvedValueOnce(status(true));
-
-    render(<WebPushControl />);
-
-    await screen.findByText('workbench.inbox.notifications.enabled');
-    expect(push.webPushSubscriptionUsesVapidKey).toHaveBeenCalledWith(oldSubscription, 'new-key');
-    expect(push.enableWebPush).toHaveBeenCalledWith(api, {
-      forceResubscribe: true,
-      recoverOnly: true,
-    });
-  });
-
-  it('does not revive an opted-out subscription with an obsolete key', async () => {
-    push.getExistingWebPushSubscription.mockResolvedValue(oldSubscription);
-    push.webPushSubscriptionUsesVapidKey.mockReturnValue(false);
-
-    render(<WebPushControl />);
-
-    await screen.findByText('workbench.inbox.notifications.enable');
-    expect(push.enableWebPush).not.toHaveBeenCalled();
-  });
-
-  it('shows disabled when a conditional repair fails after the initial status check', async () => {
-    push.getExistingWebPushSubscription.mockResolvedValue(oldSubscription);
-    push.webPushSubscriptionUsesVapidKey.mockReturnValue(false);
-    push.enableWebPush.mockRejectedValue(new Error('recovery_not_authorized'));
-    api.getWebPushStatus.mockResolvedValue(status(true));
-
-    render(<WebPushControl />);
-
-    await screen.findByText('workbench.inbox.notifications.enable');
     await waitFor(() => expect(push.enableWebPush).toHaveBeenCalledOnce());
+    expect(push.enableWebPush).toHaveBeenCalledWith(api);
+    await screen.findByText('workbench.inbox.notifications.enabled');
   });
 
-  it('does not report an initial enabled row after the replacement loses authorization', async () => {
-    push.getExistingWebPushSubscription
-      .mockResolvedValueOnce(oldSubscription)
-      .mockResolvedValueOnce(newSubscription);
-    push.webPushSubscriptionUsesVapidKey.mockReturnValue(false);
-    api.getWebPushStatus
-      .mockResolvedValueOnce(status(true))
-      .mockResolvedValueOnce(status(false));
+  it('uses the shared reconciler after disabling', async () => {
+    push.reconcileWebPush
+      .mockResolvedValueOnce({ support, status: 'enabled' })
+      .mockResolvedValueOnce({ support, status: 'disabled' });
 
     render(<WebPushControl />);
 
+    const disable = await screen.findByText('workbench.inbox.notifications.disable');
+    fireEvent.click(disable);
+
+    await waitFor(() => expect(push.disableWebPush).toHaveBeenCalledWith(api));
+    expect(push.reconcileWebPush).toHaveBeenCalledTimes(1);
     await screen.findByText('workbench.inbox.notifications.enable');
-    expect(push.rememberWebPushEndpoint).not.toHaveBeenCalled();
+  });
+
+  it('shows pending cleanup without claiming complete revocation', async () => {
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
+    push.disableWebPush.mockResolvedValue({
+      accepted: true,
+      status: 'pending',
+      remoteRevoked: true,
+      nativeRevoked: 'pending',
+    });
+
+    render(<WebPushControl />);
+    fireEvent.click(await screen.findByText('workbench.inbox.notifications.disable'));
+
+    await screen.findByText('workbench.inbox.notifications.disablePending');
+    expect(screen.getByText('workbench.inbox.notifications.enable')).toBeTruthy();
+    expect(screen.queryByText('workbench.inbox.notifications.enabled')).toBeNull();
+    expect(toast.showToast).toHaveBeenCalledWith(
+      'workbench.inbox.notifications.disablePending',
+      'warning',
+    );
+  });
+
+  it('shows a recoverable failure when cleanup cannot be confirmed', async () => {
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
+    push.disableWebPush
+      .mockResolvedValueOnce({
+        accepted: true,
+        status: 'failed',
+        remoteRevoked: true,
+        nativeRevoked: 'failed',
+      })
+      .mockResolvedValueOnce({
+        accepted: true,
+        status: 'disabled',
+        remoteRevoked: true,
+        nativeRevoked: 'confirmed',
+      });
+
+    render(<WebPushControl />);
+    fireEvent.click(await screen.findByText('workbench.inbox.notifications.disable'));
+
+    await screen.findByText('workbench.inbox.notifications.disableFailed');
+    expect(screen.getByText('workbench.inbox.notifications.enable')).toBeTruthy();
+    fireEvent.click(screen.getByText('common.retry'));
+    await waitFor(() => expect(push.disableWebPush).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.queryByText('workbench.inbox.notifications.disableFailed')).toBeNull();
+    });
+    expect(toast.showToast).toHaveBeenCalledWith(
+      'workbench.inbox.notifications.disableFailed',
+      'error',
+    );
+  });
+
+  it('keeps the enabled state when the opt-out could not be saved', async () => {
+    push.reconcileWebPush.mockResolvedValue({ support, status: 'enabled' });
+    push.disableWebPush.mockRejectedValue(new Error('storage blocked'));
+
+    render(<WebPushControl />);
+    fireEvent.click(await screen.findByText('workbench.inbox.notifications.disable'));
+
+    await screen.findByText('workbench.inbox.notifications.disableNotSaved');
+    expect(screen.getByText('workbench.inbox.notifications.enabled')).toBeTruthy();
+    expect(screen.queryByText('workbench.inbox.notifications.enable')).toBeNull();
+    expect(toast.showToast).toHaveBeenCalledWith(
+      'workbench.inbox.notifications.disableNotSaved',
+      'error',
+    );
   });
 });

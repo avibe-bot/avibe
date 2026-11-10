@@ -1,6 +1,22 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "AVIBE_PUSH_FALLBACK" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "New Avibe notification"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新的 Avibe 通知"
+          }
+        }
+      }
+    },
     "browser.account" : {
       "localizations" : {
         "en" : {

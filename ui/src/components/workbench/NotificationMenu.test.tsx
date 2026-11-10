@@ -2,7 +2,7 @@
 
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({ shell: false }));
 vi.mock('../../lib/native', async (importOriginal) => ({
@@ -30,21 +30,15 @@ vi.mock('./WebPushControl', () => ({
 
 import { NotificationMenu } from './NotificationMenu';
 
-beforeEach(() => {
+afterEach(() => {
+  cleanup();
   native.shell = false;
 });
 
-afterEach(() => cleanup());
-
 describe('NotificationMenu', () => {
-  it('shows browser Web Push outside the native shell', () => {
-    render(<MemoryRouter><NotificationMenu /></MemoryRouter>);
-    expect(screen.getByTestId('web-push-control')).toBeTruthy();
-  });
-
-  it('hides browser Web Push in the native shell', () => {
+  it('shows the native push control when the instance can be read', () => {
     native.shell = true;
     render(<MemoryRouter><NotificationMenu /></MemoryRouter>);
-    expect(screen.queryByTestId('web-push-control')).toBeNull();
+    expect(screen.getByTestId('web-push-control')).toBeTruthy();
   });
 });

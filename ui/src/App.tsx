@@ -112,7 +112,7 @@ import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCap
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
-import { isNativeShell } from './lib/native';
+import { isNativeShell, onNativePushOpened } from './lib/native';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
@@ -274,7 +274,6 @@ const WebPushNotificationNavigator = () => {
     const navigate = useNavigate();
 
     useEffect(() => {
-        if (!('serviceWorker' in navigator)) return;
         const launchNavigation = createWebPushLaunchNavigation(takeResumedWebPushLaunchPath, navigate);
 
         const onMessage = (event: MessageEvent) => {
@@ -287,11 +286,20 @@ const WebPushNotificationNavigator = () => {
         };
 
         const unsubscribeResume = onPageReactivated(() => launchNavigation.reactivated());
-        navigator.serviceWorker.addEventListener('message', onMessage);
+        const hasServiceWorker = 'serviceWorker' in navigator;
+        if (hasServiceWorker) {
+            navigator.serviceWorker.addEventListener('message', onMessage);
+        }
+        const unsubscribeNative = onNativePushOpened((path) => {
+            launchNavigation.notificationClick(path);
+        });
         return () => {
             launchNavigation.dispose();
             unsubscribeResume();
-            navigator.serviceWorker.removeEventListener('message', onMessage);
+            unsubscribeNative();
+            if (hasServiceWorker) {
+                navigator.serviceWorker.removeEventListener('message', onMessage);
+            }
         };
     }, [navigate]);
 
@@ -918,7 +926,17 @@ const router = createBrowserRouter(
       )}
     />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
-      <Route element={<AuthGuard><BotsProvider><BotHoldProvider><AppShell /></BotHoldProvider></BotsProvider></AuthGuard>}>
+      <Route
+        element={(
+          <AuthGuard>
+            <BotsProvider>
+              <BotHoldProvider>
+                <AppShell />
+              </BotHoldProvider>
+            </BotsProvider>
+          </AuthGuard>
+        )}
+      >
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>
