@@ -129,6 +129,7 @@ def test_solana_address_is_the_base58_public_key(address, public_key):
     with api._vault_engine().connect() as conn:
         meta = vault_service.get_secret_meta(conn, "KEY")
     # One Solana row, and no EVM or Bitcoin identity for an Ed25519 key.
+    assert meta["signing_curve"] == "ed25519"
     assert meta["signing_addresses"] == {"solana": address}
     assert meta["per_use_sign"] is True
 
@@ -247,6 +248,25 @@ def test_ed25519_signing_requires_the_canonical_pinned_public_key(avault, public
         api.vault_sign({"name": "KEY", "scheme": "ed25519", "message_hex": TWO_BYTES["message"]})
     assert error.value.code == "invalid_signing_key"
     assert_nothing_happened(avault)
+    # A key whose public key is damaged still says which chain it belongs to, and offers no address.
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "KEY")
+    assert meta["signing_curve"] == "ed25519"
+    assert "signing_addresses" not in meta
+
+
+@pytest.mark.parametrize("signing_key, curve", [
+    (SECP_KEY, "secp256k1"),
+    ({"curve": "secp256k1", "public_key": "not-a-key"}, "secp256k1"),
+    ({"curve": "p256", "public_key": SECP_KEY["public_key"]}, None),
+    ({"public_key": SECP_KEY["public_key"]}, None),
+    (None, None),
+])
+def test_metadata_reports_the_stored_curve_and_never_guesses_one(signing_key, curve):
+    create_key(signing_key)
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "KEY")
+    assert meta.get("signing_curve") == curve
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
@@ -537,6 +557,7 @@ def test_cli_signs_a_solana_message_and_lists_how_to_sign(avault, capfd):
     assert printed["signature"] == {"signature": TWO_BYTES["signature"], "recovery_id": None}
     assert cli.cmd_vault_list(cli.build_parser().parse_args(["vault", "list"])) == 0
     row = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert row["signing_curve"] == "ed25519"
     assert row["signing_addresses"] == {"solana": vault_solana.address(TWO_BYTES["public_key"])}
     assert "--scheme ed25519 --message-hex" in row["solana_signing_note"]
     assert "bitcoin_signing_warning" not in row

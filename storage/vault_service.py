@@ -1006,6 +1006,11 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         # UI identify a signing key by address, not hex. Derivation is a pure function of the
         # (public) key; a malformed/legacy key degrades to no addresses, never a hard error.
         public_key = signing_public_key.get("public_key")
+        # The curve says which chain family the key belongs to. It is reported as stored,
+        # so a key whose public key is damaged is still recognizable; an unknown or
+        # missing curve is not guessed.
+        if signing_public_key.get("curve") in {"secp256k1", vault_solana.CURVE}:
+            payload["signing_curve"] = signing_public_key["curve"]
         try:
             if vault_solana.is_ed25519_key(signing_public_key):
                 # An Ed25519 key is a Solana identity only, never an EVM or Bitcoin one.

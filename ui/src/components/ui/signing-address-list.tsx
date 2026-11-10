@@ -13,6 +13,7 @@ const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: TranslationKe
   { key: 'btc_segwit', labelKey: 'vaults.addresses.btcSegwit' },
   { key: 'btc_taproot', labelKey: 'vaults.addresses.btcTaproot' },
   { key: 'btc_legacy', labelKey: 'vaults.addresses.btcLegacy' },
+  { key: 'solana', labelKey: 'vaults.addresses.solana' },
 ];
 
 const AddressRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {

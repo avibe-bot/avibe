@@ -107,6 +107,8 @@ function addressesForScheme(
   protectedKey: boolean,
 ): SigningAddresses {
   if (!addresses) return {};
+  // An Ed25519 key is a Solana identity only; it has no EVM or Bitcoin address.
+  if (scheme === 'ed25519') return { solana: addresses.solana };
   // Stored Bitcoin addresses use the mainnet HRP. The trusted sandbox alone
   // derives the full address for the requester's selected network.
   if (protectedKey) return scheme === 'ecdsa-secp256k1-recoverable' ? { eth: addresses.eth } : {};
@@ -183,6 +185,8 @@ export const VaultApprovalCard: React.FC<{
   const requestSession = vaultRequestSessionDisplay(request);
   const delivery = (request.delivery ?? {}) as {
     digest?: string;
+    // `ed25519` requests carry the exact message bytes as hex instead of a digest.
+    message_hex?: string;
     scheme?: string;
     signing_context?: Record<string, unknown>;
     signingContext?: Record<string, unknown>;
@@ -190,6 +194,9 @@ export const VaultApprovalCard: React.FC<{
     operation_context?: VaultSignedOperationContext;
   };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
+  // What this request signs: the exact message for `ed25519` (it may be empty), else a digest.
+  const signsMessage = delivery.scheme === 'ed25519';
+  const signInput = signsMessage ? delivery.message_hex : delivery.digest || undefined;
   const isDelete = (card?.request_type ?? request.request_type) === 'delete';
   const isKeypair = card?.kind === 'keypair';
 
@@ -410,9 +417,12 @@ export const VaultApprovalCard: React.FC<{
   const approveSign = () =>
     finish(async () => {
       const name = card?.secret_name;
-      const digest = delivery.digest;
       const scheme = delivery.scheme;
-      if (!name || !digest || !scheme) throw new Error(t('vaults.approval.errors.missingDigest'));
+      if (!name || typeof signInput !== 'string' || !scheme) {
+        throw new Error(t(signsMessage ? 'vaults.approval.errors.missingMessage' : 'vaults.approval.errors.missingDigest'));
+      }
+      // The approval repeats exactly what the card showed; the daemon rejects any other input.
+      const signed = signsMessage ? { message_hex: signInput } : { digest: signInput };
       if (isProtected) {
         // Protected keypair: the sandbox opens + signs, parent submits only the public signature.
         const material = card?.secret_unlock_material;
@@ -434,10 +444,10 @@ export const VaultApprovalCard: React.FC<{
         }
         const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
-        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme, signature }));
+        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, ...signed, scheme, signature }));
       } else {
         // Standard keypair: avault signs; we only relay the approved request.
-        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme }));
+        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, ...signed, scheme }));
       }
       setResolved(true);
       onResolved({ kind: 'approved', requestType: 'sign' });
@@ -594,27 +604,33 @@ export const VaultApprovalCard: React.FC<{
             </span>
           </DetailRow>
         ) : null}
-        {isSign && delivery.digest ? (
-          <DetailRow label={t('vaults.approval.digest')}>
+        {isSign && typeof signInput === 'string' ? (
+          <DetailRow label={t(signsMessage ? 'vaults.approval.message' : 'vaults.approval.digest')}>
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-              {/* Full digest in a copyable code box (break-all) — it's the exact bytes being
-                  signed, so the user can verify it rather than trust an elision. */}
+              {/* The full digest or message in a copyable code box (break-all) — it's the exact
+                  bytes being signed, so the user can verify it rather than trust an elision. A
+                  long message scrolls inside the box; it is never cut. */}
               <div className="flex min-w-0 items-start gap-2">
-                <code className="min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
-                  {delivery.digest}
+                <code
+                  className={cn(
+                    'min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground',
+                    signsMessage && 'max-h-48 overflow-y-auto',
+                  )}
+                >
+                  {signInput || t('vaults.approval.emptyMessage')}
                 </code>
                 <button
                   type="button"
                   onClick={() => {
                     // Shared helper: falls back to execCommand on LAN-HTTP where
                     // navigator.clipboard is unavailable (non-secure context).
-                    void copyTextToClipboard(delivery.digest ?? '').then((ok) => {
+                    void copyTextToClipboard(signInput).then((ok) => {
                       if (!ok) return;
                       setCopiedDigest(true);
                       window.setTimeout(() => setCopiedDigest(false), 1500);
                     });
                   }}
-                  aria-label={t('vaults.approval.copyDigest')}
+                  aria-label={t(signsMessage ? 'vaults.approval.copyMessage' : 'vaults.approval.copyDigest')}
                   className="shrink-0 pt-1 text-muted transition-colors hover:text-foreground"
                 >
                   {copiedDigest ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}

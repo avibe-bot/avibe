@@ -126,6 +126,8 @@ export type SigningAddresses = {
   btc_legacy?: string;
   btc_segwit?: string;
   btc_taproot?: string;
+  /** An Ed25519 key's only identity: the base58 public key. */
+  solana?: string;
 };
 
 export type VaultSecret = {
@@ -143,6 +145,8 @@ export type VaultSecret = {
   /** Receive addresses derived from a keypair secret's public key. Agents and the UI
    *  identify a signing key by address; the raw public key is never surfaced here. */
   signing_addresses?: SigningAddresses | null;
+  /** The key's curve from its stored public metadata; present even when no address can be derived. */
+  signing_curve?: 'secp256k1' | 'ed25519';
   source: string;
   description?: string | null;
   policy: Record<string, unknown>;
@@ -288,7 +292,9 @@ export type VaultSignedOperationContext = {
   release?: {
     name?: string;
     scheme?: string;
+    /** secp256k1 schemes bind a 32-byte digest; `ed25519` binds the exact message instead. */
     digest?: string;
+    messageHex?: string;
     publicKey?: string;
     signingContext?: Record<string, unknown>;
     [key: string]: unknown;

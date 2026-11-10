@@ -72,7 +72,7 @@ URL）、`path`（要编辑的工作目录）和 `updated_at`。Agent 的列表�
 另带 `enabled: false`。Vault 的列表行在 `vibe vault list` 和 `vibe vault find` 中
 相同，包括 secret 的 `name`、`kind`、`protection`、`fields`（多字段 secret 另带
 `default_field`，即单写 `NAME` 时选中的字段）、`tags`、`description`、`policy`、
-keypair 的 `signing_addresses`，以及 `vibe vault sign` 可用该密钥时的
+keypair 的 `signing_curve` 和 `signing_addresses`，以及 `vibe vault sign` 可用该密钥时的
 `per_use_sign: true`；行中从不包含 secret 值。`vibe task show`、`vibe watch show`、
 `vibe runs show`、`vibe session get`、`vibe agent show` 和 `vibe show status` 输出完整
 记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。已删除的 Task 或 Watch 显示

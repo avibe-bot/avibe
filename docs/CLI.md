@@ -85,7 +85,8 @@ workspace to edit), and `updated_at`. An Agent row is its `name`, `backend`,
 `enabled: false`. A Vault row, the same from `vibe vault list` and
 `vibe vault find`, is the secret's `name`, `kind`, `protection`, `fields` (a
 multi-field secret adds `default_field`, the field `NAME` alone selects),
-`tags`, `description`, `policy`, a keypair's `signing_addresses`, and
+`tags`, `description`, `policy`, a keypair's `signing_curve` and
+`signing_addresses`, and
 `per_use_sign: true` when `vibe vault sign` can use the key; it never holds a
 value. `vibe task show`, `vibe watch show`, `vibe runs show`,
 `vibe session get`, `vibe agent show`, and `vibe show status` print the full
