@@ -2943,6 +2943,8 @@
       "deviceTitle": "This device",
       "pushTitle": "Push (browser or Home Screen app)",
       "pushHint": "Whether this browser receives pushes at all.",
+      "nativePushTitle": "iPhone notifications",
+      "nativePushHint": "Alerts from this Avibe app. This iPhone only.",
       "desktopTitle": "Desktop app notifications",
       "desktopHint": "Vault approvals and finished background runs. This computer only; same switch as the menu bar.",
       "desktopHintMenuBar": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications.",
