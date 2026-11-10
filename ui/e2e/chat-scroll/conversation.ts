@@ -109,11 +109,11 @@ export function activityRecords(group: TurnActivityGroupWire): ActivityRowWire[]
   ];
 }
 
-/** A settled execution-process group above every third reply; `records`: with the steps it took (else it
- *  counts four and has none). */
-export function activityGroups(messages: WorkbenchMessage[], records = false): TurnActivityGroupWire[] {
+/** A settled execution-process group above every third reply, and above the replies at `extra` (indices);
+ *  `records`: with the steps it took (else it counts four and has none). */
+export function activityGroups(messages: WorkbenchMessage[], records = false, extra: number[] = []): TurnActivityGroupWire[] {
   return messages
-    .filter((message, index) => message.type === 'result' && index % 3 === 1)
+    .filter((message, index) => message.type === 'result' && (index % 3 === 1 || extra.includes(index)))
     .map((message) => ({
       id: `grp_${message.id}`,
       anchor_message_id: message.id,
