@@ -80,7 +80,7 @@ gh pr merge <PR-URL> --squash --match-head-commit <verified-head-SHA>
 
 Only after GitHub reports `MERGED`, read back the merge commit and clean up this task's Watch, worktree, and branch without touching other work.
 
-Merge does not authorize deployment, service restarts, local regression updates, or credential changes. Each needs the user's approval.
+Merge does not authorize deployment, service restarts, or credential changes. Each needs the user's approval. Local regression updates follow the repository's own rule.
 
 ## Talk to the user
 
@@ -96,7 +96,7 @@ Use the conversation's language and lead with the result. The user cares about w
 
   If buttons are unavailable, say the same next step visibly and include the link.
 - **When acting on merge intent:** do not ask again or offer a stale Merge button. Merge, read back `MERGED` and the merge commit, and report it. State the reason when acting on your own judgment.
-- **After Merge:** when the repository has a local regression workflow (Avibe does), offer `[Update regression]` and `[Update and verify]`. Both update the local master environment; the latter also verifies the affected flows. After the user chooses one, read `references/local-regression.md` before acting.
+- **After Merge:** when the repository runs local regression automatically after landings (Avibe does, per its `AGENTS.md`), do not offer regression buttons. Otherwise, when the repository has a local regression workflow, offer `[Update regression]` and `[Update and verify]`. Both update the local master environment; the latter also verifies the affected flows. After the user chooses one, read `references/local-regression.md` before acting.
 
 Buttons belong only in user-facing replies, not lane reports or GitHub comments. When offering one, record the target PR and head internally. After a click, re-fetch live state for that PR; if the head changed or readiness was lost, explain it and offer again instead of using stale approval. If the target PR is unclear, ask rather than guess.
 

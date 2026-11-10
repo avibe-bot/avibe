@@ -29,15 +29,17 @@ def notice_message(session_id: str, reply: str) -> str:
     """
     from core.agent_input import _address
 
-    body = str(reply or "") or "(no reply recorded)"
+    header = (
+        "[It handled your message without writing back; its last reply is below. "
+        f"Follow up with {_address(session_id)[1]} only if you were waiting on it.]"
+    )
+    body = str(reply or "")
+    if not body:
+        return header
     pointer = f"\n\n[Reply truncated; use `vibe data query` to read #{session_id}'s transcript in full.]"
     if len(body) > DEFAULT_RESULT_MAX_CHARS:
         body = body[:DEFAULT_RESULT_MAX_CHARS] + pointer
-    return (
-        "[It handled your message without writing back; its last reply is below. "
-        f"Follow up with {_address(session_id)[1]} only if you were waiting on it.]\n"
-        f"{body}"
-    )
+    return f"{header}\n{body}"
 
 
 class DelegationSafetyNet:

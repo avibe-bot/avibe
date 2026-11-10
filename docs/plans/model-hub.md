@@ -548,8 +548,23 @@ Matching uses complete non-retired inventory, independent of health and CLI read
 
 | Backend/source case | Accepted match and tie-break |
 | --- | --- |
-| Claude on native anthropic Source | Reuse the existing alias parser: dated request is literal; undated version requires exact family/version tuple; bare opus, sonnet or haiku matches the family. Select max(version tuple, date or zero, model id). Fable has no bare alias. |
-| Other backend or API Source | Literal canonical model-id equality only. No vendor or fuzzy inference. |
+| Claude backend, family alias (`fable`, `opus`, `opus[1m]`, `sonnet`, `sonnet[1m]`, `haiku`), on any Source | The alias matches the family. Select max(version tuple, date or zero, model id) among that Source's inventory. A Hub Source listing no member of the family falls back to the literal rule in the last row. |
+| Claude backend, any other request, on native anthropic Source | Dated request is literal; undated version requires the exact family/version tuple and selects max(date or zero, model id). |
+| Other backend, or any other Claude request on an API Source | Literal canonical model-id equality only. No vendor or fuzzy inference; a pinned id never matches another member of its family. |
+
+The alias row is the one exception to literal API matching, and it exists because of
+what the Claude CLI does: given an alias it sends a concrete id it chose itself, and
+given a concrete id it sends that id unchanged. A route credential answers only for the
+id its launch was told to send, so a Claude launch must name a concrete id. An
+alias selection keeps its own menu row, limits and manual Route; only its inherited
+hops name the member each Source lists. The set of aliases is closed, and a suffix or
+version never makes a new one. A Hub Source that lists no member of the family still
+inherits the alias by its own name, which the Claude CLI cannot use; select a full id
+or save a manual Route for such a Source.
+
+An inventory change that moves an alias to another member on a Source still serving
+it re-targets that Source's inherited hop. It is not a removed hop for the §4.5
+guards, and background discovery may commit it.
 
 A matching tier never gains speculative passthrough hops. A Hub-only HTTP request
 filters transport availability after planning; a native matching tier cannot cause a
@@ -1708,7 +1723,7 @@ delete refuses while any route names the Source; a confirmed delete removes all 
 hops across all backends and preserves survivor order.
 
 There is no separate `mappings` field or second persisted policy discriminator.
-A manual hop's differing model id is the mapping itself. Automatic native alias
+A manual hop's differing model id is the mapping itself. Automatic Claude alias
 matching is confined to §4.2's existing parser; API-key passthrough preserves the requested id.
 All read and write wrappers expose the same GET/PUT/DELETE/preview operations and
 server-authored fields. Historical TurnProvenance keeps its exact attempts and remains

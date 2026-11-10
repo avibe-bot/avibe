@@ -165,8 +165,8 @@ def test_receipt_preserves_full_reply_until_shared_cap_and_points_to_history(len
 
 @pytest.mark.parametrize("state", [None, "open", "notified", "answered"])
 @pytest.mark.parametrize("direction", ["forward", "reverse"])
-def test_no_reply_acceptance_never_changes_a_pair(harness, state, direction):
-    """Acceptance, not hint text, must suppress creation, answering and rearming (including replay)."""
+def test_no_reply_does_not_open_or_rearm_and_answers_reverse_pair(harness, state, direction):
+    """No-reply inputs never open a pair, but still close an existing reverse delegation."""
     h = harness
     if state:
         _accept(h, _send(h))
@@ -175,11 +175,24 @@ def test_no_reply_acceptance_never_changes_a_pair(harness, state, direction):
     before = _pair(h)
     sender, recipient = ("sesA", "sesB") if direction == "forward" else ("sesB", "sesA")
     _accept(h, _send(h, sender=sender, recipient=recipient, metadata={"no_reply": True}))
-    assert _pair(h) == before
+    if direction == "reverse" and state is not None:
+        assert _pair(h)["state"] == "answered"
+    else:
+        assert _pair(h) == before
     assert _pair(h, sender="sesB", recipient="sesA") is None
     assert not _notices(h)
     if state is None:
         assert h.lane.scan(limit=10, occupied=frozenset(), cursor=None)[0] == []
+
+
+def test_empty_last_reply_keeps_idle_receipt_without_placeholder(harness):
+    h = harness
+    _accept(h, _send(h))
+    assert h.lane._notify(_pair(h))
+    notice = _notices(h)[0]
+    assert notice["prompt"].endswith("]")
+    assert "\n" not in notice["prompt"]
+    assert "(no reply recorded)" not in notice["prompt"]
 
 
 def test_no_reply_is_ignored_only_for_itself_in_a_merged_batch(harness):

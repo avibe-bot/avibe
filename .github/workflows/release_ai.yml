@@ -281,6 +281,7 @@ jobs:
           sparse-checkout: |
             scripts/show_runtime_manifest_asset.py
             scripts/release_asset_download.py
+            scripts/release_package_version.py
             .github/actions/sqlite-predecessor-contract/action.yml
             tests/test_distribution_artifacts.py
           sparse-checkout-cone-mode: false

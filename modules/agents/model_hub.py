@@ -98,6 +98,8 @@ def drain_turn_mode_stamps(timeout: float) -> bool:
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
 _CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"
 _CONTEXT_FAILURE_RECORDED_ATTR = "_vibe_model_hub_failure_recorded"
+#: ``resolve_model_hub_launch(speed=...)``: the tier is the one dispatch copied onto the context.
+_CONTEXT_SPEED: Any = object()
 _NATIVE_QUOTA_RE = re.compile(
     r"(?:quota|usage|credit|billing).{0,32}(?:exhaust|exceed|limit|deplet|insufficient)|"
     r"(?:exhaust|exceed|limit|deplet|insufficient).{0,32}(?:quota|usage|credit|billing)|"
@@ -330,12 +332,21 @@ async def resolve_model_hub_launch(
     context: Any = None,
     config: Any = None,
     turn_id: Optional[str] = None,
+    speed: Any = _CONTEXT_SPEED,
 ) -> ModelHubLaunch:
+    """``speed`` is the processing tier this resolution asks for (``"fast"``, or None for standard).
+
+    Left out, it is the tier of the Session row dispatch copied onto ``context``.
+    A backend that follows its Session during a turn passes the tier the
+    Session names now.
+    """
+
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve", None)
     if callable(resolver):
         # The Session this turn runs in may ask for its vendors' fast tier.
-        speed = session_speed_for_context(context)
+        if speed is _CONTEXT_SPEED:
+            speed = session_speed_for_context(context)
         if turn_id is None:
             # Only the Turn's own dispatch task is found this way; a caller resolving
             # from another task (Vibey's later model calls) names its Turn itself.
@@ -1270,7 +1281,10 @@ class ModelHubRuntimeRouter:
         config: ModelHubConfig | None = None,
         speed: Optional[str] = None,
     ) -> ModelHubLaunch:
-        """``speed`` is the turn's processing tier (``"fast"`` or None), kept on the gateway turn it opens."""
+        """``speed`` is the processing tier this resolution asks for (``"fast"`` or None).
+
+        The gateway turn it opens or continues runs its next requests at that tier.
+        """
 
         requested_model = str(requested_model or "").strip()
         config = config if config is not None else self.service.store.load()

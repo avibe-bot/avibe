@@ -68,6 +68,7 @@ async function submitPaste(text: string) {
   await screen.findByText('echo');
   fireEvent.click(screen.getByRole('button', { name: en.mcpHub.add }));
   const dialog = await screen.findByRole('dialog');
+  fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeJson }));
   fireEvent.change(within(dialog).getByPlaceholderText((value) => value.includes('mcpServers')), {
     target: { value: text },
   });
@@ -191,16 +192,22 @@ describe('McpHubSection add OAuth', () => {
 });
 
 describe('McpHubSection add form tab', () => {
-  it('defaults to JSON, then submits the form as mcpServers JSON', async () => {
+  it('opens on Fill in, also after a close from the JSON tab, then submits the form as mcpServers JSON', async () => {
     addMcp.mockResolvedValue({ ok: true, added: [{ name: 'fs', auth: 'ok' }], unchanged: [], failed: [] });
     renderHub();
     await screen.findByText('echo');
     fireEvent.click(screen.getByRole('button', { name: en.mcpHub.add }));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByRole('radio', { name: en.mcpHub.addModeJson }).getAttribute('aria-checked')).toBe('true');
+    let dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('radio', { name: en.mcpHub.addModeForm }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeJson }));
     expect(within(dialog).getByPlaceholderText((value) => value.includes('mcpServers'))).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: en.common.cancel }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
-    fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeForm }));
+    fireEvent.click(screen.getByRole('button', { name: en.mcpHub.add }));
+    dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('radio', { name: en.mcpHub.addModeForm }).getAttribute('aria-checked')).toBe('true');
+    expect(within(dialog).queryByPlaceholderText((value) => value.includes('mcpServers'))).toBeNull();
     fireEvent.change(within(dialog).getByLabelText(en.mcpHub.form.name), { target: { value: 'fs' } });
     const target = within(dialog).getByLabelText(new RegExp(en.mcpHub.form.target));
     fireEvent.change(target, { target: { value: 'https://example.com/mcp' } });
@@ -224,7 +231,6 @@ describe('McpHubSection add form tab', () => {
     await screen.findByText('echo');
     fireEvent.click(screen.getByRole('button', { name: en.mcpHub.add }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.click(within(dialog).getByRole('radio', { name: en.mcpHub.addModeForm }));
     fireEvent.change(within(dialog).getByLabelText(en.mcpHub.form.name), { target: { value: 'fs' } });
     const target = within(dialog).getByLabelText(new RegExp(en.mcpHub.form.target));
     fireEvent.change(target, { target: { value: 'npx server' } });

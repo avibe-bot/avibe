@@ -150,6 +150,26 @@ describe('the upgraded lint presets enforce their behavioral contract', () => {
   });
 });
 
+const REFRESH = 'react-refresh/only-export-components';
+
+// These are the unchanged Dialog, app-registry and deferred-preview export
+// shapes. Refresh 0.5.4 adds debt for them despite the identical configuration;
+// a version/config snapshot alone does not protect the consuming convention.
+describe('React Refresh preserves the established component export shapes', () => {
+  it.each([
+    ['primitive aliases', 'import * as Primitive from "@radix-ui/react-dialog"; export const Dialog = Primitive.Root; export function Content() { return <div/>; }'],
+    ['lazy registry entries', 'import { lazy } from "react"; const Body = lazy(() => import("./Body")); export const registry = { Component: () => <Body/> };'],
+    ['deferred components', 'import { lazyPage } from "./lazyPage"; export const Preview = lazyPage(() => import("./Preview")); export function Panel() { return <Preview/>; }'],
+    ['literal constants', 'export const LIMIT = 5; export function Panel() { return <div/>; }'],
+  ])('does not introduce a diagnostic for %s', async (_name, code) => {
+    expect(await ruleIdsFor(code, TSX_PROBE)).not.toContain(REFRESH);
+  });
+
+  it('still errors on a component mixed with an ordinary function export', async () => {
+    expect(await errorRuleIdsFor('export function helper() { return 1; } export function Panel() { return <div/>; }', TSX_PROBE)).toContain(REFRESH);
+  });
+});
+
 // `src/lib/useLatestRef.ts` carries the only `react-hooks/refs` exemption that is
 // not a per-site judgement call. That is defensible only while the rule still
 // applies everywhere else: switching it off in the shared config, or dropping it

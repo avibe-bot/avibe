@@ -1324,11 +1324,18 @@ def independent_process_env(
     stops here — the child's own entry point is Owner work and would refuse it
     anyway. ``None`` is materialized rather than passed through to ``Popen``,
     because an implicit inherit would carry the caller across too.
+
+    A Watch waiter's own cycle stops here for the same reason. A restart issued
+    from inside a waiter otherwise leaves the service holding that Watch's id,
+    and every Agent shell started from it takes itself for that managed Watch.
     """
 
     from core.caller_context import environment_without_caller_context
+    from core.watch_protocol import WATCH_CYCLE_ENV_NAMES
 
     child_env = environment_without_caller_context(env)
+    for name in WATCH_CYCLE_ENV_NAMES:
+        child_env.pop(name, None)
     return child_env
 
 

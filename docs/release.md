@@ -74,13 +74,44 @@ GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 must include an installable wheel containing `ui/dist` and
 `vibe/show_runtime/*.tgz`, plus the source distribution.
 
+## Activate a release on a machine
+
+Install a release, RC or stable, only from the published GitHub Release, never
+from a workflow artifact or a Draft. The wheel's Show Runtime manifest points at
+that tag's release assets, and an unpublished release serves them to nobody, so
+the new service fails to download its runtime and Show pages fall back. Before
+installing, require that the release reports `isDraft=false` and that a runtime
+archive downloads without authentication, for example
+`curl -fsSL -o /dev/null https://github.com/avibe-bot/avibe/releases/download/<tag>/vibe-show-runtime-node-darwin-arm64.tgz`.
+An authenticated `gh release download` is not proof: it also reads Drafts.
+
+Install through the tagged `install.sh` with `AVIBE_INSTALL_PACKAGE_SPEC` set to
+the published wheel, and do not skip its Show Runtime preparation. After the
+restart, open an existing Show page and require real page content: an
+`X-Avibe-Show-Recovery` header means the fallback answered, even with HTTP 200.
+
+```bash
+curl -fsS -D - -o /dev/null "$BASE/show/$SESSION/" |
+  python3 -c 'import sys; h=sys.stdin.read().lower(); assert "x-avibe-show-recovery:" not in h, h'
+```
+
+Then load that page's HTML and its scripts, not a redirect or a login page.
+
 ## Release E2E
 
 Pull-request CI does not run the hermetic Model Hub E2E (`-m e2e_model_hub`).
-`Model Hub release E2E` runs it nightly and on demand on a clean runner, with
+`Model Hub release E2E` runs it nightly and on demand on clean runners, with
 the pinned engine and the latest agent CLIs. Before tagging a stable `v*`
 release, dispatch it on the release commit and require a green run at that
 exact SHA; a strict `xfail` names a known, tracked gap, not a pass to ignore.
+
+The run shares the selection out over two shard jobs, and its `model-hub-e2e`
+job is the verdict. That job passes only when both shards succeeded in the
+same run attempt at the release commit, against the same agent CLI versions
+and the engine that commit pins; when together they ran every case of
+`-m e2e_model_hub tests/e2e` exactly once; and when every case a covered
+scenario row cites passed. Shards from different attempts do not join: after
+a failure, re-run all jobs, not only the failed one.
 
 ## Managed-runtime manifests
 

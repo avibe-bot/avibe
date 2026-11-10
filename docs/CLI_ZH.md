@@ -690,8 +690,8 @@ Run 记录替换它；旧记录中的 callback 字段仍可读取。
 向调用方 Session 发送未完成通知。
 
 信息告知可在已有 `--session-id` 或 `--bot` 消息上加 `--no-reply`：接收方看到
-`[No reply needed.]`，这条消息不打开、不关闭、不重新激活委派，也不产生已读回执。
-它不禁用失败通知，也不影响已有的反向委派。它不能与 `--sync` 或新建/fork Session 一起使用。
+`[No reply needed.]`，这条消息不会打开或重新激活委派，但会关闭已有的反向委派，也不产生已读回执。
+它不禁用失败通知，不能与 `--sync` 或新建/fork Session 一起使用。
 
 `--callback`、`--callback-session-id` 和 `--no-callback` 仍然接受，但不改变行为；stderr
 输出一行弃用说明，stdout 仍是 JSON。升级前待发送的 callback 兑现一次，内部失败投递

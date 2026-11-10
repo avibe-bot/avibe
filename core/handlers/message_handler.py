@@ -443,14 +443,16 @@ class MessageHandler(BaseHandler):
             # actually routed to the backend.
             from core.agent_session_context import session_model_settings
 
+            # What the Session inherits where its row names nothing: the run target
+            # carries that row's own values, so it is not part of this.
+            inherited_model = scope_model_override or (vibe_agent.model if vibe_agent else None)
+            inherited_reasoning_effort = scope_reasoning_override or (
+                vibe_agent.reasoning_effort if vibe_agent else None
+            )
             effective_model, effective_reasoning_effort, explicit_overrides = session_model_settings(
                 session_target if isinstance(session_target, dict) else None,
-                fallback_model=resolved_target.get("model") or scope_model_override or (
-                    vibe_agent.model if vibe_agent else None
-                ),
-                fallback_reasoning_effort=resolved_target.get("reasoning_effort") or scope_reasoning_override or (
-                    vibe_agent.reasoning_effort if vibe_agent else None
-                ),
+                fallback_model=resolved_target.get("model") or inherited_model,
+                fallback_reasoning_effort=resolved_target.get("reasoning_effort") or inherited_reasoning_effort,
             )
             materialized_agent_identity = bool(
                 vibe_agent
@@ -777,6 +779,8 @@ class MessageHandler(BaseHandler):
                 effective_model = recorded.get("model")
                 effective_reasoning_effort = recorded.get("reasoning_effort")
                 system_prompt = recorded.get("system_prompt")
+                # A setting the Session's row does not name stays what the Turn was accepted with.
+                inherited_model, inherited_reasoning_effort = effective_model, effective_reasoning_effort
             request = self._build_agent_request(
                 context=context,
                 message=message,
@@ -797,6 +801,8 @@ class MessageHandler(BaseHandler):
                 vibe_agent_reasoning_effort=effective_reasoning_effort,
                 vibe_agent_model_explicit="model" in explicit_overrides,
                 vibe_agent_reasoning_effort_explicit="reasoning_effort" in explicit_overrides,
+                vibe_agent_inherited_model=inherited_model,
+                vibe_agent_inherited_reasoning_effort=inherited_reasoning_effort,
                 vibe_agent_system_prompt=system_prompt,
                 processing_indicator=processing_indicator,
                 files=processed_files,
