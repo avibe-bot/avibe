@@ -1,4 +1,4 @@
-# iroh Apple datapath gate
+# iroh iOS binary qualification gate
 
 This directory owns the Phase 0 qualification gate for the iOS app's embedded
 `iroh-ffi` dependency. It is deliberately separate from `ios/`: the app team
@@ -20,16 +20,21 @@ iroh = { version = "1.0.0", default-features = false, features = ["metrics", "tl
 `metrics` is used by the FFI endpoint surface and `tls-ring` is required for
 the TLS backend. `fast-apple-datapath` is not enabled, and `portmapper` is
 also intentionally dropped because unsolicited UPnP/NAT-PMP/PCP mapping is
-not wanted. The gate excludes iroh's `portmapper` feature; the feature graph
-may still show the `portmapper` crate because `iroh-services` v1.0.0 uses that
-crate for its own diagnostics dependency, which is distinct from enabling
-iroh's unsolicited mapping feature. The published `irpc-iroh` transitive
+not wanted. Multicast and mDNS/local-network address discovery are also not
+allowed: the gate asserts that no matching feature or crate is present in any
+resolved iOS graph. Phase 1 supplies LAN addresses from the rendezvous instead
+of discovering peers locally, so this does not depend on an Apple multicast
+entitlement.
+The gate excludes iroh's `portmapper` feature; the feature graph may still show
+that crate because `iroh-services` v1.0.0 uses it for its own diagnostics
+dependency, which is distinct from enabling iroh's unsolicited mapping feature.
 manifest (pulled by `iroh-services`) otherwise requests iroh's default
 features, so the build script vendors the upstream lockfile dependencies and
 patches only that manifest's iroh edge to `default-features = false`; the
 upstream `Cargo.lock` remains the lockfile and every Cargo command uses
 `--locked`. Every iOS target's resolved feature graph is checked for
-`fast-apple-datapath` on iroh/noq/noq-udp and for iroh's `portmapper` feature.
+`fast-apple-datapath` on iroh/noq/noq-udp, for iroh's `portmapper` feature, and
+for multicast/mDNS/local-network address-lookup features or crates.
 
 ## What the gate proves
 
@@ -60,9 +65,11 @@ with pins, toolchain versions, deployment target, and slice layout.
 It does not archive, sign, install, or submit the App; it does not validate
 TestFlight/App Store packaging, entitlements, runtime networking, peer
 authentication, relay behavior, or the Phase 1 loopback CONNECT integration.
-The Phase 1 app archive must repeat the binary check on its final linked
-products (including any transitive/static-link result). Do not add that check
-to `ios/scripts/testflight.py` in this phase.
+The resulting xcframework is the **only iroh binary an iOS build may link**;
+this exclusion applies to every iOS build, including development, ad hoc,
+App Store, and TestFlight archives. The Phase 1 app archive must repeat the
+binary check on its final linked products (including any transitive/static-link
+result). Do not add that check to `ios/scripts/testflight.py` in this phase.
 
 ## Bumping the pin
 

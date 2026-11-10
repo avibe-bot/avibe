@@ -1,4 +1,5 @@
 name: iroh Apple datapath gate
+run-name: iOS 17.5 iroh binary qualification (no private datapath or local discovery)
 
 on:
   workflow_dispatch:
@@ -20,7 +21,7 @@ env:
 
 jobs:
   gate:
-    name: iOS 17.5 no-private-datapath gate
+    name: iOS 17.5 qualified iroh binary gate
     runs-on: macos-26
     timeout-minutes: 90
     steps:
@@ -63,7 +64,7 @@ jobs:
           test "$(git -C "$checkout_dir" rev-parse "$IROH_FFI_TAG^{commit}")" = "$IROH_FFI_COMMIT"
           echo "IROH_SOURCE=$checkout_dir" >> "$GITHUB_ENV"
 
-      - name: Build patched iOS xcframework and Swift package
+      - name: Build qualified iOS xcframework and Swift package
         run: |
           set -euo pipefail
           output_dir="$RUNNER_TEMP/iroh-apple-artifacts"

@@ -84,6 +84,11 @@ assert_feature_graph() {
     echo "forbidden iroh/noq feature reached the $target graph" >&2
     exit 1
   fi
+  local_discovery_pattern='(^|[^[:alnum:]])(address[-_ ]?lookup|dns[-_ ]?sd|dnssd|local[-_ ]?net(work)?|mdns|m[-_ ]?dns|multicast|service[-_ ]?discovery|zeroconf)([^[:alnum:]]|$)'
+  if grep -Ein "$local_discovery_pattern" "$graph_file"; then
+    echo "forbidden multicast/mDNS/local-network discovery reached the $target graph" >&2
+    exit 1
+  fi
   grep -Fq 'iroh feature "metrics"' "$graph_file" || {
     echo "iroh metrics feature is missing from the $target graph" >&2
     exit 1
@@ -217,6 +222,7 @@ cat > "$OUTPUT_DIR/manifest.json" <<EOF
   "noq_version": "$NOQ_VERSION",
   "features": ["metrics", "tls-ring"],
   "excluded_iroh_features": ["fast-apple-datapath", "portmapper"],
+  "excluded_local_discovery": ["multicast", "mDNS", "local-network address lookup"],
   "rust_toolchain": "$RUST_VERSION",
   "rustc": "$RUSTC_VERSION",
   "xcode": "$XCODE_VERSION",
