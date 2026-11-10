@@ -2178,6 +2178,104 @@ def test_state_rejects_unsafe_inputs_and_auth_permissions(tmp_path: Path) -> Non
     assert stat.S_IMODE(auth_file.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("enforce", [False, True])
+def test_auth_audit_accepts_codex_refresh_journal(tmp_path: Path, enforce: bool) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    store.audit_auth_permissions()
+    journal = store.auth_dir / ".codex-refresh"
+    journal.mkdir(mode=0o700)
+    claim = journal / ("a" * 64)
+    claim.mkdir(mode=0o700)
+    for name in ("receipt", ".receipt-in-flight"):
+        receipt = claim / name
+        receipt.write_bytes(b"synthetic-refresh-receipt")
+        receipt.chmod(0o600)
+
+    store.audit_auth_permissions(enforce=enforce)
+
+    assert {p.name for p in claim.iterdir()} == {"receipt", ".receipt-in-flight"}
+    assert (claim / "receipt").read_bytes() == b"synthetic-refresh-receipt"
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+@pytest.mark.parametrize("unsafe", [
+    "unknown-directory", "journal-file", "journal-link", "journal-permissions",
+    "claim-permissions", "receipt-link", "receipt-fifo",
+])
+def test_auth_audit_rejects_unsafe_refresh_entries(
+    tmp_path: Path, enforce: bool, unsafe: str,
+) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    store.audit_auth_permissions()
+    journal = store.auth_dir / ".codex-refresh"
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    target = outside / "untouched"
+    target.write_bytes(b"unchanged")
+    target.chmod(0o644)
+    if unsafe == "unknown-directory":
+        (store.auth_dir / "unexpected").mkdir(mode=0o700)
+    elif unsafe == "journal-file":
+        journal.touch(mode=0o600)
+    elif unsafe == "journal-link":
+        journal.symlink_to(outside, target_is_directory=True)
+    else:
+        journal.mkdir(mode=0o700)
+        claim = journal / ("a" * 64)
+        claim.mkdir(mode=0o700)
+        if unsafe == "journal-permissions":
+            journal.chmod(0o755)
+        elif unsafe == "claim-permissions":
+            claim.chmod(0o755)
+        elif unsafe == "receipt-link":
+            (claim / "receipt").symlink_to(target)
+        else:
+            import os
+            os.mkfifo(claim / "receipt", mode=0o600)
+
+    with pytest.raises(EngineStateError, match="unsafe"):
+        store.audit_auth_permissions(enforce=enforce)
+
+    assert target.read_bytes() == b"unchanged"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_auth_audit_repairs_only_regular_refresh_receipts(tmp_path: Path) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    store.audit_auth_permissions()
+    claim = store.auth_dir / ".codex-refresh" / ("a" * 64)
+    claim.parent.mkdir(mode=0o700)
+    claim.mkdir(mode=0o700)
+    receipt = claim / "receipt"
+    receipt.write_bytes(b"synthetic-refresh-receipt")
+    receipt.chmod(0o644)
+
+    with pytest.raises(EngineStateError, match="credential permissions are unsafe"):
+        store.audit_auth_permissions()
+    store.audit_auth_permissions(enforce=True)
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+    assert receipt.read_bytes() == b"synthetic-refresh-receipt"
+
+
+def test_auth_audit_tolerates_atomic_refresh_receipt_rename(tmp_path: Path, monkeypatch) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    store.audit_auth_permissions()
+    journal = store.auth_dir / ".codex-refresh"
+    journal.mkdir(mode=0o700)
+    temporary = journal / ".receipt-in-flight"
+    temporary.touch(mode=0o600)
+    lstat = Path.lstat
+
+    def renamed(path, *args, **kwargs):
+        if path == temporary:
+            path.rename(journal / "receipt")
+        return lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", renamed)
+    store.audit_auth_permissions()
+    assert (journal / "receipt").is_file()
+
+
 def _codex_grant_with_engine_lock(store: EngineStateStore) -> tuple[Path, Path]:
     """A Codex grant and the ``<name>.lock`` CPA v8.0.28+ keeps beside it (0600, never removed)."""
 
