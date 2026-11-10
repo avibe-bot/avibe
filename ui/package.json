@@ -85,7 +85,7 @@
     "dompurify": "3.4.17",
     "framer-motion": "^14.10.1",
     "frimousse": "^0.4.0",
-    "i18next": "^26.7.2",
+    "i18next": "^27.0.0",
     "i18next-browser-languagedetector": "^8.3.0",
     "lexical": "^0.53.0",
     "lexical-beautiful-mentions": "^0.1.48",
