@@ -111,10 +111,11 @@ export function SolanaProtectedNotice() {
 
 /**
  * What the sign approval shows for a standard Solana key that asks before every signature, in place
- * of the hash row: the address that signs and the size of the message, a notice that the message is
- * not decoded, and one Details section with the exact bytes. The bytes are never the summary, however
- * long the message is; Copy takes all of them whether or not Details is open. An empty message is a
- * valid message: it has no bytes to show and nothing left undecoded.
+ * of the hash row. The summary has the address that signs, the size of the message, and a notice that
+ * the message is not decoded. One Details section holds everything in full: the whole address, which
+ * the summary row cuts short where the dialog is narrow, and the exact bytes. The bytes are never the
+ * summary, however long the message is; Copy takes all of them whether or not Details is open. An
+ * empty message is a valid message: it has no bytes to show and nothing left undecoded.
  */
 export function SolanaSignRows({ address, messageHex, details = false }: {
   address: string;
@@ -126,8 +127,8 @@ export function SolanaSignRows({ address, messageHex, details = false }: {
   const { t } = useTranslation();
   const d = useDraft();
   const bytes = messageHex.length / 2;
-  const copyLabel = d('复制待签名消息', 'Copy message');
   const Chevron = details ? ChevronDown : ChevronRight;
+  const whole = 'min-w-0 break-all rounded-md bg-surface px-2 py-1.5 font-mono text-xs leading-relaxed text-foreground';
   return (
     <div className="flex min-w-0 flex-col gap-3.5">
       <DetailRow label={t('vaults.approval.signingAs')}>
@@ -141,32 +142,34 @@ export function SolanaSignRows({ address, messageHex, details = false }: {
         </span>
         <Badge variant="secondary">ed25519</Badge>
         {bytes > 0 ? (
-          <button type="button" aria-label={copyLabel} className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground">
+          <button type="button" aria-label={d('复制待签名消息', 'Copy message')} className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground">
             <Copy className="size-3.5" />
           </button>
         ) : null}
       </DetailRow>
       {bytes > 0 ? (
-        <>
-          <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
-            {d('这条消息未解析，批准即为盲签。', 'This message is not decoded; approving it is blind signing.')}
-          </div>
-          <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
-            <button type="button" aria-expanded={details} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
-              <Chevron className="size-3.5 text-muted" />
-              <span className="flex-1 text-xs font-semibold text-foreground">{d('详情', 'Details')}</span>
-            </button>
-            {details ? (
-              <div className="flex min-w-0 flex-col gap-1.5 px-3 pb-3">
-                <span className="text-xs text-muted">{d('完整的待签名字节（十六进制）', 'Exact bytes to sign (hex)')}</span>
-                <code className="max-h-40 min-w-0 overflow-y-auto break-all rounded-md bg-surface px-2 py-1.5 font-mono text-xs leading-relaxed text-foreground">
-                  {messageHex}
-                </code>
-              </div>
+        <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
+          {d('这条消息未解析，批准即为盲签。', 'This message is not decoded; approving it is blind signing.')}
+        </div>
+      ) : null}
+      <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
+        <button type="button" aria-expanded={details} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
+          <Chevron className="size-3.5 text-muted" />
+          <span className="flex-1 text-xs font-semibold text-foreground">{d('详情', 'Details')}</span>
+        </button>
+        {details ? (
+          <div className="flex min-w-0 flex-col gap-1.5 px-3 pb-3">
+            <span className="text-xs text-muted">{d('签名地址（Solana）', 'Signing address (Solana)')}</span>
+            <code className={whole}>{address}</code>
+            {bytes > 0 ? (
+              <>
+                <span className="mt-1 text-xs text-muted">{d('完整的待签名字节（十六进制）', 'Exact bytes to sign (hex)')}</span>
+                <code className={`${whole} max-h-40 overflow-y-auto`}>{messageHex}</code>
+              </>
             ) : null}
           </div>
-        </>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }
