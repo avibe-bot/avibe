@@ -1,5 +1,24 @@
 # macOS stale-session automatic recovery proposal
 
+> **Decided (2026-11-11).** Built as `vibe autostart on | off | status`
+> (`vibe/login_autostart.py`; see [`vibe autostart`](../CLI.md#vibe-autostart)).
+> The questions this proposal left open were settled as follows:
+>
+> - **Opt-in.** Nothing is installed until the user runs `vibe autostart on`.
+>   The LaunchAgent file is the setting; there is no config key.
+> - **Login-only.** The agent has `RunAtLoad` and no `KeepAlive`. It runs once
+>   at each desktop login, starts Avibe or replaces a service left over from
+>   another login session through the restart supervisor, and exits. A service
+>   it cannot place in a session is left alone.
+> - **No stop marker.** Nothing runs between logins, so an Avibe stopped with
+>   `vibe stop` stays stopped until the next login. `vibe start` and
+>   `vibe upgrade` do not touch the agent, which names the stable launcher.
+> - **CLI installs on macOS only.** The desktop app keeps its own
+>   launch-at-login. Shell adoption, headless Macs, and the Linux
+>   `systemd --user` unit described below are not built.
+>
+> The rest of this document is the original proposal, kept for its reasoning.
+
 ## Decision requested
 
 Part 1 detects an Avibe process that survived an ended macOS login session and
