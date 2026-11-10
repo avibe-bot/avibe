@@ -20,10 +20,6 @@ on:
         description: "Candidate record under patches/model-hub-engine-candidates/"
         required: true
         type: string
-      first_publication:
-        description: "The channel has never published an index"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -112,9 +108,17 @@ jobs:
           - {platform: darwin-x64, runner: macos-15-intel}
           - {platform: linux-amd64, runner: ubuntu-latest}
           - {platform: linux-arm64, runner: ubuntu-24.04-arm}
-          - {platform: windows-amd64, runner: windows-latest}
-          - {platform: windows-arm64, runner: windows-11-arm}
+          # Windows runs x64 Python, as Avibe does there; on Arm that Python
+          # still selects the native arm64 engine (core/windows_arch.py).
+          - {platform: windows-amd64, runner: windows-latest, python_arch: x64}
+          - {platform: windows-arm64, runner: windows-11-arm, python_arch: x64}
     steps:
+      # Manifests are compared byte for byte; a Windows checkout must not
+      # rewrite their line endings.
+      - name: Keep checked-out bytes exact
+        shell: bash
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare hermetic UI asset placeholder
@@ -126,6 +130,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
 
       - name: Install package
         shell: bash
@@ -166,16 +171,17 @@ jobs:
           retention-days: 30
 
   # The whole hermetic Model Hub E2E, driven through the released wheel of the
-  # minimum Avibe and of the current stable Avibe. The tests are that release's
-  # own, laid out where no product package can be imported from, so a test that
-  # imports Avibe gets the wheel, and the service starts from the wheel's own
-  # entry script. The run records where it imported from. Not yet exercised: it
-  # needs a published stable Avibe whose E2E suite runs from this layout.
+  # minimum Avibe and of the current stable Avibe. The tests are that release
+  # tag's own and nothing else: there is no fallback to this checkout's tests.
+  # They run where no product package can be imported from, the service starts
+  # from the wheel's own entry script, and every process logs where it imported
+  # Avibe from. The steps are the shared action that the rehearsal workflow
+  # also runs. Qualification itself has not run: it needs stable 3.2.6.
   released-avibe-e2e:
     name: released-avibe-e2e (${{ matrix.role }})
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -189,10 +195,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pinned uv
-        run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
-
+      # Published stable releases only; a draft, a pre-release or a wheel
+      # without GitHub's digest is refused.
       - name: Resolve and download the released wheel
         id: released
         shell: bash
@@ -216,7 +220,7 @@ jobs:
           if hashlib.sha256(wheel.read_bytes()).hexdigest() != released["wheel_sha256"]:
               raise SystemExit(f"{wheel.name} is not the wheel GitHub published")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"tag={released['tag']}\nwheel={work / released['wheel_name']}\n")
+              output.write(f"tag={released['tag']}\nwheel={wheel}\n")
           EOF
           python3 scripts/model_hub_engine_qualification.py bundled-manifest \
             --wheel "$work/$(jq -er .wheel_name "$work/record/$ROLE.json")" \
@@ -228,49 +232,6 @@ jobs:
           ref: ${{ steps.released.outputs.tag }}
           path: released-src
           persist-credentials: false
-
-      - name: Install the released wheel into its own environment
-        shell: bash
-        env:
-          WHEEL: ${{ steps.released.outputs.wheel }}
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/released"
-          python3 scripts/model_hub_engine_qualification.py prepare-harness \
-            --source released-src --wheel "$WHEEL" --output "$work/harness"
-          uv venv "$work/venv" --python 3.12
-          uv pip install --python "$work/venv/bin/python" "$WHEEL"
-          uv pip install --python "$work/venv/bin/python" --group released-src/pyproject.toml:dev
-          mkdir -p "$work/plugin"
-          cp scripts/model_hub_engine_qualification_plugin.py "$work/plugin/"
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        with:
-          node-version: "22.23.4"
-
-      - name: Install agent CLIs
-        run: |
-          npm install -g @openai/codex opencode-ai
-          codex --version
-          opencode --version
-
-      # What this run was made of: the tag commit its tests came from, the
-      # resolved dependency set, and the toolchain.
-      - name: Record the run's provenance
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/released"
-          uv pip freeze --python "$work/venv/bin/python" > "$work/dependencies.txt"
-          jq -n \
-            --arg tests_commit "$(git -C released-src rev-parse HEAD)" \
-            --arg dependencies_sha256 "$(sha256sum "$work/dependencies.txt" | cut -d' ' -f1)" \
-            --arg python "$("$work/venv/bin/python" --version)" \
-            --arg node "$(node --version)" \
-            --arg codex "$(codex --version)" \
-            --arg opencode "$(opencode --version)" \
-            '$ARGS.named' > "$work/provenance.json"
-          cat "$work/provenance.json"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
@@ -285,61 +246,41 @@ jobs:
             --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
             --asset-dir "$RUNNER_TEMP/candidate-assets" \
             --output "$RUNNER_TEMP/released/verified-assets.json"
-          python3 - <<'EOF'
-          import json, os, pathlib
+          python3 scripts/model_hub_engine_qualification.py local-manifest \
+            --manifest "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG/model-hub-engine-manifest.json" \
+            --asset-dir "$RUNNER_TEMP/candidate-assets" \
+            --output "$RUNNER_TEMP/released/local-manifest.json"
 
-          root = pathlib.Path(os.environ["RUNNER_TEMP"])
-          candidate = pathlib.Path("patches/model-hub-engine-candidates") / os.environ["ASSET_RELEASE_TAG"]
-          manifest = json.loads((candidate / "model-hub-engine-manifest.json").read_text(encoding="utf-8"))
-          (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
-          asset["url"] = (root / "candidate-assets" / asset["url"].rsplit("/", 1)[1]).as_uri()
-          (root / "released" / "offline-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-          EOF
-          echo "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=$RUNNER_TEMP/released/offline-manifest.json" >> "$GITHUB_ENV"
-
-      # `shell: bash` runs with pipefail, so a failing pytest is not hidden by tee.
       - name: Run the Model Hub E2E through the released wheel
         id: e2e
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/released"
-          mkdir -p "$work/junit"
-          cd "$work/harness"
-          PYTHONPATH="$work/plugin" AVIBE_QUALIFICATION_ORIGINS="$work/origins.json" \
-            bash "$GITHUB_WORKSPACE/scripts/ci_loopback_only.sh" "$work/venv/bin/python" -m pytest \
-            -p model_hub_engine_qualification_plugin -m e2e_model_hub tests/e2e \
-            -p no:cacheprovider -ra --basetemp="$RUNNER_TEMP/e2e" \
-            --junitxml="$work/junit/junit.xml" 2>&1 | tee "$work/pytest.log"
+        uses: ./.github/actions/model-hub-released-e2e
+        with:
+          wheel: ${{ steps.released.outputs.wheel }}
+          tests-source: released-src
+          engine-manifest: ${{ runner.temp }}/released/local-manifest.json
+          work-dir: ${{ runner.temp }}/released/run
 
-      # That release's own scenario-evidence gate, over the one selection above.
-      - name: Require that release's scenario evidence
-        id: scenarios
-        shell: bash
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/released"
-          cd "$work/harness"
-          mkdir -p .github/workflows
-          printf '%s\n' 'jobs:' '  e2e:' '    steps:' \
-            '      - run: python -m pytest -m e2e_model_hub tests/e2e' > .github/workflows/model-hub-e2e.yml
-          PYTHONPATH="$work/harness" "$work/venv/bin/python" scripts/ci_scenario_evidence.py \
-            --release "$work/junit" --workflow .github/workflows/model-hub-e2e.yml \
-            --pytest-root . --pytest-command-index 0
-
+      # Evidence only for a run that passed, whose scenario evidence passed, and
+      # that provably ran the wheel.
       - name: Record the run as evidence
         shell: bash
         env:
           WHEEL: ${{ steps.released.outputs.wheel }}
+          PYTEST_OUTCOME: ${{ steps.e2e.outputs.pytest-outcome }}
+          SCENARIO_OUTCOME: ${{ steps.e2e.outputs.scenario-outcome }}
         run: |
           set -euo pipefail
-          work="$RUNNER_TEMP/released"
+          if [ "$PYTEST_OUTCOME" != "success" ] || [ "$SCENARIO_OUTCOME" != "success" ]; then
+            echo "::error::the Model Hub E2E ($PYTEST_OUTCOME) or its scenario evidence ($SCENARIO_OUTCOME) did not pass"
+            exit 1
+          fi
+          run="$RUNNER_TEMP/released/run"
           python3 scripts/model_hub_engine_qualification.py evidence-released-e2e \
             --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
-            --role "$ROLE" --released "$work/record/$ROLE.json" --wheel "$WHEEL" \
-            --environment "$work/venv" --origins "$work/origins.json" \
-            --junit "$work/junit/junit.xml" --scenario-evidence pass \
-            --provenance "$work/provenance.json" \
+            --role "$ROLE" --released "$RUNNER_TEMP/released/record/$ROLE.json" --wheel "$WHEEL" \
+            --environment "$run/venv" --harness "$run/harness" --origins-dir "$run/origins" \
+            --junit "$run/junit/junit.xml" --scenario-evidence pass \
+            --provenance "$run/provenance.json" \
             --output "$RUNNER_TEMP/evidence/released-avibe-e2e-$ROLE.json"
 
       - name: Upload the released Avibe record
@@ -394,21 +335,23 @@ jobs:
           path: ${{ runner.temp }}/released
           merge-multiple: true
 
+      # The engines the published index lists, read through the shipped keys,
+      # and the engines the qualifying Avibe releases bundle. The signer checks
+      # this list against its own ledger before it promotes anything.
       - name: List the baseline engines
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          FIRST_PUBLICATION: ${{ inputs.first_publication }}
         run: |
           set -euo pipefail
-          avault="$(python scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
-          args=(--avault "$avault" --output-dir "$RUNNER_TEMP/baselines")
+          args=(--output-dir "$RUNNER_TEMP/baselines")
+          if [ "$(python scripts/model_hub_engine_channel.py commissioned)" = "true" ]; then
+            avault="$(python scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
+            args+=(--avault "$avault")
+          fi
           for manifest in "$RUNNER_TEMP"/released/bundled-manifest-*.json; do
             args+=(--bundled "$manifest")
           done
-          if [ "$FIRST_PUBLICATION" = "true" ]; then
-            args+=(--first-publication)
-          fi
           python scripts/model_hub_engine_channel.py baselines "${args[@]}"
 
       - name: Compare the hosted passthrough with every baseline

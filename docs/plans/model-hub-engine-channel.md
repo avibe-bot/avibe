@@ -386,7 +386,7 @@ can detect every provider-side behavioral regression.
 
 ## Step 2 as built
 
-What the second PR adds, where it lives, and where it settles a detail the
+What the second PR adds, where it lives, and the details it fixes that the
 sections above left open. Release-side procedure is in `docs/release.md`.
 
 **Code.**
@@ -401,7 +401,10 @@ sections above left open. Release-side procedure is in `docs/release.md`.
   view of the channel over the engine installer. Nothing in Avibe calls it yet.
 - `scripts/model_hub_engine_channel.py` and
   `scripts/model_hub_engine_qualification.py`, with the workflows
-  `Publish Model Hub engine channel` and `Qualify Model Hub engine candidate`.
+  `Publish Model Hub engine channel`, `Qualify Model Hub engine candidate` and
+  `Rehearse the released-wheel Model Hub E2E`.
+- `scripts/model_hub_engine_release_guard.py`: verification, backup and
+  recovery now cover every release the index lists.
 
 **Uncommissioned by default.** `engine_channel_roots.json` ships with no root.
 A client with no root makes no channel request and runs no verifier; every
@@ -421,6 +424,7 @@ publication step stops before the network, the bucket, or avault.
   than ten minutes ahead of the local clock is not yet valid.
 - `min_avibe_version` is a plain `X.Y.Z`. Every `rollback_to` must name a
   release the same payload carries.
+- Sequences increase; they need not be consecutive.
 
 **Verifier.** Two bounded processes per check: `avault version`, then
 `avault verify`. The binary comes from Avibe's read-only path lookup. The
@@ -436,57 +440,66 @@ digest of every release ever listed. A release that stops being listed keeps
 its recorded identity, so it cannot come back with other bytes. Acceptance
 runs under a cross-process lock against the file's current contents. A
 rejected index changes nothing. Damaged state fails closed; it is never
-treated as a fresh start. On read the stored envelope is authenticated again,
-and an expired one is returned marked not fresh.
+treated as a fresh start. On read the stored envelope is authenticated again.
+One that has expired, or that is older than the sequence floor the running
+Avibe ships, is returned marked not fresh: its withdrawals still apply, and
+it authorizes no adoption.
 
-**Selection.** `resolve` returns one of four actions.
+**Selection.** `resolve` returns one of four actions. A withdrawal of the
+engine in effect is decided first and by itself.
 
 | Action | When |
 | --- | --- |
-| `keep` | Nothing newer is eligible, the index is stale, routine updates are off, or this installation is outside the channel. |
-| `adopt` | A listed release is newer than the engine in effect, not below the bundled one, not withdrawn or quarantined, has an asset for this host, and its minimum is met. The newest such release wins. |
-| `withdraw` | The engine in effect was withdrawn and its fallback is usable. This may go below the bundled engine and applies with routine updates off. |
-| `blocked` | The engine in effect was withdrawn and nothing safe can replace it. |
+| `withdraw` | The engine in effect was withdrawn, and the one fallback its tombstone names is listed, not withdrawn, not quarantined, has an asset for this host, and its minimum Avibe is provably met. This may go below the bundled engine. |
+| `blocked` | The engine in effect was withdrawn and that fallback is not usable. Nothing else is substituted: not the fallback's own fallback, and not a newer release. |
+| `adopt` | Otherwise, a listed release is newer than the engine in effect, not below the bundled one, not withdrawn or quarantined, has an asset for this host, and its minimum is met. The newest such release wins. |
+| `keep` | Otherwise. Nothing newer is eligible, the index is stale, routine updates are off, or the build names no released Avibe. |
 
-Three points go beyond section 4. A fallback that was itself withdrawn later
-is followed to the next one, and a loop ends in `blocked`. When no fallback is
-usable but a newer eligible release exists, that release is adopted, since
-moving forward is always allowed. A stale index, or offline mode, still
-applies a recorded withdrawal but authorizes no download, so the fallback
-must already be on the machine.
+A withdrawal does not depend on the index being fresh, on routine updates
+being on, on the bundled engine's identity, or on this being a released Avibe
+build. A stale index or offline mode still applies it but authorizes no
+download, so the fallback must already be on the machine. A build that names
+no published release (a source checkout, a dev or local version) cannot prove
+any fallback compatible, so a withdrawn engine there is `blocked`, never
+kept; with an engine nobody withdrew it simply adopts nothing.
 
-An Avibe build that names no published release (a source checkout, a dev or
-local version) takes no channel action at all, withdrawal included. A manifest
-override opts out the same way.
+If the recorded index cannot be authenticated when it is read, for example
+because avault is missing, nothing is adopted from it. If the recorded state
+names the engine in effect as withdrawn, the result is `blocked`: the engine
+is not kept, and no fallback is taken from an index that could not be
+checked.
 
-**Publication.** The signed index published now is the desired state. Each
-run plans its successor from it and adds at most one entry; the writer refuses
-anything that is not the direct successor of what the bucket holds. Recovery
-and first publication are covered in `docs/release.md`.
+A manifest override is the one documented way out of the channel, withdrawals
+included.
+
+**Publication.** Desired state is a ledger on the signer host, not the
+published index. It holds the next sequence, the exact payload last
+allocated, and every release identity and withdrawal ever allocated. Each
+change is planned from it. The payload is committed to the ledger before
+avault signs it, and the envelope before it leaves the job, so one sequence
+is only ever signed over one payload, and a failed run is finished by
+publishing the identical envelope again. The published object, the bucket
+and workflow artifacts are never read as state.
+
+The ledger is the trust anchor on the publishing side and must not go
+backward. If it is rolled back together with the published index, this scheme
+cannot detect it. The comparisons with the published index that the signer
+and the writer make are diagnostics for a ledger that is behind; they are not
+that protection. Ledger loss or doubt stops the channel pending a separately
+approved recovery.
 
 **Qualification status.** The receipt requires six evidence classes. Four have
 producing jobs. `build` reuses the release guard's strict rebuild, which
 already publishes the packaged engine. The per-platform smoke producer runs in
 pull-request CI on all six platforms against the packaged engine, which shows
-the producer works and qualifies nothing. The hosted-wire and released-Avibe
-jobs have not run: they need a candidate, and the second needs published 3.2.6
-artifacts. `backward_state` and `lifecycle` have no producer until steps 3 and
-4, so no receipt can be produced before then.
-
-The released-Avibe job is the least proven part. Today's E2E harness starts
-the service as `main.py` from the repository root and was written for a source
-checkout. The job runs the release's own tests from a directory that holds no
-product package, supplies the wheel's own entry script as `main.py`, and
-refuses a run whose imports did not come from the wheel. Whether the 3.2.6
-suite passes from that layout is unknown until it is run; rehearse it before
-3.2.6 is tagged, while its tests can still be changed.
-
-**Still required before a first promotion**, beyond steps 3 and 4 and
-commissioning: the engine release guard's scheduled verification, backup and
-recovery covers only the packaged engine. It must cover every release the
-index lists, withdrawn ones and rollback targets included. That is not built
-here, because no listed release exists to exercise it against.
+the producer works and qualifies nothing. The hosted-wire job has not run: it
+needs a candidate. The released-Avibe job has not run for qualification: it
+needs published 3.2.6 artifacts. Its steps are rehearsed in pull-request CI
+against a pinned 3.2.6 release candidate. `backward_state` and `lifecycle`
+have no producer until steps 3 and 4, so no receipt can be produced before
+then.
 
 **Not in this step.** Adoption, activation, scheduling, recovery, the
 effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
-and public documentation (step 4); and all commissioning.
+and public documentation (step 4); and all commissioning, including whether
+renewals run unattended.

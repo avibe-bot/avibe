@@ -86,7 +86,7 @@ class ReleaseSpec:
         return next((archive for archive in self.archives if archive.platform == platform), None)
 
 
-def release_revision(asset_release_tag: str) -> tuple[int, int, int, int]:
+def release_revision(asset_release_tag: object) -> tuple[int, int, int, int]:
     """Order an engine release: upstream major, minor, patch, then Avibe build.
 
     The same upstream version rebuilt by Avibe is a different, newer release,

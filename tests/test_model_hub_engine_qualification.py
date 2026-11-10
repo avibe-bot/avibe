@@ -65,8 +65,8 @@ def _released(version: str) -> ReleasedAvibe:
 
 AVIBE = {"minimum": _released("3.2.6"), "current_stable": _released("3.2.7")}
 PROVENANCE = {
-    "tests_commit": "c" * 40, "dependencies_sha256": "d" * 64, "python": "Python 3.12.8",
-    "node": "v22.23.4", "codex": "codex-cli 0.60.0", "opencode": "1.2.3",
+    "tests_commit": "c" * 40, "tests_sha256": "e" * 64, "dependencies_sha256": "d" * 64,
+    "python": "Python 3.12.8", "node": "v22.23.4", "agent_clis": "cli-a 0.60.0; cli-b 1.2.3",
 }
 BASELINES = {BASELINE: BASELINE_DIGEST}
 
@@ -488,58 +488,240 @@ def test_nothing_stands_in_for_an_immutable_released_wheel(alter) -> None:
             qualification.resolve_released_avibe(version, github)
 
 
-def test_a_run_that_imported_avibe_from_a_checkout_is_not_released_artifact_evidence(tmp_path) -> None:
-    released = _released("3.2.6")
-    environment = tmp_path / "venv"
-    site = environment / "lib" / "python3.12" / "site-packages"
-    wheel_origins = {
-        "modules": {name: str(site / name / "__init__.py") for name in qualification.PRODUCT_PACKAGES},
-        "distribution_version": "3.2.6",
-        "vibe_version": "3.2.6",
-    }
-    assert qualification.wheel_origin_problems(wheel_origins, released=released, environment=environment) == []
+class WheelRun:
+    """A finished released-wheel run on disk: wheel, environment, harness, import logs, report."""
 
-    for forged in (
-        {**wheel_origins, "modules": {**wheel_origins["modules"], "vibe": str(tmp_path / "checkout/vibe/__init__.py")}},
-        {**wheel_origins, "modules": {**wheel_origins["modules"], "core": "None"}},
-        {**wheel_origins, "vibe_version": "0.0.0.dev0"},
-        {**wheel_origins, "distribution_version": "3.2.7"},
-        {"distribution_version": "3.2.6", "vibe_version": "3.2.6"},
-        None,
-    ):
-        assert qualification.wheel_origin_problems(forged, released=released, environment=environment) != []
+    VERSION = "3.2.6"
+    ENTRY = b"# the wheel's entry script\n"
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+        self.wheel = root / f"avibe_os-{self.VERSION}-py3-none-any.whl"
+        with zipfile.ZipFile(self.wheel, "w") as archive:
+            archive.writestr(qualification.WHEEL_SERVICE_ENTRY, self.ENTRY)
+        self.released = ReleasedAvibe(
+            self.VERSION, f"v{self.VERSION}", self.wheel.name, "https://example.invalid",
+            hashlib.sha256(self.wheel.read_bytes()).hexdigest(), self.wheel.stat().st_size,
+        )
+        self.environment = root / "venv"
+        self.site = self.environment / "lib" / "python3.12" / "site-packages"
+        self.site.mkdir(parents=True)
+        self.harness = root / "harness"
+        (self.harness / "tests" / "e2e").mkdir(parents=True)
+        (self.harness / "tests" / "e2e" / "test_case.py").write_text("def test_case(): pass\n")
+        (self.harness / "main.py").write_bytes(self.ENTRY)
+        self.origins = root / "origins"
+        self.origins.mkdir()
+        self.junit = root / "junit.xml"
+        self.junit.write_text(
+            '<testsuite><testcase classname="tests.e2e.a" name="a"/>'
+            '<testcase classname="tests.e2e.b" name="b"><skipped type="pytest.xfail"/></testcase>'
+            '<testcase classname="tests.e2e.c" name="c"><skipped type="pytest.skip"/></testcase></testsuite>'
+        )
+        self.provenance = {**PROVENANCE, "tests_sha256": qualification.tree_digest(self.harness / "tests")}
+        self.python = str(self.environment / "bin" / "python")
+        self.log(101, [str(self.environment / "bin" / "pytest"), "-m", "e2e_model_hub"],
+                 {"vibe": "vibe/__init__.py", "vibe.api": "vibe/api.py", "core": "core/__init__.py"})
+        self.log(202, [str(self.harness / "main.py"), "/tmp/home"],
+                 {"core": "core/__init__.py", "core.controller": "core/controller.py", "vibe": "vibe/__init__.py",
+                  "config": "config/__init__.py"})
+        self.log(303, ["-c"], {"vibe": "vibe/__init__.py", "vibe.ui_server": "vibe/ui_server.py"})
+
+    def log(self, pid: int, argv: list[str], modules: dict, *, version: str | None = None,
+            executable: str | None = None) -> None:
+        """Write one process's import log. A relative origin is inside the wheel's environment."""
+        lines: list[dict] = [{"process": {"pid": pid, "argv": argv, "executable": executable or self.python,
+                                          "distribution_version": self.VERSION if version is None else version}}]
+        for name, origin in modules.items():
+            inside = isinstance(origin, str) and not Path(origin).is_absolute()
+            lines.append({"module": name, "origin": str(self.site / origin) if inside else origin})
+        (self.origins / f"{pid}.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    def evidence(self, candidate, **overrides):
+        arguments = {
+            "role": "minimum", "released": self.released, "wheel": self.wheel, "environment": self.environment,
+            "harness": self.harness, "origins_dir": self.origins, "junit": self.junit,
+            "scenario_evidence_passed": True, "provenance": self.provenance,
+        }
+        return qualification.released_e2e_evidence(candidate, **{**arguments, **overrides})
+
+    def rehearse(self, **overrides):
+        arguments = {
+            "tag": "gh-v3.2.6rc3", "tag_commit": "c" * 40, "version": self.VERSION, "wheel": self.wheel,
+            "wheel_sha256": self.released.wheel_sha256, "environment": self.environment, "harness": self.harness,
+            "origins_dir": self.origins, "junit": self.junit, "provenance": self.provenance,
+        }
+        return qualification.rehearsal_record(**{**arguments, **overrides})
 
 
-def test_released_e2e_evidence_binds_the_downloaded_wheel_the_origins_and_the_report(tmp_path) -> None:
+def test_released_e2e_evidence_binds_the_wheel_the_tests_every_process_and_the_report(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path / "records"))
-    wheel = tmp_path / "avibe_os-3.2.6-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    released = ReleasedAvibe("3.2.6", "v3.2.6", wheel.name, "https://example.invalid", hashlib.sha256(b"wheel bytes").hexdigest(), 11)
-    environment = tmp_path / "venv"
-    origins = {
-        "modules": {name: str(environment / "site-packages" / name / "__init__.py") for name in qualification.PRODUCT_PACKAGES},
-        "distribution_version": "3.2.6", "vibe_version": "3.2.6",
-    }
-    junit = tmp_path / "junit.xml"
-    junit.write_text(
-        '<testsuite><testcase name="a"/><testcase name="b"><skipped type="pytest.xfail"/></testcase>'
-        '<testcase name="c"><skipped type="pytest.skip"/></testcase></testsuite>'
-    )
-    arguments = {"role": "minimum", "released": released, "wheel": wheel, "environment": environment,
-                 "origins": origins, "junit": junit, "scenario_evidence_passed": True,
-                 "provenance": {**PROVENANCE, "runner": "not recorded"}}
+    run = WheelRun(tmp_path / "run")
 
-    evidence = qualification.released_e2e_evidence(candidate, **arguments)
+    evidence = run.evidence(candidate)
 
     assert evidence["junit"] == {"tests": 3, "failed": 0, "skipped": 1}
-    assert evidence["provenance"] == PROVENANCE
-    with pytest.raises(QualificationError, match="must record"):
-        qualification.released_e2e_evidence(candidate, **{**arguments, "provenance": {"python": "Python 3.12.8"}})
-    assert evidence["avibe"] == released.identity() and evidence["imports_from_wheel"] is True
+    assert evidence["avibe"] == run.released.identity() and evidence["imports_from_wheel"] is True
+    assert evidence["origins"] == {"processes": 3, "services": 1, "product_modules": 9}
+    assert evidence["provenance"] == run.provenance
     assert evidence["manifest_sha256"] == candidate.manifest_sha256
-    wheel.write_bytes(b"other bytes")
-    with pytest.raises(QualificationError, match="not the wheel GitHub published"):
-        qualification.released_e2e_evidence(candidate, **arguments)
+    with pytest.raises(QualificationError, match="must record"):
+        run.evidence(candidate, provenance={"python": "Python 3.12.8"})
+
+
+def _checkout(run: WheelRun) -> str:
+    return str(run.root / "checkout")
+
+
+@pytest.mark.parametrize(
+    ("alter", "message"),
+    [
+        # A product module from a checkout: in the test runner, deep inside the service, or in a helper process.
+        (lambda run: run.log(101, ["pytest"], {"vibe": f"{_checkout(run)}/vibe/__init__.py"}),
+         "outside the released wheel"),
+        (lambda run: run.log(202, [str(run.harness / "main.py")],
+                             {"core": "core/__init__.py", "vibe": "vibe/__init__.py",
+                              "core.handlers.model_hub.service": f"{_checkout(run)}/core/handlers/model_hub/service.py"}),
+         "core.handlers.model_hub.service"),
+        (lambda run: run.log(404, ["-c"], {"storage.db": f"{_checkout(run)}/storage/db.py"}),
+         "outside the released wheel"),
+        (lambda run: run.log(404, ["-c"], {"config": [f"{_checkout(run)}/config"]}), "outside the released wheel"),
+        (lambda run: run.log(404, ["-c"], {"modules": []}), "outside the released wheel"),
+        # Another Avibe than the released one, or another interpreter than the environment's.
+        (lambda run: run.log(202, [str(run.harness / "main.py")],
+                             {"core": "core/__init__.py", "vibe": "vibe/__init__.py"}, version="0.0.0.dev0"),
+         "ran Avibe '0.0.0.dev0'"),
+        (lambda run: run.log(101, ["pytest"], {"vibe": "vibe/__init__.py"}, executable="/usr/bin/python3"),
+         "not the released wheel's environment"),
+        # The test runner or the real service left no log.
+        (lambda run: (run.origins / "101.jsonl").unlink(), "test runner reported no import"),
+        (lambda run: (run.origins / "202.jsonl").unlink(), "no spawned service reported"),
+        (lambda run: run.log(202, [f"{_checkout(run)}/main.py"],
+                             {"core": "core/__init__.py", "vibe": "vibe/__init__.py"}), "no spawned service reported"),
+        (lambda run: run.log(202, [str(run.harness / "main.py")], {}), "no spawned service reported"),
+        # The entry script in the harness is not the wheel's, or the tests changed after they were recorded.
+        (lambda run: (run.harness / "main.py").write_text("# the checkout's entry script\n"), "wheel's own entry script"),
+        (lambda run: (run.harness / "tests/e2e/test_case.py").write_text("def test_case(): assert True\n"),
+         "not the tests that were recorded"),
+        (lambda run: run.wheel.write_bytes(run.wheel.read_bytes() + b"x"), "is not the"),
+    ],
+)
+def test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence_nor_a_clean_rehearsal(
+    tmp_path, alter, message
+) -> None:
+    """MH-ENGINE-CHANNEL-010: a run counts only if every process imported Avibe from the released wheel."""
+
+    candidate = qualification.load_candidate(_record(tmp_path / "records"))
+    run = WheelRun(tmp_path / "run")
+    alter(run)
+
+    with pytest.raises(QualificationError, match=message):
+        run.evidence(candidate)
+    _record_document, problems = run.rehearse()
+    assert any(message in problem for problem in problems)
+
+
+def test_an_import_log_that_cannot_be_read_fails_the_run(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path / "records"))
+    run = WheelRun(tmp_path / "run")
+    (run.origins / "101.jsonl").write_text("not json\n")
+
+    with pytest.raises(QualificationError, match="import log cannot be read"):
+        run.evidence(candidate)
+    with pytest.raises(QualificationError, match="import log cannot be read"):
+        run.rehearse()
+
+
+def test_a_rehearsal_is_described_in_full_and_can_never_be_read_as_evidence(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path / "records"))
+    run = WheelRun(tmp_path / "run")
+    run.junit.write_text(
+        '<testsuite><testcase classname="tests.e2e.a" name="a"/>'
+        '<testcase classname="tests.e2e.b" name="b"><failure message="main.py not found"/></testcase></testsuite>'
+    )
+
+    record, problems = run.rehearse()
+
+    assert problems == [] and record["harness_problems"] == []
+    assert record["class"] == "rehearsal"
+    assert (record["tag"], record["tag_commit"]) == ("gh-v3.2.6rc3", "c" * 40)
+    assert record["wheel"] == {"name": run.wheel.name, "sha256": run.released.wheel_sha256}
+    assert record["harness_sha256"] == qualification.harness_digest()
+    assert record["provenance"] == run.provenance
+    assert record["junit"] == {"tests": 2, "failed": 1, "skipped": 0} and record["failing"] == ["tests.e2e.b::b"]
+    # No receipt can be built from it, alone or dressed up: it binds no candidate and names no role.
+    assert "manifest_sha256" not in record and "role" not in record
+    assert {problem.split(":")[0] for problem in _problems(candidate, [record])} == {
+        "build", "platform_smoke", "hosted_wire", "backward_state", "released_avibe_e2e", "lifecycle",
+    }
+    disguised = {**record, "class": "released_avibe_e2e", "role": "minimum"}
+    assert any(problem.startswith("released_avibe_e2e") for problem in _problems(candidate, [disguised]))
+
+
+def test_the_rehearsal_command_fails_on_harness_problems_and_on_failing_tests_only_when_asked(tmp_path, capsys) -> None:
+    run = WheelRun(tmp_path / "run")
+    (tmp_path / "provenance.json").write_text(json.dumps(run.provenance))
+    arguments = [
+        "rehearsal-record", "--tag", "gh-v3.2.6rc3", "--tag-commit", "c" * 40, "--version", run.VERSION,
+        "--wheel", str(run.wheel), "--wheel-sha256", run.released.wheel_sha256, "--environment", str(run.environment),
+        "--harness", str(run.harness), "--origins-dir", str(run.origins), "--junit", str(run.junit),
+        "--provenance", str(tmp_path / "provenance.json"), "--output", str(tmp_path / "record.json"),
+    ]
+
+    assert qualification.main(arguments) == 0 and qualification.main([*arguments, "--require-pass"]) == 0
+    run.junit.write_text('<testsuite><testcase classname="t" name="x"><failure message="no"/></testcase></testsuite>')
+    # The tag's own tests may fail; that is reported, and fails only the leg that must pass.
+    assert qualification.main(arguments) == 0
+    assert qualification.main([*arguments, "--require-pass"]) == 1
+    assert json.loads((tmp_path / "record.json").read_text())["failing"] == ["t::x"]
+    (run.origins / "202.jsonl").unlink()
+    assert qualification.main(arguments) == 1
+    capsys.readouterr()
+
+
+def test_the_recorder_logs_every_product_module_a_process_imports_from_inside_that_process(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    environment = tmp_path / "venv"
+    site = environment / "lib" / "python3.12" / "site-packages"
+    for package in ("vibe/handlers", "core"):
+        (site / package).mkdir(parents=True)
+    (site / "vibe/__init__.py").write_text("")
+    (site / "vibe/handlers/__init__.py").write_text("")
+    (site / "vibe/handlers/deep.py").write_text("VALUE = 7\n")
+    (site / "core/__init__.py").write_text("")
+    qualification.install_origin_recorder(environment, tmp_path / "origins")
+    # A checkout that comes first on the path and shadows a product package.
+    checkout = tmp_path / "checkout"
+    (checkout / "core").mkdir(parents=True)
+    (checkout / "core/__init__.py").write_text("")
+    (checkout / "core/leak.py").write_text("")
+
+    def run(code: str, *paths: Path) -> None:
+        subprocess.run(
+            [sys.executable, "-S", "-c", f"import site; site.addsitedir({str(site)!r}); {code}"],
+            check=True, cwd=tmp_path, env={"PATH": os.environ["PATH"], "PYTHONPATH": os.pathsep.join(map(str, paths))},
+        )
+
+    run("import vibe.handlers.deep, json, collections; assert vibe.handlers.deep.VALUE == 7")
+    run("import core.leak", checkout)
+
+    processes = qualification.read_origin_logs(tmp_path / "origins")
+    (clean,) = [process for process in processes if "vibe" in process.modules]
+    (leaking,) = [process for process in processes if "core.leak" in process.modules]
+    # Every product module, submodules included, and nothing from the standard library.
+    assert dict(clean.modules) == {
+        "vibe": str(site / "vibe/__init__.py"),
+        "vibe.handlers": str(site / "vibe/handlers/__init__.py"),
+        "vibe.handlers.deep": str(site / "vibe/handlers/deep.py"),
+    }
+    assert leaking.modules == {"core": str(checkout / "core/__init__.py"), "core.leak": str(checkout / "core/leak.py")}
+    problems = qualification.origin_problems(
+        processes, environment=environment, version="3.2.6", harness=tmp_path / "harness"
+    )
+    assert any("imported 2 product modules from outside" in problem for problem in problems)
 
 
 def test_a_harness_directory_holds_the_tags_tests_the_wheels_entry_script_and_no_product_package(tmp_path) -> None:
@@ -592,14 +774,82 @@ def test_the_harness_digest_changes_with_any_file_that_decides_a_qualification(t
     (tmp_path / qualification.QUALIFICATION_WORKFLOW_PATH).unlink()
     with pytest.raises(QualificationError, match="missing"):
         qualification.harness_digest(tmp_path)
-    # Every script the qualification workflow runs, and the workflow itself, is in the digest.
-    workflow = (ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8")
-    invoked = set(re.findall(r"scripts/[A-Za-z0-9_]+\.(?:py|sh)", workflow))
+    # Every script the qualification workflow and its shared action run, and both files, are in the digest.
+    workflow = "".join(
+        (ROOT / name).read_text(encoding="utf-8")
+        for name in (qualification.QUALIFICATION_WORKFLOW_PATH, qualification.RELEASED_E2E_ACTION)
+    )
+    invoked = set(re.findall(r"scripts/[A-Za-z0-9_]+\.(?:py|sh)", workflow)) | {qualification.ORIGINS_MODULE}
     # The scenario-evidence gate runs from the released tag's own copy, which
     # the receipt binds through that run's recorded tag commit.
     invoked.discard("scripts/ci_scenario_evidence.py")
     assert invoked and invoked <= set(qualification.HARNESS_FILES)
     assert all((ROOT / name).is_file() for name in qualification.HARNESS_FILES)
+
+
+def test_qualification_and_its_rehearsal_run_the_same_action_and_only_qualification_can_produce_evidence() -> None:
+    action = ".github/actions/model-hub-released-e2e"
+    qualify = _workflow()["jobs"]["released-avibe-e2e"]
+    rehearsal_text = (ROOT / ".github/workflows/model-hub-engine-released-e2e-rehearsal.yml").read_text(encoding="utf-8")
+    rehearsal_workflow = yaml.safe_load(rehearsal_text)
+    rehearsal = rehearsal_workflow["jobs"]["rehearsal"]
+
+    def shared(job: dict) -> dict:
+        (step,) = [item for item in job["steps"] if item.get("uses") == f"./{action}"]
+        return step["with"]
+
+    # Qualification runs the release tag's own tests, with no alternative.
+    assert shared(qualify)["tests-source"] == "released-src"
+    (tag_checkout,) = [item for item in qualify["steps"] if item.get("with", {}).get("path") == "released-src"]
+    assert tag_checkout["with"]["ref"] == "${{ steps.released.outputs.tag }}"
+    assert "released-avibe " in json.dumps(qualify) and "evidence-released-e2e" in json.dumps(qualify)
+    # The rehearsal is pinned to one published candidate, resolves nothing, and writes no evidence.
+    assert shared(rehearsal)["tests-source"] == "${{ matrix.tests == 'tag' && 'released-src' || '.' }}"
+    assert rehearsal["strategy"]["matrix"] == {"tests": ["tag", "head"]}
+    scripts = "\n".join(step.get("run", "") for step in rehearsal["steps"])
+    for forbidden in ("released-avibe ", "evidence-", "receipt", "model_hub_engine_channel.py"):
+        assert forbidden not in scripts
+    assert "secrets." not in rehearsal_text and rehearsal_workflow["permissions"] == {"contents": "read"}
+    assert "rehearsal-record" in scripts and "args+=(--require-pass)" in scripts
+    env = rehearsal_workflow["env"]
+    assert env["RC_WHEEL"] == f"avibe_os-{env['RC_VERSION']}-py3-none-any.whl" and len(env["RC_WHEEL_SHA256"]) == 64
+    # A release candidate is not a stable release, so the production resolver refuses this pin.
+    with pytest.raises(QualificationError):
+        qualification.resolve_released_avibe(env["RC_VERSION"], GitHub())
+    assert qualification.RELEASED_E2E_ACTION == f"{action}/action.yml" and (ROOT / action / "action.yml").is_file()
+
+
+def test_a_local_manifest_changes_only_where_one_platforms_verified_archive_is_read_from(tmp_path, monkeypatch) -> None:
+    from core.model_hub_engine_manifest import parse_release_manifest
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(manifest_bytes(build=2))
+    verified: list[tuple[Path, Path]] = []
+    spec = parse_release_manifest(manifest.read_bytes())
+
+    class Guard:
+        ReleaseGuardError = RuntimeError
+
+        @staticmethod
+        def verify_release_assets(manifest_path, asset_dir):
+            verified.append((manifest_path, asset_dir))
+            return spec
+
+    monkeypatch.setattr(qualification, "_guard", lambda: Guard)
+
+    qualification.write_local_manifest(manifest, tmp_path / "assets", "linux-amd64", tmp_path / "out" / "local.json")
+
+    assert verified == [(manifest, tmp_path / "assets")]
+    original, local = json.loads(manifest.read_text()), json.loads((tmp_path / "out" / "local.json").read_text())
+    (changed,) = [index for index, (a, b) in enumerate(zip(original["assets"], local["assets"])) if a != b]
+    assert local["assets"][changed]["platform"] == "linux-amd64"
+    assert local["assets"][changed]["url"] == (tmp_path / "assets" / spec.archive_for("linux-amd64").name).resolve().as_uri()
+    assert {**local["assets"][changed], "url": original["assets"][changed]["url"]} == original["assets"][changed]
+    assert {key: value for key, value in local.items() if key != "assets"} == {
+        key: value for key, value in original.items() if key != "assets"
+    }
+    with pytest.raises(QualificationError, match="no freebsd-amd64 asset"):
+        qualification.write_local_manifest(manifest, tmp_path / "assets", "freebsd-amd64", tmp_path / "x.json")
 
 
 # ----- the hosted-wire comparison --------------------------------------------

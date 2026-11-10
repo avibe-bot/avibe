@@ -108,9 +108,17 @@ jobs:
           - {platform: darwin-x64, runner: macos-15-intel}
           - {platform: linux-amd64, runner: ubuntu-latest}
           - {platform: linux-arm64, runner: ubuntu-24.04-arm}
-          - {platform: windows-amd64, runner: windows-latest}
-          - {platform: windows-arm64, runner: windows-11-arm}
+          # Windows runs x64 Python, as Avibe does there; on Arm that Python
+          # still selects the native arm64 engine (core/windows_arch.py).
+          - {platform: windows-amd64, runner: windows-latest, python_arch: x64}
+          - {platform: windows-arm64, runner: windows-11-arm, python_arch: x64}
     steps:
+      # Manifests are compared byte for byte; a Windows checkout must not
+      # rewrite their line endings.
+      - name: Keep checked-out bytes exact
+        shell: bash
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Prepare hermetic UI asset placeholder
@@ -122,6 +130,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
 
       - name: Install package
         shell: bash

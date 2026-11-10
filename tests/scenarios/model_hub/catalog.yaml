@@ -93,6 +93,7 @@ capability:
     - tests/test_model_hub_engine_channel_client.py
     - tests/test_model_hub_engine_channel_producer.py
     - tests/test_model_hub_engine_qualification.py
+    - tests/test_model_hub_engine_release_guard.py
     - tests/test_release_mirror.py
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
@@ -2853,12 +2854,12 @@ scenarios:
     missing_layer: e2e
     test: tests/test_model_hub_engine_channel.py::test_ordinary_selection_only_moves_forward_to_the_newest_release_this_avibe_may_run
   - id: MH-ENGINE-CHANNEL-004
-    name: Only an explicit withdrawal moves an engine back, to a listed, compatible fallback that still stands; with no safe replacement Model Hub is blocked rather than left on the withdrawn engine
+    name: Only an explicit withdrawal moves an engine back, and only to the one fallback it names when that is listed, compatible, available for this host and not withdrawn; otherwise Model Hub is blocked, with no other release substituted and the withdrawn engine never kept
     status: partial
     kind: recovery
     layer: unit
     missing_layer: e2e
-    test: tests/test_model_hub_engine_channel.py::test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_a_safe_fallback
+    test: tests/test_model_hub_engine_channel.py::test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_its_named_safe_fallback
   - id: MH-ENGINE-CHANNEL-005
     name: An Avibe release that ships no channel key makes no channel request, runs no verifier and selects nothing
     status: covered
@@ -2883,24 +2884,27 @@ scenarios:
       - tests/test_model_hub_engine_channel.py::test_only_exit_zero_with_a_true_boolean_verifies
       - tests/test_model_hub_engine_channel.py::test_every_other_answer_fails_closed
   - id: MH-ENGINE-CHANNEL-008
-    name: A stale or racing writer, or the release mirror, cannot replace a newer engine channel index or drop a published withdrawal
+    name: An old, deleted or replaced published index cannot make the signer sign older state, and a stale or racing writer, or the release mirror, cannot replace a newer index or drop a published withdrawal
     status: covered
     kind: concurrency
     layer: unit
     test:
+      - tests/test_model_hub_engine_channel_producer.py::test_what_the_published_index_says_is_never_the_state_a_change_is_signed_from
+      - tests/test_model_hub_engine_channel_producer.py::test_an_object_that_is_missing_unreadable_or_older_is_put_back_from_the_signers_envelope
       - tests/test_model_hub_engine_channel_producer.py::test_a_stale_writer_cannot_undo_a_newer_index_or_drop_its_withdrawal
       - tests/test_model_hub_engine_channel_producer.py::test_a_writer_that_lost_a_race_does_not_overwrite_the_winner
       - tests/test_release_mirror.py::test_the_mirror_never_writes_or_deletes_the_signed_engine_channel_index
   - id: MH-ENGINE-CHANNEL-009
-    name: Nothing is signed or published while the channel is uncommissioned, or unless the run is the reviewed workflow on the default branch with a protected environment's approval
+    name: Nothing is signed or published while the channel is uncommissioned, from a signer ledger that is absent or does not check out, or unless the run is the reviewed workflow on the default branch with a protected environment's approval
     status: covered
     kind: authorization
     layer: unit
     test:
       - tests/test_model_hub_engine_channel_producer.py::test_while_avibe_ships_no_key_every_producer_step_stops_before_it_does_anything
+      - tests/test_model_hub_engine_channel_producer.py::test_a_missing_damaged_or_mismatched_ledger_stops_every_routine_operation
       - tests/test_model_hub_engine_channel_producer.py::test_authorization_reads_protection_and_approval_from_github_for_this_run
   - id: MH-ENGINE-CHANNEL-010
-    name: An engine candidate qualifies only with every evidence class for its exact bytes, from a qualification run that GitHub confirms
+    name: An engine candidate qualifies only with every evidence class for its exact bytes, from a qualification run that GitHub confirms, in which every process imported Avibe from the released wheel
     status: partial
     kind: gate
     layer: unit
@@ -2908,6 +2912,26 @@ scenarios:
     test:
       - tests/test_model_hub_engine_qualification.py::test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified
       - tests/test_model_hub_engine_qualification.py::test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself
+      - tests/test_model_hub_engine_qualification.py::test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence_nor_a_clean_rehearsal
+  - id: MH-ENGINE-CHANNEL-011
+    name: Every engine release the channel lists, withdrawn ones and rollback targets included, stays under the release guard, which restores lost assets from a backup that still verifies and never overwrites published bytes
+    status: covered
+    kind: recovery
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_release_guard.py::test_assets_a_published_release_lost_are_restored_from_a_verified_backup_without_touching_the_rest
+      - tests/test_model_hub_engine_release_guard.py::test_published_bytes_that_changed_under_their_names_are_never_overwritten
+      - tests/test_model_hub_engine_release_guard.py::test_the_guard_covers_the_packaged_engine_and_every_release_the_channel_lists
+      - tests/test_model_hub_engine_channel_producer.py::test_the_guard_is_given_every_listed_release_withdrawn_ones_and_rollback_targets_included
+  - id: MH-ENGINE-CHANNEL-012
+    name: A channel sequence is only ever signed over the payload it was committed with, a retry republishes the identical envelope, and concurrent signers never share a sequence
+    status: covered
+    kind: idempotency
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel_producer.py::test_a_sequence_is_only_ever_signed_over_the_payload_it_was_committed_with
+      - tests/test_model_hub_engine_channel_producer.py::test_resuming_publishes_the_same_envelope_again_byte_for_byte
+      - tests/test_model_hub_engine_channel_producer.py::test_concurrent_signers_are_serialized_into_distinct_increasing_sequences
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001

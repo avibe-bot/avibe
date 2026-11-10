@@ -208,20 +208,70 @@ def test_an_index_another_key_signed_or_an_older_one_is_rejected(tmp_path) -> No
     assert channel.snapshot().payload.sequence == 5
 
 
-def test_without_a_working_verifier_nothing_is_recorded_or_selected(tmp_path) -> None:
-    class Unavailable:
-        def verify(self, **_request) -> None:
-            raise ChannelError("verifier_too_old", "signature checks need avault 0.1.10 or later")
+def test_an_avibe_upgrade_that_raises_the_floor_stops_adoption_from_the_older_recorded_index(tmp_path) -> None:
+    signer = Signer()
+    withdrawal = [tombstone(NEWER, f"model-hub-engine-{VERSION}-{int(BUILD) + 2}")]
+    before, _ = _channel(tmp_path, signer, _index(signer, 5, revoked=withdrawal))
+    assert before.refresh().state == "accepted"
+    assert before.resolve(current=BUNDLED).action is ResolutionAction.ADOPT
 
+    upgraded, _ = _channel(tmp_path, signer, roots=signer.roots(floor=100))
+
+    resolution = upgraded.resolve(current=BUNDLED)
+    assert (resolution.action, resolution.reason) == (ResolutionAction.KEEP, "index_stale")
+    # The recorded withdrawal still applies; it authorizes no download.
+    withdrawn = upgraded.resolve(current=NEWER)
+    assert withdrawn.action is ResolutionAction.WITHDRAW and withdrawn.download_authorized is False
+
+
+class _Unavailable:
+    def verify(self, **_request) -> None:
+        raise ChannelError("verifier_too_old", "signature checks need avault 0.1.10 or later")
+
+
+def test_without_a_working_verifier_nothing_is_recorded_or_selected(tmp_path) -> None:
     signer = Signer()
     recorded, _ = _channel(tmp_path, signer, _index(signer, 5))
     recorded.refresh()
-    channel, _ = _channel(tmp_path, signer, _index(signer, 6), verifier=Unavailable())
+    channel, _ = _channel(tmp_path, signer, _index(signer, 6), verifier=_Unavailable())
 
     assert channel.refresh().reason == "verifier_too_old"
     resolution = channel.resolve(current=BUNDLED)
     assert (resolution.action, resolution.reason) == (ResolutionAction.KEEP, "verifier_too_old")
     assert recorded.snapshot().payload.sequence == 5
+
+
+def test_an_engine_this_machine_recorded_as_withdrawn_is_not_kept_when_the_index_cannot_be_checked(tmp_path) -> None:
+    signer = Signer()
+    fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    recorded, _ = _channel(tmp_path, signer, _index(signer, 5, revoked=[tombstone(NEWER, fallback)]))
+    recorded.refresh()
+    channel, _ = _channel(tmp_path, signer, verifier=_Unavailable())
+
+    blocked = channel.resolve(current=NEWER)
+
+    # No fallback can be named from an index that cannot be authenticated, so Model Hub is blocked.
+    assert (blocked.action, blocked.reason, blocked.target) == (ResolutionAction.BLOCKED, "verifier_too_old", None)
+    assert blocked.tombstone.asset_release_tag == NEWER
+    assert channel.resolve(current=BUNDLED).action is ResolutionAction.KEEP
+
+
+def test_a_withdrawal_applies_whatever_else_would_stop_adoption(tmp_path, monkeypatch) -> None:
+    signer = Signer()
+    fallback = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    index = _index(signer, 5, revoked=[tombstone(NEWER, fallback)])
+    _channel(tmp_path, signer, index)[0].refresh()
+
+    # A source checkout cannot prove the fallback compatible: blocked, not kept.
+    unreleased, _ = _channel(tmp_path, signer, avibe_version="0.0.0.dev0")
+    assert unreleased.resolve(current=NEWER).action is ResolutionAction.BLOCKED
+    # Routine updates off, and a bundled identity that cannot be read.
+    channel, _ = _channel(tmp_path, signer)
+    assert channel.resolve(current=NEWER, allow_adoption=False).action is ResolutionAction.WITHDRAW
+    monkeypatch.setattr(EngineChannel, "bundled_release_tag", lambda self: None)
+    withdrawn = channel.resolve(current=NEWER)
+    assert (withdrawn.action, withdrawn.target.asset_release_tag) == (ResolutionAction.WITHDRAW, fallback)
+    assert channel.resolve(current=BUNDLED).reason == "engine_identity_unrecognized"
 
 
 def test_a_source_checkout_version_adopts_nothing(tmp_path) -> None:

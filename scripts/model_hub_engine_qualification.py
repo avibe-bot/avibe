@@ -73,9 +73,12 @@ RECEIPT_ARTIFACT = "model-hub-engine-qualification-receipt"
 ASSETS_ARTIFACT = "model-hub-engine-candidate-assets"
 AVIBE_ROLES = ("minimum", "current_stable")
 E2E_SELECTION = ["-m", "e2e_model_hub", "tests/e2e"]
-#: What a released-Avibe run records about itself: the tag commit its tests
-#: came from, the digest of its resolved dependency set, and its toolchain.
-E2E_PROVENANCE_FIELDS = ("tests_commit", "dependencies_sha256", "python", "node", "codex", "opencode")
+#: What a released-Avibe run records about itself: the commit its tests came
+#: from, the digest of that tests tree, the digest of its resolved dependency
+#: set, and its toolchain.
+E2E_PROVENANCE_FIELDS = ("tests_commit", "tests_sha256", "dependencies_sha256", "python", "node", "agent_clis")
+RELEASED_E2E_ACTION = ".github/actions/model-hub-released-e2e/action.yml"
+ORIGINS_MODULE = "scripts/model_hub_engine_qualification_origins.py"
 #: Every job of the qualification workflow, by the name GitHub reports. All
 #: must have succeeded in the receipt's run attempt; none may be skipped.
 REQUIRED_JOBS = (
@@ -91,6 +94,7 @@ REQUIRED_JOBS = (
 #: release tag the receipt records.
 HARNESS_FILES = (
     QUALIFICATION_WORKFLOW_PATH,
+    RELEASED_E2E_ACTION,
     "core/model_hub_engine_channel.py",
     "core/model_hub_engine_manifest.py",
     "scripts/build_model_hub_engine.py",
@@ -98,7 +102,7 @@ HARNESS_FILES = (
     "scripts/ci_loopback_only.sh",
     "scripts/model_hub_engine_channel.py",
     "scripts/model_hub_engine_qualification.py",
-    "scripts/model_hub_engine_qualification_plugin.py",
+    "scripts/model_hub_engine_qualification_origins.py",
     "scripts/model_hub_engine_release_guard.py",
     "scripts/model_hub_hosted_wire_gate.py",
     "scripts/release_asset_download.py",
@@ -335,22 +339,135 @@ def prepare_harness(source: Path, wheel: Path, output: Path) -> None:
         raise QualificationError(f"the harness directory shadows product packages: {present}")
 
 
-def wheel_origin_problems(origins: Any, *, released: ReleasedAvibe, environment: Path) -> list[str]:
-    """Why a test run did not import Avibe from the released wheel's environment."""
+def tree_digest(root: Path) -> str:
+    """One digest over every file under ``root``, by relative path and content."""
 
-    if not isinstance(origins, dict):
-        return ["the run recorded no import origins"]
-    problems = []
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file() and "__pycache__" not in item.parts):
+        digest.update(f"{path.relative_to(root).as_posix()}\0{_sha256(path)}\n".encode())
+    return digest.hexdigest()
+
+
+def install_origin_recorder(environment: Path, directory: Path) -> None:
+    """Make every Python process in ``environment`` log where it imports Avibe from."""
+
+    try:
+        from scripts import model_hub_engine_qualification_origins as recorder
+    except ModuleNotFoundError as exc:
+        if exc.name != "scripts":
+            raise
+        import model_hub_engine_qualification_origins as recorder
+
+    site_packages = sorted(environment.glob("lib/python*/site-packages"))
+    if len(site_packages) != 1:
+        raise QualificationError("the environment has no single site-packages directory")
+    target = site_packages[0]
+    (target / f"{recorder.MODULE_NAME}.py").write_bytes((REPO_ROOT / ORIGINS_MODULE).read_bytes())
+    (target / recorder.CONFIG_NAME).write_text(json.dumps({"directory": str(directory.resolve())}), encoding="utf-8")
+    (target / f"{recorder.MODULE_NAME}.pth").write_text(f"import {recorder.MODULE_NAME}\n", encoding="utf-8")
+    directory.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass(frozen=True)
+class ProcessOrigins:
+    """What one Python process reported: how it was started and what it imported."""
+
+    argv: tuple[str, ...]
+    executable: str
+    distribution_version: str | None
+    modules: Mapping[str, Any]
+
+    @property
+    def is_service(self) -> bool:
+        return bool(self.argv) and Path(self.argv[0]).name == "main.py"
+
+    @property
+    def is_test_runner(self) -> bool:
+        return any("pytest" in Path(argument).parts or Path(argument).name == "pytest" for argument in self.argv[:2])
+
+
+def read_origin_logs(directory: Path) -> list[ProcessOrigins]:
+    """Parse the per-process logs the origin recorder wrote. Unreadable logs are an error."""
+
+    processes: list[ProcessOrigins] = []
+    for log in sorted(directory.glob("*.jsonl")):
+        header: dict[str, Any] | None = None
+        modules: dict[str, Any] = {}
+        try:
+            for line in log.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if "process" in record:
+                    header = header or record["process"]
+                else:
+                    modules[record["module"]] = record["origin"]
+            if header is None:
+                raise ValueError("no process record")
+            processes.append(
+                ProcessOrigins(
+                    argv=tuple(str(item) for item in header["argv"]),
+                    executable=str(header["executable"]),
+                    distribution_version=header["distribution_version"],
+                    modules=modules,
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise QualificationError(f"an import log cannot be read: {log.name}: {exc}") from exc
+    return processes
+
+
+def origin_problems(
+    processes: Sequence[ProcessOrigins], *, environment: Path, version: str, harness: Path
+) -> list[str]:
+    """Why a run did not test the released wheel.
+
+    Every product module any process imported must have been loaded from the
+    wheel's environment. The test runner and the spawned service must each
+    have reported, and the service must be the entry script in the harness,
+    which is the wheel's own.
+    """
+
     root = environment.resolve()
-    modules = origins.get("modules")
-    for name in PRODUCT_PACKAGES:
-        origin = modules.get(name) if isinstance(modules, dict) else None
-        if not isinstance(origin, str) or root not in Path(origin).resolve().parents:
-            problems.append(f"{name} was imported from {origin!r}, not from the released wheel's environment")
-    for field in ("distribution_version", "vibe_version"):
-        if origins.get(field) != released.version:
-            problems.append(f"{field} is {origins.get(field)!r}, not {released.version}")
+
+    def inside(origin: Any) -> bool:
+        origins = origin if isinstance(origin, list) else [origin]
+        return bool(origins) and all(
+            isinstance(item, str) and root in Path(item).resolve().parents for item in origins
+        )
+
+    problems: list[str] = []
+    for process in processes:
+        label = " ".join(process.argv[:2]) or "a process"
+        outside = sorted(name for name, origin in process.modules.items() if not inside(origin))
+        if outside:
+            problems.append(
+                f"{label} imported {len(outside)} product modules from outside the released wheel's environment, "
+                f"such as {outside[0]} from {process.modules[outside[0]]!r}"
+            )
+        if process.modules and process.distribution_version != version:
+            problems.append(f"{label} ran Avibe {process.distribution_version!r}, not {version}")
+        if process.modules and root not in Path(process.executable).resolve().parents:
+            problems.append(f"{label} ran under {process.executable}, not the released wheel's environment")
+
+    def covered(selected: list[ProcessOrigins], roots: Sequence[str]) -> bool:
+        return any(all(name in process.modules for name in roots) for process in selected)
+
+    if not covered([process for process in processes if process.is_test_runner], ("vibe",)):
+        problems.append("the test runner reported no import of Avibe")
+    services = [
+        process for process in processes
+        if process.is_service and Path(process.argv[0]).resolve() == (harness / "main.py").resolve()
+    ]
+    if not covered(services, ("core", "vibe")):
+        problems.append("no spawned service reported importing Avibe from the wheel's entry script")
     return problems
+
+
+def origin_summary(processes: Sequence[ProcessOrigins]) -> dict[str, int]:
+    return {
+        "processes": len(processes),
+        "services": sum(1 for process in processes if process.is_service),
+        "product_modules": sum(len(process.modules) for process in processes),
+    }
 
 
 def junit_summary(report: Path) -> dict[str, int]:
@@ -644,6 +761,31 @@ def build_evidence(candidate_dir: Path, asset_dir: Path) -> dict[str, Any]:
     }
 
 
+def write_local_manifest(manifest_path: Path, asset_dir: Path, platform: str, output: Path) -> ReleaseSpec:
+    """Write a copy of a manifest whose ``platform`` asset is read from ``asset_dir``.
+
+    The directory must be exactly the manifest's publishable asset set, so the
+    local file is the pinned archive. Only the URL changes; the size and
+    digests the installer checks stay the manifest's.
+    """
+
+    guard = _guard()
+    try:
+        spec = guard.verify_release_assets(manifest_path, asset_dir)
+    except guard.ReleaseGuardError as exc:
+        raise QualificationError(f"the assets are not the manifest's: {exc}") from exc
+    archive = spec.archive_for(platform)
+    if archive is None:
+        raise QualificationError(f"the manifest has no {platform} asset")
+    manifest = json.loads(spec.manifest_bytes)
+    for asset in manifest["assets"]:
+        if asset["platform"] == platform:
+            asset["url"] = (asset_dir.resolve() / archive.name).as_uri()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(manifest), encoding="utf-8")
+    return spec
+
+
 def platform_smoke_evidence(candidate_dir: Path, asset_dir: Path, work: Path) -> dict[str, Any]:
     """Install this host's archive from disk, start it, and require Avibe's health check.
 
@@ -663,13 +805,9 @@ def platform_smoke_evidence(candidate_dir: Path, asset_dir: Path, work: Path) ->
     archive = candidate.spec.archive_for(probe.host_platform())
     if archive is None:
         raise QualificationError("the candidate has no asset for this host")
-    manifest = json.loads(candidate.manifest_bytes)
-    for asset in manifest["assets"]:
-        if asset["platform"] == archive.platform:
-            # The one archive this host installs, read from the verified directory.
-            asset["url"] = (asset_dir.resolve() / archive.name).as_uri()
+    # The one archive this host installs, read from the verified directory.
     local_manifest = work / "local-manifest.json"
-    local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    write_local_manifest(candidate_dir / MANIFEST_FILE, asset_dir, archive.platform, local_manifest)
 
     manager = EngineRuntimeManager(runtime_dir=work / "engine", manifest_path=local_manifest, offline=False)
     installed = manager.ensure()
@@ -693,6 +831,38 @@ def platform_smoke_evidence(candidate_dir: Path, asset_dir: Path, work: Path) ->
     }
 
 
+def _require_provenance(provenance: Any) -> dict[str, str]:
+    if not isinstance(provenance, dict) or any(
+        not isinstance(provenance.get(field), str) or not provenance[field] for field in E2E_PROVENANCE_FIELDS
+    ):
+        raise QualificationError(f"the run must record {', '.join(E2E_PROVENANCE_FIELDS)}")
+    return {field: provenance[field] for field in E2E_PROVENANCE_FIELDS}
+
+
+def _run_facts(
+    *, version: str, wheel: Path, wheel_sha256: str, environment: Path, harness: Path, origins_dir: Path,
+    provenance: Any,
+) -> tuple[dict[str, str], list[ProcessOrigins], list[str]]:
+    """What a released-wheel run was made of, and why it does not count if it does not."""
+
+    recorded = _require_provenance(provenance)
+    problems = []
+    if not wheel.is_file() or _sha256(wheel) != wheel_sha256:
+        problems.append(f"{wheel.name} is not the published wheel")
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            entry = archive.read(WHEEL_SERVICE_ENTRY)
+    except (OSError, KeyError, zipfile.BadZipFile):
+        entry = None
+    if entry is None or not (harness / "main.py").is_file() or (harness / "main.py").read_bytes() != entry:
+        problems.append("the harness does not start the service from the wheel's own entry script")
+    if recorded["tests_sha256"] != tree_digest(harness / "tests"):
+        problems.append("the tests that ran are not the tests that were recorded")
+    processes = read_origin_logs(origins_dir)
+    problems += origin_problems(processes, environment=environment, version=version, harness=harness)
+    return recorded, processes, problems
+
+
 def released_e2e_evidence(
     candidate: Candidate,
     *,
@@ -700,20 +870,20 @@ def released_e2e_evidence(
     released: ReleasedAvibe,
     wheel: Path,
     environment: Path,
-    origins: Any,
+    harness: Path,
+    origins_dir: Path,
     junit: Path,
     scenario_evidence_passed: bool,
     provenance: Any,
 ) -> dict[str, Any]:
     if role not in AVIBE_ROLES:
         raise QualificationError(f"unknown Avibe role {role}")
-    if not isinstance(provenance, dict) or any(
-        not isinstance(provenance.get(field), str) or not provenance[field] for field in E2E_PROVENANCE_FIELDS
-    ):
-        raise QualificationError(f"the run must record {', '.join(E2E_PROVENANCE_FIELDS)}")
-    if not wheel.is_file() or wheel.stat().st_size != released.wheel_size or _sha256(wheel) != released.wheel_sha256:
+    if not wheel.is_file() or wheel.stat().st_size != released.wheel_size:
         raise QualificationError(f"{wheel.name} is not the wheel GitHub published for Avibe {released.version}")
-    problems = wheel_origin_problems(origins, released=released, environment=environment)
+    recorded, processes, problems = _run_facts(
+        version=released.version, wheel=wheel, wheel_sha256=released.wheel_sha256, environment=environment,
+        harness=harness, origins_dir=origins_dir, provenance=provenance,
+    )
     if problems:
         raise QualificationError("the run did not test the released wheel: " + "; ".join(problems))
     return {
@@ -722,11 +892,67 @@ def released_e2e_evidence(
         "role": role,
         "avibe": released.identity(),
         "imports_from_wheel": True,
-        "provenance": {field: provenance[field] for field in E2E_PROVENANCE_FIELDS},
+        "origins": origin_summary(processes),
+        "provenance": recorded,
         "selection": E2E_SELECTION,
         "junit": junit_summary(junit),
         "scenario_evidence": "pass" if scenario_evidence_passed else "fail",
     }
+
+
+def rehearsal_record(
+    *,
+    tag: str,
+    tag_commit: str,
+    version: str,
+    wheel: Path,
+    wheel_sha256: str,
+    environment: Path,
+    harness: Path,
+    origins_dir: Path,
+    junit: Path,
+    provenance: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """Describe a rehearsal of the released-wheel harness, and what is wrong with it.
+
+    A rehearsal exercises the harness against some published wheel, a release
+    candidate included. Its record is not evidence: it has its own class, which
+    no receipt reads, so nothing rehearsed can qualify an engine.
+    """
+
+    recorded, processes, problems = _run_facts(
+        version=version, wheel=wheel, wheel_sha256=wheel_sha256, environment=environment, harness=harness,
+        origins_dir=origins_dir, provenance=provenance,
+    )
+    summary = junit_summary(junit)
+    record = {
+        "class": "rehearsal",
+        "tag": tag,
+        "tag_commit": tag_commit,
+        "wheel": {"name": wheel.name, "sha256": wheel_sha256},
+        "harness_sha256": harness_digest(),
+        "provenance": recorded,
+        "origins": origin_summary(processes),
+        "selection": E2E_SELECTION,
+        "junit": summary,
+        "failing": junit_failures(junit),
+        "harness_problems": problems,
+    }
+    return record, problems
+
+
+def junit_failures(report: Path) -> list[str]:
+    """The cases a JUnit report records as failed or errored."""
+
+    try:
+        cases = list(ElementTree.parse(report).getroot().iter("testcase"))
+    except (OSError, ElementTree.ParseError) as exc:
+        raise QualificationError("the test run left no readable report") from exc
+    return sorted(
+        f"{case.get('classname')}::{case.get('name')}"
+        for case in cases
+        if case.find("failure") is not None or case.find("error") is not None
+    )
 
 
 # ----- command line ----------------------------------------------------------
@@ -801,11 +1027,39 @@ def _build_parser() -> argparse.ArgumentParser:
     e2e.add_argument("--released", type=Path, required=True)
     e2e.add_argument("--wheel", type=Path, required=True)
     e2e.add_argument("--environment", type=Path, required=True)
-    e2e.add_argument("--origins", type=Path, required=True)
+    e2e.add_argument("--harness", type=Path, required=True)
+    e2e.add_argument("--origins-dir", type=Path, required=True)
     e2e.add_argument("--junit", type=Path, required=True)
     e2e.add_argument("--provenance", type=Path, required=True)
     e2e.add_argument("--scenario-evidence", required=True, choices=["pass", "fail"])
     e2e.add_argument("--output", type=Path, required=True)
+
+    recorder = command("install-origin-recorder", "Log every process's Avibe imports in an environment.", candidate=False)
+    recorder.add_argument("--environment", type=Path, required=True)
+    recorder.add_argument("--output-dir", type=Path, required=True)
+
+    local = command("local-manifest", "Point one platform's asset of a manifest at a verified local file.", candidate=False)
+    local.add_argument("--manifest", type=Path, required=True)
+    local.add_argument("--asset-dir", type=Path, required=True)
+    local.add_argument("--platform", default="linux-amd64")
+    local.add_argument("--output", type=Path, required=True)
+
+    digest = command("tree-digest", "Print the digest of a directory tree.", candidate=False)
+    digest.add_argument("--root", type=Path, required=True)
+
+    rehearsal = command("rehearsal-record", "Describe a harness rehearsal. It is not evidence.", candidate=False)
+    rehearsal.add_argument("--tag", required=True)
+    rehearsal.add_argument("--tag-commit", required=True)
+    rehearsal.add_argument("--version", required=True)
+    rehearsal.add_argument("--wheel", type=Path, required=True)
+    rehearsal.add_argument("--wheel-sha256", required=True)
+    rehearsal.add_argument("--environment", type=Path, required=True)
+    rehearsal.add_argument("--harness", type=Path, required=True)
+    rehearsal.add_argument("--origins-dir", type=Path, required=True)
+    rehearsal.add_argument("--junit", type=Path, required=True)
+    rehearsal.add_argument("--provenance", type=Path, required=True)
+    rehearsal.add_argument("--require-pass", action="store_true", help="also fail when a test failed")
+    rehearsal.add_argument("--output", type=Path, required=True)
 
     available = command("availability", "Require the release and its mirror to serve the candidate.")
     available.add_argument("--work-dir", type=Path, required=True)
@@ -843,6 +1097,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare-harness":
             prepare_harness(args.source, args.wheel, args.output)
             return 0
+        if args.command == "install-origin-recorder":
+            install_origin_recorder(args.environment, args.output_dir)
+            return 0
+        if args.command == "tree-digest":
+            print(tree_digest(args.root))
+            return 0
+        if args.command == "local-manifest":
+            write_local_manifest(args.manifest, args.asset_dir, args.platform, args.output)
+            return 0
+        if args.command == "rehearsal-record":
+            record, problems = rehearsal_record(
+                tag=args.tag, tag_commit=args.tag_commit, version=args.version, wheel=args.wheel,
+                wheel_sha256=args.wheel_sha256, environment=args.environment, harness=args.harness,
+                origins_dir=args.origins_dir, junit=args.junit, provenance=_read_json(args.provenance),
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps({key: record[key] for key in ("class", "tag", "junit", "origins", "harness_problems")}))
+            if problems:
+                raise QualificationError("the rehearsal did not test the released wheel: " + "; ".join(problems))
+            if args.require_pass and (record["junit"]["failed"] or not record["junit"]["tests"]):
+                raise QualificationError(f"{record['junit']['failed']} rehearsed cases failed: {record['failing'][:10]}")
+            return 0
 
         candidate = load_candidate(args.candidate_dir)
         result: Any = candidate.identity()
@@ -863,7 +1140,8 @@ def main(argv: list[str] | None = None) -> int:
                 released=_load_released(args.released),
                 wheel=args.wheel,
                 environment=args.environment,
-                origins=_read_json(args.origins),
+                harness=args.harness,
+                origins_dir=args.origins_dir,
                 junit=args.junit,
                 scenario_evidence_passed=args.scenario_evidence == "pass",
                 provenance=_read_json(args.provenance),

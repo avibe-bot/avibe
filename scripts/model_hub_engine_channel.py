@@ -1,31 +1,43 @@
 #!/usr/bin/env python3
 """Plan, sign and publish the signed Model Hub engine channel index.
 
-The index at ``https://dl.avibe.bot/index/model-hub-engine.json`` is the one
-record of which engine releases installed Avibe may adopt and which were
-withdrawn. This script is its only writer. Each run makes one change to the
-index that is published now: promote a qualified release, renew the
-signature, or withdraw a release. It never rebuilds the index from GitHub
-releases, so a withdrawal already published is carried into every later index.
+The index at ``https://dl.avibe.bot/index/model-hub-engine.json`` records which
+engine releases installed Avibe may adopt and which were withdrawn. This script
+is its only writer.
 
-Three steps run in three jobs, so no job holds two authorities:
+**Authority is a ledger on the signer host.** It holds the next sequence, the
+exact payload last allocated, and every release identity and withdrawal ever
+allocated. Each change is planned from the ledger and adds at most one entry.
+The published object, the bucket and workflow artifacts are never read as
+desired state: an index that was replaced by an older signed one, or deleted,
+is put back from the ledger, and cannot make the signer sign older state again.
+
+The ledger must not go backward. This script cannot tell a ledger that was
+restored from an old copy from a current one when the published index was also
+rolled back or removed, so a lost, damaged or doubtful ledger is an
+operational stop, not something to restore and continue from. The comparisons
+with the published index below are diagnostics, not that protection.
+
+Steps run in separate jobs, so no job holds two authorities:
 
 - ``authorize`` proves the run is the reviewed workflow on the default branch
   and that the GitHub Environment it is about to use requires approval. With
   ``--require-approval`` it also proves this run was approved.
-- ``sign`` plans the next payload and asks avault for a signature. It holds
-  the signing key and no bucket credential.
+- ``sign`` allocates the next payload in the ledger, then asks avault for a
+  signature. It holds the signing key and no bucket credential.
 - ``publish`` holds the bucket credential and no key. It replaces the object
-  only if it is still the one the plan started from, then reads it back.
+  only if it is still the one it read, then reads it back.
 
-The channel is uncommissioned until Avibe ships a public root: every step
-stops first. See docs/release.md and docs/plans/model-hub-engine-channel.md.
+The channel is uncommissioned until Avibe ships a public root and the owner
+initializes the ledger: every step stops first. See docs/release.md and
+docs/plans/model-hub-engine-channel.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -38,7 +50,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -49,12 +61,14 @@ from core.model_hub_engine_channel import (  # noqa: E402
     ChannelError,
     ChannelPayload,
     ReleaseIdentity,
+    Tombstone,
     TrustRoots,
 )
 from core.model_hub_engine_manifest import (  # noqa: E402
     ASSET_TAG_RE,
     EngineManifestError,
     parse_release_manifest,
+    release_revision,
 )
 
 TRUST_ROOTS_PATH = REPO_ROOT / "vibe" / "model_hub_runtime" / "engine_channel_roots.json"
@@ -65,7 +79,15 @@ INDEX_KEY = "index/model-hub-engine.json"
 INDEX_CACHE_CONTROL = "public, max-age=60"
 SIGNER_ENVIRONMENT = "model-hub-engine-channel-signer"
 WRITER_ENVIRONMENT = "model-hub-engine-channel-writer"
-ENVELOPE_ARTIFACT = "model-hub-engine-channel-envelope"
+#: Which events may start each operation, and whether the run needs a required
+#: reviewer's approval. Every operation is a manual dispatch with approval.
+#: ``renew`` takes no input and can only re-sign what the ledger already holds,
+#: so it is the only row that standing authorization could ever relax; no other
+#: operation becomes reachable by changing it.
+OPERATION_POLICY: dict[str, tuple[frozenset[str], bool]] = {
+    operation: (frozenset({"workflow_dispatch"}), True)
+    for operation in ("release", "promote", "renew", "revoke", "resume")
+}
 
 _SIGN_TIMEOUT_SECONDS = 30.0
 _SIGN_OUTPUT_LIMIT = 1024
@@ -116,26 +138,13 @@ def _identities(payload: ChannelPayload) -> dict[str, ReleaseIdentity]:
     }
 
 
-def _require_terminating_fallbacks(payload: ChannelPayload) -> None:
-    """Every withdrawal must lead, through later withdrawals, to a release still standing."""
-
-    revoked = {tombstone.asset_release_tag: tombstone for tombstone in payload.revoked}
-    for tombstone in payload.revoked:
-        seen = {tombstone.asset_release_tag}
-        step = tombstone
-        while step.rollback_to in revoked:
-            if step.rollback_to in seen:
-                raise ProducerError(f"withdrawals of {tombstone.asset_release_tag} lead back to a withdrawn release")
-            seen.add(step.rollback_to)
-            step = revoked[step.rollback_to]
-
-
-def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: datetime, floor: int) -> bytes:
+def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: datetime, sequence: int) -> bytes:
     """Return the exact payload bytes that follow ``current`` by one change.
 
-    ``current`` is the authenticated index published now, or ``None`` only
-    before the channel's first publication. Every release and withdrawal it
+    ``current`` is the payload the ledger last allocated, or ``None`` only for
+    the first allocation after commissioning. Every release and withdrawal it
     carries is copied byte for byte; the operation adds at most one entry.
+    ``sequence`` is allocated by the ledger and must exceed ``current``'s.
     """
 
     now = now.astimezone(timezone.utc).replace(microsecond=0)
@@ -149,12 +158,12 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
 
     if current is None:
         if not isinstance(operation, Promote):
-            raise ProducerError("the channel has no published index to renew or withdraw from")
-        sequence = max(1, floor)
+            raise ProducerError("the channel has no allocated index to renew or withdraw from")
     else:
         if now < current.issued_at:
-            raise ProducerError("this runner's clock is behind the published index")
-        sequence = current.sequence + 1
+            raise ProducerError("this host's clock is behind the index it last allocated")
+        if sequence <= current.sequence:
+            raise ProducerError("a new index must carry a higher sequence than the last one allocated")
 
     if isinstance(operation, Promote):
         try:
@@ -210,27 +219,18 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
             channel.check_successor(_identities(current), current.revoked, payload)
     except ChannelError as exc:
         raise ProducerError(f"the planned index is not one a client would accept: {exc}") from exc
-    _require_terminating_fallbacks(payload)
     return raw
 
 
-def require_single_step(current: ChannelPayload | None, successor: ChannelPayload, *, floor: int) -> None:
-    """Refuse to publish an index that is not the direct successor of ``current``."""
+def standing_releases(current: ChannelPayload | None) -> dict[str, str]:
+    """The listed releases that were not withdrawn, by tag, with their manifest digest."""
 
-    try:
-        if current is None:
-            if successor.sequence != max(1, floor):
-                raise ProducerError("a first publication must start at the shipped sequence floor")
-            return
-        if successor.sequence != current.sequence + 1:
-            raise ProducerError(
-                f"the signed index has sequence {successor.sequence}, but the published one is {current.sequence}; "
-                "plan again from the index published now"
-            )
-        channel.check_successor(_identities(current), current.revoked, successor)
-    except ChannelError as exc:
-        raise ProducerError(f"the signed index rewrites published history: {exc}") from exc
-    _require_terminating_fallbacks(successor)
+    withdrawn = {item.asset_release_tag for item in (current.revoked if current else ())}
+    return {
+        item.asset_release_tag: item.manifest_sha256
+        for item in (current.releases if current else ())
+        if item.asset_release_tag not in withdrawn
+    }
 
 
 def baseline_manifests(current: ChannelPayload | None, bundled: Sequence[bytes]) -> dict[str, bytes]:
@@ -259,7 +259,26 @@ def baseline_manifests(current: ChannelPayload | None, bundled: Sequence[bytes])
     return manifests
 
 
+def listed_manifests(current: ChannelPayload | None) -> dict[str, bytes]:
+    """The manifest of every release the index lists, withdrawn ones included.
+
+    A withdrawn release keeps its assets, and a rollback target must stay
+    downloadable, so the release guard keeps all of them available.
+    """
+
+    return {item.asset_release_tag: item.manifest_bytes for item in (current.releases if current else ())}
+
+
 # ----- trust roots, verification and signing ---------------------------------
+
+
+def channel_commissioned(path: Path | None = None) -> bool:
+    """Whether Avibe ships a channel key. Unreadable roots are an error, not "no"."""
+
+    try:
+        return channel.parse_trust_roots((path or TRUST_ROOTS_PATH).read_bytes()).commissioned
+    except (OSError, ValueError) as exc:
+        raise ProducerError(f"the shipped trust roots cannot be read: {exc}") from exc
 
 
 def load_trust_roots(path: Path | None = None) -> TrustRoots:
@@ -358,6 +377,372 @@ def sign_payload(
     return envelope
 
 
+# ----- the signer's ledger ---------------------------------------------------
+
+_LEDGER_SCHEMA_VERSION = 1
+_LEDGER_FIELDS = frozenset(
+    {"schema_version", "repository", "channel", "key_id", "next_sequence", "allocation", "releases", "revoked"}
+)
+
+
+@dataclass(frozen=True)
+class Allocation:
+    """One sequence, the exact payload it was spent on, and its envelope once signed."""
+
+    sequence: int
+    payload: bytes
+    envelope: bytes | None
+
+
+@dataclass(frozen=True)
+class LedgerState:
+    key_id: str
+    next_sequence: int
+    allocation: Allocation | None
+    #: Every release ever allocated, listed now or not. Its bytes and minimum never change.
+    releases: Mapping[str, ReleaseIdentity]
+    #: Every withdrawal ever allocated. None is ever dropped or changed.
+    revoked: tuple[Tombstone, ...]
+
+    @property
+    def payload(self) -> ChannelPayload | None:
+        return channel.parse_payload(self.allocation.payload) if self.allocation is not None else None
+
+
+def _durable_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
+    """Write ``data`` so that it is either wholly there after a crash or not at all.
+
+    The bytes are flushed to a temporary file, moved into place, and the
+    directory entry is flushed too. A platform that cannot flush a directory
+    cannot make that promise, and this refuses rather than pretend to.
+    ``exclusive`` never replaces an existing file.
+    """
+
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        raise ProducerError("this platform cannot flush a directory; the ledger needs that durability")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if exclusive:
+            os.link(temporary, path)
+            os.unlink(temporary)
+        else:
+            os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    directory = os.open(path.parent, directory_flag)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+class PublisherLedger:
+    """The signer host's durable record of what the channel has allocated.
+
+    ``state.json`` is the authority: the next sequence, the exact payload the
+    last sequence was spent on, its envelope once signed, and the permanent
+    sets. ``journal/`` keeps a write-once copy of every signed envelope for
+    audit; nothing is read back from it as state. Every caller holds the
+    ledger's lock for its whole step, so allocations are strictly serialized.
+
+    Nothing here creates or repairs a ledger in passing. A directory with no
+    state, or with state that does not check out, stops every routine
+    operation; only the owner's one-time ``initialize`` writes a first state,
+    and only into a directory that has never held one.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.state_path = directory / "state.json"
+        self.journal_dir = directory / "journal"
+        self.lock_path = directory / "ledger.lock"
+
+    def require_durable_location(self, environ: Mapping[str, str] = os.environ) -> None:
+        """Refuse a ledger in a place a runner wipes between jobs."""
+
+        if not self.directory.is_absolute():
+            raise ProducerError("the ledger path must be absolute")
+        resolved = self.directory.resolve()
+        for name in ("RUNNER_TEMP", "GITHUB_WORKSPACE", "RUNNER_WORKSPACE"):
+            value = environ.get(name)
+            if value and (resolved == Path(value).resolve() or Path(value).resolve() in resolved.parents):
+                raise ProducerError(f"the ledger must outlive the job; {name} does not")
+
+    @contextlib.contextmanager
+    def locked(self) -> Iterator[None]:
+        from storage.lock import MigrationFileLock
+
+        if not self.directory.is_dir():
+            raise ProducerError("the publisher ledger does not exist; it is created once, by owner commissioning")
+        with MigrationFileLock(self.lock_path, timeout_seconds=120.0):
+            yield
+
+    def _journal_path(self, sequence: int) -> Path:
+        return self.journal_dir / f"{sequence:012d}.json"
+
+    def load(self, roots: TrustRoots) -> LedgerState:
+        """Read the ledger, or stop. Call with the lock held."""
+
+        try:
+            raw = self.state_path.read_bytes()
+        except FileNotFoundError:
+            raise ProducerError(
+                "the publisher ledger has no state; it is created once, by owner commissioning, and never recreated"
+            ) from None
+        except OSError as exc:
+            raise ProducerError(f"the publisher ledger cannot be read ({type(exc).__name__})") from exc
+        try:
+            document = channel.strict_json(raw)
+            if not isinstance(document, dict) or set(document) != _LEDGER_FIELDS:
+                raise ValueError("unexpected fields")
+            if type(document["schema_version"]) is not int or document["schema_version"] != _LEDGER_SCHEMA_VERSION:
+                raise ValueError("unsupported schema_version")
+            if document["repository"] != channel.CHANNEL_REPOSITORY or document["channel"] != channel.CHANNEL_NAME:
+                raise ValueError("the ledger belongs to another channel")
+            key_id, next_sequence = document["key_id"], document["next_sequence"]
+            if not isinstance(key_id, str) or roots.find(key_id) is None:
+                raise ValueError("the ledger is bound to a key Avibe does not ship")
+            if type(next_sequence) is not int or not 1 <= next_sequence <= channel.MAX_SEQUENCE:
+                raise ValueError("next_sequence is invalid")
+            releases = {
+                tag: ReleaseIdentity(entry["min_avibe_version"], entry["manifest_sha256"])
+                for tag, entry in document["releases"].items()
+            }
+            for tag, identity in releases.items():
+                release_revision(tag)
+                channel.stable_version(identity.min_avibe_version)
+                if not isinstance(identity.manifest_sha256, str) or len(identity.manifest_sha256) != 64:
+                    raise ValueError("a recorded release identity is invalid")
+            revoked = tuple(
+                Tombstone(item["asset_release_tag"], item["rollback_to"], item["reason"]) for item in document["revoked"]
+            )
+            allocation = None
+            if document["allocation"] is not None:
+                entry = document["allocation"]
+                if not isinstance(entry, dict) or set(entry) != {"sequence", "payload", "envelope"}:
+                    raise ValueError("allocation has unexpected fields")
+                payload_bytes = base64.b64decode(entry["payload"], validate=True)
+                envelope_bytes = (
+                    base64.b64decode(entry["envelope"], validate=True) if entry["envelope"] is not None else None
+                )
+                payload = channel.parse_payload(payload_bytes)
+                if not payload.sequence == entry["sequence"] == next_sequence - 1:
+                    raise ValueError("the allocation does not match the sequence counter")
+                if payload.revoked != revoked or any(
+                    releases.get(item.asset_release_tag) != ReleaseIdentity(item.min_avibe_version, item.manifest_sha256)
+                    for item in payload.releases
+                ):
+                    raise ValueError("the allocation disagrees with the permanent record")
+                if envelope_bytes is not None:
+                    envelope = channel.parse_envelope(envelope_bytes)
+                    if envelope.payload != payload_bytes or envelope.key_id != key_id:
+                        raise ValueError("the envelope is not for the allocated payload")
+                allocation = Allocation(entry["sequence"], payload_bytes, envelope_bytes)
+            elif releases or revoked:
+                raise ValueError("a ledger with history has no allocation")
+        except (ChannelError, EngineManifestError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ProducerError(f"the publisher ledger is damaged and nothing will be signed from it: {exc}") from exc
+        return LedgerState(key_id, next_sequence, allocation, releases, revoked)
+
+    def _commit(self, state: LedgerState) -> None:
+        allocation = state.allocation
+        document = {
+            "schema_version": _LEDGER_SCHEMA_VERSION,
+            "repository": channel.CHANNEL_REPOSITORY,
+            "channel": channel.CHANNEL_NAME,
+            "key_id": state.key_id,
+            "next_sequence": state.next_sequence,
+            "allocation": None
+            if allocation is None
+            else {
+                "sequence": allocation.sequence,
+                "payload": base64.b64encode(allocation.payload).decode("ascii"),
+                "envelope": None if allocation.envelope is None else base64.b64encode(allocation.envelope).decode("ascii"),
+            },
+            "releases": {
+                tag: {"min_avibe_version": identity.min_avibe_version, "manifest_sha256": identity.manifest_sha256}
+                for tag, identity in sorted(state.releases.items())
+            },
+            "revoked": [
+                {"asset_release_tag": item.asset_release_tag, "rollback_to": item.rollback_to, "reason": item.reason}
+                for item in state.revoked
+            ],
+        }
+        _durable_write(self.state_path, (json.dumps(document, sort_keys=True) + "\n").encode("ascii"))
+
+    def initialize(self, *, key_id: str, next_sequence: int, roots: TrustRoots) -> None:
+        """Write the first state. One time, by the owner, for a channel that never signed anything.
+
+        An empty directory is not evidence that this key never signed an
+        index. That knowledge is the owner's; this only refuses the cases it
+        can see: a directory that already holds state or journal entries, a
+        key Avibe does not ship, and a sequence below the shipped floor.
+        """
+
+        if roots.find(key_id) is None:
+            raise ProducerError(f"{key_id} is not a key Avibe ships")
+        if type(next_sequence) is not int or not max(1, roots.sequence_floor) <= next_sequence <= channel.MAX_SEQUENCE:
+            raise ProducerError("the first sequence must be at least 1 and at least the shipped sequence floor")
+        self.directory.mkdir(mode=0o700, exist_ok=True)
+        with self.locked():
+            if self.state_path.exists() or (self.journal_dir.exists() and any(self.journal_dir.iterdir())):
+                raise ProducerError("this ledger already holds state or history; a ledger is initialized once")
+            self.journal_dir.mkdir(mode=0o700, exist_ok=True)
+            self._commit(LedgerState(key_id, next_sequence, None, {}, ()))
+
+    def allocate(self, operation: Operation, *, now: datetime, roots: TrustRoots) -> LedgerState:
+        """Spend the next sequence on the payload that applies ``operation``. Lock held.
+
+        The payload is committed before anything is signed. From that commit
+        the sequence belongs to that payload, whatever happens next. Planning
+        starts from the ledger's own last allocation, signed or not, so a
+        change that was allocated but never published is carried forward.
+        """
+
+        state = self.load(roots)
+        sequence = max(state.next_sequence, roots.sequence_floor, 1)
+        raw = plan_payload(state.payload, operation, now=now, sequence=sequence)
+        payload = channel.parse_payload(raw)
+        try:
+            channel.check_successor(state.releases, state.revoked, payload)
+        except ChannelError as exc:
+            raise ProducerError(f"the planned index rewrites what this ledger already allocated: {exc}") from exc
+        allocated = LedgerState(
+            key_id=state.key_id,
+            next_sequence=sequence + 1,
+            allocation=Allocation(sequence, raw, None),
+            releases={**state.releases, **_identities(payload)},
+            revoked=payload.revoked,
+        )
+        self._commit(allocated)
+        return allocated
+
+    def record_envelope(self, state: LedgerState, envelope: bytes) -> LedgerState:
+        """Commit the signature of the current allocation, then its journal copy. Lock held."""
+
+        allocation = state.allocation
+        assert allocation is not None
+        if channel.parse_envelope(envelope).payload != allocation.payload:
+            raise ProducerError("the envelope is not for the allocated payload")
+        signed = LedgerState(
+            state.key_id, state.next_sequence, Allocation(allocation.sequence, allocation.payload, envelope),
+            state.releases, state.revoked,
+        )
+        self._commit(signed)
+        self.journal(signed)
+        return signed
+
+    def journal(self, state: LedgerState) -> None:
+        """Make sure the journal holds the current signed envelope, exactly. Lock held."""
+
+        allocation = state.allocation
+        if allocation is None or allocation.envelope is None:
+            return
+        path = self._journal_path(allocation.sequence)
+        try:
+            existing = path.read_bytes()
+        except FileNotFoundError:
+            self.journal_dir.mkdir(mode=0o700, exist_ok=True)
+            _durable_write(path, allocation.envelope, exclusive=True)
+            return
+        if existing != allocation.envelope:
+            raise ProducerError(
+                f"the journal holds a different envelope for sequence {allocation.sequence}; the ledger is damaged"
+            )
+
+
+def published_index_problems(published: bytes | None, state: LedgerState, *, roots: TrustRoots,
+                             verifier: channel.SignatureVerifier) -> list[str]:
+    """Signs that the ledger is behind what was published. A diagnostic, not a guarantee.
+
+    An index this key signed with a sequence the ledger has not reached, or
+    with the ledger's sequence and other bytes, means the ledger went backward
+    or two ledgers exist. A missing, unreadable or older published index says
+    nothing: a rollback that also rolled back the published index looks the
+    same as no rollback, and this cannot see it.
+    """
+
+    if published is None:
+        return []
+    try:
+        _envelope, payload = channel.authenticate(published, roots=roots, verifier=verifier)
+    except ChannelError:
+        return []
+    allocation = state.allocation
+    if allocation is None or payload.sequence > allocation.sequence:
+        return [f"the published index is at sequence {payload.sequence}, which this ledger has not allocated"]
+    if payload.sequence == allocation.sequence and payload.raw != allocation.payload:
+        return [f"the published index carries sequence {payload.sequence} with a different payload than this ledger"]
+    return []
+
+
+def sign_from_ledger(
+    ledger: PublisherLedger,
+    operation: Operation | None,
+    *,
+    now: datetime,
+    roots: TrustRoots,
+    verifier: channel.SignatureVerifier,
+    sign: Callable[[bytes], str],
+    key_name: str,
+    key_envelope: Mapping[str, Any],
+    published: bytes | None,
+    qualified_baselines: Mapping[str, str] | None = None,
+) -> bytes:
+    """Allocate ``operation`` (or resume the current allocation) and return its envelope.
+
+    ``operation`` ``None`` resumes: it returns the envelope of the current
+    allocation byte for byte, signing that same committed payload first if it
+    was never signed. Nothing is returned before it is committed to the
+    ledger, so a failure anywhere leaves either no allocation or one that
+    ``resume`` completes without a second payload for the same sequence.
+    """
+
+    with ledger.locked():
+        state = ledger.load(roots)
+        problems = published_index_problems(published, state, roots=roots, verifier=verifier)
+        if problems:
+            raise ProducerError("the ledger is behind the published index; stop and investigate: " + "; ".join(problems))
+        if operation is None:
+            if state.allocation is None:
+                raise ProducerError("nothing was allocated yet; there is nothing to resume")
+            if now >= channel.parse_payload(state.allocation.payload).expires_at:
+                raise ProducerError("the allocated index has expired; renew instead of resuming it")
+        else:
+            if isinstance(operation, Promote):
+                standing = standing_releases(state.payload)
+                unqualified = sorted(
+                    tag for tag, digest in standing.items() if (qualified_baselines or {}).get(tag) != digest
+                )
+                if unqualified:
+                    raise ProducerError(
+                        "the candidate was not qualified against every release this ledger lists: "
+                        + ", ".join(unqualified)
+                    )
+            state = ledger.allocate(operation, now=now, roots=roots)
+        allocation = state.allocation
+        assert allocation is not None
+        if allocation.envelope is None:
+            envelope = sign_payload(
+                allocation.payload, key_id=state.key_id, key_name=key_name, key_envelope=key_envelope,
+                roots=roots, verifier=verifier, sign=sign,
+            )
+            state = ledger.record_envelope(state, envelope)
+        else:
+            # Already signed: prove it still verifies, and repair a missing journal copy.
+            authenticate(allocation.envelope, roots=roots, verifier=verifier)
+            ledger.journal(state)
+        assert state.allocation is not None and state.allocation.envelope is not None
+        return state.allocation.envelope
+
+
 # ----- run and environment protection ----------------------------------------
 
 
@@ -450,38 +835,29 @@ def approval_problems(approvals: Any, *, environment: str, reviewers: frozenset[
 def authorize(
     environment: str,
     *,
+    operation: str,
     environ: Mapping[str, str],
     api: Callable[[str], Any],
     require_approval: bool,
 ) -> None:
-    """Stop unless this run may use ``environment`` for a privileged step."""
+    """Stop unless this run may use ``environment`` for a privileged step of ``operation``."""
 
     load_trust_roots()
-    problems = run_context_problems(environ)
+    policy = OPERATION_POLICY.get(operation)
+    if policy is None:
+        raise ProducerError(f"{operation!r} is not an operation of the channel workflow")
+    events, needs_approval = policy
+    problems = run_context_problems(environ, events=events)
     base = f"/repos/{REPOSITORY}/environments/{environment}"
     protection, reviewers = environment_protection_problems(api(base), api(f"{base}/deployment-branch-policies"))
     problems += protection
-    if require_approval and not protection:
+    if require_approval and needs_approval and not protection:
         run_id = environ.get("GITHUB_RUN_ID", "")
         problems += approval_problems(
             api(f"/repos/{REPOSITORY}/actions/runs/{run_id}/approvals"), environment=environment, reviewers=reviewers
         )
     if problems:
         raise ProducerError(f"{environment} is not authorized: " + "; ".join(problems))
-
-
-def require_never_published(api: Callable[[str], Any]) -> None:
-    """Refuse a first publication when an earlier run already archived an index.
-
-    Starting again from nothing would drop every withdrawal published so far.
-    A channel that was published before continues from its newest archive.
-    """
-
-    listing = api(f"/repos/{REPOSITORY}/actions/artifacts?name={ENVELOPE_ARTIFACT}&per_page=1")
-    if not isinstance(listing, dict) or type(listing.get("total_count")) is not int:
-        raise ProducerError("earlier publications cannot be ruled out: the archive listing is unreadable")
-    if listing["total_count"] != 0:
-        raise ProducerError("the channel was published before; recover from its newest archived envelope instead")
 
 
 # ----- the published object --------------------------------------------------
@@ -560,41 +936,42 @@ def publish(
     bucket: IndexBucket,
     roots: TrustRoots,
     verifier: channel.SignatureVerifier,
-    recovered: bytes | None = None,
-    first_publication: bool = False,
     fetch_public: Callable[[], bytes | None] = fetch_public_index,
     sleep: Callable[[float], None] = time.sleep,
     public_wait_seconds: float = 300.0,
 ) -> ChannelPayload:
-    """Replace the stored index with ``envelope`` and prove clients receive it.
+    """Put ``envelope`` in the bucket and prove clients receive exactly it.
 
-    The stored object is read with its ETag, and the write succeeds only over
-    that object, so two writers cannot both win and a stale one cannot undo a
-    newer index. ``recovered`` is an archived, authenticated envelope to
-    continue from when the stored object was lost or damaged.
+    The envelope comes from the signer's ledger; what the bucket holds is not
+    desired state. An object that is missing, unreadable, or an older index
+    signed by this key is replaced. The write succeeds only over the object
+    that was read, so two writers cannot both win. Publishing the same
+    envelope again writes nothing and only repeats the read-back.
+
+    One thing stops it: a stored index signed by this key that the new one
+    does not strictly follow, by sequence and by content. That means the
+    signer's ledger is behind, and nothing is overwritten.
     """
 
     successor = authenticate(envelope, roots=roots, verifier=verifier)
     stored = bucket.read()
-    current: ChannelPayload | None = None
-    if stored is not None:
-        try:
-            current = authenticate(stored[0], roots=roots, verifier=verifier)
-        except ProducerError:
-            if recovered is None:
-                raise ProducerError("the stored index does not verify; recover from an archived envelope") from None
-    if recovered is not None:
-        archived = authenticate(recovered, roots=roots, verifier=verifier)
-        if current is not None and current.sequence >= archived.sequence:
-            raise ProducerError("the stored index is intact and at least as new as the archive; recovery is not needed")
-        current = archived
-    if current is None and not (first_publication and stored is None):
-        raise ProducerError("no index is published; a first publication must be requested explicitly")
-    if current is not None and first_publication:
-        raise ProducerError("the channel already has an index; this is not a first publication")
-    require_single_step(current, successor, floor=roots.sequence_floor)
-
-    bucket.replace(envelope, etag=stored[1] if stored is not None else None)
+    if stored is None or stored[0] != envelope:
+        if stored is not None:
+            try:
+                _stored_envelope, current = channel.authenticate(stored[0], roots=roots, verifier=verifier)
+            except ChannelError:
+                current = None
+            if current is not None:
+                if current.sequence >= successor.sequence:
+                    raise ProducerError(
+                        f"the stored index is at sequence {current.sequence}, not older than the one to publish; "
+                        "the signer's ledger is behind"
+                    )
+                try:
+                    channel.check_successor(_identities(current), current.revoked, successor)
+                except ChannelError as exc:
+                    raise ProducerError(f"the index to publish rewrites the stored one: {exc}") from exc
+        bucket.replace(envelope, etag=stored[1] if stored is not None else None)
     written = bucket.read()
     if written is None or written[0] != envelope:
         raise ProducerError("the bucket does not hold the envelope that was just written")
@@ -627,26 +1004,9 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess:
         raise ProducerError(f"unable to run {command[0]}: {exc}") from exc
 
 
-def _newest_archived(directory: Path, *, roots: TrustRoots, verifier: channel.SignatureVerifier) -> bytes:
-    """The archived envelope with the highest sequence that verifies."""
-
-    best: tuple[int, bytes] | None = None
-    for path in sorted(directory.rglob("*.json")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        raw = path.read_bytes()
-        try:
-            payload = authenticate(raw, roots=roots, verifier=verifier)
-        except ProducerError:
-            continue
-        if best is None or payload.sequence > best[0]:
-            best = (payload.sequence, raw)
-    if best is None:
-        raise ProducerError("no archived envelope verifies against the shipped roots")
-    return best[1]
-
-
-def _operation(args: argparse.Namespace) -> Operation:
+def _operation(args: argparse.Namespace) -> Operation | None:
+    if args.operation == "resume":
+        return None
     if args.operation == "renew":
         return Renew()
     if args.operation == "revoke":
@@ -668,42 +1028,83 @@ def _operation(args: argparse.Namespace) -> Operation:
     return Promote(candidate.manifest_bytes, candidate.min_avibe_version)
 
 
+def _qualified_baselines(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        baselines = channel.strict_json(raw.encode("utf-8"))
+    except ValueError as exc:
+        raise ProducerError(f"the qualified baselines cannot be read: {exc}") from exc
+    if not isinstance(baselines, dict) or not all(isinstance(value, str) for value in baselines.values()):
+        raise ProducerError("the qualified baselines map a release tag to a manifest digest")
+    return baselines
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
 
     authorize_parser = commands.add_parser("authorize", help="Prove this run may use a protected environment.")
     authorize_parser.add_argument("--environment", required=True, choices=[SIGNER_ENVIRONMENT, WRITER_ENVIRONMENT])
+    authorize_parser.add_argument("--operation", required=True)
     authorize_parser.add_argument("--require-approval", action="store_true")
 
-    sign_parser = commands.add_parser("sign", help="Plan the next index and sign it with avault.")
-    sign_parser.add_argument("--operation", required=True, choices=["promote", "renew", "revoke"])
+    # Owner commissioning, run once by hand on the signer host. The channel
+    # workflow has no operation that reaches it.
+    initialize_parser = commands.add_parser(
+        "initialize-ledger", help="Owner commissioning: create the signer's ledger for a channel that never signed.",
+    )
+    initialize_parser.add_argument("--ledger", type=Path, required=True)
+    initialize_parser.add_argument("--key-id", required=True)
+    initialize_parser.add_argument("--first-sequence", type=int, required=True)
+
+    sign_parser = commands.add_parser("sign", help="Allocate the next index in the ledger and sign it with avault.")
+    sign_parser.add_argument("--operation", required=True, choices=["promote", "renew", "revoke", "resume"])
+    sign_parser.add_argument("--ledger", type=Path, required=True)
     sign_parser.add_argument("--tag")
     sign_parser.add_argument("--rollback-to")
     sign_parser.add_argument("--reason")
     sign_parser.add_argument("--candidate-dir", type=Path)
+    sign_parser.add_argument("--qualified-baselines", help="JSON object the qualify job produced: tag to digest")
     sign_parser.add_argument("--avault", required=True)
-    sign_parser.add_argument("--key-id", required=True)
     sign_parser.add_argument("--key-name", required=True)
     sign_parser.add_argument("--key-envelope", type=Path, required=True)
-    sign_parser.add_argument("--recover-from", type=Path, help="directory of archived envelopes to continue from")
-    sign_parser.add_argument("--first-publication", action="store_true")
     sign_parser.add_argument("--output", type=Path, required=True)
 
     baselines_parser = commands.add_parser("baselines", help="List the engines a candidate must be compared with.")
     baselines_parser.add_argument("--avault")
     baselines_parser.add_argument("--bundled", type=Path, action="append", default=[])
-    baselines_parser.add_argument("--first-publication", action="store_true")
     baselines_parser.add_argument("--output-dir", type=Path, required=True)
+
+    commands.add_parser("commissioned", help="Print whether Avibe ships a channel key.")
+
+    listed_parser = commands.add_parser("listed", help="Write the manifest of every release the index lists.")
+    listed_parser.add_argument("--avault")
+    listed_parser.add_argument("--output-dir", type=Path, required=True)
 
     publish_parser = commands.add_parser("publish", help="Replace the stored index and read it back.")
     publish_parser.add_argument("--envelope", type=Path, required=True)
     publish_parser.add_argument("--avault", required=True)
     publish_parser.add_argument("--bucket", required=True)
     publish_parser.add_argument("--endpoint-url", required=True)
-    publish_parser.add_argument("--recover-from", type=Path)
-    publish_parser.add_argument("--first-publication", action="store_true")
     return parser
+
+
+def _published_payload(avault: str | None) -> ChannelPayload | None:
+    """The index clients are served, authenticated. ``None`` when there is none to read.
+
+    Used only where the published index is evidence about availability or
+    qualification, never as the state a new index is signed from.
+    """
+
+    if not channel_commissioned():
+        return None
+    published = fetch_public_index()
+    if published is None:
+        return None
+    if not avault:
+        raise ProducerError("reading the published index needs the avault verifier")
+    return authenticate(published, roots=load_trust_roots(), verifier=avault_verifier(avault))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -713,29 +1114,29 @@ def main(argv: list[str] | None = None) -> int:
             token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
             authorize(
                 args.environment,
+                operation=args.operation,
                 environ=os.environ,
                 api=lambda path: github_api(path, token=token),
                 require_approval=args.require_approval,
             )
             print(json.dumps({"ok": True, "environment": args.environment}))
             return 0
-
+        if args.command == "commissioned":
+            print("true" if channel_commissioned() else "false")
+            return 0
+        if args.command == "listed":
+            # Reads only. An uncommissioned channel, or one that never
+            # published, lists nothing; an index that does not verify is an error.
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            manifests = listed_manifests(_published_payload(args.avault))
+            for tag, manifest_bytes in manifests.items():
+                (args.output_dir / f"{tag}.json").write_bytes(manifest_bytes)
+            print(json.dumps({"ok": True, "releases": sorted(manifests)}))
+            return 0
         if args.command == "baselines":
-            # Listing baselines publishes nothing. Before the channel has an
-            # index there is nothing signed to read, so no key is needed.
-            if args.first_publication:
-                if fetch_public_index() is not None:
-                    raise ProducerError("the channel already has an index; this is not a first publication")
-                current = None
-            else:
-                roots = load_trust_roots()
-                if not args.avault:
-                    raise ProducerError("reading the published index needs the avault verifier")
-                published = fetch_public_index()
-                if published is None:
-                    raise ProducerError("no index is published; a first publication must be requested explicitly")
-                current = authenticate(published, roots=roots, verifier=avault_verifier(args.avault))
-            manifests = baseline_manifests(current, [path.read_bytes() for path in args.bundled])
+            # Evidence for qualification, not state: the signer checks it
+            # against its own ledger before it promotes anything.
+            manifests = baseline_manifests(_published_payload(args.avault), [path.read_bytes() for path in args.bundled])
             (args.output_dir / "manifests").mkdir(parents=True, exist_ok=True)
             for tag, manifest_bytes in manifests.items():
                 (args.output_dir / "manifests" / f"{tag}.json").write_bytes(manifest_bytes)
@@ -745,55 +1146,45 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         roots = load_trust_roots()
+        if args.command == "initialize-ledger":
+            ledger = PublisherLedger(args.ledger)
+            ledger.require_durable_location()
+            ledger.initialize(key_id=args.key_id, next_sequence=args.first_sequence, roots=roots)
+            print(json.dumps({"ok": True, "next_sequence": args.first_sequence}))
+            return 0
+
         verifier = avault_verifier(args.avault)
-        recovered = (
-            _newest_archived(args.recover_from, roots=roots, verifier=verifier) if args.recover_from else None
-        )
         if args.command == "sign":
-            published = fetch_public_index()
-            if recovered is not None:
-                current = authenticate(recovered, roots=roots, verifier=verifier)
-            elif published is not None:
-                if args.first_publication:
-                    raise ProducerError("the channel already has an index; this is not a first publication")
-                current = authenticate(published, roots=roots, verifier=verifier)
-            elif args.first_publication:
-                token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-                require_never_published(lambda path: github_api(path, token=token))
-                current = None
-            else:
-                raise ProducerError("no index is published; a first publication must be requested explicitly")
-            payload = plan_payload(
-                current, _operation(args), now=datetime.now(timezone.utc), floor=roots.sequence_floor
-            )
+            ledger = PublisherLedger(args.ledger)
+            ledger.require_durable_location()
             try:
                 key_envelope = channel.strict_json(args.key_envelope.read_bytes())
             except (OSError, ValueError) as exc:
                 raise ProducerError(f"the sealed channel key cannot be read: {type(exc).__name__}") from exc
             if not isinstance(key_envelope, dict):
                 raise ProducerError("the sealed channel key is not an avault envelope")
-            envelope = sign_payload(
-                payload,
-                key_id=args.key_id,
-                key_name=args.key_name,
-                key_envelope=key_envelope,
+            envelope = sign_from_ledger(
+                ledger,
+                _operation(args),
+                now=datetime.now(timezone.utc),
                 roots=roots,
                 verifier=verifier,
                 sign=lambda request: _avault_sign(args.avault, request),
+                key_name=args.key_name,
+                key_envelope=key_envelope,
+                published=fetch_public_index(),
+                qualified_baselines=_qualified_baselines(args.qualified_baselines),
             )
             args.output.write_bytes(envelope)
-            signed = channel.parse_payload(payload)
+            signed = channel.parse_payload(channel.parse_envelope(envelope).payload)
             print(json.dumps({"ok": True, "sequence": signed.sequence, "payload_sha256": signed.sha256}))
             return 0
 
-        bucket = IndexBucket(args.bucket, args.endpoint_url, _run_command)
         published_payload = publish(
             args.envelope.read_bytes(),
-            bucket=bucket,
+            bucket=IndexBucket(args.bucket, args.endpoint_url, _run_command),
             roots=roots,
             verifier=verifier,
-            recovered=recovered,
-            first_publication=args.first_publication,
         )
         print(
             json.dumps(

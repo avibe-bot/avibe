@@ -350,11 +350,13 @@ machine that has no Vault and never creates one.
 
 **Publisher side: `sign` with a dedicated key.** The release signer holds one
 secp256k1 key for the channel, sealed by avault on the signer host. It is not
-a wallet key and signs nothing else. The publication script sends avault the
-digest above and receives a DER signature; the key never leaves avault, and
-neither the script nor any Agent sees it. Before anything is published, the
-script checks the new envelope exactly as a client would, against the shipped
-root, so a signer holding any other key produces nothing publishable.
+a wallet key and signs nothing else. The publication script commits the exact
+payload to a ledger on that host, then sends avault the digest above and
+receives a DER signature; the key never leaves avault, and neither the script
+nor any Agent sees it. The ledger holds no secret. Before anything is
+published, the script checks the new envelope exactly as a client would,
+against the shipped root, so a signer holding any other key produces nothing
+publishable.
 
 **Key creation is not possible with avault 0.1.10.** Its `keypair generate`
 and `keypair import` accept only `ed25519`. Creating the channel key inside

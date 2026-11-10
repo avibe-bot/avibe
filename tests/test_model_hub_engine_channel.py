@@ -425,6 +425,20 @@ def test_an_expired_recorded_index_still_proves_provenance_but_is_not_fresh(tmp_
     assert _reason(lambda: _accept(store, signer, signed(signer, 5), now=NOW + timedelta(days=60))) == "expired"
 
 
+def test_an_index_recorded_before_a_later_avibe_raised_its_floor_no_longer_authorizes_adoption(
+    tmp_path, signer
+) -> None:
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    _accept(store, signer, signed(signer, 5))
+
+    at_floor = store.cached(roots=signer.roots(floor=5), verifier=LocalVerifier(), now=NOW)
+    below_floor = store.cached(roots=signer.roots(floor=100), verifier=LocalVerifier(), now=NOW)
+
+    assert at_floor.fresh is True
+    # Still authenticated and readable, so its withdrawals keep applying.
+    assert below_floor.payload.sequence == 5 and below_floor.fresh is False
+
+
 @pytest.mark.parametrize(
     "damage",
     [
@@ -529,6 +543,8 @@ LISTED = [("v8.0.63", 1, "3.2.6"), ("v8.0.63", 2, "3.2.6"), ("v8.0.63", 3, "3.2.
         ({"allow_adoption": False}, ResolutionAction.KEEP, None, "adoption_disabled"),
         ({"host_platform": "freebsd-amd64"}, ResolutionAction.KEEP, None, "up_to_date"),
         ({"current": "custom-engine"}, ResolutionAction.KEEP, None, "engine_identity_unrecognized"),
+        ({"bundled": "custom-engine"}, ResolutionAction.KEEP, None, "engine_identity_unrecognized"),
+        ({"bundled": None}, ResolutionAction.KEEP, None, "engine_identity_unrecognized"),
     ],
 )
 def test_ordinary_selection_only_moves_forward_to_the_newest_release_this_avibe_may_run(
@@ -549,75 +565,72 @@ def test_a_release_that_is_no_longer_listed_is_not_a_withdrawal() -> None:
     assert (resolution.action, resolution.reason) == (ResolutionAction.KEEP, "up_to_date")
 
 
+WITHDRAWN = {"current": V63_2, "bundled": V63_2}
+
+
 @pytest.mark.parametrize(
-    ("revoked", "overrides", "action", "target"),
+    ("revoked", "overrides", "action", "target", "download"),
     [
-        # The installed engine was withdrawn: back to the named fallback, even below the bundled engine.
-        ([tombstone(V63_2, V63_1)], {"current": V63_2, "bundled": V63_2}, ResolutionAction.WITHDRAW, V63_1),
-        # Routine updates switched off do not stop a withdrawal.
-        (
-            [tombstone(V63_2, V63_1)],
-            {"current": V63_2, "allow_adoption": False},
-            ResolutionAction.WITHDRAW,
-            V63_1,
-        ),
-        # The fallback was itself withdrawn later: follow it to one that stands.
+        # The engine in effect was withdrawn: back to the named fallback, even below the bundled engine.
+        ([tombstone(V63_2, V63_1)], WITHDRAWN, ResolutionAction.WITHDRAW, V63_1, True),
+        # Neither a stale index, switched-off updates, nor a newer eligible release changes that target.
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "fresh": False}, ResolutionAction.WITHDRAW, V63_1, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "allow_adoption": False}, ResolutionAction.WITHDRAW, V63_1, True),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "avibe_version": "3.2.7"}, ResolutionAction.WITHDRAW, V63_1, True),
+        # An unreadable bundled identity stops adoption, never a withdrawal.
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "bundled": "custom-engine"}, ResolutionAction.WITHDRAW, V63_1, True),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "bundled": None}, ResolutionAction.WITHDRAW, V63_1, True),
+        # Only the named fallback is used. If it was withdrawn too, nothing is followed or substituted.
         (
             [tombstone(V63_3, V63_2), tombstone(V63_2, V63_1)],
             {"current": V63_3, "avibe_version": "3.2.7"},
-            ResolutionAction.WITHDRAW,
-            V63_1,
-        ),
-        # A fallback this Avibe cannot run is unsafe; a newer release it can run is ordinary adoption.
-        (
-            [tombstone(V63_1, V63_3)],
-            {"current": V63_1},
-            ResolutionAction.ADOPT,
-            V63_2,
-        ),
-        # No safe fallback and nothing newer: Model Hub must stop rather than keep the withdrawn engine.
-        ([tombstone(V63_2, V63_3)], {"current": V63_2}, ResolutionAction.BLOCKED, None),
-        ([tombstone(V63_2, V63_1)], {"current": V63_2, "quarantined": frozenset({V63_1})}, ResolutionAction.BLOCKED, None),
-        (
-            [tombstone(V63_2, V63_1), tombstone(V63_1, V63_2)],
-            {"current": V63_2},
             ResolutionAction.BLOCKED,
             None,
+            False,
         ),
+        ([tombstone(V63_2, V63_1), tombstone(V63_1, V63_2)], WITHDRAWN, ResolutionAction.BLOCKED, None, False),
+        # A fallback this machine cannot run blocks, even with an unrelated newer release it could run.
+        ([tombstone(V63_1, V63_3)], {"current": V63_1}, ResolutionAction.BLOCKED, None, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "quarantined": frozenset({V63_1})}, ResolutionAction.BLOCKED, None, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "host_platform": "freebsd-amd64"}, ResolutionAction.BLOCKED, None, False),
         (
-            [tombstone(V63_1, V63_3)],
-            {"current": V63_1, "allow_adoption": False},
+            [tombstone(V63_2, V63_1)],
+            {**WITHDRAWN, "host_platform": "freebsd-amd64", "fresh": False, "allow_adoption": False},
             ResolutionAction.BLOCKED,
             None,
+            False,
         ),
-        # A withdrawn release is never an adoption target.
-        ([tombstone(V63_2, V63_1)], {"current": V63_1}, ResolutionAction.KEEP, None),
+        # A build that names no released Avibe cannot prove any fallback compatible: blocked, not kept.
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "avibe_version": "0.0.0.dev0"}, ResolutionAction.BLOCKED, None, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "avibe_version": "3.3.1.dev4+g1a2b3c4"}, ResolutionAction.BLOCKED, None, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "avibe_version": "3.3.0+local"}, ResolutionAction.BLOCKED, None, False),
+        ([tombstone(V63_2, V63_1)], {**WITHDRAWN, "avibe_version": "not a version"}, ResolutionAction.BLOCKED, None, False),
     ],
 )
-def test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_a_safe_fallback(
-    revoked, overrides, action, target
+def test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_its_named_safe_fallback(
+    revoked, overrides, action, target, download
 ) -> None:
-    """MH-ENGINE-CHANNEL-004: a withdrawal is the only way back, and an unsafe fallback blocks."""
+    """MH-ENGINE-CHANNEL-004: a withdrawn engine goes to its named fallback or Model Hub is blocked."""
 
     resolution = _resolve(_payload(LISTED[:3], revoked), **overrides)
 
     assert resolution.action is action
     assert (resolution.target.asset_release_tag if resolution.target else None) == target
-    if action is not ResolutionAction.KEEP:
-        assert resolution.tombstone.asset_release_tag == overrides["current"]
+    assert resolution.download_authorized is download
+    assert resolution.tombstone.asset_release_tag == overrides["current"]
 
 
-def test_a_stale_index_still_withdraws_but_authorizes_no_download() -> None:
-    payload = _payload(LISTED[:2], [tombstone(V63_2, V63_1)])
+def test_a_withdrawn_release_is_never_adopted_and_an_unrelated_withdrawal_changes_nothing() -> None:
+    payload = _payload(LISTED[:3], [tombstone(V63_2, V63_1)])
 
-    resolution = _resolve(payload, current=V63_2, fresh=False)
-
-    assert resolution.action is ResolutionAction.WITHDRAW
-    assert resolution.target.asset_release_tag == V63_1
-    assert resolution.download_authorized is False
-    # With no safe fallback, a stale index cannot offer a newer release instead.
-    stale = _resolve(_payload(LISTED[:3], [tombstone(V63_1, V63_3)]), current=V63_1, fresh=False)
-    assert stale.action is ResolutionAction.BLOCKED
+    # Build 2 is the only newer release this Avibe could run, and it was withdrawn.
+    assert _resolve(payload, current=V63_1).action is ResolutionAction.KEEP
+    # A newer Avibe skips over it to build 3.
+    newer = _resolve(payload, current=V63_1, avibe_version="3.2.7")
+    assert (newer.action, newer.target.asset_release_tag) == (ResolutionAction.ADOPT, V63_3)
+    # An unreleased build with an engine nobody withdrew keeps it.
+    unreleased = _resolve(payload, current=V63_1, avibe_version="0.0.0.dev0")
+    assert (unreleased.action, unreleased.reason) == (ResolutionAction.KEEP, "avibe_version_unreleased")
 
 
 # ----- the avault verifier ---------------------------------------------------

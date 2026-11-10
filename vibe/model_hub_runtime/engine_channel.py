@@ -226,7 +226,9 @@ class EngineChannel:
         """What the last accepted index means for the engine release in effect.
 
         ``current`` is that engine's asset release tag. Offline mode keeps
-        every recorded withdrawal in force and authorizes no download.
+        every recorded withdrawal in force and authorizes no download. A
+        manifest override is the one documented way out of the channel,
+        withdrawals included.
         """
 
         reason = self.opt_out_reason()
@@ -236,19 +238,37 @@ class EngineChannel:
             snapshot = self.snapshot()
         except ChannelError as exc:
             logger.warning("Model Hub engine channel state cannot be trusted: %s", exc)
-            return Resolution(ResolutionAction.KEEP, exc.reason)
+            return self._unverifiable(current, exc.reason)
         if snapshot is None:
             return Resolution(ResolutionAction.KEEP, "no_index")
-        bundled = self.bundled_release_tag()
-        if bundled is None:
-            return Resolution(ResolutionAction.KEEP, "engine_identity_unrecognized")
         return resolve(
             snapshot.payload,
             fresh=snapshot.fresh and not self.manager.offline,
             avibe_version=self._avibe_version,
             host_platform=self.manager.host_platform(),
-            bundled=bundled,
+            # An unreadable bundled identity stops adoption inside ``resolve``;
+            # it must not stop a withdrawal of the engine in effect.
+            bundled=self.bundled_release_tag(),
             current=current,
             quarantined=quarantined,
             allow_adoption=allow_adoption,
         )
+
+    def _unverifiable(self, current: str, reason: str) -> Resolution:
+        """The decision when the recorded index cannot be authenticated right now.
+
+        Nothing can be adopted from it. But if this machine already recorded
+        that the engine in effect was withdrawn, that engine is not kept: with
+        no index to name a safe fallback from, Model Hub is blocked.
+        """
+
+        try:
+            state = self.store.load()
+        except ChannelError:
+            return Resolution(ResolutionAction.KEEP, reason)
+        tombstone = next(
+            (item for item in (state.revoked if state is not None else ()) if item.asset_release_tag == current), None
+        )
+        if tombstone is None:
+            return Resolution(ResolutionAction.KEEP, reason)
+        return Resolution(ResolutionAction.BLOCKED, reason, None, tombstone)

@@ -774,9 +774,12 @@ class ChannelStateStore:
     def cached(self, *, roots: TrustRoots, verifier: SignatureVerifier, now: datetime) -> ChannelSnapshot | None:
         """Re-authenticate the stored envelope. ``None`` when nothing was accepted yet.
 
-        An expired snapshot is still returned, marked not fresh: it can show
-        where a retained engine came from and which releases were withdrawn,
-        but it cannot authorize adopting anything new.
+        A snapshot that has expired, or that is older than the sequence floor
+        this Avibe release ships, is still returned, marked not fresh: it can
+        show where a retained engine came from and which releases were
+        withdrawn, but it cannot authorize adopting anything new. The floor
+        is checked here as well as on acceptance, because an index recorded
+        by an earlier Avibe release may predate the floor a later one ships.
         """
 
         state = self.load()
@@ -785,7 +788,8 @@ class ChannelStateStore:
         envelope, payload = authenticate(state.envelope, roots=roots, verifier=verifier)
         if payload.sequence != state.sequence or payload.sha256 != state.payload_sha256:
             raise ChannelError("state_unreadable", "the stored index does not match the recorded sequence")
-        return ChannelSnapshot(envelope=envelope, payload=payload, fresh=payload.is_fresh(now))
+        fresh = payload.is_fresh(now) and payload.sequence >= roots.sequence_floor
+        return ChannelSnapshot(envelope=envelope, payload=payload, fresh=fresh)
 
 
 # ----- selection -------------------------------------------------------------
@@ -838,7 +842,7 @@ def resolve(
     fresh: bool,
     avibe_version: str,
     host_platform: str,
-    bundled: str,
+    bundled: str | None,
     current: str,
     quarantined: frozenset[str] = frozenset(),
     allow_adoption: bool = True,
@@ -848,17 +852,43 @@ def resolve(
     ``bundled`` is the engine release this Avibe ships, ``current`` the one in
     effect, both as asset release tags. ``quarantined`` holds releases that
     failed here and wait for an explicit retry. ``allow_adoption`` is false
-    when routine updates are switched off; a withdrawal still applies.
+    when routine updates are switched off.
+
+    A withdrawal of the engine in effect is decided first and by itself. It
+    does not depend on the index being fresh, on routine updates being on, on
+    the bundled identity, or on this being a released Avibe build. The engine
+    moves to the one fallback its tombstone names, and only if that release is
+    listed, not withdrawn, not quarantined, has an asset for this host, and its
+    minimum Avibe is provably met. Otherwise Model Hub is blocked: a withdrawn
+    engine is never kept, and no other release is substituted.
 
     Ordinary selection only moves forward and never below the bundled engine.
-    A release that is no longer listed is not a withdrawal. Only an explicit
-    tombstone moves an engine back, and only to a listed, compatible,
-    non-withdrawn fallback.
+    A release that is no longer listed is not a withdrawal.
     """
 
     from packaging.version import Version
 
     running = avibe_version_qualifies(avibe_version)
+    revoked = {tombstone.asset_release_tag: tombstone for tombstone in payload.revoked}
+
+    def usable(release: ChannelRelease) -> bool:
+        return (
+            running is not None
+            and release.asset_release_tag not in revoked
+            and release.asset_release_tag not in quarantined
+            and Version(release.min_avibe_version) <= running
+            and release.spec.archive_for(host_platform) is not None
+        )
+
+    tombstone = revoked.get(current)
+    if tombstone is not None:
+        fallback = payload.release(tombstone.rollback_to)
+        if fallback is not None and usable(fallback):
+            return Resolution(
+                ResolutionAction.WITHDRAW, "engine_withdrawn", fallback, tombstone, download_authorized=fresh
+            )
+        return Resolution(ResolutionAction.BLOCKED, "engine_withdrawn_without_fallback", None, tombstone)
+
     if running is None:
         return Resolution(ResolutionAction.KEEP, "avibe_version_unreleased")
     try:
@@ -866,52 +896,16 @@ def resolve(
         bundled_revision = release_revision(bundled)
     except EngineManifestError:
         return Resolution(ResolutionAction.KEEP, "engine_identity_unrecognized")
-
-    revoked = {tombstone.asset_release_tag: tombstone for tombstone in payload.revoked}
-
-    def usable(release: ChannelRelease) -> bool:
-        return (
-            release.asset_release_tag not in revoked
-            and release.asset_release_tag not in quarantined
-            and Version(release.min_avibe_version) <= running
-            and release.spec.archive_for(host_platform) is not None
-        )
-
-    def forward() -> ChannelRelease | None:
-        candidates = [
-            release
-            for release in payload.releases
-            if usable(release) and release.revision > current_revision and release.revision >= bundled_revision
-        ]
-        return max(candidates, key=lambda release: release.revision, default=None)
-
-    tombstone = revoked.get(current)
-    if tombstone is not None:
-        # Follow withdrawals of fallbacks until one still stands.
-        seen = {current}
-        step = tombstone
-        fallback: ChannelRelease | None = None
-        while step.rollback_to not in seen:
-            seen.add(step.rollback_to)
-            following = revoked.get(step.rollback_to)
-            if following is None:
-                fallback = payload.release(step.rollback_to)
-                break
-            step = following
-        if fallback is not None and usable(fallback):
-            return Resolution(
-                ResolutionAction.WITHDRAW, "engine_withdrawn", fallback, tombstone, download_authorized=fresh
-            )
-        newer = forward() if fresh and allow_adoption else None
-        if newer is not None:
-            return Resolution(ResolutionAction.ADOPT, "engine_withdrawn", newer, tombstone, download_authorized=True)
-        return Resolution(ResolutionAction.BLOCKED, "engine_withdrawn_without_fallback", None, tombstone)
-
     if not fresh:
         return Resolution(ResolutionAction.KEEP, "index_stale")
     if not allow_adoption:
         return Resolution(ResolutionAction.KEEP, "adoption_disabled")
-    newer = forward()
+    candidates = [
+        release
+        for release in payload.releases
+        if usable(release) and release.revision > current_revision and release.revision >= bundled_revision
+    ]
+    newer = max(candidates, key=lambda release: release.revision, default=None)
     if newer is None:
         return Resolution(ResolutionAction.KEEP, "up_to_date")
     return Resolution(ResolutionAction.ADOPT, "newer_release", newer, download_authorized=True)

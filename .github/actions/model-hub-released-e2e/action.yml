@@ -1,0 +1,117 @@
+name: Model Hub E2E through a released Avibe wheel
+description: >-
+  Installs one published Avibe wheel into its own environment, lays out a
+  tests tree where no product package can be imported from, and runs the
+  hermetic Model Hub E2E against one engine manifest. Every Python process in
+  that environment logs where it imported Avibe from. Engine qualification and
+  its rehearsal both run exactly these steps. Linux only.
+
+inputs:
+  wheel:
+    description: Path of the published avibe_os wheel, already verified against its digest.
+    required: true
+  tests-source:
+    description: Checkout whose tests, scripts and pyproject.toml are run. Qualification passes the release tag's.
+    required: true
+  engine-manifest:
+    description: Engine manifest whose linux-amd64 asset is a local file URL.
+    required: true
+  work-dir:
+    description: Empty directory for the environment, the harness and the results.
+    required: true
+
+outputs:
+  pytest-outcome:
+    description: success or failure of the E2E run.
+    value: ${{ steps.e2e.outcome }}
+  scenario-outcome:
+    description: success or failure of the tests tree's own scenario-evidence gate.
+    value: ${{ steps.scenarios.outcome }}
+
+runs:
+  using: composite
+  steps:
+    # The tests tree and the wheel's own entry script, with no product package
+    # beside them, and the wheel in an environment of its own.
+    - name: Prepare the harness and the released wheel's environment
+      shell: bash
+      env:
+        WHEEL: ${{ inputs.wheel }}
+        TESTS_SOURCE: ${{ inputs.tests-source }}
+        WORK: ${{ inputs.work-dir }}
+      run: |
+        set -euo pipefail
+        python3 -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+        python3 scripts/model_hub_engine_qualification.py prepare-harness \
+          --source "$TESTS_SOURCE" --wheel "$WHEEL" --output "$WORK/harness"
+        uv venv "$WORK/venv" --python 3.12
+        uv pip install --python "$WORK/venv/bin/python" "$WHEEL"
+        uv pip install --python "$WORK/venv/bin/python" --group "$TESTS_SOURCE/pyproject.toml:dev"
+        python3 scripts/model_hub_engine_qualification.py install-origin-recorder \
+          --environment "$WORK/venv" --output-dir "$WORK/origins"
+
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+      with:
+        node-version: "22.23.4"
+
+    - name: Install agent CLIs
+      shell: bash
+      run: |
+        npm install -g @openai/codex opencode-ai
+        codex --version
+        opencode --version
+
+    # What this run was made of: the commit and digest of its tests, the
+    # resolved dependency set, and the toolchain.
+    - name: Record the run's provenance
+      shell: bash
+      env:
+        TESTS_SOURCE: ${{ inputs.tests-source }}
+        WORK: ${{ inputs.work-dir }}
+      run: |
+        set -euo pipefail
+        uv pip freeze --python "$WORK/venv/bin/python" > "$WORK/dependencies.txt"
+        jq -n \
+          --arg tests_commit "$(git -C "$TESTS_SOURCE" rev-parse HEAD)" \
+          --arg tests_sha256 "$(python3 scripts/model_hub_engine_qualification.py tree-digest --root "$WORK/harness/tests")" \
+          --arg dependencies_sha256 "$(sha256sum "$WORK/dependencies.txt" | cut -d' ' -f1)" \
+          --arg python "$("$WORK/venv/bin/python" --version)" \
+          --arg node "$(node --version)" \
+          --arg agent_clis "$(codex --version); $(opencode --version)" \
+          '$ARGS.named' > "$WORK/provenance.json"
+        cat "$WORK/provenance.json"
+
+    # Loopback only, as in the release E2E. A failing run still leaves its
+    # report; the caller decides what a failure means.
+    - name: Run the Model Hub E2E through the released wheel
+      id: e2e
+      continue-on-error: true
+      shell: bash
+      env:
+        VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH: ${{ inputs.engine-manifest }}
+        WORK: ${{ inputs.work-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$WORK/junit"
+        cd "$WORK/harness"
+        bash "$GITHUB_WORKSPACE/scripts/ci_loopback_only.sh" "$WORK/venv/bin/python" -m pytest \
+          -m e2e_model_hub tests/e2e \
+          -p no:cacheprovider -ra --basetemp="$WORK/e2e-tmp" \
+          --junitxml="$WORK/junit/junit.xml" 2>&1 | tee "$WORK/pytest.log"
+
+    # The tests tree's own scenario-evidence gate, over the one selection above.
+    - name: Check the tests tree's scenario evidence
+      id: scenarios
+      continue-on-error: true
+      shell: bash
+      env:
+        WORK: ${{ inputs.work-dir }}
+      run: |
+        set -euo pipefail
+        cd "$WORK/harness"
+        mkdir -p .github/workflows
+        printf '%s\n' 'jobs:' '  e2e:' '    steps:' \
+          '      - run: python -m pytest -m e2e_model_hub tests/e2e' > .github/workflows/model-hub-e2e.yml
+        PYTHONPATH="$WORK/harness" "$WORK/venv/bin/python" scripts/ci_scenario_evidence.py \
+          --release "$WORK/junit" --workflow .github/workflows/model-hub-e2e.yml \
+          --pytest-root . --pytest-command-index 0
