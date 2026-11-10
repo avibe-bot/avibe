@@ -185,7 +185,9 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
     const besides = () => {
       const nodes = content();
       if (nodes.length > 0 && sourceItem() && !sourceItem()!.querySelector('[data-transcript-reveal]')) innerFirst += 1;
-      const last = nodes.at(-1) ?? hostItem();
+      // The column's item after what the host covers (a chip's or a row's content lies inside its own item).
+      let last: Element = nodes.at(-1) ?? hostItem();
+      while (last.parentElement && last.parentElement !== column) last = last.parentElement;
       let next = last.nextElementSibling;
       while (next && !(next as HTMLElement).dataset.messageId && !(next as HTMLElement).dataset.transcriptKey) next = next.nextElementSibling;
       if (next) afterTops.push(next.getBoundingClientRect().top);
@@ -351,9 +353,15 @@ for (const cell of cells) {
     expect(Math.max(...edges.map(Math.abs))).toBeLessThanOrEqual(1);
     expect(Math.max(...result.tappedMoved.map(Math.abs))).toBeLessThanOrEqual(1);
     expect(writes.filter((write) => write.site?.startsWith('restoreScrollPosition'))).toEqual([]);
-    // What the host folded away gives back room once, in one movement: the row after it rises to where it comes
-    // to rest and never past it, however many commits what closed leaves in.
-    if (cell.change === 'leaves first') expect(Math.min(...result.afterTops) - result.afterTops.at(-1)!).toBeGreaterThanOrEqual(-1);
+    // Where both move the row after what the host covers the same way (both fold, or both open), it goes to where
+    // it comes to rest in one movement and never past it, however many commits what closed leaves in and however
+    // many folds count it: the host's room is given back, or taken, once.
+    expect(result.afterTops.length).toBeGreaterThan(0);
+    const rest = result.afterTops.at(-1)!;
+    if (cell.change === 'leaves first' || (cell.phase === 'folding' && cell.change === 'shrinks')) {
+      expect(Math.min(...result.afterTops) - rest).toBeGreaterThanOrEqual(-1);
+    }
+    if (cell.phase === 'opening' && cell.change === 'grows') expect(Math.max(...result.afterTops) - rest).toBeLessThanOrEqual(1);
     // Turned back while what it covers grew inside it: it turns from where its edge is drawn, not from where that
     // was before what it covers grew.
     if (cell.phase === 'turned back') {

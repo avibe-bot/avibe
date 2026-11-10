@@ -459,6 +459,11 @@ type Disclosing = {
   moves: Map<HTMLElement, Share>;
   settles: Map<HTMLElement, Share>[];
   watch?: MutationObserver;
+  /** Folding (not opening, or opened again). */
+  folding?: boolean;
+  /** Per row below, how much of its rise folds inside it already take (a member's body closing on its own inside
+   *  a group that then closes too): those lift the row by that much themselves. */
+  owned?: Map<HTMLElement, number>;
 };
 /** By its first node. */
 const disclosing = new WeakMap<Element, Disclosing>();
@@ -732,7 +737,7 @@ function play(entry: Disclosing, from: State, closing: boolean, duration: number
     }
     // Its share in each row below, from where it has them now; what other disclosures add goes on as it was.
     entry.rows.forEach((row, index) => {
-      setShare(entry.moves, row, { start, duration, from: from.rows[index] ?? 0, to: closing ? -entry.rise : 0, curve: curveOf(curve), hold: closing });
+      setShare(entry.moves, row, { start, duration, from: from.rows[index] ?? 0, to: closing ? -(entry.rise - (entry.owned?.get(row) ?? 0)) : 0, curve: curveOf(curve), hold: closing });
     });
   }
   // What fades is the content, but not the item the curtain lies in when that is part of it (a group's collapse
@@ -921,6 +926,18 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     from = { edge: entry.open, rows: entry.rows.map(() => 0), content: 1, copy: 0, late: 0, head: 1, shared: entry.shared.map(() => ({ translate: '0px 0px', scale: '1', shown: 1, twin: 0 })) };
     disclosing.set(first, entry);
   }
+  // Folds already going on inside what this one folds (a member's body the reader closed a moment before its
+  // group): each lifts the rows below by its own content and takes in its own leaving, so this one lifts them only
+  // by the rest, and leaves to each what it takes in.
+  const inner = innerFolds(entry).map((fold) => ({
+    fold,
+    owned: new Map(entry.rows.map((row) => {
+      const share = fold.moves.get(row);
+      return [row, share?.hold ? Math.max(0, -share.to) : 0] as const;
+    })),
+  }));
+  entry.folding = true;
+  entry.owned = new Map(entry.rows.map((row) => [row, inner.reduce((sum, { owned }) => sum + (owned.get(row) ?? 0), 0)]));
   play(entry, from, true, tokens.discloseClose.duration * shareLeft(entry, from, true, reduced), tokens, reduced);
   const { rows } = entry;
   lift(entry.trail);
@@ -931,25 +948,33 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
   const gap = () => (probe && anchor ? layoutBox(column, probe).top - layoutBox(column, anchor).top : 0);
   const before = gap();
   const settled = entry;
-  // How much of what closed the layout has let go of so far, and the rows have taken on.
-  let taken = 0;
+  // Per row, how much of what closed the layout has let go of so far and the row has taken on.
+  const taken = new Map<HTMLElement, number>();
+  // What is left for a row to take on of how far the layout has let go so far: all of it, but what folds inside
+  // took in themselves once their content left.
+  const owed = (row: HTMLElement, shrunk: number) => shrunk
+    - inner.reduce((sum, { fold, owned }) => sum + (fold.nodes.some((node) => node.isConnected) ? 0 : owned.get(row) ?? 0), 0)
+    - (taken.get(row) ?? 0);
   const settle = new MutationObserver(() => {
     const known = probe?.isConnected && anchor?.isConnected;
     if (nodes.some((node) => node.isConnected)) {
       // Part of what closed has left before the rest (a member's body, which closes with its group on a timer of
       // its own, can go a frame before the members): the layout moved the rows up by that much at once. Each
-      // row's share takes it on, so the row stays drawn where it was and goes on as it went; the curtain is laid
-      // where it belongs again.
-      const delta = known ? before - gap() - taken : 0;
-      if (Math.abs(delta) < 0.5) return;
-      taken += delta;
+      // row's share takes on what is not another fold's to take, so the row stays drawn where it was and goes on
+      // as it went; the curtain is laid where it belongs again.
+      if (!known) return;
+      const shrunk = before - gap();
+      let moved = false;
       for (const row of rows) {
-        const own = settled.moves.get(row);
-        if (!row.isConnected) continue;
+        const delta = owed(row, shrunk);
+        if (!row.isConnected || Math.abs(delta) < 0.5) continue;
+        moved = true;
+        taken.set(row, (taken.get(row) ?? 0) + delta);
         noteShift(row, -delta);
+        const own = settled.moves.get(row);
         if (own) setShare(settled.moves, row, { ...own, from: own.from + delta, to: own.to + delta });
       }
-      drawCurtains(column);
+      if (moved) drawCurtains(column);
       return;
     }
     settle.disconnect();
@@ -957,9 +982,10 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
     unlift(settled.trail);
     // The layout let go of (the rest of) what closed: its share in each row becomes what is left of the way to
     // where the layout puts the row now, and that glides out; what other disclosures add goes on as it was.
-    const shrink = known ? before - gap() - taken : 0;
+    const shrunk = known ? before - gap() : 0;
     const now = clockNow();
     rows.forEach((row) => {
+      const shrink = known ? owed(row, shrunk) : 0;
       const own = settled.moves.get(row);
       const left = (own ? shareAt(own, now) : 0) + shrink;
       // The layout put it `shrink` further up; the fold showed that as movement (and what is left glides).
@@ -975,11 +1001,24 @@ function fold(column: HTMLElement, nodes: HTMLElement[], tokens: Tokens, viewpor
   window.setTimeout(() => settle.disconnect(), tokens.discloseClose.duration + 2000);
 }
 
+/** The folds going on inside what `entry` holds, whose content has not left yet. */
+function innerFolds(entry: Disclosing): Disclosing[] {
+  const found = new Set<Disclosing>();
+  for (const node of entry.nodes) {
+    for (const el of node.querySelectorAll<HTMLElement>(`[${REVEAL_ATTRIBUTE}]`)) {
+      const fold = disclosing.get(el);
+      if (fold && fold !== entry && fold.folding && fold.nodes.some((each) => each.isConnected)) found.add(fold);
+    }
+  }
+  return [...found];
+}
+
 /** Opened again while it was folding: it opens from wherever it is drawn. */
 function refold(nodes: HTMLElement[], tokens: Tokens, reduced: boolean) {
   const entry = disclosing.get(nodes[0]);
   if (!entry) return;
   entry.watch?.disconnect();
+  entry.folding = false;
   const from = drawnState(entry);
   play(entry, from, false, tokens.discloseOpen.duration * shareLeft(entry, from, false, reduced), tokens, reduced);
 }
