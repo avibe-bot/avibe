@@ -1,0 +1,13 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 8e4dbaa..e1a1af2 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -24,7 +24,7 @@ jni = "0.22"
+ [dependencies]
+ anyhow = "1.0.69"
+ async-trait = "0.1.80"
+-iroh = { version = "1.0.0" }
++iroh = { version = "1.0.0", default-features = false, features = ["metrics", "tls-ring"] }
+ iroh-base = { version = "1.0.0" }
+ iroh-metrics = { version = "1.0.0" }
+ iroh-relay = { version = "1.0.0", default-features = false }

@@ -1,0 +1,108 @@
+name: iroh Apple datapath gate
+run-name: iOS 17.5 iroh binary qualification (no private datapath or local discovery)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/iroh-apple-gate.yml
+      - packaging/iroh-apple/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iroh-apple-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  IROH_GATE_DIR: packaging/iroh-apple
+
+jobs:
+  gate:
+    name: iOS 17.5 qualified iroh binary gate
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Check out Avibe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Report pinned Apple toolchain
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          test "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6"
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          source "$IROH_GATE_DIR/versions.env"
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup target add --toolchain "$RUST_VERSION" \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+          rustc +"$RUST_VERSION" --version
+          cargo +"$RUST_VERSION" --version
+
+      - name: Check out pinned iroh-ffi commit
+        run: |
+          set -euo pipefail
+          source "$IROH_GATE_DIR/versions.env"
+          checkout_dir="$RUNNER_TEMP/iroh-ffi"
+          git init -q "$checkout_dir"
+          git -C "$checkout_dir" remote add origin https://github.com/n0-computer/iroh-ffi.git
+          git -C "$checkout_dir" fetch --depth=1 origin \
+            "$IROH_FFI_COMMIT" \
+            "refs/tags/$IROH_FFI_TAG:refs/tags/$IROH_FFI_TAG"
+          git -C "$checkout_dir" checkout --detach "$IROH_FFI_COMMIT"
+          test "$(git -C "$checkout_dir" rev-parse HEAD)" = "$IROH_FFI_COMMIT"
+          test "$(git -C "$checkout_dir" rev-parse "$IROH_FFI_TAG^{commit}")" = "$IROH_FFI_COMMIT"
+          echo "IROH_SOURCE=$checkout_dir" >> "$GITHUB_ENV"
+
+      - name: Build qualified iOS xcframework and Swift package
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/iroh-apple-artifacts"
+          bash "$IROH_GATE_DIR/build-iroh-apple.sh" "$IROH_SOURCE" "$output_dir" \
+            | tee "$RUNNER_TEMP/iroh-apple-build.log"
+          echo "IROH_OUTPUT=$output_dir" >> "$GITHUB_ENV"
+
+      - name: Verify upstream prebuilt positive control (including iOS arm64)
+        run: |
+          set -euo pipefail
+          source "$IROH_GATE_DIR/versions.env"
+          upstream_zip="$RUNNER_TEMP/IrohLib-upstream.xcframework.zip"
+          curl --fail --location --retry 3 \
+            "https://github.com/n0-computer/iroh-ffi/releases/download/$IROH_FFI_TAG/IrohLib.xcframework.zip" \
+            --output "$upstream_zip"
+          echo "$UPSTREAM_XCFRAMEWORK_SHA256  $upstream_zip" | shasum -a 256 --check --strict
+          upstream_dir="$RUNNER_TEMP/upstream-xcframework"
+          rm -rf "$upstream_dir"
+          mkdir -p "$upstream_dir"
+          ditto -x -k "$upstream_zip" "$upstream_dir"
+          bash "$IROH_GATE_DIR/check-private-apple-datapath.sh" --expect-hit "$upstream_dir" \
+            | tee "$IROH_OUTPUT/positive-control-check.log"
+          upstream_ios_arm64="$upstream_dir/Iroh.xcframework/ios-arm64/libiroh_ffi.a"
+          test -f "$upstream_ios_arm64"
+          bash "$IROH_GATE_DIR/check-private-apple-datapath.sh" --expect-hit "$upstream_ios_arm64" \
+            | tee -a "$IROH_OUTPUT/positive-control-check.log"
+
+      - name: Upload qualified iOS artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: iroh-apple-gate-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/iroh-apple-artifacts/IrohLib.xcframework.zip
+            ${{ runner.temp }}/iroh-apple-artifacts/IrohLib.xcframework.zip.sha256
+            ${{ runner.temp }}/iroh-apple-artifacts/IrohLib.swift
+            ${{ runner.temp }}/iroh-apple-artifacts/manifest.json
+            ${{ runner.temp }}/iroh-apple-artifacts/feature-graph-*.txt
+            ${{ runner.temp }}/iroh-apple-artifacts/patched-check.log
+            ${{ runner.temp }}/iroh-apple-artifacts/positive-control-check.log
+            ${{ runner.temp }}/iroh-apple-artifacts/xcodebuild-*.log
