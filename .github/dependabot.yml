@@ -38,7 +38,7 @@ updates:
           - patch
     # Vitest 5.1.0 excludes our supported Node20 toolchain. Keep the 4.x
     # declaration and leave later candidates eligible for compatibility review.
-    # Tested 0.5.5, 0.5.6 and 0.5.7 change refresh diagnostics beyond the
+    # Tested 0.5.4, 0.5.5, 0.5.6 and 0.5.7 change refresh diagnostics beyond the
     # existing lint ledger. Keep 0.4.26; review later candidates independently.
     ignore:
       # 31.0.0 excludes Node20 and its Undici dependency fails startup there.
@@ -52,7 +52,7 @@ updates:
       - dependency-name: vitest
         versions: ["5.1.0"]
       - dependency-name: eslint-plugin-react-refresh
-        versions: ["0.5.5", "0.5.6", "0.5.7"]
+        versions: ["0.5.4", "0.5.5", "0.5.6", "0.5.7"]
 
   - package-ecosystem: npm
     directory: /desktop

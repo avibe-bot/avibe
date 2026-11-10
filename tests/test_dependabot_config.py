@@ -42,12 +42,6 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
         assert "auto-merge" not in item
         assert "automerge" not in item
 
-    # Keep the known lint-policy drift out of grouped UI bumps without blocking
-    # future candidates from being reviewed against the existing lint ledger.
-    ui = next(item for item in updates if item["directory"] == "/ui")
-    refresh_ignores = [item for item in ui.get("ignore", []) if item["dependency-name"] == "eslint-plugin-react-refresh"]
-    assert refresh_ignores == [{"dependency-name": "eslint-plugin-react-refresh", "versions": ["0.5.5", "0.5.6", "0.5.7"]}]
-
     # Known-incompatible Windows IPC versions must not overwrite the safety pin.
     # Keep the exclusion version-scoped so later fixes still receive review.
     cargo = next(item for item in updates if item["package-ecosystem"] == "cargo")
@@ -59,6 +53,21 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
     assert uv["package-ecosystem"] == "uv"
     assert uv["versioning-strategy"] == "increase"
     assert uv["ignore"] == [{"dependency-name": "claude-agent-sdk"}]
+
+
+def test_ui_refresh_hold_preserves_the_established_export_contract() -> None:
+    # 0.5.4 adds diagnostics for primitive aliases, lazy registry entries and
+    # deferred components. Keep only demonstrated incompatible releases out;
+    # eslintConventions.test.mjs exercises the actual rule on those shapes.
+    ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
+    assert [item for item in ui["ignore"] if item["dependency-name"] == "eslint-plugin-react-refresh"] == [
+        {"dependency-name": "eslint-plugin-react-refresh", "versions": ["0.5.4", "0.5.5", "0.5.6", "0.5.7"]}
+    ]
+    package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
+    assert package["devDependencies"]["eslint-plugin-react-refresh"] == "0.4.26"
+    assert lock["packages"][""]["devDependencies"]["eslint-plugin-react-refresh"] == "0.4.26"
+    assert lock["packages"]["node_modules/eslint-plugin-react-refresh"]["version"] == "0.4.26"
 
 
 def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:

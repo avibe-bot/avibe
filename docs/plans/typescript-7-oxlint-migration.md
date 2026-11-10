@@ -65,7 +65,7 @@ unreleased 7.1/main APIs exist in 7.0.2.
 
 ## Implemented compatibility boundaries
 
-- TypeScript **7.0.2**, Oxlint **1.91.0**, and `oxc-parser` **0.157.0** are
+- TypeScript **7.0.2**, Oxlint **1.92.0**, and `oxc-parser` **0.157.0** are
   exactly pinned. There is no `typescript-eslint`, `@typescript-eslint/*`, or
   TypeScript 5/6 package in the installed graph. Runtime package versions and
   tarball identities are unchanged, including Monaco's bundled browser worker;
@@ -103,6 +103,36 @@ unreleased 7.1/main APIs exist in 7.0.2.
   possibly missing optional-chain result. The migrated B7 test's stale callback
   title is aligned with its existing source; the old compiler also fails that
   lookup, independently reproduced before fixing it.
+
+## Dependency maintenance acceptance (2026-11-10)
+
+The grouped UI update advances Oxlint from **1.91.0 to 1.92.0**. Its independent
+engine identity guard and assertion move together; the complete rule policy and
+`eslint-baseline.json` remain unchanged. On identical application source,
+isolated exact-lock installations measured **1590 TS/TSX files, 766 errors,
+60 warnings and 46 suppressed messages** on both versions. Every diagnostic
+matches by file, rule, severity, location and message after normalizing only
+worktree/temporary-root paths; coverage and policy measurements also match.
+
+The same candidate's Refresh **0.5.4** is not compatible with the established
+export contract. After correcting the engine identity guard, it adds 12 errors
+on unchanged source: primitive aliases in `dialog.tsx`, lazy app registry entries,
+the deferred Inbox preview and an additional `ApiContext.tsx` export. Keep
+**0.4.26** and narrowly exclude **0.5.4**, alongside the already tested
+0.5.5–0.5.7; future releases still receive review. The owning convention tests
+exercise primitive aliases, lazy registry entries and deferred components through
+the real configured CLI (all three fail with 0.5.4), while retaining the allowed
+literal-constant case and the error for an ordinary function mixed with a
+component. No rule, severity, suppression or consumer is weakened to admit it.
+
+The compatible motion **14.10.1**, lucide-react **1.70.0**, Tailwind **4.3.5** and
+Oxlint **1.92.0** upgrades remain. Fresh `npm ci` preserves the lock digest.
+On Node 22.23.4, 867 focused script/motion/dialog/FLIP tests pass, as do the lint
+gate, theme validation, test/i18n/design/E2E typechecks, UI build and first-load
+budgets. Minimum Node **20.19.0** passes 87 focused lint/motion/dialog tests and
+the UI build. The five dependency-policy tests pass. Vitest 4.1.11, jsdom 29.1.1
+and the Node engine range are unchanged. Full application/browser/native checks
+remain GitHub CI gates, not a repeated local workload.
 
 ## Local acceptance evidence (2026-11-04)
 
