@@ -507,8 +507,9 @@ def test_health_endpoint_reports_the_controller_runtime_identity(monkeypatch):
 
 
 @pytest.mark.real_desktop_session_probe
-def test_restart_endpoint_seeds_the_job_in_this_process_off_the_loop(monkeypatch, tmp_path):
-    """A caller outside the desktop session hands its restart to the service, which seeds it itself."""
+def test_restart_endpoint_seeds_this_service_s_own_restart_off_the_loop(monkeypatch, tmp_path):
+    """A caller outside the desktop session hands its restart to the service, which runs only its own launcher."""
+    import shutil
     from functools import partial
 
     from config import paths
@@ -519,6 +520,22 @@ def test_restart_endpoint_seeds_the_job_in_this_process_off_the_loop(monkeypatch
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+
+    def select_generation(generation: str) -> str:
+        """Leave the stable launcher on one generation of the managed install, as a copying activation does."""
+        launcher = tmp_path / "bin" / "vibe"
+        export = tmp_path / "runtime" / "install-generations" / generation / "bin" / "vibe"
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_text(f"#!/bin/sh\n# {generation}\n", encoding="utf-8")
+        export.chmod(0o755)
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(export, launcher)
+        (launcher.parent / ".vibe.avibe-generation").write_text(str(export.parents[1]), encoding="utf-8")
+        return str(launcher)
+
+    # The launcher this service was started from, and so restarts itself with.
+    service_launcher = select_generation("generation-1")
+    monkeypatch.setenv("VIBE_CURRENT_EXECUTABLE", service_launcher)
     # Everything a hand-over needs is here: this process is outside the desktop
     # session and a service inside it answers. A seed that handed on would ask
     # that service, which is this one, and never spawn the job.
@@ -573,12 +590,6 @@ def test_restart_endpoint_seeds_the_job_in_this_process_off_the_loop(monkeypatch
             return None
 
     monkeypatch.setattr(restart_supervisor, "atomic_upgrade_lock", CallerHoldsActivation)
-    # This service was started from another launcher than the caller's.
-    monkeypatch.setattr(
-        restart_supervisor,
-        "get_restart_environment",
-        lambda vibe_path=None: {"PATH": "/bin", "VIBE_CURRENT_EXECUTABLE": "/service/vibe"},
-    )
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
     spawned: list[tuple[list[str], dict, int]] = []
@@ -588,42 +599,46 @@ def test_restart_endpoint_seeds_the_job_in_this_process_off_the_loop(monkeypatch
         lambda command, **kwargs: spawned.append((command, kwargs["env"], threading.get_ident()))
         or SimpleNamespace(pid=45678),
     )
-    caller_launcher = str(Path(sys.executable).resolve())
     app = internal_server.create_app(_build_controller_double())
+    restart = {"delay_seconds": 60.0, "trigger": "upgrade", "scope": "service", "prepare_show_runtime": True}
+    # What a caller might name to have run inside the desktop session.
+    foreign = {"vibe_path": "/foreign/vibe", "python_executable": "/foreign/python"}
 
     async def _go():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            malformed = await client.post("/internal/restart", json={"python_executable": ["/generation/python"]})
-            seeded = await client.post(
-                "/internal/restart",
-                json={
-                    "delay_seconds": 60.0,
-                    "vibe_path": caller_launcher,
-                    "trigger": "upgrade",
-                    "scope": "service",
-                    "prepare_show_runtime": True,
-                    "python_executable": "/generation/python",
-                },
-            )
-        return threading.get_ident(), malformed, seeded
+            refused = [
+                # No generation named, a trigger that is not a label, and a
+                # generation this service's launcher does not select.
+                await client.post("/internal/restart", json={**restart, **foreign}),
+                await client.post(
+                    "/internal/restart",
+                    json={**restart, "generation": "generation-1", "trigger": "--vibe-path=/foreign/vibe"},
+                ),
+                await client.post("/internal/restart", json={**restart, **foreign, "generation": "generation-2"}),
+            ]
+            assert spawned == []
+            # An upgrade activates a newer generation: the same launcher now selects it.
+            select_generation("generation-2")
+            stale = await client.post("/internal/restart", json={**restart, "generation": "generation-1"})
+            assert spawned == []
+            seeded = await client.post("/internal/restart", json={**restart, **foreign, "generation": "generation-2"})
+        return threading.get_ident(), [*refused, stale], seeded
 
-    loop_thread, malformed, seeded = asyncio.run(_go())
+    loop_thread, refused, seeded = asyncio.run(_go())
 
-    assert malformed.status_code == 400
+    assert [response.status_code for response in refused] == [400, 400, 409, 409]
     assert seeded.status_code == 200
     job = seeded.json()
     assert job["supervisor_pid"] == 45678
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == job["job_id"]
     assert handed_on == []
-    # Only the well-formed request spawned, with every argument the caller gave.
     [(command, environment, spawn_thread)] = spawned
     assert spawn_thread != loop_thread
-    assert environment == {"PATH": "/bin", "VIBE_CURRENT_EXECUTABLE": caller_launcher}
+    # The job is this service's launcher with the caller's when and what, and
+    # nothing the request named reaches its command or its environment.
     assert command == [
-        "/generation/python",
-        "-c",
-        "from vibe.cli import main; main()",
+        service_launcher,
         "__restart-supervisor",
         "--job-id",
         job["job_id"],
@@ -634,9 +649,11 @@ def test_restart_endpoint_seeds_the_job_in_this_process_off_the_loop(monkeypatch
         "--scope",
         "service",
         "--vibe-path",
-        caller_launcher,
+        service_launcher,
         "--prepare-show-runtime",
     ]
+    assert environment["VIBE_CURRENT_EXECUTABLE"] == service_launcher
+    assert not {"/foreign/vibe", "/foreign/python"} & {*command, *environment.values()}
 
 
 @pytest.mark.parametrize("env_value", [None, "1"])

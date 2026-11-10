@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import threading
 from functools import partial
@@ -1082,15 +1083,20 @@ _HEALTH = {"ok": True, "service": "vibe-remote-internal", "version": 1}
 _HEALTHY = {**_HEALTH, "macos_login_session_state": "healthy"}
 _ASKED_HEALTH = ("GET /internal/health",)
 _ASKED_TO_RESTART = (*_ASKED_HEALTH, "POST /internal/restart")
-_RESTART_ARGUMENTS = {
-    "delay_seconds": 60.0,
-    "vibe_path": "/bin/vibe",
-    "trigger": "upgrade",
-    "scope": "service",
-    "prepare_show_runtime": True,
-    "python_executable": "/generation/python",
-}
 _SERVICE_JOB = {"ok": None, "job_id": "seeded-by-service", "state": "scheduled", "supervisor_pid": 999}
+
+
+def _select_generation(home: Path, launcher: Path, generation: str) -> Path:
+    """Leave a stable launcher on one generation of ``home``'s managed install, as a copying activation does."""
+
+    export = home / "runtime" / "install-generations" / generation / "bin" / launcher.name
+    export.parent.mkdir(parents=True, exist_ok=True)
+    export.write_text(f"#!/bin/sh\n# {generation}\n", encoding="utf-8")
+    export.chmod(0o755)
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(export, launcher)
+    (launcher.parent / f".{launcher.name}.avibe-generation").write_text(str(export.parents[1]), encoding="utf-8")
+    return launcher
 
 
 class _RestartCase(NamedTuple):
@@ -1100,6 +1106,10 @@ class _RestartCase(NamedTuple):
     desktop_managed: bool = False
     caller_asid: int | None = _SSH_ASID
     gui_asid: int | None = _DESKTOP_ASID
+    # The caller's install: a launcher of the managed generations, the
+    # interpreter of the generation an upgrade just activated, or a launcher
+    # outside them.
+    install: str = "launcher"
     # What ``GET /internal/health`` answers; ``None`` when no service is reachable.
     health: dict | None = _HEALTHY
     # The status ``POST /internal/restart`` answers with, or the failure it raises.
@@ -1118,6 +1128,11 @@ class _RestartCase(NamedTuple):
         pytest.param(_RestartCase(gui_asid=None), id="no-desktop-session"),
         pytest.param(_RestartCase(caller_asid=None), id="probe-inconclusive"),
         pytest.param(_RestartCase(handed_over=True, asked=_ASKED_TO_RESTART), id="outside-and-service-inside"),
+        pytest.param(
+            _RestartCase(install="interpreter", handed_over=True, asked=_ASKED_TO_RESTART),
+            id="outside-after-activating-a-generation",
+        ),
+        pytest.param(_RestartCase(install="foreign", warned=True), id="outside-from-an-unmanaged-install"),
         pytest.param(_RestartCase(health=None, warned=True), id="outside-and-no-service"),
         pytest.param(
             _RestartCase(
@@ -1133,7 +1148,7 @@ class _RestartCase(NamedTuple):
             id="outside-and-service-desktop-managed",
         ),
         pytest.param(_RestartCase(restart=404, warned=True, asked=_ASKED_TO_RESTART), id="outside-and-service-predates-the-endpoint"),
-        pytest.param(_RestartCase(restart=500, warned=True, asked=_ASKED_TO_RESTART), id="outside-and-service-fails"),
+        pytest.param(_RestartCase(restart=409, warned=True, asked=_ASKED_TO_RESTART), id="outside-and-service-on-another-generation"),
         pytest.param(
             _RestartCase(restart=httpx.ReadTimeout("no answer"), warned=True, asked=_ASKED_TO_RESTART),
             id="outside-and-request-fails",
@@ -1149,11 +1164,28 @@ def test_a_restart_from_outside_the_desktop_session_is_seeded_by_the_service_ins
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
+    monkeypatch.delenv("VIBE_CURRENT_EXECUTABLE", raising=False)
     monkeypatch.setattr("platform.system", lambda: case.system)
     if case.desktop_managed:
         monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     else:
         monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+    launcher = _select_generation(tmp_path, tmp_path / "bin" / "vibe", "generation-2")
+    foreign = tmp_path / "venv" / "bin" / "vibe"
+    foreign.parent.mkdir(parents=True)
+    shutil.copy2(launcher, foreign)
+    arguments = {
+        "delay_seconds": 60.0,
+        "vibe_path": str(foreign if case.install == "foreign" else launcher),
+        "trigger": "upgrade",
+        "scope": "service",
+        "prepare_show_runtime": True,
+        "python_executable": (
+            str(tmp_path / "runtime" / "install-generations" / "generation-2" / "uv" / "tools" / "avibe-os" / "bin" / "python3")
+            if case.install == "interpreter"
+            else None
+        ),
+    }
     events: list[str] = []
     probes: list[str] = []
     handed_over: list[dict] = []
@@ -1187,7 +1219,7 @@ def test_a_restart_from_outside_the_desktop_session_is_seeded_by_the_service_ins
         if isinstance(case.restart, Exception):
             raise case.restart
         if case.restart != 200:
-            return httpx.Response(case.restart, json={"detail": "Not Found"})
+            return httpx.Response(case.restart, json={"ok": False})
         handed_over.append(json.loads(request.content))
         return httpx.Response(200, json=_SERVICE_JOB)
 
@@ -1216,7 +1248,7 @@ def test_a_restart_from_outside_the_desktop_session_is_seeded_by_the_service_ins
         lambda command, **kwargs: events.append("spawn") or SimpleNamespace(pid=45678),
     )
 
-    result = restart_supervisor.schedule_restart(**_RESTART_ARGUMENTS)
+    result = restart_supervisor.schedule_restart(**arguments)
 
     # Whoever seeds the job does so while the caller holds activation.
     seeded = () if case.handed_over else ("spawn",)
@@ -1224,7 +1256,16 @@ def test_a_restart_from_outside_the_desktop_session_is_seeded_by_the_service_ins
     assert bool(probes) is case.probed
     warning = capsys.readouterr().err
     if case.handed_over:
-        assert handed_over == [_RESTART_ARGUMENTS]
+        # The service is told when and what to restart and for which generation, and no path.
+        assert handed_over == [
+            {
+                "delay_seconds": 60.0,
+                "trigger": "upgrade",
+                "scope": "service",
+                "prepare_show_runtime": True,
+                "generation": "generation-2",
+            }
+        ]
         assert result == {**_SERVICE_JOB, "handed_over": True}
         assert runtime.read_json(runtime.get_restart_status_path()) is None
     else:

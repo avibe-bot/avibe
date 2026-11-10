@@ -42,22 +42,28 @@ unchanged.
    Web UI and from Agent shells already do. At the shared restart boundary
    (`schedule_restart`), a caller whose audit session is not `gui/<uid>`'s
    hands the restart to the running service when its health identity reports a
-   `healthy` login session: `POST /internal/restart` carries
-   `schedule_restart`'s arguments, the service seeds the restart job in its own
-   process, off the controller loop, and the caller prints that job and says
-   that the running Avibe performs the restart. The caller keeps the activation
-   lock across the hand-over and the service does not take it, so an upgrade
-   hands over too.
+   `healthy` login session. `POST /internal/restart` says when and what to
+   restart and names the install generation the caller's job would run; it
+   carries no path. The service seeds the restart job in its own process, off
+   the controller loop, with the launcher it restarts itself with, as a restart
+   from the Web UI does, and refuses when that launcher does not select the
+   named generation: the desktop session reaches the Keychain, so the service
+   never runs there what a caller names. The caller prints the job and says
+   that the running Avibe performs the restart. It keeps the activation lock
+   across the hand-over and the service does not take it, so an upgrade hands
+   over too, onto the generation it just activated.
    A caller in the desktop session seeds the job itself, as before: the desktop
    terminal stays the manual repair for a stale service. With no desktop
    session, or when the probe cannot tell, nothing changes. When the caller is
    outside and no service can take the restart (none is running, it is not
-   `healthy`, it is a desktop-managed Runtime, it predates the endpoint, or the
-   request fails), the caller seeds the job and warns that Avibe will run
-   outside the desktop session, so Keychain-backed credentials are unavailable
-   until `vibe restart` is run from a terminal on the Mac's desktop. It does not
-   refuse, because a remote restart must still be possible. `vibe start` with
-   nothing running stays a local start and gives the same warning.
+   `healthy`, it is a desktop-managed Runtime, it predates the endpoint, its
+   launcher selects another generation, the caller's install is not a managed
+   generation, or the request fails), the caller seeds the job and warns that
+   Avibe will run outside the desktop session, so Keychain-backed credentials
+   are unavailable until `vibe restart` is run from a terminal on the Mac's
+   desktop. It does not refuse, because a remote restart must still be
+   possible. `vibe start` with nothing running stays a local start and gives
+   the same warning.
 3. **Notice (macOS).** "A desktop session exists and the service is outside it"
    is the degraded state `outside_gui_session` on the surfaces that show
    `stale_login_session`: the Web banner, Doctor, and `vibe status`. A service

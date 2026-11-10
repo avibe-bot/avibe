@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -30,11 +31,14 @@ from vibe.desktop_runtime import (
     desktop_runtime_id,
     is_private_desktop_runtime_path,
 )
-from vibe.launcher_path import CURRENT_VIBE_EXECUTABLE_ENV, is_usable_command_path, resolve_command_path
+from vibe.launcher_path import get_running_vibe_path
 from vibe.upgrade import (
     DESKTOP_MANAGED_RUNTIME_ENV,
     RestartState,
+    _generation_for_path,
+    _launcher_generation,
     atomic_upgrade_lock,
+    atomic_uv_install_root,
     get_restart_command,
     get_restart_environment,
     get_restart_invocation_command,
@@ -63,6 +67,9 @@ OUTSIDE_DESKTOP_SESSION_WARNING = (
     "(GitHub CLI, Vault) will be unavailable until `vibe restart` is run from a terminal on this Mac's desktop."
 )
 _HANDED_OVER_NOTE = "scheduled by the running service for a caller outside the desktop session"
+# A trigger is a label recorded with the job. A request's becomes one argument
+# of the job's command, so it has to look like a label there too.
+_TRIGGER_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 
 
 class StartedRuntime(NamedTuple):
@@ -664,14 +671,40 @@ def outside_desktop_session() -> bool:
     return context.asid_match is False
 
 
+class HandOverRefused(Exception):
+    """This service does not restart onto the install generation a hand-over names."""
+
+
+def _job_generation(vibe_path: str | None, python_executable: str | None) -> str | None:
+    """Name the managed install generation a job seeded with these arguments runs from.
+
+    ``None`` for anything outside this home's managed generations, such as a
+    virtualenv or a source checkout: an install only the caller can name.
+    """
+
+    root = atomic_uv_install_root()
+    if python_executable:
+        generation = _generation_for_path(Path(python_executable), root)
+    else:
+        launcher = get_running_vibe_path(vibe_path=vibe_path)
+        generation = _launcher_generation(Path(launcher), root) if launcher else None
+    return generation.name if generation is not None else None
+
+
 def _hand_over_to_service(arguments: Mapping[str, object]) -> dict | None:
     """Have the running service seed this restart, when it is in the desktop session.
 
-    ``None`` when it did not: no service answers, it is not in the desktop
-    session itself, it is a desktop-managed Runtime, it predates the hand-over,
-    or the request failed.
+    The service runs its own launcher, never one it is handed, so the request
+    carries no path: it names the generation this caller's job would run, and
+    the service refuses when its launcher selects another. ``None`` when the
+    restart was not handed over: this caller's install is not a managed
+    generation, no service answers, it is not in the desktop session itself, it
+    is a desktop-managed Runtime, it predates the hand-over, or it refused.
     """
 
+    generation = _job_generation(arguments["vibe_path"], arguments["python_executable"])  # type: ignore[arg-type]
+    if generation is None:
+        return None
     identity = internal_client.health_identity_sync()
     if (
         identity is None
@@ -679,7 +712,15 @@ def _hand_over_to_service(arguments: Mapping[str, object]) -> dict | None:
         or identity.get("desktop_runtime_id") is not None
     ):
         return None
-    payload = internal_client.schedule_restart_sync(dict(arguments))
+    payload = internal_client.schedule_restart_sync(
+        {
+            "delay_seconds": arguments["delay_seconds"],
+            "trigger": arguments["trigger"],
+            "scope": arguments["scope"],
+            "prepare_show_runtime": arguments["prepare_show_runtime"],
+            "generation": generation,
+        }
+    )
     if payload is None:
         return None
     return {**payload, "handed_over": True}
@@ -730,42 +771,50 @@ def schedule_restart(
 
 
 def schedule_handed_over_restart(request: Mapping[str, object]) -> dict:
-    """Seed a restart that a caller outside the desktop session handed to this service.
+    """Seed this service's own restart for a caller outside the desktop session.
 
-    That caller holds activation until this returns, so the lock is not taken
+    The job runs the launcher this service restarts itself with, as a restart
+    from the Web UI does. Nothing in the request is executed and it carries no
+    path: beside when and what to restart, it names the install generation the
+    caller's restart is for, and ``HandOverRefused`` is raised when this
+    service's launcher does not select that generation, so that the caller
+    seeds its own job. ``ValueError`` is raised for a malformed request.
+
+    The caller holds activation until this returns, so the lock is not taken
     here: taking it would wait on the caller, which is waiting on this. Nothing
-    is handed on either, whatever session this process is in. Raises
-    ``ValueError`` for a request that does not carry ``schedule_restart``'s
-    arguments.
+    is handed on either, whatever session this process is in.
     """
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
     delay_seconds = request.get("delay_seconds", 0.0)
-    vibe_path = request.get("vibe_path")
     trigger = request.get("trigger", "cli")
     scope = request.get("scope", "all")
     prepare_show_runtime = request.get("prepare_show_runtime", False)
-    python_executable = request.get("python_executable")
+    generation = request.get("generation")
     if (
         isinstance(delay_seconds, bool)
         or not isinstance(delay_seconds, (int, float))
         or not math.isfinite(delay_seconds)
         or delay_seconds < 0
-        or not (vibe_path is None or isinstance(vibe_path, str))
         or not isinstance(trigger, str)
+        or _TRIGGER_LABEL_RE.match(trigger) is None
         or scope not in ("all", "service")
         or not isinstance(prepare_show_runtime, bool)
-        or not (python_executable is None or isinstance(python_executable, str))
+        or not isinstance(generation, str)
+        or not generation
     ):
         raise ValueError("invalid restart request")
+    launcher = get_running_vibe_path()
+    if launcher is None or _job_generation(launcher, None) != generation:
+        raise HandOverRefused("this service does not restart onto the requested install generation")
     guard_source_checkout_default_state_bootstrap()
     return _schedule_restart_locked(
         delay_seconds=float(delay_seconds),
-        vibe_path=vibe_path or None,
+        vibe_path=launcher,
         trigger=trigger,
         scope=scope,
         prepare_show_runtime=prepare_show_runtime,
-        python_executable=python_executable or None,
+        python_executable=None,
         note=_HANDED_OVER_NOTE,
     )
 
@@ -807,13 +856,6 @@ def _schedule_restart_locked(
         env = dict(os.environ if env is None else env)
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
-    env = runtime.independent_process_env(env)
-    # A caller's environment already names the launcher it passes. The service
-    # seeding a job for another caller was started from its own, which a later
-    # restart from the Web UI would otherwise go back to.
-    launcher = resolve_command_path(vibe_path)
-    if is_usable_command_path(launcher):
-        env[CURRENT_VIBE_EXECUTABLE_ENV] = launcher
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Seed the status BEFORE spawning the job so the child's own writes (which set
@@ -850,7 +892,7 @@ def _schedule_restart_locked(
                 stderr=subprocess.STDOUT,
                 close_fds=True,
                 cwd=get_safe_cwd(),
-                env=env,
+                env=runtime.independent_process_env(env),
                 **isolated_subprocess_kwargs(),
             )
     except OSError as exc:
