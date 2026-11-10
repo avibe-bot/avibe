@@ -217,6 +217,11 @@ def check_profile(
                 actual_values = set(actual)
             except (TypeError, ValueError):
                 actual_values = set()
+        if key == "com.apple.developer.associated-domains" and "*" in actual_values:
+            # Provisioning-profile entitlements are an allowlist. A wildcard
+            # grant here covers this domain; the archived app is still checked
+            # below for the exact webcredentials domain it signs.
+            continue
         if not set(required) <= actual_values:
             raise TestFlightError(
                 f"The profile does not grant the required {key} values; "
@@ -447,6 +452,14 @@ def check_signed_bundle(
             raise TestFlightError(
                 "The bundle must carry exactly the required "
                 "keychain-access-groups values"
+            )
+        if (
+            key == "com.apple.developer.associated-domains"
+            and actual_values != set(required)
+        ):
+            raise TestFlightError(
+                "The bundle must carry exactly the required "
+                f"{key} values {required}"
             )
         if not set(required) <= actual_values:
             raise TestFlightError(f"The bundle's {key} entitlement lacks {required}")

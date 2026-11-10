@@ -130,6 +130,21 @@ def test_profile_keychain_grants_reject_unrelated_malformed_or_insufficient_valu
         testflight.check_profile(profile, now=NOW)
 
 
+def test_profile_associated_domain_grants_accept_the_profile_wildcard_only():
+    profile = app_store_profile()
+    profile["Entitlements"]["com.apple.developer.associated-domains"] = "*"
+    testflight.check_profile(profile, now=NOW)
+
+    profile["Entitlements"]["com.apple.developer.associated-domains"] = ["*"]
+    testflight.check_profile(profile, now=NOW)
+
+    profile["Entitlements"]["com.apple.developer.associated-domains"] = [
+        "webcredentials:example.com"
+    ]
+    with pytest.raises(testflight.TestFlightError, match="associated-domains"):
+        testflight.check_profile(profile, now=NOW)
+
+
 def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
     profile = app_store_profile()
     profile["Entitlements"]["aps-environment"] = "development"
@@ -361,6 +376,17 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         ({"ITSAppUsesNonExemptEncryption": None}, None, "ITSAppUsesNonExemptEncryption"),
         (None, {"get-task-allow": True}, "development signature"),
         (None, {"com.apple.developer.associated-domains": []}, "webcredentials:avibe.bot"),
+        (None, {"com.apple.developer.associated-domains": ["*"]}, "webcredentials:avibe.bot"),
+        (
+            None,
+            {
+                "com.apple.developer.associated-domains": [
+                    "webcredentials:avibe.bot",
+                    "webcredentials:attacker.example",
+                ]
+            },
+            "exactly",
+        ),
         (None, {"application-identifier": "ZZZZZZZZZZ.bot.avibe.ios"}, "not signed for"),
         (None, {"aps-environment": "development"}, "aps-environment"),
         (None, {"com.apple.developer.usernotifications.filtering": True}, "forbidden entitlements"),
@@ -371,6 +397,8 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         "encryption",
         "debuggable",
         "passkeys",
+        "passkeys-wildcard",
+        "passkeys-extra-domain",
         "team",
         "development-aps",
         "filtering",
