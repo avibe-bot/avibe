@@ -1,6 +1,7 @@
 # Protected Vault passkeys in the iOS App
 
-Status: draft for the owner's decision. Nothing here is implemented.
+Status: decided by the owner on 2026-11-11 (see Decisions). The device check
+is still open.
 Date: 2026-11-10.
 Related: `ios-app.md` section 7 ("Known risk: Protected Vault passkeys"),
 `vault-crypto-sandbox.md`, `vault-sandbox-protocol-v2.md`,
@@ -104,7 +105,7 @@ Add the missing platform association and change nothing else.
   `scripts/release*.mjs`, so the release identity, the retained bytes, and the
   Avibe pin are untouched. Merging deploys Production, so it needs the owner's
   authorization.
-- **App (Max):** add `webcredentials:sandbox.avibe.bot` to
+- **App:** add `webcredentials:sandbox.avibe.bot` to
   `ios/Avibe/Avibe.entitlements`; add it to `MAIN_REQUIRED_ENTITLEMENTS` in
   `ios/scripts/testflight.py` and its test; update `ios/README.md` and
   `ios-app.md` section 7. No Swift change.
@@ -263,12 +264,18 @@ Account sign-in uses a different passkey under `avibe.bot`, already
 associated. This adds a second `webcredentials` domain to the same
 entitlement and exact-set check; neither passkey can stand in for the other.
 
-## Open questions for the owner
+## Decisions
 
-1. Is the recommendation enough, keeping the sandbox sheet, or does he want
-   the sheet gone (alternative D, a trust decision)?
-2. Authorization to deploy the association file to `sandbox.avibe.bot`.
-3. Who does the App change: Max, or an Agent prepares the branch for Max to
-   approve so the owner can test the same day on his own iPhone.
-4. Protected tier in the App requires iOS 18. Is a plain "needs iOS 18"
-   message on iOS 17 wanted, or is the current failure acceptable?
+Owner, 2026-11-11:
+
+1. The recommendation is adopted: association only. The sandbox review sheet
+   stays, and alternative D is off.
+2. Deploying the association file to `sandbox.avibe.bot` is authorized
+   (avibe-bot/vault-sandbox#27).
+3. The App change is made without waiting for Max, who is told afterwards
+   (#3506).
+
+No "needs iOS 18" message is added for now; revisit after the device check.
+
+Order: the association file is deployed and visible at Apple's CDN, then the
+App change merges and a TestFlight build is cut, then the device check above.
