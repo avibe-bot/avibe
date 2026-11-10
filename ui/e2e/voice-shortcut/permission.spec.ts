@@ -14,10 +14,15 @@ async function composer(page: Page) {
 test('an explicit Desktop retry reaches capture after refusal and delivers frames on repeated holds', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel' });
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     let requests = 0;
     navigator.mediaDevices.getUserMedia = (constraints) => ++requests === 1
-      ? Promise.reject(new DOMException('Injected refusal', 'NotAllowedError'))
+      ? new Promise((_resolve, reject) => {
+        // A native alert takes the press before its answer reaches the page.
+        window.dispatchEvent(new Event('blur'));
+        setTimeout(() => reject(new DOMException('Injected refusal', 'NotAllowedError')), 100);
+      })
       : getUserMedia(constraints);
     // Stale website state remains denied even after the simulated OS change.
     const query = navigator.permissions.query.bind(navigator.permissions);

@@ -28,8 +28,10 @@ The installed rc25 bundle has `NSMicrophoneUsageDescription`, the audio-input en
 
 ## Results
 
-The five initial hook regressions failed on the baseline for swallowed probe errors and the Desktop website-permission gate. The repaired focused suites pass 163 UI tests and 17 telemetry contract tests. Five browser scenarios exercise the real AudioWorklet with generated 440 Hz input: two successful captures each delivered seven chunks, 516 render calls, no empty inputs, and a peak level of -17 dBFS. Refusal and device failures are injected in those browser scenarios; they do not exercise macOS TCC.
+The five initial hook regressions failed on the baseline for swallowed probe errors and the Desktop website-permission gate. Further regressions failed when Desktop lost focus before its permission rejection arrived and when Windows selected macOS recovery text. The repaired focused suites pass 168 UI tests and 17 telemetry contract tests, including the delayed answer and invalidation on dismissal, cancellation, or a new gesture. Five browser scenarios exercise the real AudioWorklet with generated 440 Hz input: two successful captures each delivered seven chunks, 516 render calls, no empty inputs, and a peak level of approximately -17 dBFS. Refusal, alert blur, and device failures are injected in those browser scenarios; they do not exercise macOS TCC.
 
 UI test and all 21 E2E typecheck suites, lint, production build, changed-file Ruff, and 22 existing Chromium voice-shortcut scenarios pass. Real undetermined-to-Allow and denial-to-System-Settings recovery remain manual gates because the host is locked. The identity-only shell verified a separate undetermined bundle but did not execute capture and is not Release-equivalent.
 
 After enabling System Settings, an explicit Desktop hold reissues `getUserMedia`. If WebKit still rejects access from retained page/system state, the UI advises quitting and reopening Avibe. No automatic recording, forced navigation, or restart is added, and the native recovery mechanism has not been verified on the affected Mac.
+
+Review also requires Desktop recovery copy to respect the operating system. Both hold surfaces reserve the macOS settings path for Apple Desktop and use desktop-app privacy guidance elsewhere; browser/mobile instructions retain their selection.

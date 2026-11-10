@@ -121,6 +121,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   cleanup();
 });
@@ -352,11 +353,15 @@ describe('what the composer shows', () => {
     expect(await screen.findByText(note)).toBeTruthy();
   });
 
-  it('points a refused Desktop microphone to system settings', async () => {
+  it.each([
+    ['MacIntel', en.voice.deniedDesktop],
+    ['Win32', en.voice.deniedDesktopOther],
+  ])('points a refused Desktop microphone on %s to the appropriate system settings', async (platform, note) => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform);
     hookMock.state = { outcome: 'denied' };
     renderComposer();
-    expect(await screen.findByText(en.voice.deniedDesktop)).toBeTruthy();
+    expect(await screen.findByText(note)).toBeTruthy();
     expect(screen.queryByText(en.voice.composer.deniedBrowser)).toBeNull();
   });
 

@@ -369,6 +369,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   /** The press is over with nothing to keep: back to rest, saying how it ended. */
   const end = useCallback((how: HoldOutcome | null) => {
+    if (how !== 'asking') permissionAsk.current = null;
     if (how) reportHold(TELEMETRY_OUTCOME[how], take.current);
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
@@ -460,6 +461,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, [end, interrupt]);
 
   const startTake = useCallback((granted: boolean) => {
+    const startupAsk = isDesktopShell() ? Symbol('capture-start') : null;
+    if (startupAsk) permissionAsk.current = startupAsk;
     const keep = latest.current.keep?.();
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
@@ -509,6 +512,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // A release (or the system) may come before the microphone is ready.
       if (current.ending === 'send' || current.ending === 'system') dictation.finish();
     }, (error: unknown) => {
+      // A macOS alert can take the press before its answer arrives. Keep that
+      // answer visible only while the original asking note still owns feedback.
+      if (startupAsk && permissionAsk.current === startupAsk && take.current !== current
+        && mounted.current && !(error instanceof VoiceTranscriptionError && error.code === 'cancelled')) {
+        permissionAsk.current = null;
+        allowedOnAsk = false;
+        const outcome = microphoneFailure(error);
+        reportHold(TELEMETRY_OUTCOME[outcome], null);
+        setOutcome(outcome);
+      }
       fail(current, error);
       dictation.abort();
     });

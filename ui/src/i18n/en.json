@@ -7009,6 +7009,7 @@
     "deniedTitle": "The microphone is off",
     "deniedBody": "Allow the microphone in system settings, or tap {{name}} to type.",
     "deniedDesktop": "Allow Avibe in System Settings → Privacy & Security → Microphone, then hold to try again. If access is still blocked, quit and reopen Avibe.",
+    "deniedDesktopOther": "Allow microphone access for desktop apps in your system privacy settings, then hold to try again.",
     "tapToType": "Tap {{name}} to type.",
     "failedBody": "Nothing was recognized; the recording is kept, so you can retry.",
     "dismiss": "Dismiss",

@@ -68,9 +68,13 @@ vi.mock('../../lib/showPageVoiceDictation', () => ({
         done,
         resolve,
         reject,
-        start: vi.fn(() => pipeline.startError
-          ? Promise.reject(pipeline.startError)
-          : new Promise<void>((ready) => setTimeout(ready, pipeline.startMs))),
+        start: vi.fn(() => {
+          const { startError, startMs } = pipeline;
+          return new Promise<void>((ready, refuse) => setTimeout(() => {
+            if (startError) refuse(startError);
+            else ready();
+          }, startMs));
+        }),
         finish: vi.fn(),
         abort: vi.fn(() => reject(new VoiceTranscriptionError('cancelled'))),
         canRetry: vi.fn(() => true),
@@ -614,6 +618,43 @@ describe('useHoldToTalk', () => {
     await holdFor(el);
     expect(pipeline.takes).toHaveLength(2);
     expect(hold.phase).toBe('listening');
+  });
+
+  it('reports a Desktop refusal that arrives after the permission alert took the press', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    pipeline.startMs = 5_000;
+    pipeline.startError = new DOMException('Blocked', 'NotAllowedError');
+    const el = await mount();
+    await holdFor(el);
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(hold.outcome).toBe('asking');
+    await elapse(5_000);
+    expect(hold.outcome).toBe('denied');
+    expect(hold.phase).toBe('idle');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(['dismiss', 'new-hold', 'cancel'] as const)('ignores a late Desktop refusal after %s', async (action) => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    pipeline.startMs = 5_000;
+    pipeline.startError = new DOMException('Blocked', 'NotAllowedError');
+    const el = await mount();
+    await holdFor(el);
+    if (action === 'cancel') {
+      fireEvent.keyDown(window, { key: 'Escape' });
+    } else {
+      act(() => window.dispatchEvent(new Event('blur')));
+      if (action === 'dismiss') act(() => hold.dismiss());
+      else {
+        pipeline.startMs = 0;
+        pipeline.startError = null;
+        await holdFor(el);
+      }
+    }
+    await elapse(5_000);
+    expect(hold.outcome).toBe(action === 'cancel' ? 'cancelled' : null);
+    expect(hold.phase).toBe(action === 'new-hold' ? 'listening' : 'idle');
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('lets the permission prompt take the first hold, records the next once allowed, and says why a refused one does nothing', async () => {

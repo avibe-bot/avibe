@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { BotAvatar as BotAvatarSpec } from '@/lib/bots';
 import { isDesktopShell } from '@/lib/desktopShell';
+import { isApplePlatform } from '@/lib/platform';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { BotAvatar } from '../ui/bot-avatar';
@@ -133,7 +134,9 @@ export function MainBotVoiceToast({ hold, bot, onView, placement = 'bar' }: { ho
               {outcome === 'denied' && (
                 <>
                   <span className="font-semibold text-foreground">{t('voice.deniedTitle')}</span>
-                  <span className="text-muted">{t(isDesktopShell() ? 'voice.deniedDesktop' : 'voice.deniedBody', { name: bot.name })}</span>
+                  <span className="text-muted">{t(isDesktopShell()
+                    ? isApplePlatform() ? 'voice.deniedDesktop' : 'voice.deniedDesktopOther'
+                    : 'voice.deniedBody', { name: bot.name })}</span>
                 </>
               )}
               {outcome === 'unavailable' && (

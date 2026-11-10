@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { isDesktopShell } from '@/lib/desktopShell';
+import { isApplePlatform } from '@/lib/platform';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { Button } from '../ui/button';
@@ -201,7 +202,9 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
         {note === 'denied' && (
           <>
             <span className="font-semibold text-foreground">{t('voice.deniedTitle')}</span>
-            <span className="text-muted">{t(isDesktopShell() ? 'voice.deniedDesktop' : pointer === 'mouse' ? 'voice.composer.deniedBrowser' : 'voice.composer.deniedSystem')}</span>
+            <span className="text-muted">{t(isDesktopShell()
+              ? isApplePlatform() ? 'voice.deniedDesktop' : 'voice.deniedDesktopOther'
+              : pointer === 'mouse' ? 'voice.composer.deniedBrowser' : 'voice.composer.deniedSystem')}</span>
           </>
         )}
         {note === 'unavailable' && <span className="text-foreground">{t('pet.voice.cloudRequired')}</span>}
