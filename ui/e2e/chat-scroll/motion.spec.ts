@@ -1396,8 +1396,10 @@ test('a disclosure tapped on a row another opening still pushes down writes no s
   const { writes } = await stop(page);
   expect(restoreWrites(writes)).toEqual([]);
   // The row itself only goes down, with the chip's edge, and comes to rest. (What follows it ends up below the
-  // screen, where the motion does not move it: the other specs judge the rows below an edge.)
-  const tops = frames.filter(({ frame, exact }) => frame !== null && exact).map(({ tapped }) => tapped);
+  // screen, where the motion does not move it: the other specs judge the rows below an edge.) Judged at every read
+  // taken at one moment and on time, at a frame or as the document changed: a slow runner can draw most of the way
+  // before its next frame.
+  const tops = frames.filter(({ exact, onTime }) => exact && onTime).map(({ tapped }) => tapped);
   const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
   expect(steps.length).toBeGreaterThan(0);
   expect(steps.every((step) => step > 0)).toBe(true);
