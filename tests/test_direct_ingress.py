@@ -618,7 +618,9 @@ def _remove_guard_layer(monkeypatch) -> None:
 
 
 def _remove_marker_layer(monkeypatch) -> None:
-    monkeypatch.setattr(ui_server, "_is_direct_ingress_request", lambda: False)
+    """Have the guard mark requests under a key no reader looks at."""
+
+    monkeypatch.setattr(direct_ingress, "DIRECT_INGRESS_SCOPE_KEY", "unread")
 
 
 def _remove_peer_layer(monkeypatch) -> None:
@@ -762,6 +764,42 @@ async def test_ingress_stops_answering_once_its_hostname_is_not_the_instances(av
     for status, _headers, body in (moved, disabled):
         assert status == 421
         assert json.loads(body) == {"ok": False, "error": "direct_ingress_host_mismatch"}
+
+
+@pytest.mark.parametrize("scope_type", ["http", "websocket"])
+async def test_no_route_answers_for_a_stale_ingress_hostname(avibe_config, scope_type):
+    """Request hooks do not wrap WebSocket handlers, so the rule sits outside every route."""
+
+    reached: list[str] = []
+
+    async def inner(scope, receive, send) -> None:
+        reached.append(scope["type"])
+
+    async def call(marked: bool) -> list[dict]:
+        sent: list[dict] = []
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        scope = _scope(type=scope_type)
+        if marked:
+            scope[DIRECT_INGRESS_SCOPE_KEY] = {"peer": PEER}
+        await ui_server._DirectIngressLiveHostMiddleware(inner)(scope, None, send)
+        return sent
+
+    current = await call(marked=True)
+    avibe_config.remote_access.vibe_cloud.enabled = False
+    avibe_config.save()
+    disabled = await call(marked=True)
+    # Control: a request from any other listener is not this rule's business.
+    unmarked = await call(marked=False)
+
+    assert current == [] and unmarked == []
+    assert reached == [scope_type, scope_type]
+    if scope_type == "websocket":
+        assert disabled == [{"type": "websocket.close", "code": 1008}]
+    else:
+        assert disabled[0]["status"] == 421
 
 
 def test_auth_rate_limit_is_keyed_by_the_transport_peer():

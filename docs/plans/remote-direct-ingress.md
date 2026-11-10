@@ -91,7 +91,7 @@ With all three removed, `Host: localhost` through a valid CONNECT returns the ow
 
 Two further rules:
 
-- **Hostname drift.** Before any other request hook, a direct-ingress request is answered `421` unless its `Host` is still the instance's managed hostname and remote access is still enabled. This covers the routes that are exempt from host validation, such as `/api/session`, which would otherwise describe a local owner.
+- **Hostname drift.** Outside every route, a direct-ingress request is refused (`421`; a WebSocket handshake gets `403`) unless its `Host` is still the instance's managed hostname and remote access is still enabled. The rule is an ASGI middleware, not a request hook, so it also covers WebSocket handlers and the routes exempt from host validation, such as `/api/session`, which would otherwise describe a local owner.
 - **Rate limiting.** The unauthenticated sign-in budget is keyed `direct:<peer label>`, so one device cannot spend the budget of every direct client.
 
 Everything else is unchanged and identical to the tunnel: recognized-host check, session cookie and current authorization, roles, CSRF double-submit, exact Origin, WebSocket Origin and authorization, SSE revalidation. Cookies set through the ingress are `Secure` because the listener is TLS.
@@ -117,7 +117,7 @@ Everything else is unchanged and identical to the tunnel: recognized-host check,
 | Forged forwarding headers do not change the answer (covers both proxy-trust layers) | `test_forged_forwarding_headers_do_not_change_the_answer` |
 | Anonymous, signed-in, and forged-cookie requests get the tunnel's answers | `test_remote_authentication_matches_the_tunnel` |
 | A loopback-only WebSocket route is closed to the ingress | `test_loopback_only_websocket_is_closed_to_the_ingress` |
-| Hostname drift and disabled remote access | `test_ingress_stops_answering_once_its_hostname_is_not_the_instances` |
+| Hostname drift and disabled remote access, for HTTP and WebSocket routes | `test_ingress_stops_answering_once_its_hostname_is_not_the_instances`, `test_no_route_answers_for_a_stale_ingress_hostname` |
 | WebSocket upgrade and unbuffered streaming pass through the tunnel | `test_tunnel_carries_websockets_and_unbuffered_streams` |
 | Renewal, key permissions, limits, rate-limit key | the remaining tests in the file |
 

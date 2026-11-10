@@ -840,14 +840,6 @@ def _is_direct_ingress_request() -> bool:
     return getattr(request, "direct_ingress", None) is not None
 
 
-def _direct_ingress_host_is_current(config: V2Config | None) -> bool:
-    """The ingress hostname is still this instance's enabled managed hostname."""
-
-    if config is None or not config.remote_access.vibe_cloud.enabled:
-        return False
-    return _normalized_host(request.host) == _remote_access_public_host(config)
-
-
 def _is_loopback_origin_proxy_request() -> bool:
     if _is_direct_ingress_request():
         return False
@@ -2513,11 +2505,6 @@ def reject_disabled_model_hub_api():
 @app.before_request
 def enforce_remote_access_cookie():
     config = _load_remote_access_config()
-    if _is_direct_ingress_request() and not _direct_ingress_host_is_current(config):
-        # The ingress serves one hostname. Once that is no longer this
-        # instance's enabled managed hostname, no route may answer for it,
-        # including the ones exempt from host validation below.
-        return jsonify({"ok": False, "error": "direct_ingress_host_mismatch"}), 421
     markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
         return None
@@ -3315,6 +3302,49 @@ class _RejectInvalidHostMiddleware:
 
 
 app.add_middleware(_RejectInvalidHostMiddleware)
+
+
+def _direct_ingress_host_is_current(host: str) -> bool:
+    """``host`` is this instance's managed hostname and remote access is enabled."""
+
+    config = _load_remote_access_config()
+    if config is None or not config.remote_access.vibe_cloud.enabled:
+        return False
+    return _normalized_host(host) == _remote_access_public_host(config)
+
+
+class _DirectIngressLiveHostMiddleware:
+    """Answer a direct-ingress request only for the instance's current hostname.
+
+    The ingress serves the one hostname it was started for. Once that is no
+    longer this instance's managed hostname, or remote access is turned off,
+    nothing may answer for it. This sits outside every route, so it also covers
+    WebSocket handlers and the routes exempt from host validation, which
+    request hooks do not reach.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in {"http", "websocket"} and scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None:
+            host = next((value for key, value in scope.get("headers") or () if key == b"host"), b"")
+            if not await asyncio.to_thread(_direct_ingress_host_is_current, host.decode("latin-1")):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                response = FastAPIResponse(
+                    content='{"ok":false,"error":"direct_ingress_host_mismatch"}',
+                    status_code=421,
+                    media_type="application/json",
+                    headers={"Cache-Control": "no-store"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_DirectIngressLiveHostMiddleware)
 
 
 _CONVERSATION_PREFETCH_PATH_RE = re.compile(r"/api/sessions/[^/]+/bootstrap")
