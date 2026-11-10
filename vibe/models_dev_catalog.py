@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 MODELS_DEV_URL_ENV = "AVIBE_MODELS_DEV_URL"
 DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_TIMEOUT_SECONDS = 8.0
-MODELS_DEV_CACHE_TTL_SECONDS = 24 * 60 * 60
+MODELS_DEV_CACHE_TTL_SECONDS = 3 * 60 * 60
+MODELS_DEV_SEARCH_REFRESH_AFTER_SECONDS = 5 * 60
 MODELS_DEV_MAX_BYTES = 16 * 1024 * 1024
 MODELS_DEV_MAX_MATCHES = 8
 _CACHE_LOCK = threading.Lock()
@@ -237,16 +238,17 @@ def load_models_dev_catalog() -> dict[str, Any]:
 _REFRESH_LOCK = threading.Lock()
 _refresh_in_flight = False
 _last_refresh_failed = False
+_last_refresh_started_at: float | None = None
 
 
-def _refresh_in_background() -> bool:
+def _refresh_in_background(*, retry_after_seconds: float = 0.0) -> bool:
     """Start a background fetch unless one is running; whether a fetch is expected to land.
 
     A fetch retried after a failed one is not expected to: the reader says "no
     price" rather than "fetching" for as long as the network keeps failing.
     """
 
-    global _refresh_in_flight
+    global _refresh_in_flight, _last_refresh_started_at
 
     def refresh() -> None:
         global _refresh_in_flight, _last_refresh_failed
@@ -269,7 +271,15 @@ def _refresh_in_background() -> bool:
         expected = not _last_refresh_failed
         if _refresh_in_flight:
             return expected
+        now = time.monotonic()
+        if (
+            retry_after_seconds > 0
+            and _last_refresh_started_at is not None
+            and now - _last_refresh_started_at < retry_after_seconds
+        ):
+            return expected
         _refresh_in_flight = True
+        _last_refresh_started_at = now
     try:
         threading.Thread(target=refresh, name="models-dev-refresh", daemon=True).start()
     except RuntimeError:  # no thread to be had: release the claim, or no fetch ever runs again
@@ -282,13 +292,11 @@ def _refresh_in_background() -> bool:
 def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None, bool]:
     """The catalog, when it was fetched, and whether a first copy is on its way.
 
-    For readers on a request path, such as usage valuation, which never wait on
-    the network when a copy exists: a stale cached copy is returned at once and
-    refreshed in the background, since a day-old price table is still the best
-    one there is and the reader shows its date. With no cached copy at all it
-    starts that fetch and returns an empty catalog, so the first read reports
-    nothing as priced rather than holding a page on the network; the third value
-    says a fetch is running that should land, so the reader can read again soon.
+    A stale cached price table is still the best one there is and the reader shows
+    its date. With no cached copy at all it starts that fetch and returns an empty
+    catalog, so the first read reports nothing as priced rather than holding a page
+    on the network; the third value says a fetch is running that should land, so
+    the reader can read again soon.
     """
 
     with _CACHE_LOCK:
@@ -557,9 +565,41 @@ def _preferred_copy(
     return {**row, "first_party": row["provider_id"] == first_party_vendor}
 
 
-def search_models_dev(query: str) -> list[dict[str, Any]]:
+def _catalog_for_search(*, refresh_if_stale: bool) -> dict[str, Any]:
+    """Return search data without blocking on a conditional refresh when requested."""
+
+    url = _models_dev_url()
+    with _CACHE_LOCK:
+        cached = _read_cache()
+        catalog = _catalog_from_cache(cached) if cached.get("url") == url else None
+        fetched_at = cached.get("fetched_at")
+        cache_age = (
+            time.time() - float(fetched_at)
+            if isinstance(fetched_at, (int, float)) and not isinstance(fetched_at, bool)
+            else None
+        )
+    if refresh_if_stale and (
+        catalog is None
+        or cache_age is None
+        or cache_age >= MODELS_DEV_SEARCH_REFRESH_AFTER_SECONDS
+    ):
+        _refresh_in_background(
+            retry_after_seconds=MODELS_DEV_SEARCH_REFRESH_AFTER_SECONDS,
+        )
+    if catalog is not None:
+        return catalog
+    if refresh_if_stale:
+        return {}
+    return load_models_dev_catalog()
+
+
+def search_models_dev(
+    query: str,
+    *,
+    refresh_if_stale: bool = False,
+) -> list[dict[str, Any]]:
     tokens = _search_tokens(query)
-    catalog = load_models_dev_catalog()
+    catalog = _catalog_for_search(refresh_if_stale=refresh_if_stale)
     vendor_map = load_model_vendor_map()
     candidates = _catalog_rows(
         catalog,

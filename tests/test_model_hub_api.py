@@ -3653,6 +3653,26 @@ def test_model_producers_emit_admissible_backend_payloads(
     assert parsed == ModelHubBackendModelConfig.from_payload(parsed.to_payload())
 
 
+def test_models_dev_route_passes_the_nonblocking_refresh_mode(monkeypatch):
+    calls = []
+
+    class FakeModelHub:
+        def models_dev_matches(self, query, *, refresh_if_stale=False):
+            calls.append((query, refresh_if_stale))
+            return []
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: FakeModelHub())
+
+    response = app.test_client().get(
+        "/api/models/catalog/models-dev?query=claude&refresh=if-stale",
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["matches"] == []
+    assert calls == [("claude", True)]
+
+
 def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     monkeypatch.setattr(

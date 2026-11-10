@@ -8607,13 +8607,17 @@ class ModelHubService:
             return result
 
     @staticmethod
-    def models_dev_matches(query: object) -> list[dict]:
+    def models_dev_matches(
+        query: object,
+        *,
+        refresh_if_stale: bool = False,
+    ) -> list[dict]:
         if not isinstance(query, str) or not query.strip():
             raise ModelHubError("mapping_target_unavailable")
         from vibe.models_dev_catalog import search_models_dev
 
         try:
-            return search_models_dev(query)
+            return search_models_dev(query, refresh_if_stale=refresh_if_stale)
         except (OSError, RuntimeError, ValueError):
             raise ModelHubError("models_dev_unavailable", status=502) from None
 
