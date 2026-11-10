@@ -21,6 +21,26 @@ product logic.
 3. Probes `GET /ready`. Only the exact versioned `product: "avibe"` affirmative
    response means that the UI, service-lock owner, and Controller IPC are all
    ready; that Runtime is **adopted as-is**.
+
+   One ready Runtime is replaced instead. On macOS a log-out or a WindowServer
+   crash ends the shell and leaves its Runtime running in a login session that
+   is over, where the Keychain and name resolution no longer work. `/ready`
+   does not say which session a Runtime is in, so the descriptor from step 1
+   does: the product build's CLI runs in the shell's process tree, and so in
+   the user's current desktop session, and it adds `"replace_runtime": true`
+   when the running Controller carries this app's Runtime id and either
+   reports that its login session ended or runs in an audit session other than
+   the desktop session's. On a launch or the user's Try again the shell then
+   starts with `--hand-over` instead of adopting; that start stops the Runtime
+   by its id and starts a new one in the current session, and the window shows
+   the bootstrap page meanwhile. A recovery run adopts as before. A Runtime of
+   another Avibe, such as a CLI install, is never replaced, and a comparison
+   that cannot be made adopts. The decision is
+   `service_outside_desktop_session` in `vibe/login_autostart.py`, the one
+   `vibe autostart` acts on for a CLI install at each desktop login. A shell
+   refuses a descriptor field it does not know, so the field is sent only to a
+   desktop host asking about its own Runtime, whose shell and CLI ship in one
+   bundle.
 4. Otherwise runs the selected Runtime's `start --no-open-browser` command
    once, detached, with no shell interpreter involved. The shell already owns a
    window onto the Workbench; plain `vibe start` honours

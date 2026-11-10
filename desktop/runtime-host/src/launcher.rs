@@ -16,6 +16,7 @@ use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -251,6 +252,15 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
         None
     }
 
+    /// Whether the last `endpoint` answer asked for this launcher's own running
+    /// Runtime to be replaced rather than adopted: its CLI found it in a login
+    /// session other than the one this shell runs in. The CLI decides, and the
+    /// same CLI's start does the replacing; an installed CLI, and one that
+    /// predates the cue, never asks.
+    fn wants_runtime_replaced(&self) -> bool {
+        false
+    }
+
     /// Stops the Runtime whose identity is `runtime_id`, and nothing else.
     fn stop(&self, _runtime_id: &str) -> CliOutcome {
         CliOutcome::Unrunnable
@@ -467,6 +477,7 @@ impl RuntimeLauncher for InstalledVibeLauncher {
             // application data directory to write diagnostics into.
             log: BootstrapLog::disabled(),
             login_path: OnceLock::new(),
+            wants_runtime_replaced: AtomicBool::new(false),
         }))
     }
 }
@@ -517,6 +528,7 @@ impl RuntimeLauncher for BundledVibeLauncher {
             cleanup: Some((self.bundle.clone(), runtime.root)),
             log: self.log.clone(),
             login_path: OnceLock::new(),
+            wants_runtime_replaced: AtomicBool::new(false),
         }))
     }
 
@@ -565,6 +577,8 @@ struct ResolvedVibeExecutable {
     log: BootstrapLog,
     /// The `PATH` this attempt's Runtime start inherits. See `login_path`.
     login_path: OnceLock<LoginPath>,
+    /// What this attempt's endpoint answer said about adopting the Runtime.
+    wants_runtime_replaced: AtomicBool,
 }
 
 impl ResolvedVibeExecutable {
@@ -597,7 +611,10 @@ impl ResolvedVibeExecutable {
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
-        query_endpoint(&self.command, &self.log)
+        let endpoint = query_endpoint(&self.command, &self.log)?;
+        self.wants_runtime_replaced
+            .store(endpoint.replace_runtime, Ordering::SeqCst);
+        Ok(endpoint.origin)
     }
 
     fn prepare_launch(&self) {
@@ -668,6 +685,10 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
 
     fn expected_runtime_id(&self) -> Option<&str> {
         self.expected_runtime_id.as_deref()
+    }
+
+    fn wants_runtime_replaced(&self) -> bool {
+        self.wants_runtime_replaced.load(Ordering::SeqCst)
     }
 
     fn stop(&self, runtime_id: &str) -> CliOutcome {
@@ -854,6 +875,19 @@ fn is_python_startup_variable(name: &OsStr) -> bool {
 struct EndpointDescriptor {
     schema_version: u32,
     origin: String,
+    /// Sent, as `true`, only by a desktop-managed CLI that found its own
+    /// Runtime in another login session. A shell older than the field rejects
+    /// a descriptor carrying it, so Python sends it to no other caller.
+    #[serde(default)]
+    replace_runtime: bool,
+}
+
+/// What the Runtime's CLI answered: where it serves, and whether the Runtime
+/// serving there is to be replaced rather than adopted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DescribedEndpoint {
+    origin: LoopbackOrigin,
+    replace_runtime: bool,
 }
 
 /// One run of the endpoint helper, including everything a `LaunchError` cannot
@@ -862,13 +896,13 @@ struct EndpointDescriptor {
 struct EndpointAttempt {
     /// 1 for the first run of this discovery, 2 for its one repeat.
     number: u32,
-    result: Result<LoopbackOrigin, LaunchError>,
+    result: Result<DescribedEndpoint, LaunchError>,
     status: Option<std::process::ExitStatus>,
     stderr: Option<Vec<u8>>,
     elapsed: Duration,
 }
 
-fn query_endpoint(runtime: &RuntimeCommand, log: &BootstrapLog) -> Result<LoopbackOrigin, LaunchError> {
+fn query_endpoint(runtime: &RuntimeCommand, log: &BootstrapLog) -> Result<DescribedEndpoint, LaunchError> {
     query_endpoint_within(runtime, log, ENDPOINT_TIMEOUT)
 }
 
@@ -879,7 +913,7 @@ fn query_endpoint_within(
     runtime: &RuntimeCommand,
     log: &BootstrapLog,
     timeout: Duration,
-) -> Result<LoopbackOrigin, LaunchError> {
+) -> Result<DescribedEndpoint, LaunchError> {
     let mut attempt = 1;
     loop {
         match query_endpoint_once(runtime, log, timeout, attempt) {
@@ -894,7 +928,7 @@ fn query_endpoint_once(
     log: &BootstrapLog,
     timeout: Duration,
     attempt: u32,
-) -> Result<LoopbackOrigin, LaunchError> {
+) -> Result<DescribedEndpoint, LaunchError> {
     let started = Instant::now();
     let mut status = None;
     let mut stderr_reader = None;
@@ -918,7 +952,7 @@ fn endpoint_descriptor(
     timeout: Duration,
     status_slot: &mut Option<std::process::ExitStatus>,
     stderr_slot: &mut Option<mpsc::Receiver<Vec<u8>>>,
-) -> Result<LoopbackOrigin, LaunchError> {
+) -> Result<DescribedEndpoint, LaunchError> {
     let mut command = Command::new(&runtime.executable);
     runtime.apply(&mut command, None);
     command
@@ -1027,13 +1061,17 @@ fn record_endpoint_attempt(log: &BootstrapLog, attempt: &EndpointAttempt) {
     if let Err(LaunchError::EndpointSpawn(error)) = &attempt.result {
         fields.push(("error", error.to_string()));
     }
+    if attempt.result.as_ref().is_ok_and(|endpoint| endpoint.replace_runtime) {
+        // The one record of why a launch restarted a Runtime that was ready.
+        fields.push(("replace_runtime", "true".to_owned()));
+    }
     if let Some(stderr) = attempt.stderr.as_ref().filter(|bytes| !bytes.is_empty()) {
         fields.push(("stderr", String::from_utf8_lossy(stderr).into_owned()));
     }
     log.record("endpoint.query", &fields);
 }
 
-fn endpoint_outcome(result: &Result<LoopbackOrigin, LaunchError>) -> &'static str {
+fn endpoint_outcome(result: &Result<DescribedEndpoint, LaunchError>) -> &'static str {
     match result {
         Ok(_) => "ok",
         Err(LaunchError::EndpointSpawn(_)) => "spawn_failed",
@@ -1098,7 +1136,7 @@ fn record_runtime_audit(log: &BootstrapLog, audited: &Result<(), PrivateRuntimeE
     log.record("runtime.audit", &fields);
 }
 
-fn parse_endpoint_descriptor(bytes: &[u8]) -> Result<LoopbackOrigin, LaunchError> {
+fn parse_endpoint_descriptor(bytes: &[u8]) -> Result<DescribedEndpoint, LaunchError> {
     if bytes.len() > MAX_ENDPOINT_BYTES as usize {
         return Err(LaunchError::EndpointOutput);
     }
@@ -1106,7 +1144,10 @@ fn parse_endpoint_descriptor(bytes: &[u8]) -> Result<LoopbackOrigin, LaunchError
     if descriptor.schema_version != 1 {
         return Err(LaunchError::EndpointOutput);
     }
-    LoopbackOrigin::parse(&descriptor.origin).map_err(|_| LaunchError::InvalidOrigin)
+    Ok(DescribedEndpoint {
+        origin: LoopbackOrigin::parse(&descriptor.origin).map_err(|_| LaunchError::InvalidOrigin)?,
+        replace_runtime: descriptor.replace_runtime,
+    })
 }
 
 /// Every location the shell is willing to look for an installed `vibe`, in order.
@@ -1804,9 +1845,21 @@ mod tests {
     fn descriptor_parser_accepts_only_the_frozen_schema_and_literal_loopback() {
         let accepted = parse_endpoint_descriptor(br#"{"schema_version":1,"origin":"http://127.0.0.1:5123"}"#)
             .expect("valid descriptor");
-        assert_eq!(accepted.as_str(), "http://127.0.0.1:5123");
+        assert_eq!(accepted.origin.as_str(), "http://127.0.0.1:5123");
+        assert!(
+            !accepted.replace_runtime,
+            "a CLI that predates the cue, or has nothing to replace, is adopted as before"
+        );
+        let replacing = parse_endpoint_descriptor(include_bytes!(
+            "../../../tests/fixtures/desktop_endpoint_replace_runtime.json"
+        ))
+        .expect("the descriptor a desktop-managed CLI prints for a Runtime left in another login session");
+        assert_eq!(replacing.origin.as_str(), "http://127.0.0.1:5123");
+        assert!(replacing.replace_runtime);
 
         for rejected in [
+            br#"{"schema_version":1,"origin":"http://127.0.0.1:5123","replace_runtime":"true"}"#.as_slice(),
+            br#"{"schema_version":1,"origin":"http://127.0.0.1:5123","replace_runtime":null}"#.as_slice(),
             br#"{"schema_version":2,"origin":"http://127.0.0.1:5123"}"#.as_slice(),
             br#"{"schema_version":1,"origin":"http://localhost:5123"}"#.as_slice(),
             br#"{"schema_version":1,"origin":"http://192.168.1.2:5123"}"#.as_slice(),
@@ -2034,6 +2087,7 @@ mod tests {
             cleanup: None,
             log: BootstrapLog::disabled(),
             login_path: OnceLock::new(),
+            wants_runtime_replaced: AtomicBool::new(false),
         }
     }
 
@@ -2162,6 +2216,41 @@ mod tests {
             ["desktop", "endpoint", "--json", "shell=1"],
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The cue reaches the bootstrap run through this launcher, and the log
+    /// keeps the one record of why a launch restarted a Runtime that was ready.
+    /// A CLI that does not send it, as every CLI before the cue, asks nothing.
+    #[cfg(unix)]
+    #[test]
+    fn the_endpoint_answer_carries_the_clis_request_to_replace_its_runtime() {
+        for (descriptor, replaced) in [
+            (r#"{"schema_version":1,"origin":"http://127.0.0.1:5123"}"#, false),
+            (
+                include_str!("../../../tests/fixtures/desktop_endpoint_replace_runtime.json").trim_end(),
+                true,
+            ),
+        ] {
+            let dir = scratch_dir("endpoint-replace-cue");
+            let executable = write_fake_runtime(&dir, &format!("#!/bin/sh\nprintf '%s\\n' '{descriptor}'\n"));
+            let log_path = dir.join("bootstrap.log");
+            let resolved = ResolvedVibeExecutable {
+                log: BootstrapLog::at(log_path.clone()),
+                ..identified(executable)
+            };
+
+            assert!(
+                !resolved.wants_runtime_replaced(),
+                "nothing is asked before the CLI answers"
+            );
+            let origin = resolved.endpoint().expect("descriptor is accepted");
+
+            assert_eq!(origin.as_str(), "http://127.0.0.1:5123");
+            assert_eq!(resolved.wants_runtime_replaced(), replaced, "{descriptor}");
+            let written = std::fs::read_to_string(&log_path).expect("the query is recorded");
+            assert_eq!(written.contains("replace_runtime=\"true\""), replaced, "{written}");
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 
     /// Longer than the 10s budget that cut off cold first launches, short enough
@@ -2527,7 +2616,7 @@ mod tests {
         )
         .expect("the run after a timed-out cold run answers");
 
-        assert_eq!(endpoint.as_str(), "http://127.0.0.1:6123");
+        assert_eq!(endpoint.origin.as_str(), "http://127.0.0.1:6123");
         let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("both runs are recorded");
         let records: Vec<&str> = written.lines().collect();
         assert_eq!(records.len(), 2, "{written}");
