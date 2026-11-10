@@ -55,6 +55,13 @@ _PRINT_PATH_SCRIPT = (
     "/usr/bin/printf %s __AVIBE_LOGIN_PATH_START__; /usr/bin/printenv PATH; "
     "/usr/bin/printf %s __AVIBE_LOGIN_PATH_END__"
 )
+# What a login starts from before any startup file runs: launchd's ``PATH`` on
+# macOS, the usual login default elsewhere.
+_SYSTEM_PATH = (
+    "/usr/bin:/bin:/usr/sbin:/sbin"
+    if sys.platform == "darwin"
+    else "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
 # Startup output is not read past this; a ``PATH`` is far smaller.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _EXIT_POLL_SECONDS = 0.02
@@ -102,6 +109,11 @@ def resolve_with(shell: str, timeout: float) -> LoginPath:
     ``.bashrc``, which only interactive shells read. The shell runs in the home
     directory, as a new terminal does, so a tool that picks versions by
     directory does not hand the Runtime one project's ``PATH``.
+
+    It starts from the system ``PATH``, not the caller's. Startup files extend
+    whatever ``PATH`` they are given, so a shell that inherited the caller's
+    would answer with the caller's entries mixed into its own, and the caller's
+    leading entries could no longer be told from the shell's.
     """
 
     deadline = time.monotonic() + timeout
@@ -113,6 +125,7 @@ def resolve_with(shell: str, timeout: float) -> LoginPath:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             cwd=str(home) if home.is_dir() else None,
+            env={**os.environ, "PATH": _SYSTEM_PATH},
             close_fds=True,
             # Its own session: no controlling terminal to take from the caller,
             # and one process group that holds everything a startup file starts.

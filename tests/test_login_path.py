@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -38,14 +39,22 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def test_the_path_a_startup_file_exports_is_returned_without_its_banner(tmp_path):
+def test_the_lookup_returns_what_a_new_terminal_has_not_the_callers_path(tmp_path, monkeypatch):
+    """Startup files extend the PATH they are given; the banner they print is not part of it.
+
+    A shell that inherited the caller's PATH would answer with the caller's
+    virtualenv inside its own entries, and the start could no longer keep that
+    virtualenv ahead of what the startup files add.
+    """
+    monkeypatch.setenv("PATH", "/srv/venv/bin:" + os.environ["PATH"])
     shell = _fake_shell(tmp_path, "echo 'Welcome back'\nPATH=\"/home/user/.nvm/bin:$PATH\"; export PATH")
 
     resolved = login_path.resolve_with(shell, 10.0)
 
-    assert resolved.outcome == "resolved"
-    assert resolved.value.startswith("/home/user/.nvm/bin:")
-    assert "\n" not in resolved.value and "Welcome" not in resolved.value
+    system_path = "/usr/bin:/bin:/usr/sbin:/sbin" if sys.platform == "darwin" else (
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
+    assert resolved == LoginPath("/home/user/.nvm/bin:" + system_path, "resolved")
 
 
 def test_a_startup_file_that_never_finishes_falls_back_and_leaves_nothing_running(tmp_path):
