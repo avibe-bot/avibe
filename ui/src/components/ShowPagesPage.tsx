@@ -141,7 +141,7 @@ function ShowPageRow({
             ]
               .filter(Boolean)
               .join(' · ')}
-            className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-foreground/[0.03]"
+            className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left transition-colors hover:bg-wash"
           >
             <ShowPageAvatarTile sessionId={page.session_id} title={page.title || ''} iconVersion={page.icon_version} />
             <span className="min-w-0">
@@ -195,7 +195,7 @@ function ShowPageRow({
             aria-label={t('showPages.details')}
             aria-expanded={expanded}
             onClick={() => onToggleExpand()}
-            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+            className="grid size-8 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-wash hover:text-foreground"
           >
             {expanded ? <ChevronUp size={18} className="text-foreground" /> : <ChevronDown size={18} />}
           </button>
@@ -245,7 +245,7 @@ function ShowPageRow({
                 <div className="flex flex-col gap-2">
                   <span className={LABEL}>{t('showPages.liveLink')}</span>
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
+                    <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-edge bg-foreground/[0.03] px-3 py-2 shadow-elevation-0">
                       <Link2 size={14} className={page.visibility === 'public' ? 'text-gold-ink' : 'text-cyan-ink'} />
                       <span className="truncate font-mono text-[12px] text-foreground">{shown}</span>
                     </div>
@@ -288,7 +288,7 @@ function ShowPageRow({
 
             </div>
 
-            <div className="flex flex-col gap-3 rounded-md border border-border bg-foreground/[0.02] p-4">
+            <div className="flex flex-col gap-3 rounded-md border border-edge bg-foreground/[0.02] p-4 shadow-elevation-0">
               <span className={LABEL}>{t('showPages.details')}</span>
               {([
                 { k: t('showPages.detail.session'), v: page.session_id, mono: true, to: `/chat/${page.session_id}` },
@@ -385,7 +385,7 @@ const InlineTitleRename: React.FC<{
           className="h-9 w-[240px] max-w-full px-3 text-[13px]"
         />
       ) : (
-        <div className="flex w-[240px] max-w-full items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
+        <div className="flex w-[240px] max-w-full items-center gap-2 rounded-lg border border-edge bg-foreground/[0.03] px-3 py-2 shadow-elevation-0">
           <span className="min-w-0 flex-1 truncate text-[13px] text-foreground">
             {page.title?.trim() || t('chat.untitled')}
           </span>
@@ -395,7 +395,7 @@ const InlineTitleRename: React.FC<{
             disabled={disabled || saving}
             title={t('showPages.rename')}
             aria-label={t('showPages.rename')}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground disabled:opacity-50"
+            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-wash hover:text-foreground disabled:opacity-50"
           >
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Pencil className="size-3.5" />}
           </button>

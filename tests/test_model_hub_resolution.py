@@ -370,6 +370,114 @@ def test_matching_v1_claude_aliases_persist_concrete_observed_id():
     assert _matching_v1_model_id(backend="claude", requested_model="claude-opus-4-6-20250101", source=source) is None
 
 
+def test_matching_v1_fable_alias_uses_observed_family_but_pinned_version_never_downgrades():
+    source = _source(
+        "src_fable01", ("fable", "claude-fable-5", "claude-fable-5-1", "claude-fable-5-2"),
+        kind="subscription", channel="native_cli", credential_ref=None,
+    )
+    assert _matching_v1_model_id(backend="claude", requested_model="fable", source=source) == "claude-fable-5-2"
+    assert _matching_v1_model_id(backend="claude", requested_model="claude-fable-5-1", source=source) == "claude-fable-5-1"
+    source.models = [model for model in source.models if model.id != "claude-fable-5-2"]
+    assert _matching_v1_model_id(backend="claude", requested_model="fable", source=source) == "claude-fable-5-1"
+    assert _matching_v1_model_id(backend="claude", requested_model="claude-fable-5-2", source=source) is None
+
+
+@pytest.mark.parametrize(
+    ("backend", "model", "vendor"),
+    [("claude", "claude-fable-5-2", "anthropic"), ("vibey", "claude-fable-5-2", "anthropic"),
+     ("codex", "gpt-6.1-terra", "openai"), ("opencode", "gpt-6.1-terra", "openai"),
+     ("vibey", "gpt-6.1-terra", "openai")],
+)
+def test_new_api_models_resolve_only_the_exact_observed_id(backend, model, vendor):
+    source = _source("src_exactnew", (model,), vendor=vendor)
+    assert _matching_v1_model_id(backend=backend, requested_model=model, source=source) == model
+    assert _matching_v1_model_id(backend=backend, requested_model=f"{vendor}/{model}", source=source) is None
+    # Only the Claude CLI rewrites a family alias, so only its routes resolve one.
+    assert _matching_v1_model_id(backend=backend, requested_model="fable", source=source) == (
+        model if backend == "claude" else None
+    )
+
+
+_HUB_FAMILY_INVENTORY = (
+    "sonnet",
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
+    "claude-sonnet-4-6-20260115",
+    "claude-opus-5-5",
+    "claude-opus-4-8-20260301",
+    "claude-haiku-5-5",
+    "claude-fable-5-2",
+)
+
+
+@pytest.mark.parametrize(
+    ("requested", "matched"),
+    [
+        ("sonnet", "claude-sonnet-5-5"),
+        ("sonnet[1m]", "claude-sonnet-5-5"),
+        ("opus", "claude-opus-5-5"),
+        ("opus[1m]", "claude-opus-5-5"),
+        ("haiku", "claude-haiku-5-5"),
+        ("fable", "claude-fable-5-2"),
+        # Everything else keeps literal identity: a pinned id never widens to
+        # another member of its family, and a suffix makes no new alias.
+        ("claude-sonnet-5", "claude-sonnet-5"),
+        ("claude-sonnet-4-6", None),
+        ("claude-opus-4-8", None),
+        ("claude-opus-5", None),
+        ("haiku[1m]", None),
+        ("claude-sonnet-5-5[1m]", None),
+        ("Sonnet", None),
+    ],
+)
+@pytest.mark.parametrize(("kind", "vendor"), [("api_key", "anthropic"), ("api_key", "custom"), ("subscription", "anthropic")])
+def test_claude_alias_selects_the_newest_observed_family_member_on_a_hub_source(kind, vendor, requested, matched):
+    """MH-MATCH-003: the Claude CLI sends a concrete id for an alias, so a Hub route must target one."""
+
+    source = _source("src_aliashub", _HUB_FAMILY_INVENTORY, kind=kind, vendor=vendor)
+
+    assert _matching_v1_model_id(backend="claude", requested_model=requested, source=source) == matched
+    for backend in ("codex", "opencode", "vibey"):
+        assert _matching_v1_model_id(backend=backend, requested_model=requested, source=source) == (
+            requested if requested in _HUB_FAMILY_INVENTORY else None
+        )
+
+
+def test_claude_alias_without_an_observed_family_member_keeps_literal_identity():
+    listed = _source("src_aliaslit", ("sonnet", "claude-opus-4-6", "anthropic/claude-sonnet-5-5"))
+
+    assert _matching_v1_model_id(backend="claude", requested_model="sonnet", source=listed) == "sonnet"
+    assert _matching_v1_model_id(backend="claude", requested_model="haiku", source=listed) is None
+    config = _config([listed], model="claude-opus-4-6")
+    unmatched = resolve_model_hub_turn(config, "claude", "haiku")
+    assert (unmatched.route_origin, unmatched.source_model_ids) == ("passthrough", ((listed.id, "haiku"),))
+
+
+def test_claude_alias_inherits_its_full_ids_route_and_yields_to_an_explicit_one():
+    """MH-MATCH-003: an alias and the id it stands for reach the same hop; a saved Route still wins."""
+
+    newest = _source("src_aliasnew", ("claude-sonnet-5", "claude-sonnet-5-5"))
+    lagging = _source("src_aliasold", ("claude-sonnet-5",))
+    config = _config([newest, lagging], model="claude-opus-4-6")
+    config.agents["claude"].routes = {}
+
+    full = resolve_model_hub_turn(config, "claude", "claude-sonnet-5-5")
+    assert (full.route_origin, full.source_model_ids) == ("automatic", ((newest.id, "claude-sonnet-5-5"),))
+    for alias in ("sonnet", "sonnet[1m]"):
+        inherited = resolve_model_hub_turn(config, "claude", alias)
+        assert inherited.route_origin == "automatic"
+        assert inherited.target_model == full.target_model
+        # Each Source answers with its own newest member, as a native Source does.
+        assert inherited.source_model_ids == (*full.source_model_ids, (lagging.id, "claude-sonnet-5"))
+
+    config.agents["claude"].routes["sonnet"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(lagging.id, "claude-sonnet-5"),)
+    )
+    explicit = resolve_model_hub_turn(config, "claude", "sonnet")
+    assert (explicit.route_origin, explicit.source_model_ids) == ("manual", ((lagging.id, "claude-sonnet-5"),))
+    assert resolve_model_hub_turn(config, "claude", "claude-sonnet-5-5").source_model_ids == full.source_model_ids
+
+
 def test_matching_v1_is_literal_for_non_native_and_codex():
     source = _source("src_literal1", ("claude-opus-4-6-20260115",), vendor="anthropic")
     assert _matching_v1_model_id(backend="claude", requested_model="claude-opus-4-6", source=source) is None
@@ -1471,8 +1579,10 @@ def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
 
 def test_set_agent_chain_reports_removed_hops_and_syncs_transport_targets(tmp_path):
     menu_model = "claude-opus-4-6"
-    first = _source("src_chain006", (menu_model,))
-    second = _source("src_chain007", (menu_model,))
+    # The `opus` alias rows inherit a Source's newest opus, so each Source lists
+    # a newer one: the chain's own model is then asked of a Source only by the chain.
+    first = _source("src_chain006", (menu_model, "claude-opus-4-7"))
+    second = _source("src_chain007", (menu_model, "claude-opus-4-7"))
     config = _config([first, second], model=menu_model)
     service, _store, adapter = _service(tmp_path, config)
 
@@ -1498,8 +1608,10 @@ def test_set_agent_chain_reports_removed_hops_and_syncs_transport_targets(tmp_pa
     ]
     assert len(adapter.synced) == 1
     assert menu_model not in adapter.synced[0][1].route_model_ids
+    # An alias is asked of a Source by the member it selects, never by its own name.
     assert set(adapter.synced[0][1].route_model_ids) == {
-        model.id for agent in config.agents.values() for model in agent.models if model.id != menu_model
+        model.id for agent in config.agents.values() for model in agent.models
+        if model.id not in {menu_model, "opus", "opus[1m]"}
     }
 
 

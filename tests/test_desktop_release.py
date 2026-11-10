@@ -171,6 +171,34 @@ def test_real_tag_resolution_and_prepare_pin_runtime_before_build(tmp_path, monk
         release.resolve(TAG, "b" * 40)
 
 
+@pytest.mark.parametrize("tag", [TAG, "v3.1.2"])
+@pytest.mark.parametrize("matching", [True, False])
+def test_resolver_cli_enforces_backstop_sha_before_writing_outputs(tmp_path, tag, matching):
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "--allow-empty", "-qm", "release fixture")
+    source = git(tmp_path, "rev-parse", "HEAD")
+    git(tmp_path, "tag", tag)
+    output = tmp_path / "output"
+    existing = "enabled=true\nupdater_enabled=false\n"
+    output.write_text(existing)
+    command = [sys.executable, str(ROOT / "scripts/desktop_release.py"), "resolve",
+               "--tag", tag, "--source-sha", source if matching else "b" * 40,
+               "--output", str(output)]
+    result = subprocess.run(command, cwd=tmp_path, text=True, capture_output=True)
+    if matching:
+        assert result.returncode == 0, result.stderr
+        fields = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        assert fields["source_sha"] == source and fields["tag"] == tag
+        assert fields["enabled"] == "true" and fields["updater_enabled"] == "false"
+    else:
+        assert result.returncode != 0 and "exact source SHA" in result.stderr
+        assert output.read_text() == existing
+        output.unlink()
+        result = subprocess.run(command, cwd=tmp_path, text=True, capture_output=True)
+        assert result.returncode != 0 and not output.exists()
+
+
 @pytest.mark.parametrize("tag", ["gh-v3.1.2", "gh-v3.1.2-rc1", "gh-v03.1.2rc1", "gh-v3.1.2rc01",
                                  "v3.1.2rc1", "gh-vnext", "gh-v3.1.2rc1\n", "--help", ""])
 def test_malformed_test_tags_fail_before_git_or_publication(tag, monkeypatch):
@@ -502,11 +530,17 @@ def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
     assert not (work / "rejected").exists()
 
 
-def test_windows_release_policy_is_rc_only():
-    assert release.release_signature("x86_64-pc-windows-msvc", "gh-v3.2.5rc11") == (
-        "installer-certum-authenticode-timestamped\n"
-    )
-    assert release.release_signature("x86_64-pc-windows-msvc", "v3.2.5") == "installer-unsigned\n"
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("gh-v3.2.6rc1", "installer-certum-authenticode-timestamped\n"),
+        ("v3.2.5", "installer-certum-authenticode-timestamped\n"),
+        ("", "installer-unsigned\n"),
+        ("refs/heads/master", "installer-unsigned\n"),
+    ],
+)
+def test_windows_release_policy_signs_rc_and_stable_but_not_manual_or_nonrelease(tag, expected):
+    assert release.release_signature("x86_64-pc-windows-msvc", tag) == expected
 
 
 @pytest.mark.parametrize(("profile", "layers"), [
@@ -738,6 +772,14 @@ def test_workflow_signs_every_macos_layer_before_recording():
     for command in ("sign-dmg", "notarize", "verify-release"):
         assert f"macos_signing.py {command}" in dmg["run"]
     assert "NotSigned" in step("Verify unsigned Windows installer before Certum handoff")["run"]
+    stage = step("Stage unsigned Windows installer for Certum")
+    assert "startsWith(inputs.release_tag, 'gh-v')" in stage["if"]
+    assert "startsWith(inputs.release_tag, 'v')" in stage["if"]
+    record = step("Record artifact hashes")
+    assert "!startsWith(inputs.release_tag, 'gh-v')" in record["if"]
+    assert "!startsWith(inputs.release_tag, 'v')" in record["if"]
+    updater = step("Sign and verify final updater artifacts")
+    assert "!startsWith(inputs.release_tag, 'v')" in updater["if"]
     certum_verify = next(
         item
         for item in jobs["certum-windows-sign"]["steps"]
@@ -934,8 +976,7 @@ def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):
     dist = tmp_path / "dist"
     dist.mkdir()
     for name in ("vibe-show-runtime-node-darwin-arm64.tgz", "show-runtime-manifest.json",
-                 "avibe_os-3.1.2rc1.whl", "avibe_os-3.1.2rc1.tar.gz",
-                 "avibe_memory-3.1.2rc1-py3-none-any.whl"):
+                 "avibe_os-3.1.2rc1.whl", "avibe_os-3.1.2rc1.tar.gz"):
         (dist / name).write_bytes(name.encode())
     remote = tmp_path / "remote"
     remote.mkdir()

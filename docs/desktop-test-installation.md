@@ -52,8 +52,10 @@ open the same popover and run a check. A newer signed release asks before doing
 anything: choose **Download and Install**, **Skip This Version**, or **Later**.
 Startup checks do not show a native dialog after the Workbench is reachable. A
 native fallback is reserved for the period before the webview is ready or when
-the fixed popover event cannot be dispatched. Prerelease builds follow TEST
-releases while **Use TEST Updates** is on, and updates never downgrade. Releases
+the fixed popover event cannot be dispatched. While **Get Pre-release Updates**
+is on (the default for prerelease builds, also a switch in the Workbench version
+popover), the newest stable or pre-release release is offered; updates never
+downgrade. Releases
 without that metadata, including builds that report **Desktop updates disabled**,
 upgrade manually: quit the shell and replace the app (macOS) or run the
 replacement installer (Windows).

@@ -31,9 +31,9 @@ const MAX_H_PX = 15 * 16; // 240
 // The unknown-dimensions box: inline ``max-*`` so it beats the
 // ``.vr-markdown img { max-width: 100% }`` descendant rule.
 const IMG_BOX: React.CSSProperties = { maxWidth: 'min(22rem, 100%)', maxHeight: '15rem' };
-const IMG_CLASS = 'block h-auto w-auto rounded-lg border border-border object-contain';
+const IMG_CLASS = 'block h-auto w-auto rounded-lg border border-edge object-contain shadow-elevation-0';
 // When the box is reserved by the parent, the image just fills it.
-const IMG_FILL_CLASS = 'block size-full rounded-lg border border-border object-contain';
+const IMG_FILL_CLASS = 'block size-full rounded-lg border border-edge object-contain shadow-elevation-0';
 
 // Process-lifetime cache of natural pixel dimensions keyed by src, so an image
 // seen once (its ``load`` measured below) reserves its exact box on every later

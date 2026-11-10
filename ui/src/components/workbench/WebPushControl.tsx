@@ -10,16 +10,15 @@ import { Badge } from '../ui/badge';
 import {
   disableWebPush,
   enableWebPush,
-  getWebPushDeviceId,
-  getRememberedWebPushEndpoints,
   getExistingWebPushSubscription,
-  getWebPushSupportState,
-  rememberWebPushEndpoint,
-  webPushSubscriptionUsesVapidKey,
+  reconcileWebPush,
+  type WebPushReconcileStatus,
   type WebPushSupportState,
 } from '@/lib/webPush';
+import { hasNativeCapability, nativePushStatus } from '@/lib/native';
 
-type Status = 'checking' | 'unsupported' | 'needs_install' | 'disabled' | 'enabled';
+type Status = 'checking' | WebPushReconcileStatus;
+type DisableFeedback = 'not_saved';
 
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
@@ -30,67 +29,13 @@ export const WebPushControl: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [support, setSupport] = useState<WebPushSupportState | null>(null);
+  const [disableFeedback, setDisableFeedback] = useState<DisableFeedback | null>(null);
   const canRegister = capabilities.can_read_instance;
 
   const refresh = async () => {
-    const nextSupport = getWebPushSupportState();
-    setSupport(nextSupport);
-    if (!nextSupport.supported) {
-      setStatus(nextSupport.reason === 'ios_requires_standalone' ? 'needs_install' : 'unsupported');
-      return;
-    }
-    const existing = await getExistingWebPushSubscription();
-    const previousEndpoints = await getRememberedWebPushEndpoints();
-    const rememberedEndpoint = previousEndpoints[0];
-    const serverStatus = await api
-      .getWebPushStatus(
-        existing
-          ? {
-              endpoint: existing.endpoint,
-              subscription: existing.toJSON(),
-              device_id: await getWebPushDeviceId(),
-              previous_endpoints: previousEndpoints,
-            }
-          : rememberedEndpoint ? { endpoint: rememberedEndpoint } : undefined,
-      )
-      .catch(() => null);
-    const repairable = Boolean(serverStatus && (
-      serverStatus.current_subscription_repairable
-      || (!existing && Boolean(rememberedEndpoint) && serverStatus.current_subscription_enabled)
-      || (existing && serverStatus.current_subscription_enabled
-        && !webPushSubscriptionUsesVapidKey(existing, serverStatus.public_key))
-    ));
-    if (
-      repairable
-      && typeof Notification !== 'undefined'
-      && Notification.permission === 'granted'
-    ) {
-      try {
-        await enableWebPush(api, { forceResubscribe: Boolean(existing), recoverOnly: true });
-        const repaired = await getExistingWebPushSubscription();
-        if (repaired) {
-          const repairedStatus = await api.getWebPushStatus({
-            endpoint: repaired.endpoint,
-            subscription: repaired.toJSON(),
-            device_id: await getWebPushDeviceId(),
-            previous_endpoints: await getRememberedWebPushEndpoints(),
-          });
-          if (repairedStatus.current_subscription_enabled) {
-            await rememberWebPushEndpoint(repaired.endpoint);
-            setStatus('enabled');
-            return;
-          }
-        }
-      } catch {
-        // Keep the control recoverable; the user can still retry manually.
-      }
-      setStatus('disabled');
-      return;
-    }
-    if (existing && serverStatus?.current_subscription_enabled) {
-      await rememberWebPushEndpoint(existing.endpoint);
-    }
-    setStatus(existing && serverStatus?.current_subscription_enabled ? 'enabled' : 'disabled');
+    const result = await reconcileWebPush(api);
+    setSupport(result.support);
+    setStatus(result.status);
   };
 
   useEffect(() => {
@@ -103,6 +48,7 @@ export const WebPushControl: React.FC = () => {
     setBusy(true);
     try {
       await enableWebPush(api);
+      setDisableFeedback(null);
       await refresh();
     } catch {
       await refresh();
@@ -114,8 +60,23 @@ export const WebPushControl: React.FC = () => {
   const onDisable = async () => {
     setBusy(true);
     try {
-      await disableWebPush(api);
-      setStatus('disabled');
+      const result = await disableWebPush(api);
+      setStatus(
+        result.status === 'disabled'
+          ? 'disabled'
+          : result.status === 'pending'
+            ? 'disable_pending'
+            : 'disable_failed',
+      );
+      setDisableFeedback(null);
+      if (result.status === 'pending') {
+        showToast(t('workbench.inbox.notifications.disablePending'), 'warning');
+      } else if (result.status === 'failed') {
+        showToast(t('workbench.inbox.notifications.disableFailed'), 'error');
+      }
+    } catch {
+      setDisableFeedback('not_saved');
+      showToast(t('workbench.inbox.notifications.disableNotSaved'), 'error');
     } finally {
       setBusy(false);
     }
@@ -125,7 +86,14 @@ export const WebPushControl: React.FC = () => {
     setTesting(true);
     try {
       const subscription = await getExistingWebPushSubscription();
-      if (!subscription?.endpoint) {
+      const nativeStatus = hasNativeCapability('push')
+        ? await api
+          .getWebPushVapidPublicKey()
+          .then(({ public_key }) => nativePushStatus(public_key))
+        : null;
+      const endpoint = subscription?.endpoint
+        ?? (nativeStatus?.state === 'on' ? nativeStatus.endpoint : null);
+      if (!endpoint) {
         showToast(t('workbench.inbox.notifications.testFailed', { count: 0 }), 'error');
         await refresh();
         return;
@@ -134,7 +102,7 @@ export const WebPushControl: React.FC = () => {
         title: t('workbench.inbox.notifications.testTitle'),
         body: t('workbench.inbox.notifications.testBody'),
         url: '/inbox',
-        endpoint: subscription.endpoint,
+        endpoint,
       });
       if (result.ok) {
         const blocked = result.normal_delivery;
@@ -236,14 +204,36 @@ export const WebPushControl: React.FC = () => {
           {busy ? <Loader2 className="animate-spin" /> : <BellOff className="size-3.5" />}
           {t('workbench.inbox.notifications.disable')}
         </Button>
+        {disableFeedback && (
+          <span role="status" className="text-[10px] leading-tight text-muted">
+            {t('workbench.inbox.notifications.disableNotSaved')}
+          </span>
+        )}
       </div>
     );
   }
 
   return (
-    <Button type="button" variant="outline-cyan" size="xs" onClick={onEnable} disabled={busy}>
-      {busy ? <Loader2 className="animate-spin" /> : <Bell className="size-3.5" />}
-      {t('workbench.inbox.notifications.enable')}
-    </Button>
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <Button type="button" variant="outline-cyan" size="xs" onClick={onEnable} disabled={busy}>
+        {busy ? <Loader2 className="animate-spin" /> : <Bell className="size-3.5" />}
+        {t('workbench.inbox.notifications.enable')}
+      </Button>
+      {(status === 'disable_pending' || status === 'disable_failed') && (
+        <>
+          <Button type="button" variant="secondary" size="xs" onClick={onDisable} disabled={busy}>
+            {busy ? <Loader2 className="animate-spin" /> : <BellOff className="size-3.5" />}
+            {t('common.retry')}
+          </Button>
+          <span role="status" className="text-[10px] leading-tight text-muted">
+            {t(
+              status === 'disable_pending'
+                ? 'workbench.inbox.notifications.disablePending'
+                : 'workbench.inbox.notifications.disableFailed',
+            )}
+          </span>
+        </>
+      )}
+    </div>
   );
 };

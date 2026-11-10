@@ -283,7 +283,7 @@ const ImageBody: React.FC<{ src: string; name?: string; className?: string; onDo
         // pan/zoom handlers. The strip is transparent to pointer events except the pill; the bottom
         // safe-area inset keeps it clear of the mobile home indicator inside the full-screen overlay.
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-3" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
-          <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-black/55 px-1 py-1 text-white shadow-lg backdrop-blur-sm">
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-full bg-black/55 px-1 py-1 text-white shadow-elevation-2 backdrop-blur-sm">
             <Button variant="ghost" size="icon" className={ZOOM_BTN} onClick={() => zoomByButton(-1)} disabled={atFit} aria-label={t('preview.zoomOut')}>
               <ZoomOut className="size-4" />
             </Button>
@@ -581,7 +581,7 @@ const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
               onClick={() => setActive(i)}
               className={clsx(
                 'shrink-0 rounded px-2 py-0.5 text-[11.5px] transition',
-                i === active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.06] hover:text-foreground',
+                i === active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-wash hover:text-foreground',
               )}
             >
               {s.name}

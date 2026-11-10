@@ -312,7 +312,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
     }
 
     return (
-      <div className="rounded-md border border-border bg-background px-3 py-3 text-[12px] leading-relaxed text-muted">
+      <div className="rounded-md border border-edge bg-surface px-3 py-3 text-[12px] leading-relaxed text-muted shadow-elevation-0">
         {t('platform.wechatCredentialHint')}
       </div>
     );
@@ -321,7 +321,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
   if (isPage) {
     return (
       <div className="mx-auto max-w-[920px]">
-        <section className="overflow-hidden rounded-md border border-border bg-surface-2/45">
+        <section className="overflow-hidden rounded-md border border-edge bg-surface-2/45 shadow-elevation-0">
           <div className="border-b border-border px-4 py-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -330,7 +330,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
               </div>
               <button
                 type="button"
-                className="inline-flex h-6 shrink-0 items-center rounded-md border border-border bg-surface-3 px-2 text-[10px] font-medium text-foreground"
+                className="inline-flex h-6 shrink-0 items-center rounded-md border border-edge px-2 text-[10px] font-medium text-foreground bg-field hover:bg-field-hover"
               >
                 {t('common.edit')}
               </button>
@@ -356,7 +356,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                       'inline-flex h-7 min-w-[118px] items-center justify-between gap-2 rounded-[5px] border px-2 text-[11px] font-medium transition-colors',
                       active
                         ? 'border-mint/35 bg-mint-soft text-foreground'
-                        : 'border-border bg-surface-3 text-muted hover:border-border-strong',
+                        : 'border-edge bg-surface-3 text-muted shadow-elevation-0',
                       focused && 'ring-1 ring-mint/30'
                     )}
                   >
@@ -372,7 +372,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  className="h-6 rounded-md border border-border bg-surface-3 px-2 text-[10px] font-medium text-foreground"
+                  className="h-6 rounded-md border border-edge px-2 text-[10px] font-medium text-foreground bg-field hover:bg-field-hover"
                 >
                   {t('common.cancel')}
                 </button>
@@ -409,7 +409,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                         'h-6 rounded-md border px-2.5 text-[10px] font-medium transition-colors',
                         activeCredentialPlatform === platform
                           ? 'border-mint/40 bg-mint-soft text-mint-ink'
-                          : 'border-border bg-surface-3 text-muted hover:border-border-strong'
+                          : 'border-edge text-muted bg-field hover:bg-field-hover'
                       )}
                     >
                       {platformText(t, platform, 'title', descriptor?.title_key)}
@@ -440,7 +440,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                           'flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px] font-semibold',
                           index < 2 || currentValidationState === 'success'
                             ? 'border-mint bg-mint text-primary-foreground'
-                            : 'border-border bg-background text-muted'
+                            : 'border-edge text-muted bg-field'
                         )}
                       >
                         {index < 2 || currentValidationState === 'success' ? <Check className="size-2.5" /> : index + 1}
@@ -458,8 +458,8 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                   </div>
 
                   {expanded && (
-                    <div className="mt-2 rounded-md border border-border bg-background/70 p-2.5">
-                      <div className="rounded-md border border-border bg-surface-3 px-2.5 py-2 text-[10px] leading-relaxed text-muted">
+                    <div className="mt-2 rounded-md border border-edge bg-background/70 p-2.5 shadow-elevation-0">
+                      <div className="rounded-md border border-edge bg-surface-3 px-2.5 py-2 text-[10px] leading-relaxed text-muted shadow-elevation-0">
                         {t('platform.credentialGuide', { platform: activePlatformLabel })}
                       </div>
 
@@ -470,7 +470,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                           <button
                             type="button"
                             onClick={() => openLinkInNewContext(getExternalUrl(activeCredentialPlatform))}
-                            className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-border bg-surface-3 px-2.5 text-[10px] font-medium text-foreground hover:border-border-strong"
+                            className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-edge px-2.5 text-[10px] font-medium text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
                           >
                             <ExternalLink className="size-3" />
                             {t('platform.openConsole', { platform: activePlatformLabel })}
@@ -556,7 +556,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
           <div className="flex flex-1 flex-col gap-3">
             <div className="flex items-center justify-between">
               <h3 className="text-[14px] font-semibold text-foreground">{t('platform.chatPlatformsTitle')}</h3>
-              <span className="rounded-full border border-border px-2.5 py-0.5 text-[10px] text-muted">
+              <span className="rounded-full border border-edge px-2.5 py-0.5 text-[10px] text-muted bg-field">
                 {t('platform.optionalLabel')}
               </span>
             </div>
@@ -669,7 +669,7 @@ const CredentialToggle: React.FC<{
   <button
     type="button"
     onClick={() => onChange(!checked)}
-    className="flex h-10 items-center justify-between gap-3 rounded-md border border-border bg-background px-3 text-left"
+    className="flex h-10 items-center justify-between gap-3 rounded-md border border-edge px-3 text-left bg-field hover:bg-field-hover active:bg-field-hover"
   >
     <span className="text-[11px] font-medium text-foreground">{label}</span>
     <span className={clsx('relative h-5 w-9 rounded-full transition-colors', checked ? 'bg-mint' : 'bg-surface-3')}>

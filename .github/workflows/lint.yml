@@ -6,11 +6,16 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
     types: [checks_requested]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # PR runs supersede older runs for the same PR. Queue groups are immutable
-  # landing trees and must never cancel one another or a PR run.
+  # One running full backstop finishes; only the newest pending master waits.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'push' || github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -18,21 +23,15 @@ env:
 
 jobs:
   changes:
-    # Always report a workflow result; workflow-level paths-ignore would leave
-    # required contexts pending. Only proven narrative-only diffs skip work,
-    # and on a pull request or merge-group entry two job families skip when no
-    # changed path can reach their inputs (docs/plans/ci-affected-routing.md).
-    # Each routed job reports through a required gate that checks it against its
-    # route.
+    # Sole scope authority: preserve proven docs-only PRs; otherwise run cheap
+    # checks and route heavy work. Queue combinations are thin, master is full.
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
       contents: read
     outputs:
-      docs_only: ${{ steps.scope.outputs.docs_only }}
-      windows_control_ipc: ${{ steps.scope.outputs.windows_control_ipc }}
-      browser: ${{ steps.scope.outputs.browser }}
-      platform: ${{ steps.scope.outputs.platform }}
+      mode: ${{ steps.scope.outputs.mode }}
+      plan: ${{ steps.scope.outputs.plan }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -40,7 +39,7 @@ jobs:
           fetch-depth: 2
       - name: Classify the complete change
         id: scope
-        run: python3 scripts/ci_docs_only.py
+        run: python3 scripts/ci_scope.py
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.scope.outputs.docs_only == 'true'
         with:
@@ -53,9 +52,102 @@ jobs:
           python -m pip install --disable-pip-version-check pytest==9.0.3
           python -m pytest --noconftest -p no:cacheprovider -c /dev/null -q tests/test_repository_guidance.py
 
+  ios-shell:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['ios-shell'] == 'run'
+    uses: ./.github/workflows/ios-shell.yml
+
+  desktop-shell:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['desktop-shell'] == 'run'
+    uses: ./.github/workflows/desktop-shell.yml
+
+  manifest-consistency:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['manifest-consistency'] == 'run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-ci-manifests-${{ hashFiles('uv.lock', 'desktop/Cargo.lock') }}
+      - name: Install locked Python test dependencies and pinned workflow validator
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          uv sync --locked --no-install-project
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          base=https://github.com/rhysd/actionlint/releases/download/v1.7.12
+          curl --fail --location --retry 2 "$base/actionlint_1.7.12_linux_amd64.tar.gz" -o actionlint.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz' | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          echo "$RUNNER_TEMP/actionlint" >> "$GITHUB_PATH"
+          # Tests isolate HOME; use the installed Cargo binary, not a rustup
+          # shim that would try to provision another toolchain in that home.
+          dirname "$(rustup which cargo)" >> "$GITHUB_PATH"
+      - name: Verify locks, manifests, CI YAML and JSON schemas without rewriting locks
+        run: .venv/bin/python scripts/ci_manifest_guard.py
+      - name: Exercise routing, required contexts and workflow contracts
+        run: >-
+          .venv/bin/python -m pytest -q
+          tests/test_ci_scope.py tests/test_ci_manifest_guard.py tests/test_ci_release_backstop.py
+          tests/test_ci_docs_only.py tests/test_ci_scenario_evidence.py
+          tests/test_workflow_call_permissions.py tests/test_repository_guidance.py tests/test_ci_pipeline.py
+          -k 'not unit_file and not file_metrics and not shard_lanes and not release_gating_is_read'
+
+  python-smoke:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['python-smoke'] == 'run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.13.7-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+          uv sync --locked --no-install-project
+      - name: Collect Python tests without running the unit suite
+        run: bash scripts/ci_loopback_only.sh .venv/bin/python -m pytest --collect-only -q -m 'not integration' --ignore=tests/e2e tests
+
+  master-full-backstop:
+    runs-on: ubuntu-latest
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [changes, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper, ui-checks, manifest-consistency, python-smoke, model-hub-hosted-wire, unit-test-shards, ui-tests, scenario-evidence, ui-browser-checks, ios-shell, desktop-shell, install-upgrade-shards, web-fetch-runtime, web-fetch-macos, windows-install-smoke-runners, windows-agent, windows-model-hub, windows-control-ipc, unit-tests, install-upgrade-regression, windows-install-smoke]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Certify this exact SHA only after every full-scope job succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py --gate master-full-backstop
+
   memory-insight-contract:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['memory-insight-contract'] == 'run'
     # Repository branch protection still requires this historical context name.
     # An administrator can rename that requirement after this compatibility job
     # has landed; the job itself is a substantive removal contract, not a shim.
@@ -99,7 +191,7 @@ jobs:
 
   ruff:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['ruff'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -116,97 +208,29 @@ jobs:
           pre-commit run --all-files
 
   web-fetch-runtime:
-    name: web-fetch-runtime (${{ matrix.os }}, ${{ matrix.label }})
     needs: [changes, build-linux-artifacts]
-    # Routed with the Windows installer smoke; both report through the
-    # required windows-install-smoke gate.
-    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        # Every leg is requested the moment the artifact build finishes, beside
-        # the install regression that sits on the critical path. Five ubuntu
-        # legs held runners for under a minute of setup each, so one ubuntu job
-        # verifies all five Pythons in turn, each in its own interpreter.
-        include:
-          - {os: ubuntu-latest, label: "3.10-3.14", python: "3.10\n3.11\n3.12\n3.13\n3.14"}
-          - {os: ubuntu-24.04-arm, label: "3.12", python: "3.12"}
-          - {os: macos-15-intel, label: "3.12", python: "3.12"}
-          - {os: macos-15, label: "3.12", python: "3.12"}
-          - {os: windows-latest, label: "3.12", python: "3.12"}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
-        with:
-          name: vibe-wheel-linux
-          path: dist
-      - name: Prepare frozen requirements
-        run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
-          uv export --frozen --no-dev --no-emit-project --output-file fetch-requirements.txt
-          python -c "from pathlib import Path; p=Path('ui/dist'); p.mkdir(parents=True,exist_ok=True); (p/'index.html').touch()"
-      # Each listed Python gets the same frozen binary dependencies, wheel and
-      # pytest selection in its own interpreter. Every version runs even after
-      # one fails, and each failure names its version.
-      - name: Verify native resources, pinned transports and disposable workers offline
-        env:
-          PYTHON_VERSIONS: ${{ matrix.python }}
-        run: |
-          failed=""
-          for version in $PYTHON_VERSIONS; do
-            echo "::group::Python $version"
-            if python_bin="$(uv python find --system --no-project --python-preference only-system "$version")" \
-              && "$python_bin" -c "import sys; print(sys.executable, sys.version)" \
-              && uv pip install --system --python "$python_bin" --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt \
-              && uv pip install --system --python "$python_bin" --no-deps dist/*.whl \
-              && uv pip install --system --python "$python_bin" pytest pytest-asyncio jsonschema \
-              && "$python_bin" -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
-            then
-              echo "::endgroup::"
-            else
-              echo "::endgroup::"
-              echo "::error::web-fetch-runtime failed on Python $version"
-              failed="$failed $version"
-            fi
-          done
-          if [ -n "$failed" ]; then
-            echo "web-fetch-runtime failed on Python:$failed"
-            exit 1
-          fi
+    if: fromJSON(needs.changes.outputs.plan).jobs['web-fetch-runtime'] == 'run'
+    uses: ./.github/workflows/web-fetch-runtime.yml
+    with:
+      platforms: >-
+        [{"os":"ubuntu-latest","label":"3.10-3.14","python":"3.10\n3.11\n3.12\n3.13\n3.14"},
+         {"os":"ubuntu-24.04-arm","label":"3.12","python":"3.12"},
+         {"os":"windows-latest","label":"3.12","python":"3.12"}]
+
+  web-fetch-macos:
+    needs: [changes, build-linux-artifacts]
+    if: fromJSON(needs.changes.outputs.plan).jobs['web-fetch-macos'] == 'run'
+    uses: ./.github/workflows/web-fetch-runtime.yml
+    with:
+      platforms: >-
+        [{"os":"macos-15-intel","label":"3.12","python":"3.12"},
+         {"os":"macos-15","label":"3.12","python":"3.12"}]
 
   ui-checks:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
-    # Static validation and Vitest share no state, and run back to back they
-    # were the workflow's longest job. Each part runs once on its own runner;
-    # the required unit-tests gate needs this job, so it needs both parts.
-    name: ui-checks (${{ matrix.part }})
+    if: fromJSON(needs.changes.outputs.plan).jobs['ui-checks'] == 'run'
+    name: ui-checks (static)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - part: static
-            commands: |
-              npm run validate:theme
-              npm run lint
-              # Production tsc excludes test files, and vitest only strips types.
-              npm run typecheck:tests
-              # Design frames (ui/design) are not part of the production build.
-              npm run typecheck:design
-              # Every browser suite, including those whose cases no lane runs.
-              npm run typecheck:e2e
-          - part: tests
-            commands: |
-              npm test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
@@ -214,16 +238,37 @@ jobs:
           node-version: "22.23.4"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
-
-      - name: Validate and test UI
+      - name: Validate UI types and static contracts
         working-directory: ui
         run: |
           npm ci
-          ${{ matrix.commands }}
+          npm run validate:theme
+          npm run lint
+          npm run typecheck:tests
+          npm run typecheck:design
+          npm run typecheck:e2e
+
+  ui-tests:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.plan).jobs['ui-tests'] == 'run'
+    name: ui-checks (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+      - name: Run Vitest
+        working-directory: ui
+        run: |
+          npm ci
+          npm test
 
   ui-browser-checks:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.browser != 'skip'
+    if: fromJSON(needs.changes.outputs.plan).jobs['ui-browser-checks'] == 'run'
     # Browser interactions do not depend on lint, Vitest, or the production
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for every lane, including failure/cancellation. Design captures stay manual.
@@ -233,8 +278,8 @@ jobs:
       fail-fast: false
       matrix:
         # Keep each suite's workers, server and type check unchanged. Four
-        # independent runners balance the measured command wall times at about
-        # eight minutes each (run 41810827956); see docs/plans/ci-browser-parallelism.md.
+        # independent runners balance measured command wall times; see
+        # docs/plans/ci-browser-parallelism.md for the coverage contract.
         include:
           - lane: 1
             suites: |
@@ -252,6 +297,7 @@ jobs:
               npm run test:chat-paging
               npm run test:model-provider
               npm run test:web-fetch
+              npm run test:voice-shortcut
           - lane: 3
             suites: |
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
@@ -261,14 +307,13 @@ jobs:
               npm run test:motion
               npm run test:citations
               npm run test:session-dot
+              npm run test:vault-integrity
           - lane: 4
             suites: |
-              npm run test:vault-integrity
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
               npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts
               npm run test:badge-triggers
               npm run test:chat-selection
-              npm run test:voice-shortcut
               npm run test:chat-scroll
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -355,7 +400,7 @@ jobs:
 
   show-router-integration:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['show-router-integration'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -394,7 +439,7 @@ jobs:
 
   build-linux-artifacts:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['build-linux-artifacts'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -414,6 +459,10 @@ jobs:
         run: |
           npm ci
           npm run build
+          # Ordinary UI changes still validate the bundled phone app on Linux;
+          # only native/bridge/contract changes allocate the iOS simulator.
+          npm run build:mobile
+          ../ios/scripts/verify_mobile_bundle.sh ../ios/Avibe/Resources/MobileApp
 
       # What a phone downloads before the first screen draws (docs/plans/web-ui-first-load.md).
       - name: Check the first screen's download budget
@@ -466,7 +515,7 @@ jobs:
 
   unit-test-shards:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['unit-test-shards'] == 'run'
     name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -531,7 +580,7 @@ jobs:
 
   model-hub-hosted-wire:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['model-hub-hosted-wire'] == 'run'
     # A pull request that replaces the engine must not change how it passes
     # hosted tools through, unless labeled engine-hosted-wire-change
     # (docs/plans/model-hub-cpa-dependency.md). Any other change passes after
@@ -605,55 +654,18 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
-    # Keep UI validation in the existing required gate while allowing artifact
-    # consumers to start as soon as their production bundle is built. The
-    # hosted wire gate reports through it too, under no new required context.
-    # It is also the browser route's gate: lanes skipped by route must report
-    # skipped, and lanes that should run must succeed.
-    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-browser-checks, model-hub-hosted-wire]
+    needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, manifest-consistency, python-smoke, ios-shell, desktop-shell, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper]
     if: always()
     steps:
-      - name: Verify unit test shards, UI checks and the hosted_wire gate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Require exactly the results declared by this CI mode
         env:
-          SCOPE_RESULT: ${{ needs.changes.result }}
-          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          BROWSER_ROUTE: ${{ needs.changes.outputs.browser }}
-          UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
-          EVIDENCE_RESULT: ${{ needs['scenario-evidence'].result }}
-          UI_RESULT: ${{ needs['ui-checks'].result }}
-          BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
-          HOSTED_WIRE_RESULT: ${{ needs['model-hub-hosted-wire'].result }}
-        run: |
-          if [ "$SCOPE_RESULT" != "success" ]; then
-            echo "Change classification did not succeed."
-            exit 1
-          fi
-          case "$DOCS_ONLY" in
-            true) expected="skipped" ;;
-            false) expected="success" ;;
-            *) echo "Missing or invalid change classification."; exit 1 ;;
-          esac
-          case "$BROWSER_ROUTE" in
-            run) browser_expected="$expected" ;;
-            skip) browser_expected="skipped" ;;
-            *) echo "Missing or invalid browser route."; exit 1 ;;
-          esac
-          if [ "$BROWSER_RESULT" != "$browser_expected" ]; then
-            echo "Browser lanes finished with result: $BROWSER_RESULT (expected $browser_expected)"
-            exit 1
-          fi
-          for result in "$UNIT_RESULT" "$EVIDENCE_RESULT" "$UI_RESULT" "$HOSTED_WIRE_RESULT"; do
-            if [ "$result" != "$expected" ]; then
-              echo "Unit/UI/hosted_wire checks finished with result: $result"
-              exit 1
-            fi
-          done
-          echo "Unit/UI/hosted_wire results match the classified scope (docs_only=$DOCS_ONLY, browser=$BROWSER_ROUTE)."
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py --gate unit-tests
 
-  # Every case a covered scenario row cites as evidence ran and passed in some
-  # job, or a release workflow runs it (scripts/ci_scenario_evidence.py). It
-  # waits for every job that writes junit; one that a path or event filter
-  # skipped leaves no report, and its cases count as not run, never as failed.
+  # PR/master evidence must match the mode and the actual JUnit producers.
+  # MG_THIN explicitly does not attest scenario execution; its required gate
+  # accepts exactly this job's declared skipped result, not fabricated reports.
   scenario-evidence:
     needs:
       - changes
@@ -664,7 +676,7 @@ jobs:
       - windows-model-hub
       - windows-control-ipc
       - windows-agent
-    if: always() && needs.changes.outputs.docs_only == 'false'
+    if: always() && needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).jobs['scenario-evidence'] == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -697,12 +709,14 @@ jobs:
           pattern: junit-*
           path: ci-junit
 
-      - name: Check that covered scenario evidence ran
-        run: python scripts/ci_scenario_evidence.py ci-junit
+      - name: Check that covered scenario evidence ran in this mode
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/ci_scenario_evidence.py ci-junit --mode "${{ needs.changes.outputs.mode }}"
 
   migration-release-guard:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['migration-release-guard'] == 'run'
     runs-on: ubuntu-latest
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
@@ -742,7 +756,7 @@ jobs:
         run: |
           set -o pipefail
           output="$RUNNER_TEMP/migration-release-guard.log"
-          python -m pytest tests/test_migration_release_guard.py -ra | tee "$output"
+          python -m pytest tests/test_migration_release_guard.py tests/test_github_read_retry.py -ra | tee "$output"
           # The release-history properties skip themselves when no tags are reachable so
           # the sharded unit job stays green on its shallow checkout. This job is the one
           # that supplies the history, so here a skip means the guard proved nothing.
@@ -769,7 +783,7 @@ jobs:
 
   npm-wrapper:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: fromJSON(needs.changes.outputs.plan).jobs['npm-wrapper'] == 'run'
     runs-on: [self-hosted, Linux, X64, avibe]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -789,7 +803,8 @@ jobs:
   install-upgrade-shards:
     name: install-upgrade-regression (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    needs: build-linux-artifacts
+    needs: [changes, build-linux-artifacts]
+    if: fromJSON(needs.changes.outputs.plan).jobs['install-upgrade-shards'] == 'run'
     strategy:
       fail-fast: false
       matrix:
@@ -881,38 +896,22 @@ jobs:
     needs: [changes, install-upgrade-shards]
     if: always()
     steps:
-      - name: Verify all install and upgrade suites
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Require exactly the results declared by this CI mode
         env:
-          SCOPE_RESULT: ${{ needs.changes.result }}
-          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          INSTALL_RESULT: ${{ needs['install-upgrade-shards'].result }}
-        run: |
-          if [ "$SCOPE_RESULT" != "success" ]; then
-            echo "Change classification did not succeed."
-            exit 1
-          fi
-          case "$DOCS_ONLY" in
-            true) expected="skipped" ;;
-            false) expected="success" ;;
-            *) echo "Missing or invalid change classification."; exit 1 ;;
-          esac
-          if [ "$INSTALL_RESULT" != "$expected" ]; then
-            echo "Install/upgrade suites finished with result: $INSTALL_RESULT"
-            exit 1
-          fi
-          echo "Install/upgrade results match the classified scope (docs_only=$DOCS_ONLY)."
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py --gate install-upgrade-regression
 
   windows-install-smoke-runners:
     name: windows-install-smoke (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
-    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip'
-    # Pull requests allocate only Windows latest; merge groups run the full
-    # Windows latest plus Windows on Arm matrix.
+    if: fromJSON(needs.changes.outputs.plan).jobs['windows-install-smoke-runners'] == 'run'
+    # Relevant PRs and full master both cover x64 and ARM; MG_THIN skips both.
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","windows-11-arm"]') }}
+        runner: [windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -1082,46 +1081,14 @@ jobs:
 
   windows-install-smoke:
     runs-on: ubuntu-latest
-    # The required gate of the installed-package platform route: the Windows
-    # installer smoke and web-fetch-runtime on all five platforms. Skipped by
-    # route, both must report skipped; otherwise both must succeed. Any
-    # web-fetch-runtime leg that fails, is cancelled, times out or never gets a
-    # runner therefore fails this required context too; the context keeps its
-    # historical name because branch protection requires it.
-    needs: [changes, windows-install-smoke-runners, web-fetch-runtime]
+    needs: [changes, windows-install-smoke-runners, web-fetch-runtime, web-fetch-macos, windows-agent, windows-model-hub, windows-control-ipc]
     if: always()
     steps:
-      - name: Verify the Windows installer and web-fetch-runtime on every platform
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Require exactly the results declared by this CI mode
         env:
-          SCOPE_RESULT: ${{ needs.changes.result }}
-          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
-          PLATFORM_ROUTE: ${{ needs.changes.outputs.platform }}
-          SMOKE_RESULT: ${{ needs['windows-install-smoke-runners'].result }}
-          WEB_FETCH_RESULT: ${{ needs['web-fetch-runtime'].result }}
-        run: |
-          if [ "$SCOPE_RESULT" != "success" ]; then
-            echo "Change classification did not succeed."
-            exit 1
-          fi
-          case "$DOCS_ONLY" in
-            true) expected="skipped" ;;
-            false) expected="success" ;;
-            *) echo "Missing or invalid change classification."; exit 1 ;;
-          esac
-          case "$PLATFORM_ROUTE" in
-            run) ;;
-            skip) expected="skipped" ;;
-            *) echo "Missing or invalid platform route."; exit 1 ;;
-          esac
-          if [ "$SMOKE_RESULT" != "$expected" ]; then
-            echo "Windows installer smoke finished with result: $SMOKE_RESULT (expected $expected)"
-            exit 1
-          fi
-          if [ "$WEB_FETCH_RESULT" != "$expected" ]; then
-            echo "web-fetch-runtime finished with result: $WEB_FETCH_RESULT (expected $expected)"
-            exit 1
-          fi
-          echo "Installer and runtime results match the classified scope (docs_only=$DOCS_ONLY, platform=$PLATFORM_ROUTE)."
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py --gate windows-install-smoke
 
   # The only job that starts the real service on Windows. A fresh install
   # installs the Model Hub engine from the packaged manifest, saves API-key
@@ -1131,7 +1098,7 @@ jobs:
     name: windows-model-hub (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
-    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'
+    if: fromJSON(needs.changes.outputs.plan).jobs['windows-model-hub'] == 'run'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1197,7 +1164,7 @@ jobs:
   windows-control-ipc:
     runs-on: windows-latest
     needs: [changes, build-linux-artifacts]
-    if: needs.changes.outputs.docs_only == 'false' && (github.event_name != 'pull_request' || needs.changes.outputs.windows_control_ipc == 'true')
+    if: fromJSON(needs.changes.outputs.plan).jobs['windows-control-ipc'] == 'run'
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -1330,7 +1297,7 @@ jobs:
     name: windows-agent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'
+    if: fromJSON(needs.changes.outputs.plan).jobs['windows-agent'] == 'run'
     timeout-minutes: 20
     strategy:
       fail-fast: false

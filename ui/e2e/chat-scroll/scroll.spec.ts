@@ -371,7 +371,13 @@ test('following the tail, opening something holds it where it was tapped and sto
 async function glideFrames(page: Page, act: () => Promise<void>) {
   await page.evaluate(() => window.__scrollLab.start());
   await act();
-  await page.waitForTimeout(700);
+  // The glide waits for the reader's scroll to settle, including the lost-scrollend fallback. Observe
+  // its landing rather than assuming it starts inside a fixed wall-clock window after the click.
+  // Wait for the recorder's frame, not just scrollTop, so the returned path includes that landing.
+  await expect.poll(() => page.evaluate(() => {
+    const frame = window.__scrollLab.frames.at(-1);
+    return frame ? frame.height - frame.client - frame.top : Infinity;
+  })).toBeLessThan(1);
   await page.evaluate(() => window.__scrollLab.stop());
   return page.evaluate(() => window.__scrollLab.frames.map((frame) => [frame.t, frame.top, frame.height - frame.client] as const));
 }
@@ -448,37 +454,45 @@ test('an explicit jump to latest clears an old anchor takeback before a reader s
   expect(restoreWrites(writes)).toEqual([]);
 });
 
-test('the way back to the latest message is a quick glide that slows as it lands, then follows the tail', async ({ page }) => {
-  // All 50 rows are in the first window: nothing older to load.
-  await open(page, 'delay=0&images=0&count=50');
-  await standAt(page, 2);
-  const frames = await glideFrames(page, () => toLatest(page).click());
-  const startTop = frames[0][1];
-  const bottom = frames.at(-1)![2];
-  expect(frames.at(-1)![1]).toBeGreaterThanOrEqual(bottom - 1);
-  const between = frames.filter(([, top]) => top > startTop + 1 && top < bottom - 1);
-  expect(between.length).toBeGreaterThanOrEqual(5);
-  const firstMove = frames.find(([, top]) => top > startTop + 1)![0];
-  const landed = frames.find(([, top]) => top >= bottom - 1)![0];
-  expect(landed - firstMove).toBeGreaterThan(150);
-  expect(landed - firstMove).toBeLessThan(500);
-  // It slows as it lands: the last third of the way takes longer than the first.
-  const at = (fraction: number) => frames.find(([, top]) => top >= startTop + (bottom - startTop) * fraction)![0];
-  expect(landed - at(2 / 3)).toBeGreaterThan(at(1 / 3) - firstMove);
-  // At the bottom it follows the tail again.
-  await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
-  await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
+for (const scrollend of ['delivered', 'lost'] as const) {
+  test(`the way back to the latest message is a quick glide that slows as it lands, then follows the tail (${scrollend} scrollend)`, async ({ page }) => {
+    if (scrollend === 'lost') {
+      // The browser can omit scrollend. Exercise the real rest fallback, not a synthetic product hook.
+      await page.addInitScript(() => {
+        document.addEventListener('scrollend', (event) => event.stopImmediatePropagation(), true);
+      });
+    }
+    // All 50 rows are in the first window: nothing older to load.
+    await open(page, 'delay=0&images=0&count=50');
+    await standAt(page, 2);
+    const frames = await glideFrames(page, () => toLatest(page).click());
+    const startTop = frames[0][1];
+    const bottom = frames.at(-1)![2];
+    expect(frames.at(-1)![1]).toBeGreaterThanOrEqual(bottom - 1);
+    const between = frames.filter(([, top]) => top > startTop + 1 && top < bottom - 1);
+    expect(between.length).toBeGreaterThanOrEqual(5);
+    const firstMove = frames.find(([, top]) => top > startTop + 1)![0];
+    const landed = frames.find(([, top]) => top >= bottom - 1)![0];
+    expect(landed - firstMove).toBeGreaterThan(150);
+    expect(landed - firstMove).toBeLessThan(500);
+    // It slows as it lands: the last third of the way takes longer than the first.
+    const at = (fraction: number) => frames.find(([, top]) => top >= startTop + (bottom - startTop) * fraction)![0];
+    expect(landed - at(2 / 3)).toBeGreaterThan(at(1 / 3) - firstMove);
+    // At the bottom it follows the tail again.
+    await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
+    await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
 
-  // From far up it cuts to a screen above the bottom first, then glides.
-  await standAt(page, 8);
-  const far = await glideFrames(page, () => toLatest(page).click());
-  const farStart = far[0][1];
-  const moved = far.filter(([, top]) => top > farStart + 1);
-  const client = await transcript(page).evaluate((el) => el.clientHeight);
-  expect(moved[0][1]).toBeGreaterThanOrEqual(far.at(-1)![2] - client - 2);
-  expect(moved.filter(([, top, end]) => top < end - 1).length).toBeGreaterThanOrEqual(5);
-  expect(await gapToBottom(page)).toBeLessThan(1);
-});
+    // From far up it cuts to a screen above the bottom first, then glides.
+    await standAt(page, 8);
+    const far = await glideFrames(page, () => toLatest(page).click());
+    const farStart = far[0][1];
+    const moved = far.filter(([, top]) => top > farStart + 1);
+    const client = await transcript(page).evaluate((el) => el.clientHeight);
+    expect(moved[0][1]).toBeGreaterThanOrEqual(far.at(-1)![2] - client - 2);
+    expect(moved.filter(([, top, end]) => top < end - 1).length).toBeGreaterThanOrEqual(5);
+    expect(await gapToBottom(page)).toBeLessThan(1);
+  });
+}
 
 test('the glide to the latest message gives way to the reader, and is a cut under reduced motion', async ({ page }) => {
   await open(page, 'delay=0&images=0&count=50');

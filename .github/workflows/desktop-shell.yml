@@ -6,23 +6,7 @@ name: desktop-shell
 # — bundling and signing belong to a release workflow, not to a PR gate.
 
 on:
-  pull_request:
-    paths:
-      - "desktop/**"
-      - "ui/src/i18n/en.json"
-      - "ui/src/i18n/zh.json"
-      - "scripts/desktop_release.py"
-      - ".github/workflows/desktop-shell.yml"
-      - ".github/workflows/desktop-package.yml"
-      - ".github/workflows/desktop-signpath-test.yml"
-  merge_group:
-    types: [checks_requested]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # PR runs may be superseded within one PR. Queue groups must not cancel
-  # another group or a PR run.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  workflow_call:
 
 permissions:
   contents: read

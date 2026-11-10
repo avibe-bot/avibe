@@ -56,6 +56,15 @@ const designFrames = frames([
     render: tools(readyRegion(hostedTools({ tavilyAdded: false })), demoSources.filter((s) => s.id !== tavily.id)),
   },
   {
+    name: 'parallel-elected',
+    title: '工具 · 已选用内置免费 Parallel（排在 Exa 之后）',
+    width: 1280,
+    height: 1400,
+    status: 'shipped',
+    fixtures: { api: baseApi },
+    render: tools(readyRegion(hostedTools({ tavilyAdded: false, parallelElected: true })), demoSources.filter((s) => s.id !== tavily.id)),
+  },
+  {
     name: 'key-invalid',
     title: '工具 · Tavily 密钥无效、已自动改用',
     width: 1280,

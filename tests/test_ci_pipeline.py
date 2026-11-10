@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import Counter
 import io
-import itertools
 import json
 import os
 from pathlib import Path
@@ -21,20 +20,7 @@ from scripts.ci_scenario_evidence import pytest_commands
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The only jobs a pull request may route past, the route each reads, and the
-# required gate that checks its result against that route
-# (docs/plans/ci-affected-routing.md).
-_ROUTED = {
-    "ui-browser-checks": ("browser", "unit-tests"),
-    "web-fetch-runtime": ("platform", "windows-install-smoke"),
-    "windows-install-smoke-runners": ("platform", "windows-install-smoke"),
-}
-_ROUTE_ENV = {"browser": "BROWSER_ROUTE", "platform": "PLATFORM_ROUTE"}
-_REQUIRED_GATES = ("unit-tests", "install-upgrade-regression", "windows-install-smoke")
-
-
-def _routed_if(route: str) -> str:
-    return f"needs.changes.outputs.docs_only == 'false' && needs.changes.outputs.{route} != 'skip'"
+# The mode/routing gate contract is exercised at its owner in test_ci_scope.py.
 
 
 def _jobs() -> dict:
@@ -427,8 +413,10 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert checks.get("needs") == "changes"
     assert build.get("needs") == "changes"
     assert set(jobs["unit-tests"]["needs"]) == {
-        "changes", "unit-test-shards", "scenario-evidence", "ui-checks",
-        "ui-browser-checks", "model-hub-hosted-wire",
+        "changes", "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
+        "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency", "python-smoke",
+        "ios-shell", "desktop-shell", "ruff", "memory-insight-contract",
+        "show-router-integration", "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
     }
     # Captures are an explicit design-review command, not routine CI work.
     # Inspect commands in both steps and matrices, not just the old job name.
@@ -441,14 +429,11 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
     assert all(step.get("working-directory") == "ui" for step in check_steps)
-    # The parts run on separate runners: each runs the shared steps with its own
-    # commands, and together they run every UI check exactly once.
+    # Static checks and Vitest run independently. Only the former is in MG_THIN.
     shared = "\n".join(step["run"] for step in check_steps).splitlines()
-    parts = checks["strategy"]["matrix"]["include"]
-    assert checks["strategy"]["fail-fast"] is False
-    assert shared.count("${{ matrix.commands }}") == 1
     assert "npm ci" in shared
-    check_commands = [line.strip() for part in parts for line in part["commands"].splitlines()]
+    test_commands = [line for step in jobs["ui-tests"]["steps"] for line in step.get("run", "").splitlines()]
+    check_commands = shared + test_commands
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
     for command in (
         "npm run validate:theme", "npm run lint", "npm run typecheck:tests",
@@ -461,11 +446,11 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert ui_scripts["typecheck:e2e"] == "node scripts/typecheck-e2e.mjs"
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
-    for job in (checks, build):
-        assert job["if"] == "needs.changes.outputs.docs_only == 'false'"
+    for name, job in (("ui-checks", checks), ("build-linux-artifacts", build)):
+        assert job["if"] == f"fromJSON(needs.changes.outputs.plan).jobs['{name}'] == 'run'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
-    assert browsers["if"] == _routed_if("browser")
+    assert browsers["if"] == "fromJSON(needs.changes.outputs.plan).jobs['ui-browser-checks'] == 'run'"
     assert not browsers.get("continue-on-error")
     assert all(not step.get("continue-on-error") for step in browsers["steps"])
     browser_artifacts = [
@@ -486,7 +471,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     }
     assert browsers["steps"][-1] is artifact
     assert {leg["lane"] for leg in browsers["strategy"]["matrix"]["include"]} == {1, 2, 3, 4}
-    assert jobs["install-upgrade-shards"]["needs"] == "build-linux-artifacts"
+    assert jobs["install-upgrade-shards"]["needs"] == ["changes", "build-linux-artifacts"]
     assert jobs["windows-install-smoke-runners"]["needs"] == ["changes", "build-linux-artifacts"]
 
 
@@ -521,19 +506,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
     )
-    triggers = workflow[True]
-    browser_inputs = [
-        f"{entry}**" if entry.endswith("/") else entry
-        for entry in BROWSER_CHECKOUT
-        if entry != "Dockerfile"
-    ]
-    expected_paths = [
-        "ios/**",
-        ".github/workflows/ios-shell.yml",
-        *browser_inputs,
-    ]
-    assert triggers["pull_request"]["paths"] == expected_paths
-    assert triggers["merge_group"] == {"types": ["checks_requested"]}
+    assert workflow[True] == {"workflow_call": None, "pull_request": None}
 
     steps = workflow["jobs"]["simulator"]["steps"]
     setup_node, = [
@@ -647,7 +620,26 @@ def test_ios_app_builds_carry_the_avibe_bot_webcredentials_domain() -> None:
     apple-app-site-association lists this app under the same domain.
     """
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
-    assert entitlements == {"com.apple.developer.associated-domains": ["webcredentials:avibe.bot"]}
+    assert entitlements == {
+        "aps-environment": "development",
+        "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+        "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+        "keychain-access-groups": [
+            "$(AppIdentifierPrefix)bot.avibe.ios",
+            "$(AppIdentifierPrefix)bot.avibe.ios.push",
+        ],
+    }
+    app_info = plistlib.loads((ROOT / "ios/Avibe/Resources/Info.plist").read_bytes())
+    extension_info = plistlib.loads((ROOT / "ios/NotificationService/Info.plist").read_bytes())
+    assert app_info["AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios.push"
+    )
+    assert app_info["AVIBE_PRIVATE_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios"
+    )
+    assert extension_info["AVIBE_PUSH_KEYCHAIN_ACCESS_GROUP"] == (
+        "$(AppIdentifierPrefix)bot.avibe.ios.push"
+    )
 
     project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
     app_configurations = [
@@ -757,18 +749,12 @@ def test_browser_matrix_runs_complete_disjoint_commands_and_propagates_each_fail
     assert Counter(observed) == Counter(expected)
 
 
-def test_windows_platform_checks_route_queue_entries_like_pull_requests() -> None:
+def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
     jobs = _jobs()
-    expected_scope = "needs.changes.outputs.docs_only == 'false'"
     assert jobs["windows-model-hub"]["needs"] == ["changes", "build-linux-artifacts"]
-    assert jobs["windows-model-hub"]["if"] == (
-        expected_scope + " && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'"
-    )
+    assert jobs["windows-model-hub"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-model-hub'] == 'run'"
     assert jobs["windows-control-ipc"]["needs"] == ["changes", "build-linux-artifacts"]
-    assert jobs["windows-control-ipc"]["if"] == (
-        expected_scope + " && (github.event_name != 'pull_request' || "
-        "needs.changes.outputs.windows_control_ipc == 'true')"
-    )
+    assert jobs["windows-control-ipc"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-control-ipc'] == 'run'"
     skill_step = next(
         step for step in jobs["windows-control-ipc"]["steps"]
         if step.get("name") == "Verify Skill discovery keeps real directory identities"
@@ -787,17 +773,16 @@ def test_windows_platform_checks_route_queue_entries_like_pull_requests() -> Non
     assert node["with"]["node-version"] == "22.23.4"
     install = next(step for step in ipc_steps if step.get("name") == "Install package and focused test dependency")
     assert "pytest-asyncio" in install["run"]
-    assert jobs["windows-agent"]["if"] == (
-        expected_scope + " && needs.changes.outputs.platform != 'skip' && github.event_name != 'pull_request'"
-    )
+    assert jobs["windows-agent"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-agent'] == 'run'"
 
     smoke = jobs["windows-install-smoke-runners"]
-    assert smoke["strategy"]["matrix"]["runner"] == (
-        "${{ fromJSON(github.event_name == 'pull_request' && '[\"windows-latest\"]' || '[\"windows-latest\",\"windows-11-arm\"]') }}"
-    )
+    assert smoke["strategy"]["matrix"]["runner"] == ["windows-latest", "windows-11-arm"]
     smoke_steps = {step["name"]: step for step in smoke["steps"] if "name" in step}
     assert "if" not in smoke_steps["Run Windows installer smoke test"]
-    assert jobs["windows-install-smoke"]["needs"] == ["changes", "windows-install-smoke-runners", "web-fetch-runtime"]
+    assert jobs["windows-install-smoke"]["needs"] == [
+        "changes", "windows-install-smoke-runners", "web-fetch-runtime", "web-fetch-macos",
+        "windows-agent", "windows-model-hub", "windows-control-ipc",
+    ]
     assert jobs["windows-install-smoke"]["if"] == "always()"
 
 
@@ -807,7 +792,7 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     assert shards["strategy"]["fail-fast"] is False
     suites = shards["strategy"]["matrix"]["suite"]
     assert len(suites) == len(set(suites)) == 1
-    assert not shards.get("if")
+    assert shards["if"] == "fromJSON(needs.changes.outputs.plan).jobs['install-upgrade-shards'] == 'run'"
     assert not shards.get("continue-on-error")
     assert all(not step.get("continue-on-error") for step in shards["steps"])
     steps = {step["name"]: step for step in shards["steps"] if "name" in step}
@@ -853,7 +838,7 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     assert download["with"] == {"name": "vibe-package-contracts-linux", "path": "dist"}
     assert not download.get("continue-on-error")
     owners = [
-        (name, step) for name, job in jobs.items() for step in job["steps"]
+        (name, step) for name, job in jobs.items() for step in job.get("steps", [])
         if "tests/test_distribution_artifacts.py" in step.get("run", "")
     ]
     (owner, contracts), = owners
@@ -871,7 +856,10 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     assert jobs["windows-install-smoke-runners"]["needs"] == ["changes", "build-linux-artifacts"]
     # Branch protection requires `windows-install-smoke`; the per-runner matrix
     # reports under other names, so the required name gates on all of them.
-    assert jobs["windows-install-smoke"]["needs"] == ["changes", "windows-install-smoke-runners", "web-fetch-runtime"]
+    assert jobs["windows-install-smoke"]["needs"] == [
+        "changes", "windows-install-smoke-runners", "web-fetch-runtime", "web-fetch-macos",
+        "windows-agent", "windows-model-hub", "windows-control-ipc",
+    ]
     assert jobs["windows-install-smoke"]["if"] == "always()"
 
 
@@ -1001,23 +989,27 @@ def test_steps_that_tee_a_command_keep_its_exit_status() -> None:
     assert unguarded == []
 
 
+RELEASE_E2E_SHARDS = ("model-hub-e2e-wire-mock", "model-hub-e2e-remaining")
+
+
+@pytest.mark.parametrize("shard", RELEASE_E2E_SHARDS)
 @pytest.mark.parametrize(
     ("pytest_exit", "evidence_exit", "expected"),
     [(0, 0, 0), (1, 0, 1), (0, 1, 1), (2, 1, 2)],
     ids=["green", "pytest-failed", "evidence-failed", "both-failed"],
 )
 def test_release_e2e_gate_fails_when_its_tests_or_evidence_fail(
-    tmp_path: Path, pytest_exit: int, evidence_exit: int, expected: int,
+    tmp_path: Path, shard: str, pytest_exit: int, evidence_exit: int, expected: int,
 ) -> None:
-    """The release E2E step, run as GitHub runs it, exits with pytest's failure, else the gate's.
+    """Each release E2E shard step, run as GitHub runs it, exits with pytest's failure, else the gate's.
 
     Its pytest output goes through `| tee`; before the step ran with pipefail every
     failing release E2E run (three cases from 2026-10-27) still concluded success.
     """
 
     release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())
-    step, = [step for job in release["jobs"].values() for step in job["steps"]
-             if "e2e_model_hub" in step.get("run", "")]
+    step, = [step for step in release["jobs"][shard]["steps"] if "e2e_model_hub" in step.get("run", "")]
+    (tmp_path / "model-hub-e2e-evidence").mkdir()
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "ci_loopback_only.sh").write_text(
         f'echo "pytest ran: $*"\nexit {pytest_exit}\n', encoding="utf-8",
@@ -1039,86 +1031,86 @@ def test_release_e2e_gate_fails_when_its_tests_or_evidence_fail(
     )
 
     assert result.returncode == expected, result.stdout + result.stderr
-    assert "pytest ran: python -m pytest -m e2e_model_hub" in (tmp_path / "model-hub-e2e.log").read_text()
+    assert "pytest ran: python -m pytest -m e2e_model_hub" in (tmp_path / "model-hub-e2e-evidence" / "pytest.log").read_text()
 
 
-_OUTCOMES = ("success", "failure", "cancelled", "skipped", "")
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the join step reads the engine manifest with jq")
+def test_release_e2e_shards_record_what_they_ran_against_and_the_join_pins_the_engine(tmp_path: Path) -> None:
+    """Each shard records its own commit, run, attempt, CLIs and engine archive; the join names its checkout's engine.
 
-
-def _gate_contract(gate_name: str) -> tuple[dict, dict[str, str], dict[str, str | None]]:
-    """The gate's step, its producer result variables, and the route (if any) each producer reads."""
-    gate = _jobs()[gate_name]
-    assert gate["if"] == "always()"
-    step, = gate["steps"]
-    env = step["env"]
-    assert env["SCOPE_RESULT"] == "${{ needs.changes.result }}"
-    assert env["DOCS_ONLY"] == "${{ needs.changes.outputs.docs_only }}"
-    producers = [name for name in gate["needs"] if name != "changes"]
-    assert gate["needs"][0] == "changes"
-    routes = {_ROUTED[name][0] for name in producers if name in _ROUTED}
-    assert {name: value for name, value in env.items() if name.endswith("_ROUTE")} == {
-        _ROUTE_ENV[route]: f"${{{{ needs.changes.outputs.{route} }}}}" for route in routes
-    }
-    by_value = {value: name for name, value in env.items()}
-    variables = {by_value[f"${{{{ needs['{name}'].result }}}}"]: name for name in producers}
-    assert set(env) == {"SCOPE_RESULT", "DOCS_ONLY", *(_ROUTE_ENV[route] for route in routes), *variables}
-    return step, variables, {variable: _ROUTED.get(name, (None,))[0] for variable, name in variables.items()}
-
-
-def _gate_passes(step: dict, cwd: Path, values: dict[str, str]) -> bool:
-    # GitHub's default Linux shell for a step without `shell:` is `bash -e {0}`.
-    result = subprocess.run(
-        ["bash", "-e", "-c", step["run"]], cwd=cwd,
-        env={**os.environ, **values}, capture_output=True, text=True, check=False,
-    )
-    assert result.returncode in (0, 1), result.stdout + result.stderr
-    return result.returncode == 0
-
-
-@pytest.mark.parametrize("gate_name", _REQUIRED_GATES)
-def test_required_gates_check_each_producer_against_its_scope_and_route(tmp_path: Path, gate_name: str) -> None:
-    """Run the gate shell exactly as written in lint.yml over every scope, route and producer outcome.
-
-    A producer must report `skipped` exactly when the documentation fast path or
-    its own literal `skip` route says so, and `success` otherwise. A failed,
-    cancelled, missing or unexpectedly skipped producer fails the gate, and so
-    does a producer that ran when its route said skip. So does a failed
-    classification or any route or docs value other than the literal ones.
+    The join tells a mixed run from a whole one only by these records. A shard
+    that recorded the manifest's digest instead of its archive's, or a join that
+    compared the engine in another form, would let a different engine through or
+    fail every run.
     """
-    step, variables, route_of = _gate_contract(gate_name)
-    routes = sorted({route for route in route_of.values() if route})
 
-    def expected(docs_only: str, route_values: dict[str, str], variable: str) -> str:
-        route = route_of[variable]
-        if docs_only == "true" or (route and route_values[route] == "skip"):
-            return "skipped"
-        return "success"
+    import hashlib
+    import importlib.metadata
 
-    valid = [
-        (docs_only, dict(zip(routes, combination)))
-        for docs_only in ("false", "true")
-        for combination in itertools.product(("run", "skip"), repeat=len(routes))
+    release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())["jobs"]
+    sha = "c" * 40
+    archive = tmp_path / "engine archive.tar.gz"
+    archive.write_bytes(b"the engine this run installs")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    # The checkout's manifest pins another digest than the archive a shard was handed.
+    pinned = {"asset_release_tag": "model-hub-engine-v1", "assets": [
+        {"platform": "darwin-arm64", "sha256": "0" * 64, "url": "https://example.invalid/darwin"},
+        {"platform": "linux-amd64", "sha256": "1" * 64, "url": "https://example.invalid/linux"},
+    ]}
+    (tmp_path / "vibe" / "model_hub_runtime").mkdir(parents=True)
+    (tmp_path / "vibe" / "model_hub_runtime" / "cliproxyapi_manifest.json").write_text(json.dumps(pinned))
+    offline = json.loads(json.dumps(pinned))
+    offline["assets"][1]["url"] = archive.as_uri()
+    (tmp_path / "offline-manifest.json").write_text(json.dumps(offline))
+
+    def tools(name: str, python: str) -> Path:
+        bin_dir = tmp_path / name
+        bin_dir.mkdir()
+        for tool, script in {
+            "python": python, "git": f'echo "{sha}"', "codex": 'echo "codex-cli 9.9.9"', "opencode": 'echo "8.8.8"',
+        }.items():
+            (bin_dir / tool).write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+            (bin_dir / tool).chmod(0o755)
+        return bin_dir
+
+    def run_step(step: dict, bin_dir: Path, runner_temp: Path, **env: str) -> subprocess.CompletedProcess:
+        runner_temp.mkdir(exist_ok=True)
+        return subprocess.run(
+            [*_GITHUB_LINUX_SHELLS[step.get("shell")], "-c", step["run"]], cwd=tmp_path,
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(runner_temp),
+                 "GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "3", "GITHUB_SHA": sha, **env},
+            capture_output=True, text=True, check=False,
+        )
+
+    real_python = tools("shard-bin", f'exec "{sys.executable}" "$@"')
+    for shard in RELEASE_E2E_SHARDS:
+        step, = [step for step in release[shard]["steps"] if "provenance.json" in step.get("run", "")]
+        result = run_step(step, real_python, tmp_path / shard,
+                          VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=str(tmp_path / "offline-manifest.json"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads((tmp_path / shard / "model-hub-e2e-evidence" / "provenance.json").read_text()) == {
+            "sha": sha, "run_id": "77", "run_attempt": "3",
+            "versions": {
+                "codex": "codex-cli 9.9.9", "opencode": "8.8.8",
+                "claude-agent-sdk": importlib.metadata.version("claude-agent-sdk"),
+                "model-hub-engine": f"model-hub-engine-v1 sha256:{digest}",
+            },
+        }
+
+    # The join hands the checker its own checkout's pin, in the form the shards record.
+    step, = [step for step in release["model-hub-e2e"]["steps"] if "--release-join" in step.get("run", "")]
+    recording = tools("join-bin", f'printf "%s\\n" "$@" > "{tmp_path}/join-args"')
+    result = run_step(step, recording, tmp_path / "join")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "join-args").read_text().splitlines() == [
+        "scripts/ci_scenario_evidence.py", "--release-join", f"{tmp_path}/join/model-hub-e2e-evidence",
+        "--workflow", ".github/workflows/model-hub-e2e.yml", "--pytest-root", ".",
+        "--expect-version", f"model-hub-engine=model-hub-engine-v1 sha256:{'1' * 64}",
     ]
-    checked = 0
-    for docs_only, route_values in valid:
-        base = {"SCOPE_RESULT": "success", "DOCS_ONLY": docs_only,
-                **{_ROUTE_ENV[route]: value for route, value in route_values.items()}}
-        good = {**base, **{variable: expected(docs_only, route_values, variable) for variable in variables}}
-        assert _gate_passes(step, tmp_path, good), good
-        checked += 1
-        for variable in variables:
-            for outcome in _OUTCOMES:
-                if outcome != good[variable]:
-                    assert not _gate_passes(step, tmp_path, {**good, variable: outcome}), (variable, outcome, good)
-                    checked += 1
-        for scope_result in ("failure", "cancelled", "skipped", ""):
-            assert not _gate_passes(step, tmp_path, {**good, "SCOPE_RESULT": scope_result}), scope_result
-        for invalid in ("", "TRUE", "unknown", "skip"):
-            assert not _gate_passes(step, tmp_path, {**good, "DOCS_ONLY": invalid}), invalid
-        for route in routes:
-            for invalid in ("", "RUN", "skipped", "false", "true"):
-                assert not _gate_passes(step, tmp_path, {**good, _ROUTE_ENV[route]: invalid}), (route, invalid)
-    assert checked == len(valid) * (1 + len(variables) * (len(_OUTCOMES) - 1))
+    # A join checkout that is not the run's commit stops before it judges anything.
+    (tmp_path / "join-args").unlink()
+    assert run_step(step, recording, tmp_path / "join", GITHUB_SHA="d" * 40).returncode != 0
+    assert not (tmp_path / "join-args").exists()
 
 
 WEB_FETCH_TESTS = (
@@ -1131,8 +1123,9 @@ WEB_FETCH_TESTS = (
 @pytest.mark.parametrize("failing", [(), ("3.11", "3.13")])
 def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path: Path, failing: tuple) -> None:
     """One ubuntu job covers all five Pythons; every version runs, and each failure names its version."""
-    job = _jobs()["web-fetch-runtime"]
-    legs = job["strategy"]["matrix"]["include"]
+    job = yaml.safe_load((ROOT / ".github/workflows/web-fetch-runtime.yml").read_text())["jobs"]["runtime"]
+    calls = _jobs()
+    legs = [leg for name in ("web-fetch-runtime", "web-fetch-macos") for leg in json.loads(calls[name]["with"]["platforms"])]
     assert job["strategy"]["fail-fast"] is False
     assert [leg["os"] for leg in legs].count("ubuntu-latest") == 1
     assert {(leg["os"], version) for leg in legs for version in leg["python"].split()} == {
@@ -1142,7 +1135,7 @@ def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path
     step, = [step for step in job["steps"] if "PYTHON_VERSIONS" in step.get("env", {})]
     assert step["env"]["PYTHON_VERSIONS"] == "${{ matrix.python }}"
     # The evidence gate reads what this job selects from the workflow text.
-    assert pytest_commands(ROOT / ".github/workflows/lint.yml")["web-fetch-runtime"] == [(
+    assert pytest_commands(ROOT / ".github/workflows/web-fetch-runtime.yml")["runtime"] == [(
         "tests/test_model_hub_fetch_policy.py", "tests/test_model_hub_fetch_transport.py",
         "tests/test_model_hub_fetch_tls.py", "tests/test_model_hub_local_fetch.py",
         "tests/test_desktop_runtime_bundle_builder.py", "-k", "not packaged_cli_survives",
@@ -1190,66 +1183,3 @@ def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path
         assert named == (version in failing)
     if failing:
         assert "web-fetch-runtime failed on Python: 3.11 3.13" in result.stdout
-
-
-def test_ci_workflows_scope_pr_and_queue_runs_without_master_push_duplicates() -> None:
-    expected_concurrency = {
-        "group": "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
-        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
-    }
-    for filename in ("lint.yml", "ios-shell.yml", "desktop-shell.yml"):
-        workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
-        events = workflow[True]
-        assert "merge_group" in events and events["merge_group"] == {"types": ["checks_requested"]}
-        assert "push" not in events
-        assert workflow["concurrency"] == expected_concurrency
-
-
-def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
-    events = workflow[True]  # PyYAML YAML 1.1 reads the Actions `on` key as True.
-    # Default activity types plus the labeling that re-runs the hosted wire gate.
-    assert events["pull_request"] == {"types": ["opened", "synchronize", "reopened", "labeled", "unlabeled"]}
-    assert events["merge_group"] == {"types": ["checks_requested"]}
-    jobs = workflow["jobs"]
-    gates = set(_REQUIRED_GATES)
-    # Branch protection skips nothing it has not been told about: a required
-    # leaf that is skipped passes it with no gate looking, so none is routed.
-    required_leaves = {"ruff", "show-router-integration", "memory-insight-contract",
-                       "migration-release-guard", "npm-wrapper", "build-linux-artifacts"}
-    assert required_leaves | gates <= jobs.keys()
-    for name, job in jobs.items():
-        if name == "changes" or name in gates:
-            continue
-        # Every expensive root depends on scope; artifact consumers may depend
-        # on the gated producer. No new job can silently evade docs selection.
-        needs = job.get("needs", [])
-        needs = [needs] if isinstance(needs, str) else needs
-        condition = job.get("if", "")
-        if name in _ROUTED:
-            route, gate = _ROUTED[name]
-            assert condition == _routed_if(route), name
-            assert name in jobs[gate]["needs"], (name, gate)
-        elif name in required_leaves:
-            assert condition == "needs.changes.outputs.docs_only == 'false'", name
-        if "changes" in needs:
-            assert "needs.changes.outputs.docs_only == 'false'" in condition
-        else:
-            assert needs == ["build-linux-artifacts"], name
-            assert "always()" not in condition
-        if name not in _ROUTED and name not in {"windows-model-hub", "windows-control-ipc", "windows-agent"}:
-            assert "outputs.browser" not in condition and "outputs.platform" not in condition, name
-        assert not job.get("continue-on-error")
-    scope = jobs["changes"]
-    assert scope["outputs"] == {
-        name: f"${{{{ steps.scope.outputs.{name} }}}}"
-        for name in ("docs_only", "windows_control_ipc", "browser", "platform")
-    }
-    assert not scope.get("if") and not scope.get("continue-on-error")
-    command, = [s for s in scope["steps"] if s.get("id") == "scope"]
-    assert command["run"] == "python3 scripts/ci_docs_only.py"
-    assert not command.get("continue-on-error")
-    guidance, = [s for s in scope["steps"] if "test_repository_guidance.py" in s.get("run", "")]
-    assert guidance["if"] == "steps.scope.outputs.docs_only == 'true'"
-    assert not guidance.get("continue-on-error")
-    assert "--noconftest" in guidance["run"]

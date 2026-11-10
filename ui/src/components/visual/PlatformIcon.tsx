@@ -143,7 +143,7 @@ export const PlatformIcon: React.FC<PlatformIconProps> = ({
   return (
     <span
       className={cn(
-        'inline-flex shrink-0 items-center justify-center rounded-xl border border-border bg-surface-2',
+        'inline-flex shrink-0 items-center justify-center rounded-xl border border-edge bg-surface-2 shadow-elevation-0',
         className
       )}
       style={{ width: tileSize, height: tileSize }}

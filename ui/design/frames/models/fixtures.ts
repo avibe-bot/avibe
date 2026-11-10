@@ -253,8 +253,8 @@ export const runtime = (health: RuntimeHealth = 'ok', enabled = true): RuntimeDe
 // ── Hosted tools ────────────────────────────────────────────────────────
 
 const price = <U extends HostedToolPriceUnit>(unit: U, usd: number, url = 'https://avibe.bot') => ({ unit, usd_per_1k: usd, extra: [], as_of: '2026-10-24', url });
-const searchService = (id: string, model: string, usd: number, state: SourceState = STANDBY): HostedServiceExecutorCandidate => ({
-  kind: 'service', source_id: id, model_id: model, billing: 'metered', relay: false, price: price('search', usd), settings: { results: 5, enabled: true }, state, trial_pending: false, cooldown_until: null,
+const searchService = (id: string, model: string, usd: number, state: SourceState = STANDBY, enabled = true): HostedServiceExecutorCandidate => ({
+  kind: 'service', source_id: id, model_id: model, billing: 'metered', relay: false, price: price('search', usd), settings: { results: 5, enabled }, state, trial_pending: false, cooldown_until: null,
 });
 const fetchService = (kind: 'local' | 'service', id: string, model: string, usd: number, state: SourceState = ACTIVE): HostedFetchExecutorCandidate => ({
   kind, source_id: id, model_id: model, billing: 'metered', relay: false, price: price('fetch', usd), settings: { enabled: true }, state, trial_pending: false, cooldown_until: null,
@@ -267,20 +267,22 @@ export type HostedToolsSpec = {
   tavilyAdded?: boolean;
   /** Tavily's key was revoked: it stopped, and searches moved on to the next service. */
   tavilyRevoked?: boolean;
+  /** The opt-in built-in Parallel is in the catalog but off until chosen; `elected` puts it in the order. */
+  parallelElected?: boolean;
 };
 
 /** The four hosted tools as Vibey uses them: search with services and model executors, web fetch, X search, images. */
-export const hostedTools = ({ tavilyAdded = true, tavilyRevoked = false }: HostedToolsSpec = {}): HostedToolsStatus => {
+export const hostedTools = ({ tavilyAdded = true, tavilyRevoked = false, parallelElected = false }: HostedToolsSpec = {}): HostedToolsStatus => {
   const tavilyState: SourceState = tavilyRevoked ? { status: 'needs_action', retry_at: null, detail_key: 'models.source.needs_action.credential_revoked' } : STANDBY;
   const tavilyIds = tavilyAdded ? [tavily.id] : [];
-  const searchOrder = [...tavilyIds, 'src_exakeyless', relayClaude.id, chatgptPro.id];
+  const searchOrder = [...tavilyIds, 'src_exakeyless', ...(parallelElected ? ['src_parallelkeyless'] : []), relayClaude.id, chatgptPro.id];
   return {
     tools: [
       {
         name: 'web_search',
         enabled: true,
         prefer_native: true,
-        services: {},
+        services: parallelElected ? { src_parallelkeyless: { enabled: true } } : {},
         service_order: tavilyIds,
         executor_order: null,
         effective_order: searchOrder,
@@ -299,6 +301,7 @@ export const hostedTools = ({ tavilyAdded = true, tavilyRevoked = false }: Hoste
         executor_candidates: [
           ...(tavilyAdded ? [searchService(tavily.id, 'tavily/search', 8, tavilyState)] : []),
           searchService('src_exakeyless', 'exa/mcp', 0, ACTIVE),
+          ...(parallelElected ? [searchService('src_parallelkeyless', 'parallel/mcp', 0, ACTIVE)] : []),
           { kind: 'model', source_id: relayClaude.id, model_id: 'claude-haiku-5', billing: 'metered', relay: true, price: price('call', 10) },
           { kind: 'model', source_id: chatgptPro.id, model_id: 'gpt-5.6-sol', billing: 'monthly', relay: false, price: price('call', 10) },
         ],
@@ -306,7 +309,8 @@ export const hostedTools = ({ tavilyAdded = true, tavilyRevoked = false }: Hoste
           { id: 'tavily', name: 'Tavily', results_max: 20, price: price('search', 8), free_tier: '1,000 credits / month', source_ids: tavilyIds, facts: { tool_only: true, auto_enroll: false, free_check: true } },
           { id: 'exa', name: 'Exa', results_max: 10, price: price('search', 7), free_tier: null, source_ids: [], facts: { tool_only: true, auto_enroll: false, free_check: false } },
           { id: 'deepseek', name: 'DeepSeek', results_max: 50, price: price('search', 0.75), free_tier: null, source_ids: [], facts: { tool_only: false, auto_enroll: true, free_check: true } },
-          { id: 'exa-mcp', name: 'Exa (free)', results_max: 100, price: price('search', 0), free_tier: 'Free; IP rate-limited', source_ids: ['src_exakeyless'], facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false } },
+          { id: 'exa-mcp', name: 'Exa (free)', results_max: 100, price: price('search', 0), free_tier: 'Free; IP rate-limited', source_ids: ['src_exakeyless'], endpoint: 'https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa', facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false, default_enabled: true } },
+          { id: 'parallel-mcp', name: 'Parallel (free)', results_max: 10, price: price('search', 0), free_tier: 'Free; IP rate-limited', source_ids: ['src_parallelkeyless'], endpoint: 'https://mcp.parallel.ai/mcp', facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false, default_enabled: false } },
         ],
       },
       {

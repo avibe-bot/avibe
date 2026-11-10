@@ -47,7 +47,8 @@ the Turn as stopped without another provider request or a failure notice.
 
 ```text
 commit input → loop:
-    projection → before_model hooks (without a ContextConfig) or budget and the C-9 stage (with one; C-9 §10)
+    drain steers queued since the last boundary (§4)
+        → projection → before_model hooks (without a ContextConfig) or budget and the C-9 stage (with one; C-9 §10)
         → provider stream (events out) → admission of the response
     if the response has tool calls:
         commit it as `assistant`
@@ -154,7 +155,10 @@ owns the request and the checkpoint turn's tools. Hooks with context management 
 
 - `steer(m)` queues `m`. It enters the context after the current tool batch and before the next model call, or, when
   the current response has no tool calls, it starts another model call in the same run. A steer never interrupts a
-  running tool. Avibe P1 deliveries map to `steer`.
+  running tool or a request already sent. One that arrives after that boundary but before the request leaves (while
+  the route resolves, an attempt is retried, or the context is compacted) still enters that request; the first
+  request of a `resume` and one continuing an Anthropic deferred server search take none. Avibe P1 deliveries map to
+  `steer`.
 - `follow_up(m)` enters only when the run would otherwise end. It exists for hooks and the future tension system;
   Avibe's P3 queue starts a new run after the Turn settles instead.
 - `abort(reason)` cancels the provider stream and every running tool call of the batch: each foreground job's process

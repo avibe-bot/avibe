@@ -156,7 +156,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     return (
       <div className="flex w-full justify-center">
         <WizardCard accent size="hero" className="items-center gap-6 text-center">
-          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-glow-xl-mint">
+          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-decor-xl-mint">
             <Check size={36} strokeWidth={2.4} />
           </div>
           <div className="space-y-2">
@@ -177,11 +177,11 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
                 <p className="text-[11px] text-muted">{t('summary.bindCodeDesc')}</p>
               </div>
             </div>
-            <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5">
+            <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
               <code className="min-w-0 flex-1 select-all break-all font-mono text-[13px] text-foreground">bind {bindCode}</code>
               <button
                 onClick={copyBindCode}
-                className="rounded-md p-1.5 text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+                className="rounded-md p-1.5 text-muted transition hover:bg-wash hover:text-foreground"
                 title="Copy"
                 aria-label={t('common.copy') as string}
               >
@@ -205,7 +205,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     <div className="flex w-full justify-center">
       <WizardCard accent size="hero" className="gap-6">
         <div className="flex flex-col items-center gap-5 text-center">
-          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-glow-xl-mint">
+          <div className="flex size-[72px] items-center justify-center rounded-full border-2 border-mint/40 bg-mint/[0.08] text-mint-ink shadow-decor-xl-mint">
             <Check size={36} strokeWidth={2.4} />
           </div>
           <div className="space-y-2">
@@ -220,7 +220,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         </div>
 
         {/* Recap card */}
-        <div className="overflow-hidden rounded-xl border border-border bg-background">
+        <div className="overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
           {recapRows.map((row, idx) => (
             <div
               key={row.label}
@@ -241,7 +241,7 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
         </div>
 
         {/* Auto Update */}
-        <div className="flex items-center justify-between rounded-xl border border-border bg-background px-5 py-4">
+        <div className="flex items-center justify-between rounded-xl border border-edge bg-surface px-5 py-4 shadow-elevation-0">
           <div>
             <h3 className="text-[13px] font-semibold text-foreground">{t('summary.autoUpdate')}</h3>
             <p className="mt-0.5 text-[11px] text-muted">{t('summary.autoUpdateHint')}</p>

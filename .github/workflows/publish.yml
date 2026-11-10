@@ -15,7 +15,31 @@ permissions:
   contents: read
 
 jobs:
+  release-backstop:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      run_id: ${{ steps.verify.outputs.run_id }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The ref only selects the workflow code. The script resolves the
+          # dispatch/tag input through the API and never trusts a workflow
+          # context SHA as the release source.
+          ref: ${{ github.ref }}
+      - name: Require exact full master backstop
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+
   resolve-tag:
+    needs: release-backstop
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -54,9 +78,9 @@ jobs:
             PRERELEASE="true"
           fi
 
-          SOURCE_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/$TAG" --jq '.sha')"
+          SOURCE_SHA="${{ needs.release-backstop.outputs.source_sha }}"
           if [ -z "$SOURCE_SHA" ]; then
-            echo "Could not resolve source commit for $TAG" >&2
+            echo "Backstop did not provide an exact source SHA" >&2
             exit 1
           fi
 
@@ -75,6 +99,7 @@ jobs:
           echo "workflow_sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
   resolve-show-runtime-ref:
+    needs: release-backstop
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
@@ -93,7 +118,7 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   show-runtime-bundles:
-    needs: resolve-show-runtime-ref
+    needs: [release-backstop, resolve-show-runtime-ref]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -160,6 +185,7 @@ jobs:
 
   build:
     needs:
+      - release-backstop
       - resolve-tag
       - show-runtime-bundles
     runs-on: ubuntu-latest
@@ -169,7 +195,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.resolve-tag.outputs.tag }}
+          ref: ${{ needs.resolve-tag.outputs.source_sha }}
 
       - name: Checkout release automation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -180,19 +206,9 @@ jobs:
             scripts/github_release.py
             scripts/show_runtime_manifest_asset.py
             scripts/release_asset_download.py
-            scripts/build_retired_companion.py
             scripts/release_package_version.py
-            scripts/ci_scenario_evidence.py
-            scripts/pytest_collection.py
             .github/actions/sqlite-predecessor-contract/action.yml
-            .github/workflows/publish.yml
-            tests/scenarios/**/catalog.yaml
             tests/test_distribution_artifacts.py
-            tests/__init__.py
-            tests/e2e/test_retired_updater_bridge.py
-            tests/e2e/test_install_command.py
-            tests/e2e/retired_updater_probe.py
-            tests/e2e/github_release_fixture.py
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
@@ -312,13 +328,6 @@ jobs:
                   )
           PY
 
-      - name: Build and verify inert old-updater bridge
-        env:
-          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: |
-          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG"
-          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG" --verify
-
       - name: Verify built distribution contracts
         run: |
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
@@ -338,54 +347,15 @@ jobs:
           fi
 
       - name: Run release install and upgrade regressions
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
-          export AVIBE_CORE_WHEEL="$(realpath "$VIBE_INSTALL_TEST_WHEEL")"
-          export AVIBE_BRIDGE_WHEEL="$(realpath "$(ls dist/avibe_memory-*.whl)")"
-          mkdir -p old-release
-          for asset in avibe_os-3.1.0-py3-none-any.whl avibe_memory-3.1.0-py3-none-any.whl; do
-            gh release download v3.1.0 --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir old-release
-          done
-          echo '7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924  old-release/avibe_os-3.1.0-py3-none-any.whl' | sha256sum -c -
-          echo 'ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0  old-release/avibe_memory-3.1.0-py3-none-any.whl' | sha256sum -c -
-          export AVIBE_OLD_CORE_WHEEL="$(realpath old-release/avibe_os-3.1.0-py3-none-any.whl)"
-          export AVIBE_OLD_COMPANION_WHEEL="$(realpath old-release/avibe_memory-3.1.0-py3-none-any.whl)"
-          export AVIBE_RELEASE_GATE=1
           pytest \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
-          TARGET_VERSION="$(python release-automation/scripts/release_package_version.py "$RELEASE_TAG")"
-          export TARGET_VERSION
-          UPGRADE_DIRECTION="$(python - <<'PY'
-          import os
-          from packaging.version import Version
-
-          print("forward" if Version(os.environ["TARGET_VERSION"]) > Version("3.1.0") else "historical")
-          PY
-          )"
-          if [ "$UPGRADE_DIRECTION" = forward ]; then
-            mkdir -p "$RUNNER_TEMP/retired-updater-junit"
-            pytest_status=0
-            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=. -v \
-              --junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml") || pytest_status=$?
-            evidence_status=0
-            (cd release-automation && python scripts/ci_scenario_evidence.py --release \
-              "$RUNNER_TEMP/retired-updater-junit" \
-              --workflow .github/workflows/publish.yml \
-              --pytest-root . \
-              --pytest-command-index 1) || evidence_status=$?
-            if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
-            exit "$evidence_status"
-          else
-            echo "No forward Memory retirement upgrade from v3.1.0 to $RELEASE_TAG"
-          fi
 
       - name: Upload GitHub release assets
         env:
@@ -400,8 +370,8 @@ jobs:
             --title "$TAG" \
             --notes "Release assets for $TAG."
 
-          # All artifacts are immutable per tag, including the GitHub-only
-          # companion. Compare every existing byte BEFORE uploading anything.
+          # All artifacts are immutable per tag. Compare every existing byte
+          # BEFORE uploading anything.
           existing="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           tmp="$(mktemp -d)"
           trap 'rm -r -- "$tmp"' EXIT
@@ -409,7 +379,6 @@ jobs:
           package_to_upload=()
           package_paths=(
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
-            dist/avibe_memory-*-py3-none-any.whl
           )
           # The existing v3.0.x shim remains part of those releases only.
           for path in dist/vibe_remote-*.whl dist/vibe_remote-*.tar.gz; do
@@ -457,6 +426,7 @@ jobs:
 
   publish-avibe-os:
     needs:
+      - release-backstop
       - build
       - finalize-github-release
     runs-on: ubuntu-latest
@@ -486,10 +456,11 @@ jobs:
 
   publish-vibe-remote:
     needs:
+      - release-backstop
       - resolve-tag
       - build
       - finalize-github-release
-    if: needs.resolve-tag.outputs.publish_legacy == 'true'
+    if: needs.release-backstop.result == 'success' && needs.resolve-tag.outputs.publish_legacy == 'true'
     runs-on: ubuntu-latest
     # PyPI trusted publishers issue project-scoped tokens for the exact OIDC
     # claim, including the GitHub environment. Keep the legacy shim on a
@@ -520,6 +491,7 @@ jobs:
 
   finalize-github-release:
     needs:
+      - release-backstop
       - resolve-tag
       - build
     # Latest is repository-wide: serialize its read/decide/edit across tags

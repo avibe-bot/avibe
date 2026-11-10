@@ -185,7 +185,7 @@ export const BotStrip: React.FC<{
         type="button"
         onClick={() => openProfile({ kind: 'create' })}
         aria-label={t('bots.addLabel')}
-        className="group rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+        className="group rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="grid size-10 place-items-center rounded-full border border-dashed border-border-strong text-muted transition group-hover:border-mint group-hover:bg-mint-soft group-hover:text-mint-ink">
           <Plus className="size-4" />
@@ -473,7 +473,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
             }}
             aria-label={label}
             aria-current={selected ? 'page' : undefined}
-            className="bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+            className="bot-avatar-hover relative rounded-full p-[2px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {/* The open Bot's own edge lights up (the shared selected look); a hovered
                 one shows a quiet edge in the same place. */}
@@ -486,7 +486,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
               className={clsx('transition', heldHere && holdFaceClass(heldHere))}
             />
             {unread > 0 && !voice && (
-              <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+              <span className="absolute -right-1.5 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan px-1 font-mono text-[9px] font-bold text-accent-foreground">
                 {unreadLabel(unread)}
               </span>
             )}
@@ -513,7 +513,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
           aria-label={t('bots.menu.label', { name })}
           data-settings-interaction-owner="true"
           onOpenAutoFocus={(event) => event.preventDefault()}
-          className="flex w-[208px] flex-col gap-0.5 rounded-2xl border-border-strong bg-surface-2 p-1.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+          className="flex w-[208px] flex-col gap-0.5 rounded-2xl p-1.5"
         >
           <button
             type="button"
@@ -522,7 +522,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
               setMenuOpen(false);
               openProfile({ kind: 'edit', handle: bot.handle });
             }}
-            className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-foreground transition hover:bg-foreground/[0.05]"
+            className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-foreground transition hover:bg-wash"
           >
             <Pencil className="size-4 text-muted" />
             {t('bots.menu.editProfile')}
@@ -554,7 +554,7 @@ const BotSlot: React.FC<BotSlotProps> = ({ bot, index, name, unread, status, scr
           onOpenAutoFocus={(event) => event.preventDefault()}
           onMouseEnter={queueOpen}
           onMouseLeave={queueClose}
-          className="w-[248px] rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+          className="w-[248px] rounded-2xl p-0"
         >
           <button
             type="button"

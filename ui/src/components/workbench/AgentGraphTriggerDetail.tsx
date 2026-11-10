@@ -314,7 +314,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
             'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold',
             enabled
               ? 'border-mint/40 bg-mint-soft text-mint-ink'
-              : 'border-border-strong bg-foreground/[0.04] text-muted',
+              : 'border-edge text-muted bg-field',
           )}
         >
           {t(enabled ? 'agents.graph.triggerDetail.enabled' : 'agents.graph.triggerDetail.disabled')}
@@ -378,7 +378,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
                   key={id}
                   type="button"
                   onClick={() => onSelectNode(id)}
-                  className="flex items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-left text-[11px] transition hover:border-border-strong"
+                  className="flex items-center gap-2 rounded-lg border border-edge px-2.5 py-1.5 text-left text-[11px] transition bg-field hover:bg-field-hover active:bg-field-hover"
                 >
                   <span className={clsx('size-1.5 shrink-0 rounded-full', statusMeta(node.status).dotClass)} />
                   <span className="min-w-0 flex-1 truncate text-foreground">{nodeDisplayTitle(node)}</span>
@@ -406,7 +406,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
               <Link
                 key={run.id}
                 to={`/harness?tab=runs&run=${encodeURIComponent(run.id)}`}
-                className="flex items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[11px] transition hover:border-border-strong"
+                className="flex items-center gap-2 rounded-lg border border-edge px-2.5 py-1.5 text-[11px] transition bg-field hover:bg-field-hover active:bg-field-hover"
               >
                 <span className={clsx('size-1.5 shrink-0 rounded-full', statusMeta(runStatus(run.status)).dotClass)} />
                 <code className="font-mono text-foreground">{run.id}</code>
@@ -421,7 +421,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
 
       {/* Actions */}
       <div className="flex flex-col gap-2 pt-1">
-        <div className="flex items-center justify-between rounded-lg border border-border bg-surface px-3 py-2">
+        <div className="flex items-center justify-between rounded-lg border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <span className="inline-flex items-center gap-2 text-[12px] font-medium text-foreground">
             <Power className="size-3.5 text-muted" />
             {t(isWatch ? 'agents.graph.triggerDetail.watchActiveLabel' : 'agents.graph.triggerDetail.taskActiveLabel')}

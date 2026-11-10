@@ -109,7 +109,13 @@ def test_installed_wheel_imports_and_cli_without_memory(tmp_path):
                             capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stdout + result.stderr
     script = r'''
-import importlib.abc, importlib.util, pathlib, sys
+import importlib.abc, importlib.metadata, importlib.util, pathlib, sys
+try:
+    importlib.metadata.distribution("avibe-memory")
+except importlib.metadata.PackageNotFoundError:
+    pass
+else:
+    raise AssertionError("Fresh installs must not include even the metadata-only Memory bridge")
 class NoMemory(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname == "avibe_memory" or fullname.startswith("avibe_memory."):

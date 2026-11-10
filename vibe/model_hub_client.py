@@ -221,8 +221,16 @@ class ModelHubRemoteService:
             },
         )
 
-    def models_dev_matches(self, query: object) -> list[dict]:
-        return _rpc_sync("models_dev_matches", {"query": query})
+    def models_dev_matches(
+        self,
+        query: object,
+        *,
+        refresh_if_stale: bool = False,
+    ) -> list[dict]:
+        return _rpc_sync(
+            "models_dev_matches",
+            {"query": query, "refresh_if_stale": refresh_if_stale},
+        )
 
     async def set_agent_chain(self, backend: str, model_id: str, chain: object) -> dict:
         return await _rpc(

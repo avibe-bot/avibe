@@ -502,7 +502,6 @@
     "tests/test_restart_supervisor.py": 2.0,
     "tests/test_result_message_token_field.py": 1.0,
     "tests/test_resume_session.py": 3.0,
-    "tests/test_retired_companion.py": 1.0,
     "tests/test_ripgrep_runtime.py": 3.0,
     "tests/test_route_menu.py": 1.0,
     "tests/test_running_agents_service.py": 4.0,

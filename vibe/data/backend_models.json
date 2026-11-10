@@ -3,6 +3,7 @@
   "backends": {
     "claude": {
       "models": [
+        {"id": "claude-fable-5-2", "label": "claude-fable-5-2 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-fable-5-1", "label": "claude-fable-5-1 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-fable-5", "label": "claude-fable-5 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-opus-5-5", "label": "claude-opus-5-5 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
@@ -17,6 +18,7 @@
         {"id": "claude-haiku-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-opus-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-sonnet-4-5", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "fable", "label": "fable [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "opus", "label": "opus [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "sonnet", "label": "sonnet [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "haiku", "reasoning_efforts": ["low", "medium", "high"]},
@@ -37,6 +39,7 @@
         {"id": "gpt-6.1-sol", "label": "GPT-6.1-Sol", "priority": 2, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "gpt-6-sol", "label": "GPT-6-Sol", "priority": 3, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "gpt-6-luna", "label": "GPT-6-Luna", "priority": 4, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+        {"id": "gpt-6.1-terra", "label": "GPT-6.1-Terra", "priority": 5, "visibility": "list", "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
         {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "priority": 6, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "client_presets": ["ultra"]},
         {"id": "gpt-5.6-terra", "label": "GPT-5.6-Terra", "priority": 7, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "client_presets": ["ultra"]},
         {"id": "gpt-5.6-luna", "label": "GPT-5.6-Luna", "priority": 8, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import errno
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import http.client
 import json
 import logging
 import os
 import random
+import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -16,14 +20,64 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
 _T = TypeVar("_T")
-_MAX_ATTEMPTS = 4
+_MAX_ATTEMPTS = 3
 _REQUEST_TIMEOUT = 10.0
-_RETRY_WINDOW = 45.0
+_RETRY_WINDOW = 30.0
+
+
+class _GhReadError(RuntimeError):
+    def __init__(self, message: str, *, transient: bool, retry_after: float = 0.0):
+        super().__init__(message)
+        self.transient = transient
+        self.retry_after = retry_after
+
+
+def _secondary_limit(exc: urllib.error.HTTPError) -> bool:
+    # Classification is used by both API fallback and retry; consume a 403's
+    # error body at most once, before closing it. Never classify release data.
+    if not hasattr(exc, "_secondary_limit"):
+        try:
+            body = exc.read(8192).decode("utf-8", errors="replace").lower()
+        except (OSError, http.client.HTTPException):
+            body = ""
+        exc._secondary_limit = "secondary rate limit" in body or "abuse detection mechanism" in body
+    return exc._secondary_limit
+
+
+def _retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            return max(0.0, (date - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _server_delay(exc: Exception) -> float:
+    if isinstance(exc, _GhReadError):
+        return exc.retry_after
+    if isinstance(exc, urllib.error.HTTPError):
+        hint = _retry_after(exc.headers.get("Retry-After")) if exc.headers else None
+        if hint is not None:
+            return hint
+        # GitHub asks for at least a minute without an explicit server delay.
+        # Fail clearly when that cannot fit, rather than hammering a rate limit.
+        if exc.code == 403 and _secondary_limit(exc):
+            return 60.0
+        if exc.code == 429 and urllib.parse.urlparse(exc.url).hostname == "api.github.com":
+            return 60.0
+    return 0.0
 
 
 def _retryable(exc: Exception) -> bool:
+    if isinstance(exc, _GhReadError):
+        return exc.transient
     if isinstance(exc, urllib.error.HTTPError):
-        return exc.code == 429 or 500 <= exc.code < 600
+        return exc.code == 429 or 500 <= exc.code < 600 or (exc.code == 403 and _secondary_limit(exc))
     reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
     return isinstance(reason, (ConnectionResetError, TimeoutError, http.client.RemoteDisconnected,
                                http.client.IncompleteRead)) or (
@@ -38,20 +92,80 @@ def _with_retry(operation: Callable[[], _T], *, deadline: float) -> _T:
         try:
             return operation()
         except Exception as exc:
+            transient = _retryable(exc)
+            server_delay = _server_delay(exc) if transient else 0.0
             if isinstance(exc, urllib.error.HTTPError):
                 exc.close()
-            if not _retryable(exc) or attempt == _MAX_ATTEMPTS - 1:
+            if not transient or attempt == _MAX_ATTEMPTS - 1:
                 raise
-            delay = 2.0**attempt + random.uniform(0.0, 0.5)
+            delay = max(server_delay, 2.0**attempt + random.uniform(0.0, 0.5))
             if time.monotonic() + delay >= deadline:
+                if server_delay:
+                    raise RuntimeError(f"GitHub rate limit exceeds the {_RETRY_WINDOW:g}s retry budget; retry later: {exc}") from exc
                 raise
             detail = f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
             logging.getLogger(__name__).warning(
-                "Release download attempt %d/%d failed (%s); retrying in %.1fs",
+                "GitHub/release read attempt %d/%d failed (%s); retrying in %.1fs",
                 attempt + 1, _MAX_ATTEMPTS, detail, delay,
             )
             time.sleep(delay)
     raise AssertionError("unreachable")
+
+
+def run_gh_read(*args: str, **kwargs) -> str:
+    """Run the queue's read-only gh operations within one hard wall budget.
+
+    A failed paginated response is discarded, not concatenated with a retry.
+    Callers must validate successful JSON/digests outside this transport loop.
+    """
+    api_read = args and args[0] == "api"
+    asset_read = args[:2] == ("release", "download")
+    # gh changes to POST when fields are present. Do not let a future caller
+    # accidentally replay a mutation through this read-only helper.
+    if (not (api_read or asset_read) or (api_read and any(
+            arg.startswith(("-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"))
+            for arg in args[1:]))):
+        raise ValueError("GitHub retries support read-only API and release download commands only")
+    if asset_read and "--clobber" not in args:
+        raise ValueError("Retried release downloads require --clobber in a test-owned directory")
+    deadline = time.monotonic() + _RETRY_WINDOW
+    attempt = 0
+
+    def operation() -> str:
+        nonlocal attempt
+        attempt += 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"GitHub read exhausted its {_RETRY_WINDOW:g}s retry budget")
+        try:
+            result = subprocess.run(["gh", *args], capture_output=True, text=True,
+                                    timeout=remaining, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            raise _GhReadError(f"GitHub read exceeded its {_RETRY_WINDOW:g}s retry budget",
+                               transient=True) from exc
+        if result.returncode == 0:
+            return result.stdout
+        detail = result.stderr.strip() or f"gh exited {result.returncode} without an error message"
+        status = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b", detail, re.IGNORECASE)
+        code = int(status[1]) if status else None
+        secondary = "secondary rate limit" in detail.lower() or "abuse detection mechanism" in detail.lower()
+        limited = code == 429 or (secondary and code in (None, 403))
+        network = re.search(
+            r"unexpected EOF|\bEOF$|connection (?:reset|refused)|i/o timeout|"
+            r"TLS handshake timeout|context deadline exceeded|temporary failure in name resolution|"
+            r"network is unreachable|error connecting to api\.github\.com", detail, re.IGNORECASE,
+        )
+        transient = limited or (code is not None and 500 <= code < 600) or (code is None and bool(network))
+        hint = re.search(r"(?im)^Retry-After:\s*(.+)$", detail)
+        delay = _retry_after(hint[1]) if hint else None
+        if limited and delay is None:
+            delay = 60.0
+        raise _GhReadError(
+            f"GitHub read failed (attempt {attempt}/{_MAX_ATTEMPTS}, exit {result.returncode}): {detail[:1000]}",
+            transient=transient, retry_after=delay or 0.0,
+        )
+
+    return _with_retry(operation, deadline=deadline)
 
 
 def _request(url: str, *, accept: str = "application/octet-stream") -> urllib.request.Request:
@@ -154,10 +268,13 @@ def _with_response(
                 # is never requested again during retries of the browser route.
                 if not (_retryable(exc) or isinstance(exc, urllib.error.URLError)):
                     raise
+                # A throttled API must not be replayed early if the public
+                # asset route also needs a retry. The public route remains a
+                # separate, unauthenticated fallback with the same byte checks.
+                if _server_delay(exc) or not _retryable(exc):
+                    api_allowed = False
                 if isinstance(exc, urllib.error.HTTPError):
                     exc.close()
-                if not _retryable(exc):
-                    api_allowed = False
                 logging.getLogger(__name__).warning("Release asset API unavailable; trying browser download URL")
         with open_response(request) as response:
             return consume(response)

@@ -410,7 +410,7 @@ export const BackendModelEditorDialog: React.FC<{
         onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
-        className="model-hub-model-editor flex h-[min(660px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
+        className="model-hub-model-editor flex h-[min(660px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
       >
         <DialogHeader className="model-hub-model-editor-head shrink-0 justify-center border-b border-border">
           <p className="model-hub-model-editor-eyebrow truncate">{t('settings.models.gateway.modelEditor.eyebrow', { backend: backendName })}</p>

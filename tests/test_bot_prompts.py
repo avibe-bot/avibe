@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -138,6 +139,55 @@ def test_prompt_cli_examples_parse_against_the_real_cli(capsys):
     assert {"--queue", "--visible", "--model"} <= run_flags
     for fragment in fragments:
         assert set(re.findall(r"--[a-z][a-z-]*", fragment)) <= run_flags, fragment
+
+
+def test_roster_prompt_matches_plan_drafts_and_teaches_one_reporting_mechanism():
+    root = Path(__file__).resolve().parents[1]
+    plan = (root / "docs/plans/bots.md").read_text()
+    section = plan.split("### Bots and Agents (`harness-agents.md`, every Session)\n", 1)[1]
+    roster = section.split("```markdown\n", 1)[1].split("\n```", 1)[0]
+    mentions = section.split("### Mentions (replaces the current section)", 1)[1]
+    mentions = mentions.split("```markdown\n", 1)[1].split("\n```", 1)[0]
+    prompt = (root / "core/prompts/harness-agents.md").read_text()
+    assert prompt == roster + "\n\n" + mentions + "\n"
+    assert "--callback" not in prompt and "--no-callback" not in prompt
+    assert "read receipt" in prompt and "--no-reply" in prompt
+
+
+@pytest.mark.parametrize("source,heading", [
+    ("bot-main.md", "### The main Bot\n"),
+    ("bot-harness.md", "### Handing out work (every Bot, after the main Bot's section)\n"),
+])
+def test_bot_prompts_match_their_plan_drafts(source, heading):
+    root = Path(__file__).resolve().parents[1]
+    prompt = (root / "core/prompts" / source).read_text()
+    plan = (root / "docs/plans/bots.md").read_text()
+    section = plan.split(heading, 1)[1]
+    draft = section.split("```markdown\n", 1)[1].split("\n```", 1)[0] + "\n"
+    assert prompt == draft
+
+
+@pytest.mark.parametrize("bot", [_MAIN, _CSO], ids=["main", "custom"])
+def test_every_bot_keeps_the_boundary_once_in_the_shared_section(bot):
+    """Owner decision 2026-11-09 (bots.md D9): no Bot does the work itself, and web lookups are finding out."""
+    blocks = _blocks(enabled_agents=_ROSTER, bot=bot)
+    shared = blocks["bot-harness-prompt"]
+    for line in (
+        "apart from that you do no work yourself.",
+        "anything that takes finding out or getting done goes to a Session",
+        "Searching the web and reading pages or code count as finding out.",
+    ):
+        assert shared.index(line) < shared.index("`vibe agent run` hands work")
+        assert "".join(text for module, text in blocks.items() if module.startswith("bot-")).count(line) == 1
+
+
+def test_bot_harness_prompt_teaches_read_receipts():
+    built = _blocks(enabled_agents=_ROSTER, bot=_CSO)["bot-harness-prompt"]
+    assert "read receipt with its last reply" in built
+    assert "handles your message without writing back" in built
+    assert "following up is yours when you were waiting on it" in built
+    assert "goes idle without answering" not in built
+    assert "--no-reply" in built and "immediate notice" in built
 
 
 def test_bots_get_no_messaging_guidance_in_their_system_prompt():

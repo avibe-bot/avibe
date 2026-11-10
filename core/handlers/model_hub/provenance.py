@@ -731,10 +731,10 @@ class TurnTrace:
     # Vibey: the hosted tools the turn's first resolution froze, with each
     # search tool's executor order. Written once; settings apply next turn.
     hosted_tools: Optional[TurnHostedTools] = None
-    # The processing tier the turn's first resolution asked for (``"fast"`` or
-    # None, fast_mode.py). Written once; a Session's change applies next turn.
+    # The processing tier the turn's latest resolution asked for (``"fast"`` or
+    # None, fast_mode.py). A turn that resolves once keeps it; a Vibey turn
+    # follows its Session, so its next request runs at the tier named last.
     speed: Optional[str] = None
-    speed_recorded: bool = False
     # Vibey: per Source, the identity digest the turn's native content is bound
     # to, claimed by its first admitted pinned request. Each entry is written once.
     pinned_identities: dict[str, str] = field(default_factory=dict)
@@ -1398,7 +1398,7 @@ class TurnCorrelationRegistry:
             return trace.hosted_tools if trace is not None else None
 
     def turn_speed(self, turn_id: Optional[str]) -> Optional[str]:
-        """The processing tier a turn's first resolution asked for; None for standard or an untracked turn."""
+        """The processing tier a turn's latest resolution asked for; None for standard or an untracked turn."""
 
         normalized = str(turn_id or "").strip()
         if not normalized:
@@ -1718,9 +1718,7 @@ class TurnCorrelationRegistry:
         trace.gateway_model_id = route.resolved_model_id
         if trace.hosted_tools is None:
             trace.hosted_tools = hosted_tools
-        if not trace.speed_recorded:
-            trace.speed = speed
-            trace.speed_recorded = True
+        trace.speed = speed
         return True
 
     def prepare_gateway_turn(
@@ -1741,9 +1739,9 @@ class TurnCorrelationRegistry:
     ) -> str:
         """Register a route and return its legacy credential or explicit handle.
 
-        ``hosted_tools`` is what a Vibey turn's first resolution froze, and
-        ``speed`` the processing tier it asked for; the turn keeps the first
-        it is given.
+        ``hosted_tools`` is what a Vibey turn's first resolution froze, and the
+        turn keeps the first it is given. ``speed`` is the processing tier this
+        resolution asks for, and the turn's next requests run at the latest.
         """
 
         with self._lock:
@@ -1808,16 +1806,19 @@ class TurnCorrelationRegistry:
                 trace = self._readable_trace(route_turn_id, backend)
                 if (
                     trace is None
-                    or trace.requested_model_id != requested_model_id
                     or trace.gateway_requests
                     or trace.pending_attempts
                     or trace.recovery_requests
                 ):
-                    raise PreparedGatewayRouteConflict("Vibey route is still owned or its alias changed")
+                    raise PreparedGatewayRouteConflict("Vibey route is still owned")
                 # Keep the turn's attempt history and outcome. Only the launch
                 # snapshot changes; old credentials can route but cannot claim
-                # this newly prepared identity.
+                # this newly prepared identity. The snapshot's model changes
+                # with it when the turn's Session moved to another model
+                # between two requests, so the turn's record names the model
+                # it asked for last.
                 scope.prepared_routes.pop(route_turn_id)
+                trace.requested_model_id = requested_model_id
                 trace.gateway_source_id = None
                 trace.gateway_request_model_id = None
                 trace.gateway_model_id = None
@@ -2363,6 +2364,9 @@ class TurnCorrelationRegistry:
                     scope_key=exact[1],
                 ),
             )
+            # The model that had no candidate: a Vibey turn may ask for another
+            # model than the one its earlier requests ran on.
+            trace.requested_model_id = requested_model_id
             trace.model_supply_state = supply_state
             trace.blockers = [blocker.payload() for blocker in blockers]
 

@@ -123,7 +123,17 @@ const designFrames = frames([
   },
   {
     name: 'add',
-    title: 'MCP · 添加 MCP',
+    title: 'MCP · 添加 MCP（默认填写）',
+    width: 1192,
+    height: 900,
+    status: 'shipped',
+    route: '/skills?tab=mcp',
+    fixtures: hubFixtures(),
+    render: addDialog('form'),
+  },
+  {
+    name: 'add-json',
+    title: 'MCP · 添加 · 粘贴 JSON 导入',
     width: 1192,
     height: 900,
     status: 'shipped',
@@ -131,7 +141,6 @@ const designFrames = frames([
     fixtures: hubFixtures(),
     render: addDialog('json'),
   },
-  addFormFrame('add-form', 'MCP · 添加 · 表单', EMPTY_MCP_ADD_FORM),
   addFormFrame('add-form-stdio', 'MCP · 表单 · stdio 命令 + 环境变量 + 高级', {
     ...EMPTY_MCP_ADD_FORM,
     name: 'filesystem',
@@ -251,13 +260,13 @@ const designFrames = frames([
       <McpAddDialog
         open
         project={{ id: 'proj_avibe', name: 'avibe' }}
-        text={pasted}
+        text=""
         error={null}
         result={null}
         busy={false}
         adding={false}
         onTextChange={() => {}}
-        tab="json"
+        tab="form"
         onTabChange={() => {}}
         form={EMPTY_MCP_ADD_FORM}
         onFormChange={() => {}}

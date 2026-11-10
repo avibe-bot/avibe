@@ -95,13 +95,9 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
   return (
     <div className={clsx('flex w-full flex-col gap-5', isPage && 'h-full')}>
       {/* diagHero */}
-      {/* Not `shadow-mint-card-sm`: this card's glow sits at y16, and that
-          rung is y8. Card washes are not this change's scope -- 41 of them are
-          still literals -- so it keeps its own value rather than being snapped
-          to the nearest rung. */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-mint/30 bg-surface-2 px-6 py-5 shadow-[0_16px_32px_-8px_rgba(91,255,160,0.078)]">
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-edge bg-surface-2 px-6 py-5 shadow-elevation-0">
         <div className="flex min-w-0 items-center gap-3.5">
-          <div className="flex size-[42px] shrink-0 items-center justify-center rounded-full border border-mint/35 bg-mint/[0.08] shadow-glow-sm-mint">
+          <div className="flex size-[42px] shrink-0 items-center justify-center rounded-full border border-mint/35 bg-mint/[0.08] text-mint-ink shadow-decor-sm-mint">
             <Activity className="size-5 text-mint-ink" strokeWidth={2.25} />
           </div>
           <div className="flex min-w-0 flex-col gap-0.5">
@@ -120,7 +116,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <Link
             to={logsPath}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-foreground/[0.04] px-3 text-[12px] font-medium text-foreground transition hover:border-border-strong"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-edge px-3 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
           >
             <FileText className="size-3.5" />
             {t('common.viewLogs')}
@@ -195,7 +191,7 @@ export const DoctorPanel: React.FC<DoctorPanelProps> = ({
             return (
               <div
                 key={index}
-                className="flex flex-col overflow-hidden rounded-xl border border-border bg-background"
+                className="flex flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0"
               >
                 <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-3.5">
                   <h3 className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-muted">

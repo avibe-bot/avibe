@@ -24,7 +24,7 @@ type SearchPaletteProps = {
 // Key cornerRadius 5 / #FFFFFF0F / border, mono key + Inter muted label.
 const FooterHint: React.FC<{ keyLabel: string; label: string }> = ({ keyLabel, label }) => (
   <span className="flex items-center gap-1.5">
-    <kbd className="flex items-center justify-center rounded-[5px] border border-border bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[10px] font-bold text-muted">
+    <kbd className="flex items-center justify-center rounded-[5px] border border-edge bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[10px] font-bold text-muted shadow-elevation-0">
       {keyLabel}
     </kbd>
     <span className="text-[11px] text-muted">{label}</span>
@@ -207,7 +207,7 @@ const SearchPresentation = ({ query, setQuery, includeArchived, setIncludeArchiv
           }}
           onCloseAutoFocus={onCloseAutoFocus}
           aria-describedby={undefined}
-          className="fixed left-1/2 top-[120px] z-50 flex max-h-[min(640px,calc(100dvh-160px))] w-[720px] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_32px_80px_-16px_rgba(0,0,0,0.75)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95"
+          className="fixed left-1/2 top-[120px] z-50 flex max-h-[min(640px,calc(100dvh-160px))] w-[720px] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border border-edge bg-popover shadow-elevation-3 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95"
         >
           <DialogTitle className="sr-only">{t('workbench.search.title')}</DialogTitle>
 
@@ -229,7 +229,7 @@ const SearchPresentation = ({ query, setQuery, includeArchived, setIncludeArchiv
               autoComplete="off"
             />
             {(loading || appsLoading) && <Loader2 className="size-4 shrink-0 animate-spin text-muted" />}
-            <kbd className="shrink-0 rounded-md border border-border bg-foreground/[0.06] px-2 py-[3px] font-mono text-[11px] text-muted">
+            <kbd className="shrink-0 rounded-md border border-edge bg-foreground/[0.06] px-2 py-[3px] font-mono text-[11px] text-muted shadow-elevation-0">
               {t('workbench.search.kbdEsc')}
             </kbd>
           </div>

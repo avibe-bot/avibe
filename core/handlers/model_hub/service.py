@@ -25,6 +25,7 @@ from config.v2_config import (
     CONFIG_LOCK,
     KEYLESS_EXA_DISPLAY_NAME,
     KEYLESS_EXA_SOURCE_ID,
+    KEYLESS_EXA_SERVICE_ID,
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
@@ -1665,7 +1666,11 @@ class ModelHubService:
         self._service_cooldowns = ServiceCooldowns()
         # Exa's anonymous endpoint is per-IP limited; cap active MCP calls
         # without serializing a turn or the session's independent JSON-RPC ids.
-        self._keyless_exa_call_semaphore = asyncio.Semaphore(3)
+        self._keyless_exa_call_semaphore = asyncio.Semaphore(
+            search_service("exa-mcp", "search")["limits"]["max_concurrent"]
+        )
+        # Exa search/fetch share the existing IP budget; unrelated MCP hosts do not.
+        self._keyless_call_semaphores = {KEYLESS_EXA_SERVICE_ID: self._keyless_exa_call_semaphore}
         self._jina_fetch_sent_at: deque[datetime] = deque()
         self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
@@ -5366,17 +5371,27 @@ class ModelHubService:
         updated: ModelHubConfig,
     ) -> list[dict]:
         # Inventory evidence narrows speculative candidates without deleting routes.
-        return [
-            item for item in self._removed_effective_hops(previous, updated)
-            if not (
-                effective_model_route(
-                    previous, cast(BackendName, item["backend"]), item["menu_model"],
-                ).route_origin == "passthrough"
-                and effective_model_route(
-                    updated, cast(BackendName, item["backend"]), item["menu_model"],
-                ).route_origin == "automatic"
+        # It also re-targets an inherited hop on a Source that still serves the
+        # same row, which is not a removal: a Claude family alias follows the
+        # newest member its Source lists. Literal matching inherits only the
+        # row's own id, so no other inherited hop can move this way.
+        removed = self._removed_effective_hops(previous, updated)
+        serving = {
+            (item["backend"], item["menu_model"], item["source_id"])
+            for item in (self._effective_hop_refs(updated) if removed else ())
+        }
+
+        def moved_supply(item: dict) -> bool:
+            backend, menu_model = cast(BackendName, item["backend"]), item["menu_model"]
+            origins = (
+                effective_model_route(previous, backend, menu_model).route_origin,
+                effective_model_route(updated, backend, menu_model).route_origin,
             )
-        ]
+            if origins == ("passthrough", "automatic"):
+                return False
+            return "manual" in origins or (backend, menu_model, item["source_id"]) not in serving
+
+        return [item for item in removed if moved_supply(item)]
 
     def _guard_inventory_mutation(
         self,
@@ -8602,13 +8617,17 @@ class ModelHubService:
             return result
 
     @staticmethod
-    def models_dev_matches(query: object) -> list[dict]:
+    def models_dev_matches(
+        query: object,
+        *,
+        refresh_if_stale: bool = False,
+    ) -> list[dict]:
         if not isinstance(query, str) or not query.strip():
             raise ModelHubError("mapping_target_unavailable")
         from vibe.models_dev_catalog import search_models_dev
 
         try:
-            return search_models_dev(query)
+            return search_models_dev(query, refresh_if_stale=refresh_if_stale)
         except (OSError, RuntimeError, ValueError):
             raise ModelHubError("models_dev_unavailable", status=502) from None
 

@@ -38,7 +38,8 @@
         "main-pet-settings",
         "main-computer-use",
         "main-desktop-update",
-        "main-app-windows"
+        "main-app-windows",
+        "main-desktop-notifications"
       ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }

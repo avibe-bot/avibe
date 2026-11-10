@@ -3653,6 +3653,26 @@ def test_model_producers_emit_admissible_backend_payloads(
     assert parsed == ModelHubBackendModelConfig.from_payload(parsed.to_payload())
 
 
+def test_models_dev_route_passes_the_nonblocking_refresh_mode(monkeypatch):
+    calls = []
+
+    class FakeModelHub:
+        def models_dev_matches(self, query, *, refresh_if_stale=False):
+            calls.append((query, refresh_if_stale))
+            return []
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: FakeModelHub())
+
+    response = app.test_client().get(
+        "/api/models/catalog/models-dev?query=claude&refresh=if-stale",
+        base_url="http://127.0.0.1:15131",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["matches"] == []
+    assert calls == [("claude", True)]
+
+
 def test_claude_reconcile_accepts_explicit_non_claude_cli_override(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     monkeypatch.setattr(
@@ -5317,6 +5337,19 @@ async def _delete_seeded_custom_model(service):
     return await service.delete_custom_model("src_first0001", "claude-extra-model")
 
 
+async def _shorten_chain_past_a_newer_family_member(service):
+    # The `opus` alias rows inherit each Source's newest opus, so the dropped
+    # Source stops being asked for the chain's model only where it lists a newer one.
+    service.store.config.sources[1].models.append(
+        ModelHubModelConfig(id="claude-opus-4-8", provenance="discovered")
+    )
+    return await _confirm_guard(lambda guard: service.set_agent_chain(
+        "claude",
+        _PROJECTION_MODEL,
+        {"hops": [{"source_id": "src_first0001", "model_id": _PROJECTION_MODEL}], **guard},
+    ))
+
+
 async def _reconcile_builtin_supplied_model(service):
     service.store.config.sources[0].models.append(
         ModelHubModelConfig(id="claude-extra-model", provenance="manual")
@@ -5399,11 +5432,7 @@ _PROJECTION_MUTATIONS = {
         lambda bindings: bindings["src_second001"].route_model_ids == (_PROJECTION_MODEL,),
     ),
     "shorten_chain": (
-        lambda service: _confirm_guard(lambda guard: service.set_agent_chain(
-            "claude",
-            _PROJECTION_MODEL,
-            {"hops": [{"source_id": "src_first0001", "model_id": _PROJECTION_MODEL}], **guard},
-        )),
+        _shorten_chain_past_a_newer_family_member,
         lambda bindings: _PROJECTION_MODEL not in bindings["src_second001"].route_model_ids,
     ),
     "remove_catalog_model": (

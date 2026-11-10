@@ -352,7 +352,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       {isOpen && (
         <div
           className={clsx(
-            'z-50 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl',
+            'z-50 rounded-lg border border-edge bg-popover text-popover-foreground shadow-elevation-2',
             mobileHeaderPopoverClassName,
             'md:absolute md:inset-x-auto md:right-0 md:top-full md:mt-2 md:w-72 md:max-h-none md:overflow-visible',
           )}
@@ -453,7 +453,7 @@ const ChipPopoverBody: React.FC<{
 
   if (visual === 'disabled') {
     return (
-      <p className="rounded-md border border-border bg-surface-2/40 px-3 py-2 text-xs text-muted">
+      <p className="rounded-md border border-edge bg-surface-2/40 px-3 py-2 text-xs text-muted shadow-elevation-0">
         {t('backendLifecycle.disabledHint')}
       </p>
     );

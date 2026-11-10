@@ -59,7 +59,9 @@ def test_source_version_binding_for_both_channels(tag, expected, monkeypatch):
 ])
 def test_real_workflow_channel_resolution(tmp_path, tag, test, stable, enabled, signed):
     steps = workflow('release_ai.yml')['resolve-desktop-release']['steps']
-    script = next(s['run'] for s in steps if s.get('id') == 'resolve')
+    resolver = next(s for s in steps if s.get('id') == 'resolve')
+    script = resolver['run']
+    assert resolver['env']['BACKSTOP_SOURCE_SHA'] == '${{ needs.release-backstop.outputs.source_sha }}'
     # A test-owned resolver witnesses that disabled paths never invoke release tooling.
     scripts = tmp_path / 'scripts'
     scripts.mkdir()
@@ -67,7 +69,8 @@ def test_real_workflow_channel_resolution(tmp_path, tag, test, stable, enabled, 
     output = tmp_path / 'output'
     result = subprocess.run(['bash', '-e', '-c', script], cwd=tmp_path, capture_output=True, text=True,
                             env={**os.environ, 'RELEASE_TAG': tag, 'TEST_ENABLED': test,
-                                 'STABLE_ENABLED': stable, 'GITHUB_OUTPUT': str(output)})
+                                 'STABLE_ENABLED': stable, 'BACKSTOP_SOURCE_SHA': 'a' * 40,
+                                 'GITHUB_OUTPUT': str(output)})
     assert result.returncode == 0, result.stderr
     assert (tmp_path / 'resolved').exists() == enabled
     assert dict(line.split('=') for line in output.read_text().splitlines()) == {

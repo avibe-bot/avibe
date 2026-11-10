@@ -1680,6 +1680,7 @@
     "mainSessionProtected": "桌宠主会话由 Avibe 管理，不能归档或编辑。"
   },
   "hostedTools": {
+    "keylessParallel": "Parallel (free)",
     "keylessExa": "Exa（免费）",
     "rateLimitSwitch": "{sources}限流，已改用 {provider}。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。",
     "errorCode": {

@@ -42,7 +42,7 @@ const Brand = () => {
         src={logoImg}
         alt=""
         aria-hidden="true"
-        className="size-8 shrink-0 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-glow-sm-mint"
+        className="size-8 shrink-0 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-mark-sm-mint"
       />
       <div className="min-w-0 leading-tight">
         <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>

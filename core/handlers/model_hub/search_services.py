@@ -16,7 +16,6 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from config.v2_config import (
-    KEYLESS_EXA_SERVICE_ID,
     ModelHubConfig,
     ModelHubSourceConfig,
     model_hub_builtin_sources,
@@ -29,7 +28,6 @@ from .hosted_executor import Failure, failed_record
 from .retry import retry_after_deadline, source_identity
 
 ATTEMPT_SECONDS = 30.0
-KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS = 15.0
 ZERO = HostedCost(basis="list", usd=0)
 BLOCKERS = {
     "service_key_invalid": "models.source.needs_action.credential_revoked",
@@ -47,7 +45,7 @@ _KEYLESS_TEXT_CONTENT_TYPE_FIELD = "type"
 _KEYLESS_TEXT_CONTENT_TYPE = "text"
 
 
-def _keyless_mcp_content(body: Mapping[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
+def _keyless_mcp_content(body: Mapping[str, Any], results_path: str) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
     result = body.get("result")
     if not isinstance(result, Mapping):
         return dict(body), None
@@ -69,7 +67,7 @@ def _keyless_mcp_content(body: Mapping[str, Any]) -> tuple[dict[str, Any], Mappi
                 if not isinstance(candidate, Mapping):
                     continue
                 first_candidate = first_candidate or candidate
-                if "results" in candidate:
+                if isinstance(_path(candidate, results_path), list):
                     content = candidate
                     break
             if not isinstance(content, Mapping):
@@ -153,7 +151,10 @@ def search_request(service: Mapping[str, Any], query: str, results: int) -> dict
     mapping = service["request"]
     request = dict(mapping.get("defaults", {}))
     _put(request, mapping["query"], query)
-    _put(request, mapping["results"], results)
+    if mapping.get("query_array"):
+        _put(request, mapping["query_array"], [query])
+    if mapping.get("results"):
+        _put(request, mapping["results"], results)
     if mapping.get("highlights"):
         _put(request, mapping["highlights"], True)
     return request
@@ -188,11 +189,11 @@ def map_response(
         except (ValueError, UnicodeError, RecursionError):
             pass
     status = response.http_status
-    keyless = service.get("service_id") == KEYLESS_EXA_SERVICE_ID
+    keyless = service.get("auth") == "none" and isinstance(service.get("mcp"), Mapping)
     mcp_result: Mapping[str, Any] | None = None
-    if keyless and isinstance(body, Mapping):
-        body, mcp_result = _keyless_mcp_content(body)
     mapping = service["result"]
+    if keyless and isinstance(body, Mapping):
+        body, mcp_result = _keyless_mcp_content(body, mapping["results"])
     rows = _path(body, mapping["results"])
     sources: list[dict[str, str]] = []
     if isinstance(rows, list):
@@ -210,7 +211,7 @@ def map_response(
             for field, bound in (("title", 300), ("snippet", 1000), ("page_age", 64)):
                 value = _path(row, mapping[field])
                 if field == "snippet" and isinstance(value, list):
-                    # Exa's highlights, in rank order, never its page text.
+                    # Provider excerpts/highlights, in rank order, never full page text.
                     value = ("\n\n" if keyless else "\n").join(
                         part[:bound] for part in value[:bound] if isinstance(part, str)
                     )
@@ -285,7 +286,7 @@ def map_response(
     billing = service["billing"]
     billable, uncertain = False, False
     if sent and keyless:
-        # Keyless Exa's service is free: attempts still enter usage.requests,
+        # Anonymous services are free: attempts still enter usage.requests,
         # but never become billable or carry a provider cost estimate.
         billable, uncertain = False, False
     elif sent:

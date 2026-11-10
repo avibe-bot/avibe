@@ -5,19 +5,25 @@ for `AGENTS.md`. The workflows are the source of truth for the final commands.
 
 ## Select the release commit
 
-Fetch `origin/master` and select its latest commit when starting a release. Record
-that exact SHA for all release-only validation and tag creation; do not switch the
-candidate silently while checks run. New PRs may continue through the merge queue:
-there is no routine release-time merge freeze or requirement to wait for duplicate
-`push: master` lint, iOS-shell, or desktop-shell runs.
+Fetch `origin/master` and record the candidate's exact SHA for all release-only
+validation and tag creation; do not switch it silently while checks run. New PRs
+may continue to merge: there is no routine release-time merge freeze.
 
-Require successful merge-group validation for the candidate's landing tree, traced
-through the merged PR/queue timeline and its associated `merge_group` Actions runs.
-A green PR head alone is insufficient, and a synthetic queue head is not the commit
-to tag. If queue evidence is unavailable (for example, a pre-queue bootstrap commit),
-run the applicable validation explicitly against the selected SHA rather than
-assuming missing checks passed. Keep the post-merge cache and release-guard jobs;
-the queue replaces duplicated pre-merge suites, not release-specific safeguards.
+Require a successful **full master backstop at the exact candidate SHA** for
+every release, stable included. `lint.yml` runs that full pass after master
+pushes, including iOS, desktop, browser, installer, web-fetch and Windows
+checks. A running pass finishes; only the newest pending master pass waits.
+`release_ai.yml` and `publish.yml` enforce whole-run success plus the
+`master-full-backstop` certificate before any build/sign/publish path.
+See [CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
+NavigationPolicyTests quarantine (#3418) does not relax this release gate:
+iOS must pass in the exact full master run, even while its PR check is advisory.
+
+A green PR head, another SHA's full run, or a missing/coalesced run is not
+proof. Select a full-green master SHA; wait for its current full pass, or rerun
+its existing master backstop. Manual full validation is available on master.
+Historical runs with no explicit full-backstop certificate are not assumed
+equivalent.
 
 Before pushing a tag, fetch master again. If the release is required to include
 newly landed work, select the new tip and repeat candidate-specific gates; otherwise
@@ -58,10 +64,18 @@ must include an installable wheel containing `ui/dist` and
 ## Release E2E
 
 Pull-request CI does not run the hermetic Model Hub E2E (`-m e2e_model_hub`).
-`Model Hub release E2E` runs it nightly and on demand on a clean runner, with
+`Model Hub release E2E` runs it nightly and on demand on clean runners, with
 the pinned engine and the latest agent CLIs. Before tagging a stable `v*`
 release, dispatch it on the release commit and require a green run at that
 exact SHA; a strict `xfail` names a known, tracked gap, not a pass to ignore.
+
+The run shares the selection out over two shard jobs, and its `model-hub-e2e`
+job is the verdict. That job passes only when both shards succeeded in the
+same run attempt at the release commit, against the same agent CLI versions
+and the engine that commit pins; when together they ran every case of
+`-m e2e_model_hub tests/e2e` exactly once; and when every case a covered
+scenario row cites passed. Shards from different attempts do not join: after
+a failure, re-run all jobs, not only the failed one.
 
 ## Managed-runtime manifests
 

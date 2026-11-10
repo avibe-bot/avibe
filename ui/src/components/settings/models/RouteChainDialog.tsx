@@ -59,7 +59,7 @@ import type {
 
 const sourceName = (sources: Source[], sourceId: string): string =>
   sources.find((source) => source.id === sourceId)?.display_name ?? sourceId;
-const MENU_ITEM = "model-hub-route-menu-item flex w-full items-center rounded-md text-left font-semibold hover:bg-surface-2";
+const MENU_ITEM = "model-hub-route-menu-item flex w-full items-center rounded-md text-left font-semibold hover:bg-wash";
 type RouteMode = "follow" | "custom";
 
 export type RouteReport = {
@@ -1272,7 +1272,7 @@ export const RouteChainDialog: React.FC<{
         <DialogPrimitive.Overlay className="model-hub-route-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
           aria-busy={phase === "saving" || previewPending || phase === "reconciling"}
-          className="model-hub-route-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0"
+          className="model-hub-route-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-edge bg-popover p-0"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             focusDismiss();

@@ -22,6 +22,8 @@ from core.agent_core.ai.claude_thinking import is_claude_model, uses_adaptive_th
     ("claude-opus-4-7", True),
     ("claude-opus-5-5", True),
     ("claude-fable-5-1", True),
+    ("claude-fable-5-2", True),
+    ("anthropic/claude-fable-5-2", True),
     ("claude-opus-4-6-thinking", True),
     # A Claude ID that names no version is a later release or an alias: adaptive, not guessed legacy.
     ("claude-latest", True),

@@ -128,7 +128,7 @@ export function ComposerHoldCard({
       )}
       {card && attachments.length > 0 && (
         <VoiceHalo>
-          <span className="flex max-w-full items-center gap-1.5 rounded-full border border-border-strong bg-surface px-3 py-1 text-xs text-muted shadow-md">
+          <span className="flex max-w-full items-center gap-1.5 rounded-full border border-edge px-3 py-1 text-xs text-muted shadow-elevation-2 bg-popover">
             <Paperclip className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">
               <Trans
@@ -154,8 +154,8 @@ export function MouseHint({ armed, box = 'composer' }: { armed: boolean; box?: '
     <VoiceHalo>
       <span
         className={clsx(
-          'flex items-center gap-1.5 rounded-full border bg-surface px-3 py-1 text-xs font-semibold shadow-md',
-          armed ? 'border-destructive/50 text-destructive-ink' : 'border-border-strong text-muted',
+          'flex items-center gap-1.5 rounded-full border bg-popover px-3 py-1 text-xs font-semibold shadow-elevation-2',
+          armed ? 'border-destructive/50 text-destructive-ink' : 'border-edge text-muted',
         )}
       >
         {armed ? (
@@ -163,7 +163,7 @@ export function MouseHint({ armed, box = 'composer' }: { armed: boolean; box?: '
         ) : (
           <Trans
             i18nKey={box === 'avatar' ? 'voice.avatar.mouseHint' : 'voice.composer.mouseHint'}
-            components={{ key: <kbd className="rounded border border-border-strong bg-surface-2 px-1 font-mono text-2xs text-foreground" /> }}
+            components={{ key: <kbd className="rounded border border-edge bg-surface-2 px-1 font-mono text-2xs text-foreground shadow-elevation-0" /> }}
           />
         )}
       </span>
@@ -178,8 +178,8 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
     <div
       role="status"
       className={clsx(
-        'flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-xl',
-        note === 'denied' ? 'border-destructive/35' : note === 'asking' ? 'border-mint/40 shadow-glow-md-mint' : 'border-border-strong',
+        'flex w-full max-w-sm items-start gap-3 rounded-2xl border bg-surface-2 px-3.5 py-3 shadow-elevation-2',
+        note === 'denied' ? 'border-destructive/35' : note === 'asking' ? 'border-mint/40 shadow-glow-md-mint' : 'border-edge',
       )}
     >
       {note === 'asking' && <Mic className="mt-0.5 size-4 shrink-0 text-mint-ink" />}
@@ -235,7 +235,7 @@ export function ComposerHoldSurface({
           className="absolute flex -translate-x-1/2 -translate-y-1/2 flex-col items-center"
           style={{ left: point?.x ?? '50%', top: point?.y ?? '50%' }}
         >
-          <span className="absolute bottom-full mb-4 whitespace-nowrap rounded-full border border-border-strong bg-surface px-2.5 py-1 text-xs font-semibold text-foreground shadow-md">
+          <span className="absolute bottom-full mb-4 whitespace-nowrap rounded-full border border-edge px-2.5 py-1 text-xs font-semibold text-foreground shadow-elevation-2 bg-popover">
             {t('voice.composer.keepHolding')}
           </span>
           <PressRing progress={progress} />
@@ -245,7 +245,7 @@ export function ComposerHoldSurface({
   }
   if (phase === 'settling') {
     return (
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl border border-border-strong bg-surface-2 text-muted" aria-hidden="true">
+      <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl border border-edge bg-surface-2 text-muted shadow-elevation-0" aria-hidden="true">
         <Loader2 className="size-4 animate-spin" />
       </div>
     );

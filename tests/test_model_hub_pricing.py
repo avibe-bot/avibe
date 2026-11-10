@@ -30,13 +30,14 @@ from core.handlers.model_hub.pricing import (
 from core.handlers.model_hub.stream_wire import ProtocolUsageReport, extract_protocol_usage
 from core.handlers.model_hub.usage import BoundedUsageLedger, SourceIdentity, UsageCall, UsageWriter
 
-# Shapes as models.dev publishes them (USD per million tokens), at 2026-09 prices.
+# Shapes as models.dev publishes them (USD per million tokens), captured through 2026-11-10.
 CATALOG = {
     "anthropic": {
         "models": {
             "claude-opus-5": {"cost": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25}},
             "claude-sonnet-5": {"cost": {"input": 2, "output": 10, "cache_read": 0.2, "cache_write": 2.5}},
             "claude-fable-5-1": {"cost": {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5}},
+            "claude-fable-5-2": {"cost": {"input": 8, "output": 40, "cache_read": 0.2, "cache_write": 10}},
             "claude-haiku-4-5": {"cost": {"input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25}},
         }
     },
@@ -47,6 +48,7 @@ CATALOG = {
             "gpt-5.6-sol": {"cost": {"input": 4, "output": 20, "cache_read": 0.4, "cache_write": 5}},
             "gpt-5.6-luna": {"cost": {"input": 0.2, "output": 1.2, "cache_read": 0.02, "cache_write": 0.25}},
             "gpt-6-astra": {"cost": {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5}},
+            "gpt-6.1-terra": {"cost": {"input": 1, "output": 5, "cache_read": 0.05, "cache_write": 1.25}},
         }
     },
     "xai": {"models": {"grok-4.6": {"cost": {"input": 2, "output": 6, "cache_read": 0.5}}}},
@@ -65,6 +67,24 @@ FETCHED_AT = datetime(2026, 9, 23, 12, 0).timestamp()
 
 def _table(overrides=None) -> PriceTable:
     return PriceTable(catalog=CATALOG, vendor_map=VENDOR_MAP, overrides=overrides or {}, price_table_date="2026-09-23")
+
+
+@pytest.mark.parametrize(
+    ("model", "vendor", "expected", "long_write", "long_price"),
+    [("claude-fable-5-2", "anthropic", (8, 40, 0.2, 10), "cache_write_1h", 16),
+     ("gpt-6.1-terra", "openai", (1, 5, 0.05, 1.25), "cache_write_12h", 2.5)],
+)
+def test_new_models_use_exact_prices_and_remain_unknown_without_them(model, vendor, expected, long_write, long_price):
+    """MH-PRICE-003: new releases use their own prices, never a sibling's when metadata is stale."""
+    price = _table().price(model)
+    assert price is not None
+    assert (price.input, price.output, price.cache_read, price.cache_write) == expected
+    assert getattr(price, long_write) == long_price
+    stale = {key: {"models": {mid: row for mid, row in provider["models"].items() if mid != model}}
+             for key, provider in CATALOG.items()}
+    assert model not in stale[vendor]["models"]
+    table = PriceTable(catalog=stale, vendor_map=VENDOR_MAP, overrides={}, price_table_date="2026-11-09")
+    assert table.price(model) is None
 
 
 def _context(size: int) -> dict:
@@ -149,6 +169,8 @@ def test_model_ids_normalize_to_the_price_table_spelling(reported, normalized):
         ("gpt-6-astra", 10),
         ("grok-4.6", 2),
         ("claude-fable-5-1", 10),
+        ("claude-fable-5-2", 8),
+        ("gpt-6.1-terra", 1),
         ("claude-opus-5", 5),
         ("claude-opus-5-5", 5),  # not yet on models.dev: aliased to its predecessor
         ("claude-sonnet-5-5", 2),  # likewise

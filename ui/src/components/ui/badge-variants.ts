@@ -8,9 +8,10 @@ export const badgeVariants = cva(
   {
     variants: {
       variant: {
-        default: 'border border-border-strong bg-surface text-foreground',
-        secondary: 'border border-border bg-surface text-muted',
-        outline: 'border border-border-strong bg-transparent text-foreground',
+        // Neutral chips are filled, not outlined (ui/design: system/elevation/edges).
+        default: 'border border-edge bg-field text-foreground',
+        secondary: 'border border-edge bg-field text-muted',
+        outline: 'border border-edge bg-field text-foreground',
         success: 'border border-mint/40 bg-mint-soft text-mint-ink',
         warning: 'border border-gold/40 bg-gold/10 text-gold-ink',
         info: 'border border-cyan/40 bg-cyan-soft text-cyan-ink',

@@ -329,7 +329,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
   const bodyContent = (
     <>
         {/* Horizontal stepper */}
-        <div className="rounded-xl border border-border bg-background px-5 py-4">
+        <div className="rounded-xl border border-edge bg-surface px-5 py-4 shadow-elevation-0">
           <div className="flex items-center justify-between gap-3">
             {stepLabels.map((label, idx) => {
               const num = idx + 1;
@@ -368,7 +368,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
         <div className="space-y-4">
           {!canManageAccessMembers && (
-            <div className="space-y-3 rounded-xl border border-border bg-background px-5 py-4">
+            <div className="space-y-3 rounded-xl border border-edge bg-surface px-5 py-4 shadow-elevation-0">
               <p className="text-sm text-muted">{t('wechatConfig.ownerBindingRequired')}</p>
               <label className="block space-y-2 text-sm">
                 <span>{t('wechatConfig.botToken')}</span>
@@ -378,16 +378,16 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           )}
           {/* Already bound */}
           {isAlreadyBound && (
-            <div className="rounded-xl border border-border bg-background px-6 py-6">
+            <div className="rounded-xl border border-edge bg-surface px-6 py-6 shadow-elevation-0">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-lg-mint">
                   <Check size={32} />
                 </div>
                 <div>
                   <h3 className="text-[16px] font-semibold text-foreground">{t('wechatConfig.alreadyBound')}</h3>
                   <p className="mt-1 text-[12px] text-muted">{t('wechatConfig.alreadyBoundDesc')}</p>
                 </div>
-                <div className="w-full max-w-md rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-left">
+                <div className="w-full max-w-md rounded-lg border border-edge bg-surface-2 px-3 py-2.5 text-left shadow-elevation-0">
                   <div className="mb-1 flex items-center gap-1 text-[11px] text-muted">
                     <KeyRound size={12} /> Token
                   </div>
@@ -415,7 +415,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* Starting */}
           {loginState === 'idle' && !botToken && !isAlreadyBound && (
-            <div className="rounded-xl border border-border bg-background px-6 py-8 text-center">
+            <div className="rounded-xl border border-edge bg-surface px-6 py-8 text-center shadow-elevation-0">
               <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.06] text-cyan-ink">
                 {starting || (autoStartLogin && canManageAccessMembers) ? (
                   <Loader2 size={26} className="animate-spin" />
@@ -437,9 +437,9 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* QR */}
           {(loginState === 'qr_ready' || loginState === 'scanning' || loginState === 'confirming') && (
-            <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-mint-card-sm">
+            <div className="rounded-xl border border-edge bg-surface-2 px-6 py-6 shadow-elevation-0">
               <div className="flex flex-col items-center gap-4">
-                <div className="rounded-xl border border-border bg-white p-4 shadow-glow-md-mint">
+                <div className="rounded-xl border border-edge bg-white p-4 shadow-glow-md-mint">
                   <QRCodeSVG value={qrCodeUrl} size={224} level="M" includeMargin={false} />
                 </div>
                 <div
@@ -484,9 +484,9 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
 
           {/* Connected */}
           {loginState === 'connected' && (
-            <div className="rounded-xl border border-mint/35 bg-surface-2 px-6 py-6 shadow-mint-card-sm">
+            <div className="rounded-xl border border-edge bg-surface-2 px-6 py-6 shadow-elevation-0">
               <div className="flex flex-col items-center gap-4 text-center">
-                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-lg-mint">
+                <div className="flex size-16 items-center justify-center rounded-full border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-decor-lg-mint">
                   <Check size={32} />
                 </div>
                 <div>
@@ -525,7 +525,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
           )}
 
           {/* Proxy (optional) — applies to outbound iLink/CDN traffic */}
-          <div className="rounded-xl border border-border bg-background px-5 py-4">
+          <div className="rounded-xl border border-edge bg-surface px-5 py-4 shadow-elevation-0">
             <ProxyUrlField value={proxyUrl} onChange={setProxyUrl} />
           </div>
         </div>
@@ -560,7 +560,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({
               {t('wechatConfig.subtitle')}
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
+          <div className="flex items-center gap-2 rounded-full border border-edge px-3 py-1.5 bg-field">
             <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedDots} / 3
             </span>

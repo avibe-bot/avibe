@@ -625,7 +625,7 @@ export const HarnessPage: React.FC = () => {
       <CapabilityTabs />
       {/* Header */}
       <div className="flex items-center gap-4">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-glow-md-violet">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-violet/30 bg-violet/[0.08] text-violet-ink shadow-decor-md-violet">
           <Activity className="size-5" />
         </div>
         <div className="flex flex-1 flex-col">
@@ -651,7 +651,7 @@ export const HarnessPage: React.FC = () => {
 
       {/* Global background-work banner toggle (spec req 2). Off → the workbench
           chat banner never renders in any session; data/API unaffected. */}
-      <div className="flex items-center justify-between gap-4 rounded-xl border border-border-strong bg-surface px-4 py-3">
+      <div className="flex items-center justify-between gap-4 rounded-xl border border-edge bg-surface px-4 py-3 shadow-elevation-0">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">{t('harness.bannerToggle.title')}</div>
           <div className="text-[12px] text-muted">
@@ -691,7 +691,7 @@ export const HarnessPage: React.FC = () => {
                   'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
                   active
                     ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
-                    : 'border-border-strong bg-foreground/[0.04] text-muted',
+                    : 'border-edge text-muted bg-field',
                 )}
               >
                 {count}
@@ -705,7 +705,7 @@ export const HarnessPage: React.FC = () => {
           lifecycle segments for outcome statuses and add a type selector; all
           three narrow server-side. */}
       <div className="flex flex-wrap items-center gap-2.5">
-        <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
+        <div className="flex h-9 w-full items-center gap-2 rounded-md border border-field-edge bg-field px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}
@@ -717,7 +717,7 @@ export const HarnessPage: React.FC = () => {
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
-        <div className="flex rounded-md border border-border-strong bg-surface p-0.5">
+        <div className="flex rounded-md border border-edge bg-surface p-0.5 shadow-elevation-0">
           {statusOptions.map(({ value: opt, labelKey }) => (
             <button
               key={opt}
@@ -753,7 +753,7 @@ export const HarnessPage: React.FC = () => {
               resetPaging();
             }}
             aria-label={t('harness.runTypeFilter.label')}
-            className="h-9 rounded-md border border-input bg-background px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring"
+            className="h-9 rounded-md border border-field-edge bg-field px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="default">{t('harness.runTypeFilter.default')}</option>
             <option value="all">{t('harness.runTypeFilter.all')}</option>
@@ -863,7 +863,7 @@ export const HarnessPage: React.FC = () => {
         </div>
 
         {hasSelection && (
-          <div className="flex min-w-0 flex-col gap-3 self-start rounded-xl border border-border-strong bg-surface p-5">
+          <div className="flex min-w-0 flex-col gap-3 self-start rounded-xl border border-edge bg-surface p-5 shadow-elevation-0">
             <Button
               type="button"
               variant="ghost"
@@ -1168,7 +1168,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
     <div
       className={clsx(
         'group/row flex min-w-0 items-center gap-3 rounded-lg border px-4 py-3 transition',
-        active ? 'border-violet/40 bg-violet/[0.05]' : 'border-border bg-surface hover:bg-foreground/[0.03]',
+        active ? 'border-violet/40 bg-violet/[0.05]' : 'border-edge bg-surface hover:bg-foreground/[0.03] shadow-elevation-0',
       )}
     >
       <button type="button" onClick={onSelect} className="flex min-w-0 flex-1 items-center gap-3 text-left">
@@ -1231,7 +1231,7 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
         className={clsx(
           'flex size-7 items-center justify-center rounded-md border transition',
           enabled
-            ? 'border-border-strong text-muted hover:bg-foreground/[0.06] hover:text-foreground'
+            ? 'border-edge text-muted hover:text-foreground bg-field hover:bg-field-hover'
             : 'border-mint/40 bg-mint/[0.08] text-mint-ink hover:brightness-110',
           pending && 'cursor-wait opacity-60',
         )}
@@ -1254,7 +1254,7 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
         aria-label={t('harness.row.delete')}
         title={t('harness.row.delete')}
         className={clsx(
-          'flex size-7 items-center justify-center rounded-md border border-border-strong text-muted transition',
+          'flex size-7 items-center justify-center rounded-md border border-edge text-muted transition bg-field hover:bg-field-hover',
           'hover:border-pink/40 hover:bg-pink/[0.08] hover:text-pink-ink',
           pending && 'cursor-wait opacity-60',
         )}
@@ -1329,7 +1329,7 @@ const RoutingFields: React.FC<{
       </div>
       {showMessage && (
         <DetailField label={messageLabel}>
-          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
             {task.message || task.prompt || '—'}
           </pre>
         </DetailField>
@@ -1373,7 +1373,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           truncates for the header; this is the copyable full text. */}
       {isCommand && (
         <DetailField label={t('harness.detail.command')}>
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
             {formatCommandLine(task.shell_command, task.command) || '—'}
           </pre>
         </DetailField>
@@ -1465,7 +1465,7 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           creates and old rows still can. Shown rather than dropped. */}
       {!routesSomewhere && (task.message || task.prompt) && (
         <DetailField label={t('harness.detail.message')}>
-          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
             {task.message || task.prompt || '—'}
           </pre>
         </DetailField>
@@ -1593,7 +1593,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
         />
       </div>
       <DetailField label={t('harness.detail.command')}>
-        <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
           {cmd}
         </pre>
       </DetailField>
@@ -1618,7 +1618,7 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
         <span className="font-mono text-[11px] text-muted">{watch.mode}</span>
       </DetailField>
       <DetailField label={t('harness.detail.followUp')}>
-        <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
           {watch.message || watch.prefix || '—'}
         </pre>
       </DetailField>
@@ -1719,7 +1719,7 @@ const RunsList: React.FC<RunsListProps> = ({
             key={run.id}
             className={clsx(
               'relative rounded-lg border px-4 py-3 transition',
-              active ? 'border-violet/40 bg-violet/[0.05]' : 'border-border bg-surface hover:bg-foreground/[0.03]',
+              active ? 'border-violet/40 bg-violet/[0.05]' : 'border-edge bg-surface hover:bg-foreground/[0.03] shadow-elevation-0',
             )}
           >
             <button
@@ -1737,7 +1737,7 @@ const RunsList: React.FC<RunsListProps> = ({
                   {/* CSS truncation, never a slice: the detail panel and the
                       server-side search keep the full message. */}
                   <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground">{title}</span>
-                  <span className="shrink-0 rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 text-[9px] font-medium uppercase tracking-wide text-muted">
+                  <span className="shrink-0 rounded border border-edge bg-foreground/[0.04] px-1.5 py-0 text-[9px] font-medium uppercase tracking-wide text-muted shadow-elevation-0">
                     {typeLabel}
                   </span>
                 </div>
@@ -1834,8 +1834,8 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
   const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   const title = runRowTitle(run, typeLabel);
   const runCommandLine = runCommandSnapshotLine(run);
-  // A run that asked for no callback still tells its sender when it did not complete: its route only
-  // notifies on failure, so it shows whether that notice went out, not a skipped callback.
+  // New runs notify only on failure, including no-reply messages. Keep historical
+  // final-callback state readable without presenting a successful result promise.
   const notifyOnFailure = run.metadata?.callback_mode === 'failure';
   const shownCallbackStatus =
     notifyOnFailure && run.callback_status !== 'sent' && run.callback_status !== 'failed' ? null : run.callback_status;
@@ -1854,7 +1854,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
         <span
           className={clsx(
             'shrink-0 rounded border px-2 py-0 text-[9px] font-bold uppercase tracking-wide',
-            STATUS_PILL_CLASS[run.status as HarnessRunStatus] ?? 'border-border-strong bg-foreground/[0.04] text-muted',
+            STATUS_PILL_CLASS[run.status as HarnessRunStatus] ?? 'border-edge bg-foreground/[0.04] text-muted shadow-elevation-0',
           )}
         >
           {runStatusLabel(run.status, t)}
@@ -1891,7 +1891,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
         <DetailField label={t('harness.detail.source')}>
           <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] text-foreground">
             {run.source_kind && (
-              <span className="rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
+              <span className="rounded border border-edge bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted shadow-elevation-0">
                 {run.source_kind}
               </span>
             )}
@@ -1921,17 +1921,21 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
           </Link>
         </DetailField>
       )}
+      {run.metadata?.no_reply === true && (
+        <DetailField label={t('harness.detail.replyPolicy')}>
+          <span className="text-[12px] text-foreground">{t('harness.detail.noReply')}</span>
+        </DetailField>
+      )}
       {run.callback_session_id && (
         <DetailField label={t(notifyOnFailure ? 'harness.detail.notifyOnFailure' : 'harness.detail.callback')}>
           <div className="flex min-w-0 flex-col gap-1">
-            {/* Where the result reports back to — the same four session states,
-                so "who gets told" is as openable as "who ran it". */}
+            {/* Historical callback or internal notice recipient; retain the same Session states. */}
             <DetailSession
               summary={run.callback_session ?? BLANK_SESSION_SUMMARY}
               sessionId={run.callback_session_id}
             />
             {shownCallbackStatus && (
-              <span className="w-fit rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
+              <span className="w-fit rounded border border-edge bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted shadow-elevation-0">
                 {shownCallbackStatus}
               </span>
             )}
@@ -1948,21 +1952,21 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
           past execution — only the run can. */}
       {runCommandLine && (
         <DetailField label={t('harness.detail.command')}>
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
             {runCommandLine}
           </pre>
         </DetailField>
       )}
       {(run.message || run.prompt) && (
         <DetailField label={t('harness.detail.message')}>
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
             {run.message || run.prompt}
           </pre>
         </DetailField>
       )}
       {run.result_text && (
         <DetailField label={t('harness.detail.result')}>
-          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">
+          <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[11px] text-foreground shadow-elevation-0">
             {run.result_text}
           </pre>
         </DetailField>
@@ -1976,14 +1980,14 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
       )}
       {run.stdout && (
         <DetailField label="stdout">
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[10px] text-foreground">
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[10px] text-foreground shadow-elevation-0">
             {run.stdout}
           </pre>
         </DetailField>
       )}
       {run.stderr && (
         <DetailField label="stderr">
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[10px] text-foreground">
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-edge bg-surface-3 p-2 font-mono text-[10px] text-foreground shadow-elevation-0">
             {run.stderr}
           </pre>
         </DetailField>
@@ -2212,9 +2216,9 @@ const FailureDetails: React.FC<{
       {row.last_error && (
         <details
           key={disclosureKey}
-          className="group min-w-0 rounded-md border border-border bg-surface-3 px-2 py-1.5"
+          className="group min-w-0 rounded-md border border-edge bg-surface-3 px-2 py-1.5 shadow-elevation-0"
         >
-          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
             <ChevronRight aria-hidden className="size-3 shrink-0 transition-transform group-open:rotate-90" />
             {t('harness.detail.technicalDetails')}
           </summary>

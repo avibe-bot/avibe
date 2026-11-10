@@ -24,6 +24,7 @@ vi.mock('../../lib/useIsDesktop', () => ({ isDesktopViewport: () => false, useIs
 vi.mock('./Composer', () => ({ Composer: () => null }));
 
 import { Transcript } from './ChatPage';
+import { noteShift } from '../../lib/layoutBox';
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import type { ActivityGroup } from '../../lib/agentActivity';
 
@@ -268,9 +269,12 @@ describe('transcript Harness groups', () => {
   });
 
   // jsdom has no layout: every direct child of the transcript column is 100px
-  // tall, stacked in DOM order, and a nested element sits at its top-level
-  // ancestor's place. The viewport is 800px tall.
+  // tall, stacked in DOM order (``lower`` moves one down by as much), and a
+  // nested element sits at its top-level ancestor's place. The viewport is 800px tall.
+  const lower = new Map<Element, number>();
+  const itemOf = (el: Element) => [...el.closest('[data-testid="chat-transcript"]')!.firstElementChild!.firstElementChild!.children].find((child) => child.contains(el))!;
   const layOut = (scroller: HTMLElement) => {
+    lower.clear();
     const column = scroller.firstElementChild!.firstElementChild!;
     let scrollTop = 0;
     Object.defineProperties(scroller, {
@@ -282,21 +286,26 @@ describe('transcript Harness groups', () => {
       if (this === scroller) return { top: 0, bottom: 800, height: 800 } as DOMRect;
       const ancestor = [...column.children].find((child) => child === this || child.contains(this));
       const index = ancestor ? Array.prototype.indexOf.call(column.children, ancestor) : -1;
-      const top = index < 0 ? 0 : index * 100 - scrollTop;
+      const top = index < 0 ? 0 : index * 100 + (lower.get(ancestor!) ?? 0) - scrollTop;
       return { top, bottom: top + 90, height: 90 } as DOMRect;
     });
     return { top: () => scrollTop };
   };
   const tail = Array.from({ length: 10 }, (_, index) => reply(`r${index}`));
 
+  // A disclosure's motion may have moved the row before (lib/layoutBox): its place leaves that out, and the
+  // element it re-mounts as starts with nothing left out, so the place is carried over, not made up again.
   it.each([
-    ['opened, so it re-mounts inside the opened group', true, 400],
-    ['closed, so it folds into the collapsed head', false, 100],
-  ])('holds the reading position when an older page makes the anchored row a group member (%s)', (_label, opened, expected) => {
+    ['opened, so it re-mounts inside the opened group', true, 400, 0],
+    ['closed, so it folds into the collapsed head', false, 100, 0],
+    ['opened, after a disclosure above pushed it down', true, 400, 120],
+    ['closed, after a disclosure above pushed it down', false, 100, 120],
+  ])('holds the reading position when an older page makes the anchored row a group member (%s)', (_label, opened, expected, shifted) => {
     const view = renderTranscript({ messages: [watch('h5'), ...tail], hasOlder: true });
     const scroller = view.getByTestId('chat-transcript');
     const layout = layOut(scroller);
     if (opened) fireEvent.click(rendered('h5')!.querySelector('button[aria-expanded]')!);
+    noteShift(itemOf(rendered('h5')!), shifted);
     // Read at the top of the window: h5 is the anchored row, at the top of the view.
     fireEvent.pointerDown(scroller);
     scroller.scrollTop = 0;
@@ -308,6 +317,27 @@ describe('transcript Harness groups', () => {
     // the head stands in for it. Either way it is back at the top of the view.
     expect(groupToggle(3).getAttribute('aria-expanded')).toBe(opened ? 'true' : 'false');
     expect(layout.top()).toBe(expected);
+  });
+
+  it('holds the head that folded the anchored row in from then on, and leaves its motion to the motion', () => {
+    const view = renderTranscript({ messages: [watch('h5'), ...tail], hasOlder: true });
+    const scroller = view.getByTestId('chat-transcript');
+    const layout = layOut(scroller);
+    fireEvent.pointerDown(scroller);
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+
+    // An older message folds h5 into a head in its very place: nothing to make up.
+    view.rerender({ messages: [watch('h4'), watch('h5'), ...tail] });
+    expect(groupToggle(2).getAttribute('aria-expanded')).toBe('false');
+    expect(layout.top()).toBe(0);
+
+    // A disclosure above then pushes the head down, which its motion draws as movement: not the scroller's.
+    const head = itemOf(groupToggle(2));
+    noteShift(head, 50);
+    lower.set(head, 50);
+    view.rerender({ messages: [watch('h4'), watch('h5'), ...tail, reply('r10')] });
+    expect(layout.top()).toBe(0);
   });
 });
 

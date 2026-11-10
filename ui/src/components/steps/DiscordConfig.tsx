@@ -399,7 +399,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
                         </div>
                       </div>
                     )}
-                    <div className="max-h-52 overflow-y-auto rounded-lg border border-border bg-background">
+                    <div className="max-h-52 overflow-y-auto rounded-lg border border-edge bg-surface shadow-elevation-0">
                       {guilds.length === 0 ? (
                         <div className="px-3 py-2.5 text-[12px] text-muted">{t('discordConfig.guildPlaceholder')}</div>
                       ) : (
@@ -457,7 +457,7 @@ export const DiscordConfig: React.FC<DiscordConfigProps> = ({ data, onNext, onBa
               {t('discordConfig.subtitle')}
             </p>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
+          <div className="flex items-center gap-2 rounded-full border border-edge px-3 py-1.5 bg-field">
             <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint-ink">
               {completedCount} / 4
             </span>

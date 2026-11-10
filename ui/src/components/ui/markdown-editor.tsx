@@ -61,7 +61,7 @@ export const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
       {/* Body — editor or preview, fills the remaining height. */}
       <div className="min-h-0 flex-1 overflow-hidden p-5">
         {showPreview ? (
-          <div className="h-full overflow-auto rounded-lg border border-border bg-surface-2 px-4 py-3">
+          <div className="h-full overflow-auto rounded-lg border border-edge bg-surface-2 px-4 py-3 shadow-elevation-0">
             {value.trim() ? (
               <Suspense fallback={null}><DeferredMarkdown content={value} /></Suspense>
             ) : (

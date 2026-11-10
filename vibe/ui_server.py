@@ -85,6 +85,7 @@ from modules.agents.catalog import (
     is_agent_backend,
     supports_runtime_refresh,
 )
+from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -828,7 +829,20 @@ def _has_forwarded_metadata() -> bool:
     return _has_cloudflare_forwarded_metadata()
 
 
+def _is_direct_ingress_request() -> bool:
+    """The request entered through the strict direct ingress (``vibe/direct_ingress.py``).
+
+    Such a request came from a device on the network, relayed by this process
+    over loopback. It is remote by construction: no local, proxy, setup-host,
+    or Docker trust path may apply to it, whatever its headers say.
+    """
+
+    return getattr(request, "direct_ingress", None) is not None
+
+
 def _is_loopback_origin_proxy_request() -> bool:
+    if _is_direct_ingress_request():
+        return False
     if not _is_loopback_peer() or not _is_loopback_host(request.host):
         return False
     if _has_trusted_forwarded_metadata():
@@ -1432,6 +1446,8 @@ def _is_tunnel_wildcard_bind(config: V2Config) -> bool:
 
 
 def _is_local_request(config: V2Config | None = None) -> bool:
+    if _is_direct_ingress_request():
+        return False
     if _has_untrusted_forwarded_metadata():
         return False
     if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is None:
@@ -2415,6 +2431,11 @@ def _auth_client_id() -> str:
     otherwise set/rotate forwarded headers to dodge the limit, so for such peers
     we key on the real connecting address instead.
     """
+    direct_ingress = getattr(request, "direct_ingress", None)
+    if direct_ingress is not None:
+        # The socket peer is this process's own relay; key on the transport peer.
+        return f"direct:{direct_ingress.get('peer') or 'unknown'}"
+
     if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is not None:
         forwarded_client = _trusted_forwarded_client_address()
         if forwarded_client is not None:
@@ -3281,6 +3302,49 @@ class _RejectInvalidHostMiddleware:
 
 
 app.add_middleware(_RejectInvalidHostMiddleware)
+
+
+def _direct_ingress_host_is_current(host: str) -> bool:
+    """``host`` is this instance's managed hostname and remote access is enabled."""
+
+    config = _load_remote_access_config()
+    if config is None or not config.remote_access.vibe_cloud.enabled:
+        return False
+    return _normalized_host(host) == _remote_access_public_host(config)
+
+
+class _DirectIngressLiveHostMiddleware:
+    """Answer a direct-ingress request only for the instance's current hostname.
+
+    The ingress serves the one hostname it was started for. Once that is no
+    longer this instance's managed hostname, or remote access is turned off,
+    nothing may answer for it. This sits outside every route, so it also covers
+    WebSocket handlers and the routes exempt from host validation, which
+    request hooks do not reach.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in {"http", "websocket"} and scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None:
+            host = next((value for key, value in scope.get("headers") or () if key == b"host"), b"")
+            if not await asyncio.to_thread(_direct_ingress_host_is_current, host.decode("latin-1")):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                response = FastAPIResponse(
+                    content='{"ok":false,"error":"direct_ingress_host_mismatch"}',
+                    status_code=421,
+                    media_type="application/json",
+                    headers={"Cache-Control": "no-store"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_DirectIngressLiveHostMiddleware)
 
 
 _CONVERSATION_PREFETCH_PATH_RE = re.compile(r"/api/sessions/[^/]+/bootstrap")
@@ -4389,6 +4453,9 @@ def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_sch
 
 
 def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) -> bool:
+    if (getattr(websocket, "scope", None) or {}).get(DIRECT_INGRESS_SCOPE_KEY) is not None:
+        # Same rule as _is_direct_ingress_request: never local.
+        return False
     if _websocket_has_untrusted_forwarded_metadata(websocket):
         return False
     if _websocket_has_trusted_forwarded_metadata(websocket) and _websocket_trusted_forwarded_host(websocket) is None:
@@ -5142,9 +5209,14 @@ def model_hub_models_dev_get():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        matches = _model_hub_service().models_dev_matches(
-            request.args.get("query"),
-        )
+        query = request.args.get("query")
+        if request.args.get("refresh") == "if-stale":
+            matches = _model_hub_service().models_dev_matches(
+                query,
+                refresh_if_stale=True,
+            )
+        else:
+            matches = _model_hub_service().models_dev_matches(query)
         return _model_hub_success(matches=matches)
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -7276,15 +7348,10 @@ def web_push_unsubscribe():
 @app.route("/api/web-push/test", methods=["POST"])
 def web_push_test():
     from core.web_push import send_web_push
+    from core.web_push_notifications import _badge_count_for_user_key
     from storage import web_push_service
 
     payload = request.json or {}
-    notification = {
-        "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
-        "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
-        "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
-        "tag": "web-push-test",
-    }
     endpoint = payload.get("endpoint")
     if not isinstance(endpoint, str) or not endpoint.strip():
         return jsonify({"ok": False, "error": "endpoint_required"}), 400
@@ -7298,8 +7365,26 @@ def web_push_test():
             endpoint=endpoint,
             user_key=user_key,
         )
+        context = _request_authorization_context()
+        contexts = (
+            {user_key: context}
+            if user_key != "local" and context is not None
+            else {}
+        )
+        badge_count = _badge_count_for_user_key(
+            conn,
+            user_key=user_key,
+            contexts=contexts,
+        )
     if not subscription:
         return jsonify({"ok": False, "error": "no_subscription"}), 404
+    notification = {
+        "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
+        "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
+        "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
+        "tag": "web-push-test",
+        "badge_count": badge_count,
+    }
     try:
         send_web_push(subscription=subscription, payload=notification)
         with engine.begin() as conn:
@@ -7883,6 +7968,54 @@ def remote_access_status():
     if authorization_context is not None and authorization_context.can_manage_access_members:
         status_payload["pending_pairing"] = remote_access.pending_pairing_status(config)
     return jsonify(status_payload)
+
+
+@app.route("/api/direct/rendezvous", methods=["POST"])
+def direct_rendezvous():
+    """Tell an authenticated remote client how to dial this instance directly.
+
+    Contract: docs/plans/remote-direct-rendezvous.md. The answer is public
+    endpoint information bound to the caller's remote session; it is not a
+    credential and grants nothing by itself.
+    """
+
+    from vibe import direct_rendezvous as rendezvous_state
+
+    config = _load_remote_access_config()
+    session = getattr(g, "remote_session_payload", None)
+    subject = str((session or {}).get("sub") or "").strip()
+    if config is None or not subject:
+        # A local or setup-host request has no remote session to bind to and no
+        # use for a direct path.
+        return jsonify({"ok": False, "error": "remote_session_required"}), 403
+    payload = request.json
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != rendezvous_state.RENDEZVOUS_VERSION
+        or not rendezvous_state.is_endpoint_id(payload.get("client_endpoint_id"))
+    ):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+
+    instance_id = config.remote_access.vibe_cloud.instance_id
+    hostname = _remote_access_public_host(config) or ""
+    if _effective_normalized_host() != hostname:
+        # The direct path serves the managed hostname only. A session on a
+        # custom hostname keeps using the tunnel.
+        result = rendezvous_state.unavailable(
+            instance_id=instance_id,
+            hostname=hostname,
+            reason="hostname_not_direct",
+        )
+    else:
+        result = rendezvous_state.rendezvous.offer(
+            instance_id=instance_id,
+            hostname=hostname,
+            subject=subject,
+            client_endpoint_id=payload["client_endpoint_id"],
+        )
+    response = jsonify(result)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])

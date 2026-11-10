@@ -40,7 +40,7 @@
     "vendor": "exa-mcp", "label": "Exa (free)", "source_id": "src_exakeyless", "kind": "service",
     "service_id": "exa/mcp", "available": true, "auto_enroll": true,
     "endpoint": "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa", "auth": "none",
-    "request": {"tool": "web_fetch_exa", "url_field": "urls", "url_array": true, "fixed": {"maxCharacters": 48000}},
+    "request": {"tool": "web_fetch_exa", "required_arguments": ["urls", "maxCharacters"], "url_field": "urls", "url_array": true, "fixed": {"maxCharacters": 48000}},
     "result": {"content": "content"}, "content_types": ["markdown"],
     "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/get-started/exa-mcp#authentication"},
     "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"refusal_tags": ["PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"], "target_tags": ["CRAWL_UNKNOWN_ERROR"]}

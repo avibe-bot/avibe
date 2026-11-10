@@ -156,7 +156,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
         </div>
 
         {loading ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+          <div className="flex items-center gap-2 rounded-lg border border-edge bg-surface-2 px-3 py-2 text-sm text-muted shadow-elevation-0">
             <Loader2 className="size-4 animate-spin" />
             {t('vaults.settings.loading')}
           </div>
@@ -181,7 +181,7 @@ export const VaultSettingsDialog: React.FC<{ open: boolean; onOpenChange: (open:
             </div>
 
             {/* Strict approvals — R2 behaves like R3 (a passkey every approve/reveal). */}
-            <div className="flex items-start gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
+            <div className="flex items-start gap-3 rounded-[10px] border border-edge bg-surface-2 px-3 py-3 shadow-elevation-0">
               <div className="flex min-w-0 flex-1 flex-col gap-1">
                 <span className="text-[13px] font-semibold text-foreground">{t('vaults.settings.strict')}</span>
                 <span className="text-[11.5px] leading-snug text-muted-foreground">{t('vaults.settings.strictHelp')}</span>

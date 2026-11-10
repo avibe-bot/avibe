@@ -638,13 +638,13 @@ Session，且在目标 Session 已存在时仍然会被拒绝。
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --callback --agent release-reviewer --message 'Review the latest deployment result and send me the findings.'
+vibe agent run --agent release-reviewer --message 'Review the deployment result and report the findings here.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
 vibe agent run --bot cso --message 'Review the new login flow for security risks.'
 vibe agent run --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
-vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
+vibe agent run --bot cso --no-reply --message 'Record this deployment fact; no response is needed.'
 vibe agent run --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
 vibe agent run --close-after --agent release-reviewer --message 'Run a disposable batch review.'
 ```
@@ -678,19 +678,25 @@ Session 或 fork）设置模型，该 Session 之后的轮次会沿用它。
 会被拒绝；claude 和 codex 的未知值只给出警告，因为它们内置的目录可能落后于新版本。
 `vibe agent models <agent>` 会列出可用的值。
 
-命令输出一个 `run` 对象：它的 `id`、`status`、`run_type`、`agent_name`，以及 Avibe
-为它解析出的 `session_id`、`scope_id`、`visibility` 和 `callback_session_id`。
-`--sync` 会用结束后的 run 记录替换它。只有当 run 落在调用方自己的 Session、
-结果已直接回到那里因而不再回调时，才会附带 `callback_notice`。
+命令输出一个 `run` 对象：它的 `id`、`status`、`run_type`、`agent_name`，以及解析出的
+`session_id`、`scope_id` 和 `visibility`。设置后会包含 `no_reply`。`--sync` 会用结束后的
+Run 记录替换它；旧记录中的 callback 字段仍可读取。
 
-无论目标是什么，run 都不创建 callback，除非明确要求。当最终结果文本需要回到某个
-Session 时，使用 `--callback`（在 Agent shell 内）或 `--callback-session-id`；否则之后用
-`vibe runs show` 查看结果。`--no-callback` 仍被接受，但不改变任何行为。无论有没有
-callback，以失败、取消或中断结束的 run 都会告诉调用方 Session 它没有完成以及原因；没有
-callback 的 run 会告诉目标该向谁汇报：目标的输入里有一行写明发送方和确切的
-`vibe agent run` 命令。这个 callback 与普通投递相互独立：
-即使目标 run 已经把结果发到了自己的 IM scope，调用方 Session 仍然会收到结果并触发一次
-跟进 Agent 消息。system、tool call、assistant 中间过程消息不会包含在 callback 里。
+成功结果不再自动回传。目标输入会告诉它如何用 `vibe agent run` 向发送方汇报，但发送方
+是接收方自己派出的 Session 时省略这行提示。目标处理消息但没有写回，且空闲、没有待办
+工作时，Avibe 会向发送方发一次已读回执，保留最后一条回复的格式和最多 30,000 个字符，
+超出时提示用 `vibe data query` 查看完整对话。已启用的 Watch、待处理的 Task 或未闭合的
+委派会推迟回执；回执不等于明确的进度或完成汇报。失败、取消或中断的 Run 仍然立即
+向调用方 Session 发送未完成通知。
+
+信息告知可在已有 `--session-id` 或 `--bot` 消息上加 `--no-reply`：接收方看到
+`[No reply needed.]`，这条消息不会打开或重新激活委派，但会关闭已有的反向委派，也不产生已读回执。
+它不禁用失败通知，不能与 `--sync` 或新建/fork Session 一起使用。
+
+`--callback`、`--callback-session-id` 和 `--no-callback` 仍然接受，但不改变行为；stderr
+输出一行弃用说明，stdout 仍是 JSON。升级前待发送的 callback 兑现一次，内部失败投递
+和 Vault 审批自动续接不变。同 epoch 的旧版可以忽略 `no_reply`；回退时多一条汇报提示或
+回执是接受的兼容成本。任何 Run 的已存储结果都可以用 `vibe runs show` 读取。
 
 对于新建或 fork 的 Session，如果希望 Run 结束后释放 Agent runtime，同时保留
 Session、transcript 和 Run 记录，可以使用 `--close-after`。它不能和

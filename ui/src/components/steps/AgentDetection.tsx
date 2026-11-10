@@ -784,7 +784,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // Page mode keeps the existing settings shell — render the inner content only
   const Inner = isPage ? (
     <>
-      <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 rounded-xl border border-edge bg-surface px-4 py-3 sm:flex-row sm:items-center sm:justify-between shadow-elevation-0">
         <div className="min-w-0">
           <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
             {t('agentDetection.backendsLabel')}
@@ -808,12 +808,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           return (
             <div
               key={name}
-              className="flex flex-col gap-3.5 rounded-xl border border-border bg-background px-5 py-4 transition-colors hover:border-border-strong"
+              className="flex flex-col gap-3.5 rounded-xl border border-edge bg-surface px-5 py-4 transition-colors shadow-elevation-0"
             >
               {/* Top row — identity + status + enable switch. */}
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 flex-1 items-center gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface-2">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-edge bg-surface-2 shadow-elevation-0">
                     <BackendIcon backend={name as BackendId} size={18} variant="glyph" />
                   </div>
                   <div className="min-w-0">

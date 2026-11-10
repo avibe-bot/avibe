@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Classify a complete event diff; uncertainty selects full CI.
+"""Classify a complete event diff; uncertainty never authorizes path routing.
 
 Only Git trees are consulted: no API file-list limits or truncated push commit
-arrays. A pull request or merge-group entry targeting the default branch whose
-every changed path is narrative skips the test jobs (docs/plans/ci-docs-fast-path.md).
-Otherwise two job families may skip when no changed path can reach their inputs
-(docs/plans/ci-affected-routing.md). Errors and anything unrecognised run
-full CI; pushes are retained only for standalone exact-diff probes.
+arrays. This low-level classifier records narrative/browser/platform evidence
+and validated paths. ``ci_scope.py`` owns the workflow modes and job selection;
+the standalone CLI here is a diagnostic, not authority to skip cheap checks.
 """
 from __future__ import annotations
 
@@ -99,6 +97,10 @@ class Scope(NamedTuple):
     browser_reason: str
     platform: str
     platform_reason: str
+    # Present only after the complete diff and its file modes were validated.
+    # A missing path set makes new heavy-job routes fail closed.
+    paths: tuple[str, ...] = ()
+    routable: bool = False
 
 
 def full(reason: str, windows_control_ipc: bool) -> Scope:
@@ -170,8 +172,9 @@ def route(paths: list[str], independent: Callable[[str], bool], family: str) -> 
 def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     """Classify complete diff records ``(status, old mode, new mode, path)``.
 
-    ``routable`` is true only for a pull request into the default branch; any
-    other event can skip nothing beyond the documentation fast path.
+    ``routable`` means the event targets the default branch and can use these
+    path predicates. Workflow modes and whether a job is eligible to skip are
+    applied by ``ci_scope.py`` after this low-level classification.
     """
     paths = [path for *_, path in entries]
     windows_control_ipc = any(path in WINDOWS_CONTROL_IPC_PATHS for path in paths)
@@ -183,7 +186,7 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     code = next((path for path in paths if not narrative_path(path)), None)
     if code is None:
         reason = f"all {len(paths)} changed paths are narrative documentation"
-        return Scope(True, reason, False, SKIP, reason, SKIP, reason)
+        return Scope(True, reason, False, SKIP, reason, SKIP, reason, tuple(paths), routable)
     reason = f"not documentation only: {json.dumps(code, ensure_ascii=True)}"
     if not routable:
         return full(reason, windows_control_ipc)
@@ -194,7 +197,8 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
         added = next((path for status, _, _, path in entries if status == "A" and not portable_path(path)), None)
         if added is not None:
             platform, platform_reason = RUN, f"added name {json.dumps(added, ensure_ascii=True)} is not portable"
-    return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason)
+    return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason,
+                 tuple(paths), routable)
 
 
 def targets_default_branch(event_name: str, event: dict) -> bool:
@@ -297,8 +301,8 @@ def main() -> None:
         event = {}
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     scope = classify(event_name, event, os.environ.get("GITHUB_SHA", ""), Path.cwd())
-    # Merge-group scope is derived above from its validated base/head pair;
-    # there is no second master-push pass to widen it.
+    # Diagnostic output only. The workflow uses ci_scope.py, which makes master
+    # full and merge groups thin independently of these low-level path facts.
     # Output/write failures remain job failures; consumers require success AND
     # literal dispositions, so no missing output can authorize a skip.
     outputs = {

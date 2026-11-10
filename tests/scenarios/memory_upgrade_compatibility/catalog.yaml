@@ -1,15 +1,13 @@
 version: 1
 capability:
   id: memory_upgrade_compatibility
-  name: Memory retirement and official release upgrade compatibility
+  name: Memory retirement config and data preservation
   canonical_tests:
     - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
     - tests/test_memory_removal.py
-    - tests/e2e/test_retired_updater_bridge.py
-    - tests/test_release_verification.py
   shared_harness: []
 status_legend:
-  covered: deterministic test or release-gated end-to-end evidence exists
+  covered: deterministic contract evidence exists
 scenarios:
   - id: MUC-001
     name: startup migration removes obsolete config key only after successful write while preserving other configuration and user data
@@ -29,9 +27,3 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_memory_removal.py::test_retired_memory_malformed_config_keeps_original_for_recovery
-  - id: MUC-004
-    name: official publication gates real pip and uv upgrades from pinned v3.1.0 wheels to built core and inert bridge
-    status: covered
-    kind: release
-    layer: scenario
-    test: tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data

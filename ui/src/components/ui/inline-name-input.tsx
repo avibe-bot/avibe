@@ -42,7 +42,7 @@ export const InlineNameInput: React.FC<{
       }}
       className={
         className ??
-        'min-w-0 flex-1 rounded border border-cyan bg-surface px-1 py-0 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none'
+        'min-w-0 flex-1 rounded border border-cyan px-1 py-0 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none bg-field'
       }
     />
   );

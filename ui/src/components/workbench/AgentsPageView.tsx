@@ -177,7 +177,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
       {/* The Definitions tab stays mounted while Running shows, so the open panel keeps its edits. */}
       <div className={clsx('flex flex-col gap-5', !definitions && 'hidden')}>
         <div className={clsx('flex flex-wrap items-center gap-2.5', detailOpen && 'max-lg:hidden')}>
-          <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-80">
+          <div className="flex h-9 w-full items-center gap-2 rounded-md border border-field-edge px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-80 bg-field">
             <Search className="size-3.5 shrink-0 text-muted" />
             <input
               value={search}
@@ -259,7 +259,7 @@ export const AgentsPageView: React.FC<AgentsPageViewProps> = ({
           {detail && (
             <aside
               className={clsx(
-                'w-full shrink-0 self-start rounded-2xl border border-border-strong bg-surface p-5 lg:w-105',
+                'w-full shrink-0 self-start rounded-2xl border border-edge bg-surface p-5 lg:w-105 shadow-elevation-0',
                 !detailOpen && 'max-lg:hidden',
               )}
             >
@@ -357,8 +357,8 @@ const rowClass = (selected: boolean) =>
   clsx(
     'flex items-center gap-3 rounded-xl border px-3.5 text-left transition',
     selected
-      ? 'border-mint/40 bg-mint-soft shadow-glow-sm-mint'
-      : 'border-border bg-surface hover:border-border-strong hover:bg-surface-2',
+      ? 'border-mint/40 bg-mint-soft'
+      : 'border-edge bg-surface hover:bg-surface-wash shadow-elevation-0',
   );
 
 function BotCard({
@@ -451,7 +451,7 @@ export function AgentGlyph({ backend, muted = false, size = 'md' }: { backend: s
   return (
     <span
       className={clsx(
-        'grid shrink-0 place-items-center border border-border bg-surface-2',
+        'grid shrink-0 place-items-center border border-edge bg-surface-2 shadow-elevation-0',
         size === 'lg' ? 'size-12 rounded-xl' : 'size-8 rounded-lg',
         muted && 'opacity-60',
       )}
@@ -503,7 +503,7 @@ const AgentsTabStrip: React.FC<AgentsTabStripProps> = ({ tabs, active: activeTab
                   'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
                   active
                     ? 'border-violet/30 bg-violet/[0.10] text-violet-ink'
-                    : 'border-border-strong bg-foreground/[0.04] text-muted',
+                    : 'border-edge text-muted bg-field',
                 )}
               >
                 {runningCount}
@@ -532,7 +532,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface px-3 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+          className="flex items-center gap-1.5 rounded-md border border-edge px-3 py-2 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
         >
           <Funnel className="size-3 text-muted" />
           <span className="text-muted">{t('agents.backendFilterLabel')}</span>
@@ -551,7 +551,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
             }}
             className={clsx(
               'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
+              value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-wash',
             )}
           >
             {key !== 'all' && <BackendAvatar backend={key} className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
@@ -593,7 +593,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
               onImport(backend);
               setOpen(false);
             }}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash disabled:opacity-50"
           >
             <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
             <span>{t('agents.importFrom', { backend: BACKEND_LABEL[backend] })}</span>

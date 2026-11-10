@@ -16,7 +16,7 @@ import { SkillDetailPanel } from './skills/SkillDetailPanel';
 import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
-import { McpHubSection } from './skills/McpHubSection';
+import { McpHubSection, type McpHubHandle } from './skills/McpHubSection';
 import { SectionLabel } from './skills/sectionLabel';
 import { skillsLinkFromParams, type SkillsLink, type SkillsTab } from './skills/skillsLink';
 import { errorMessage } from '@/lib/errorMessage';
@@ -53,6 +53,8 @@ export const SkillsPage: React.FC = () => {
   const [showBrowse, setShowBrowse] = useState(false);
   const [checkMap, setCheckMap] = useState<Record<string, SkillCheckItem>>({});
   const [updating, setUpdating] = useState(false);
+  const mcpHub = useRef<McpHubHandle>(null);
+  const [mcpRefreshing, setMcpRefreshing] = useState(false);
 
   // A link that changes while the page is open (arriving, or going away again on a bare
   // navigation) moves the view, one param at a time, so what the user clicked since stays.
@@ -230,6 +232,18 @@ export const SkillsPage: React.FC = () => {
     }
   };
 
+  // On the MCP tab the header refresh is the hub's: an Owner rediscovers, anyone else reloads.
+  const onRefresh = async () => {
+    if (!showMcp) return refresh();
+    setMcpRefreshing(true);
+    try {
+      await mcpHub.current?.refresh();
+    } finally {
+      setMcpRefreshing(false);
+    }
+  };
+  const mcpHubShown = scope === 'global' || Boolean(activeProject);
+
   const afterDialog = () => {
     setShowAdd(false);
     setShowBrowse(false);
@@ -256,8 +270,8 @@ export const SkillsPage: React.FC = () => {
         title={t('skills.pageTitle')}
         subtitle={t('skills.subtitle')}
         actions={
-          <Button type="button" variant="outline" size="xs" onClick={() => refresh()} disabled={loading}>
-            <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
+          <Button type="button" variant="outline" size="xs" onClick={() => void onRefresh()} disabled={showMcp ? mcpRefreshing : loading}>
+            <RefreshCw className={clsx('size-3.5', (showMcp ? mcpRefreshing : loading) && 'animate-spin')} />
             {t('common.refresh')}
           </Button>
         }
@@ -285,7 +299,7 @@ export const SkillsPage: React.FC = () => {
         {scope === 'project' && projects.length > 0 ? (
           <ProjectPicker projects={projects} value={projectId} onChange={setProjectId} />
         ) : null}
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-3 py-2">
+        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-edge bg-surface px-3 py-2 shadow-elevation-0">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
             value={search}
@@ -295,7 +309,14 @@ export const SkillsPage: React.FC = () => {
           />
         </div>
 
-        {showMcp ? null : (
+        {showMcp ? (
+          capabilities.is_instance_owner && mcpHubShown ? (
+            <Button type="button" variant="brand" size="xs" onClick={() => mcpHub.current?.openAdd()}>
+              <Plus />
+              {t('mcpHub.add')}
+            </Button>
+          ) : null
+        ) : (
         <>
         {projectCanManage ? (
           <>
@@ -319,7 +340,7 @@ export const SkillsPage: React.FC = () => {
       </div>
 
       {scope === 'project' && activeProject?.folder_path ? (
-        <div className="flex items-center gap-2 rounded-[10px] border border-border-strong bg-surface-2 px-3.5 py-2.5">
+        <div className="flex items-center gap-2 rounded-[10px] border border-edge bg-surface-2 px-3.5 py-2.5 shadow-elevation-0">
           <span className="truncate font-mono text-[10.5px] text-muted">
             {showMcp ? <>{activeProject.folder_path}/.mcp.json</> : <>{activeProject.folder_path}/.agents/skills</>}
           </span>
@@ -335,8 +356,8 @@ export const SkillsPage: React.FC = () => {
           {t('mcpHub.projectNoFolder')}
         </div>
       ) : null}
-      {showMcp ? (scope === 'global' || (activeProject && !projectHasFolder) ? <McpHubSection key="global" searchQuery={search} /> : activeProject ? (
-        <McpHubSection key={activeProject.id} searchQuery={search} project={{ id: activeProject.id, name: activeProject.display_name }} />
+      {showMcp ? (scope === 'global' || (activeProject && !projectHasFolder) ? <McpHubSection key="global" ref={mcpHub} searchQuery={search} /> : activeProject ? (
+        <McpHubSection key={activeProject.id} ref={mcpHub} searchQuery={search} project={{ id: activeProject.id, name: activeProject.display_name }} />
       ) : null) : (
       <>
       {error ? (

@@ -176,7 +176,7 @@ export function getBackendUiMeta(id: string): BackendUiMeta {
       Icon: Bot,
       Avatar: Bot,
       initials: id.slice(0, 2).toUpperCase(),
-      blockCls: 'border-border bg-surface-2 text-foreground',
+      blockCls: 'border-edge bg-surface-2 text-foreground',
       glyphCls: 'text-muted',
       tileCls: 'bg-surface-2',
       iconCls: 'text-muted',

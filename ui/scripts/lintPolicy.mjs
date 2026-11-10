@@ -9,7 +9,7 @@ import { EXPECTED_BROWSER_GLOBALS } from './browserGlobals.mjs';
 export const DEPENDENCY_ROOTS = ['node_modules', 'dist'];
 export const INTENDED_EXTENSIONS = ['.ts', '.tsx'];
 export const CONFIG_FILE = '.oxlintrc.json';
-export const OXLINT_VERSION = '1.91.0';
+export const OXLINT_VERSION = '1.92.0';
 
 // Keep the ledger's established rule identities while replacing their engine.
 // A rename is not a debt reduction. Native aliases and JS-plugin aliases are

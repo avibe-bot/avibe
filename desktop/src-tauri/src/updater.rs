@@ -175,6 +175,9 @@ pub struct DesktopUpdateState {
     phase: Phase,
     latest: Option<String>,
     channel: Channel,
+    /// Pre-releases are offered too (the Test channel). Also tells the
+    /// Workbench that this shell has `desktop_update_prereleases_set`.
+    prereleases: bool,
     skipped_version: Option<String>,
     interactive: bool,
     remote_install_allowed: bool,
@@ -638,6 +641,7 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
         phase: state.phase,
         latest: state.latest.clone(),
         channel: state.channel,
+        prereleases: state.channel == Channel::Test,
         skipped_version: skipped_version(&updater),
         interactive: state.availability_interactive,
         remote_install_allowed: state.remote_install_allowed,
@@ -668,18 +672,14 @@ fn set_available(app: &AppHandle, manifest: Manifest) {
     app.state::<Updater>().state.lock().expect("updater state").manifest = Some(manifest);
     emit_state(app);
 }
-pub fn toggle_channel(app: &AppHandle) {
+/// Persist the update channel the menu item and the Workbench switch share.
+fn set_channel(app: &AppHandle, channel: Channel) -> Result<(), String> {
     let updater = app.state::<Updater>();
     if updater.busy.load(Ordering::SeqCst) {
-        return;
+        return Err("The update channel cannot change while an update is in progress.".to_owned());
     }
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut state = updater.state.lock().expect("updater state");
-        let channel = if state.channel == Channel::Test {
-            Channel::Stable
-        } else {
-            Channel::Test
-        };
         std::fs::create_dir_all(updater.channel_path.parent().ok_or("missing config directory")?)?;
         std::fs::write(&updater.channel_path, serde_json::to_vec(&channel)?)?;
         state.channel = channel;
@@ -687,11 +687,24 @@ pub fn toggle_channel(app: &AppHandle) {
         updater.channel_menu.set_checked(channel == Channel::Test)?;
         Ok(())
     })();
-    if result.is_err() {
+    result.map_err(|error| format!("The update channel could not be saved: {error}"))?;
+    emit_state(app);
+    Ok(())
+}
+pub fn toggle_channel(app: &AppHandle) {
+    let updater = app.state::<Updater>();
+    if updater.busy.load(Ordering::SeqCst) {
+        return;
+    }
+    let channel = if updater.state.lock().expect("updater state").channel == Channel::Test {
+        Channel::Stable
+    } else {
+        Channel::Test
+    };
+    if set_channel(app, channel).is_err() {
         show(app, &catalog().check_failed, None);
         return;
     }
-    emit_state(app);
     check(app.clone(), true);
 }
 fn show(app: &AppHandle, message: &str, latest: Option<&str>) {
@@ -948,7 +961,8 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Manife
             .ok_or("missing source")?
             .to_owned(),
     };
-    let artifact = manifest.validate(channel, &release.tag, &commit, TARGET)?;
+    // Each release is verified against its own channel; Test also offers stable releases.
+    let artifact = manifest.validate(Channel::of(release.prerelease), &release.tag, &commit, TARGET)?;
     if !release
         .assets
         .iter()
@@ -1088,6 +1102,15 @@ pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(),
     ensure_workbench(&window)?;
     check_with_presentation(app, true, CheckPresentation::Workbench);
     Ok(())
+}
+
+/// The Workbench's pre-release switch: the same channel as the menu item.
+#[tauri::command]
+pub fn desktop_update_prereleases_set(window: WebviewWindow, app: AppHandle, enabled: bool) -> Result<bool, String> {
+    ensure_workbench(&window)?;
+    set_channel(&app, Channel::of(enabled))?;
+    check_with_presentation(app, true, CheckPresentation::Workbench);
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -1690,6 +1713,7 @@ mod tests {
             phase: Phase::Available,
             latest: Some("3.2.3".to_owned()),
             channel: Channel::Test,
+            prereleases: true,
             skipped_version: Some("3.2.3".to_owned()),
             interactive: true,
             remote_install_allowed: false,
@@ -1701,6 +1725,7 @@ mod tests {
                 "phase": "available",
                 "latest": "3.2.3",
                 "channel": "test",
+                "prereleases": true,
                 "skippedVersion": "3.2.3",
                 "interactive": true,
                 "remoteInstallAllowed": false,

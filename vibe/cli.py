@@ -31,7 +31,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_native_cli_backend
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    display_name_for_backend,
+    is_builtin_backend,
+    is_native_cli_backend,
+)
 from core.caller_context import (
     caller_context_from_env,
     caller_resource_user_context,
@@ -1035,6 +1041,10 @@ def cmd_debug_prompt(args) -> int:
         return 1
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+#: ``--speed`` values: a Session's stored ``speed`` is ``"fast"`` or absent, which the CLI names ``standard``.
+SESSION_SPEED_CHOICES = ("fast", "standard")
 
 
 def _add_pagination_args(parser, *, help_command: str) -> None:
@@ -2139,14 +2149,14 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Inside an Agent shell, new Sessions use the caller's scope and directory.
-        Only --callback returns the final reply; a run that fails still tells the caller.
-        --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
-          apply only to a new or forked Session.
+        Failed, canceled, or interrupted runs still notify the sender.
+        --no-reply rejects --sync and new/forked Sessions.
+        --model, --reasoning-effort, --speed, --visible, --same-scope, --scope-id, and
+          --close-after apply only to a new or forked Session.
 
         Examples:
-          vibe agent run --agent reviewer --message 'Review the latest deployment result.'
-          vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
+          vibe agent run --session-id sesk8m4q2p7x --queue --message 'Update docs next.'
+          vibe agent run --bot reviewer --no-reply --message 'Record this fact.'
         """
     )
 
@@ -5762,7 +5772,6 @@ def _agent_models_current(agent, options: dict) -> dict:
 
 def cmd_agent_models(args):
     from core.vibe_agents import VibeAgentAccessError, validate_agent_backend
-    from vibe import api
 
     try:
         name = getattr(args, "name", None)
@@ -5799,14 +5808,14 @@ def cmd_agent_models(args):
                 hint="Providers are an OpenCode concept; drop --provider for claude/codex.",
                 help_command="vibe agent models --help",
             )
-        options = api.agent_model_options(backend, provider=provider)
-        if not options.get("ok"):
-            raise TaskCliError(
-                options.get("error") or "failed to load model options",
-                code="agent_models_unavailable",
-                details={"backend": backend},
-                help_command="vibe agent models --help",
-            )
+        # The Web route picker's menu (Model Hub's live answer, with each model's fast tier) when the service
+        # answers; otherwise the configured or bundled catalog.
+        options = _route_menu(
+            backend,
+            hub_agent_reader=_remote_hub_agent_reader(),
+            provider=provider,
+            help_command="vibe agent models --help",
+        )
         # `current` validity is checked against the full set; --model only narrows
         # the displayed list, so an Agent's real model is never hidden from it.
         current = _agent_models_current(agent, options) if agent else None
@@ -5917,14 +5926,35 @@ def _agent_value_warning_fields(agent) -> dict:
 
 
 def _session_model_override_fields(
-    *, backend: str, agent_label: str, model: Optional[str], reasoning_effort: Optional[str], help_command: str
+    *,
+    backend: str,
+    agent_label: str,
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+    help_command: str,
+    speed: Optional[str] = None,
+    hub_agent_reader=None,
 ) -> dict:
-    """Check the model and effort a new Session will run on against the target Agent's catalog.
+    """Check the model, effort, and speed a new Session will run on against the menu its Session will have.
 
     ``model`` and ``reasoning_effort`` are the effective pair: the run's overrides over the defaults the Session would
-    otherwise keep. Where the catalog is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
+    otherwise keep. With a Model Hub reader the menu is the Web route picker's (``_check_session_route``); without
+    one, the Agent's catalog: where it is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
     and its reservation released; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
     """
+    if hub_agent_reader is not None or speed == "fast":
+        menu = _route_menu(backend, hub_agent_reader=hub_agent_reader, help_command=help_command)
+        _writes, notes = _check_session_route(
+            menu,
+            backend=backend,
+            current={"model": None, "reasoning_effort": None, "speed": "standard"},
+            model=model,
+            reasoning_effort=reasoning_effort,
+            speed=speed,
+            menu_command=f"vibe agent models {agent_label}",
+            help_command=help_command,
+        )
+        return {"warnings": notes, "hint": f"Run `vibe agent models {agent_label}` to list valid models and reasoning efforts."} if notes else {}
     mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort)
     if not mismatches:
         return {}
@@ -6157,6 +6187,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     project = (getattr(args, "project", None) or "").strip()
     visibility = (getattr(args, "visibility", None) or "").strip()
     close_after = bool(getattr(args, "close_after", False))
+    no_reply = bool(getattr(args, "no_reply", False))
     if _agent_run_is_async(args) and getattr(args, "wait_timeout", None) is not None:
         raise TaskCliError(
             "use --sync with --wait-timeout",
@@ -6164,18 +6195,11 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Agent runs are async by default. Pass --sync when the CLI should wait, or remove --wait-timeout.",
             help_command=help_command,
         )
-    if bool(getattr(args, "callback", False)) and bool(getattr(args, "no_callback", False)):
+    if no_reply and (not session_id or fork_session or fork_self or bool(getattr(args, "sync_run", False))):
         raise TaskCliError(
-            "use either --callback or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback to have the final reply return to this Session, or leave both out for no callback.",
-            help_command=help_command,
-        )
-    if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
-        raise TaskCliError(
-            "use either --callback-session-id or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback-session-id to have the final reply return to that Session, or leave both out for no callback.",
+            "--no-reply requires an existing --session-id or --bot run and cannot be used with --sync",
+            code="invalid_no_reply_policy",
+            hint="Use --no-reply only when messaging an existing Session or Bot asynchronously.",
             help_command=help_command,
         )
     if sum(bool(value) for value in (same_scope, bool(scope_id), bool(project))) > 1:
@@ -6202,11 +6226,16 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     if session_id and (
         (getattr(args, "model", None) or "").strip()
         or (getattr(args, "reasoning_effort", None) or "").strip()
+        or getattr(args, "speed", None)
     ):
         raise TaskCliError(
-            "--model and --reasoning-effort only apply when the run creates a new Session",
+            "--model, --reasoning-effort, and --speed only apply when the run creates a new Session",
             code="model_override_with_existing_session",
-            hint="An existing Session keeps its model; change it in the Web UI's Session model picker. To run on another model now, start a new Session (--agent <name> --model ...) or fork this one (--fork-session <id> --model ...).",
+            hint=(
+                "Switch the existing Session first with `vibe session update --session-id <id> --model ... "
+                "--reasoning-effort ... --speed ...` (`vibe session models` lists the choices), then send the "
+                "message; add --queue when a Turn is running, since a message that joins it keeps its old model."
+            ),
             help_command=help_command,
         )
     if session_id and (same_scope or scope_id or project):
@@ -6788,47 +6817,22 @@ def _agent_run_is_async(args) -> bool:
     return not bool(getattr(args, "sync_run", False))
 
 
-def _resolve_callback_route(
-    args,
+def _resolve_failure_notice_route(
     caller_context,
     *,
     target_session_id: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str], Optional[dict]]:
-    """Where a Run's outcome goes: ``(session id, callback mode, notice)`` (``docs/plans/bots.md`` D4).
+) -> Optional[str]:
+    """Resolve the internal failure-notice route for a new Agent Run.
 
-    No run gets a callback unless it asks for one, whatever its target: ``--callback`` returns the final reply
-    to the caller Session, ``--callback-session-id`` to the Session it names. Without a callback the caller
-    Session is still told when the run does not complete, so a failure always reaches the sender: mode
-    ``failure``. A run on the caller's own Session gets neither, because its result already lands there.
-    ``--no-callback`` is accepted and changes nothing.
+    Successful user-facing callbacks are retired. The historical callback
+    flags remain parser-compatible no-ops; a delegated run still sends its caller an
+    immediate notice when it fails, is canceled, or is interrupted. Legacy pending
+    callback rows are drained by the scheduler using their stored route.
     """
-    from core.scheduled_tasks import AGENT_RUN_CALLBACK_FAILURE_ONLY
-
-    explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
-    if explicit_callback:
-        return explicit_callback, None, None
     caller_session_id = caller_context.session_id if caller_context is not None else None
-    on_caller = bool(target_session_id and caller_session_id and target_session_id == caller_session_id)
-    if bool(getattr(args, "callback", False)):
-        if not caller_session_id:
-            raise TaskCliError(
-                "--callback needs a caller Session",
-                code="callback_without_caller",
-                hint="Run it from an Avibe Agent shell, or pass --callback-session-id <session-id>.",
-                help_command="vibe agent run --help",
-            )
-        if on_caller:
-            return None, None, {
-                "code": "async_self_run_without_callback",
-                "message": (
-                    "Started Agent Run on the caller Session without a callback. "
-                    "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
-                ),
-            }
-        return caller_session_id, None, None
-    if caller_session_id and not on_caller:
-        return caller_session_id, AGENT_RUN_CALLBACK_FAILURE_ONLY, None
-    return None, None, None
+    if caller_session_id and target_session_id != caller_session_id:
+        return caller_session_id
+    return None
 
 
 def _reserve_cli_session(
@@ -7200,6 +7204,7 @@ _BOT_RUN_CONFLICTS = (
     ("fork_self", "--fork-self"),
     ("model", "--model"),
     ("reasoning_effort", "--reasoning-effort"),
+    ("speed", "--speed"),
     ("same_scope", "--same-scope"),
     ("scope_id", "--scope-id"),
     ("project", "--project"),
@@ -7210,9 +7215,9 @@ _BOT_RUN_CONFLICTS = (
 def _resolve_bot_run_target(args) -> None:
     """``--bot <handle>``: a message into the Bot's permanent Session, queued (``docs/plans/bots.md`` D4).
 
-    A Bot keeps one conversation on its own model, so the flags that pick or shape a Session do not apply. Like
-    every run it asks for no callback unless ``--callback`` says so (``_resolve_callback_route``). The Session and
-    directory are prepared here when missing, then the run continues as a queued ``--session-id`` run.
+    A Bot keeps one conversation on its own model, so flags that pick or shape a Session do not apply.
+    Its Session and directory are prepared here when missing, then the run continues as a queued
+    ``--session-id`` run, with the same failure notice and read-receipt policy as any other target.
     """
     from core.bots import MAIN_BOT_HANDLE, BotError, BotService
 
@@ -7392,6 +7397,13 @@ def cmd_agent_run(args):
     from core.control_requests import ADMISSION_SECONDS, failure, new_request
     from vibe import internal_client
 
+    legacy_callback_flags = tuple(
+        flag for flag, enabled in (
+            ("--callback", bool(getattr(args, "callback", False))),
+            ("--callback-session-id", bool((getattr(args, "callback_session_id", None) or "").strip())),
+            ("--no-callback", bool(getattr(args, "no_callback", False))),
+        ) if enabled
+    )
     arguments = dict(vars(args))
     if arguments.get("message_file") is not None:
         # /dev/stdin and /dev/fd/N name this process's descriptors, not the
@@ -7420,12 +7432,19 @@ def cmd_agent_run(args):
             "execution_unknown", "Agent Run may have been enqueued; its result could not be confirmed",
             execution="execution_unknown",
         )
+    if response["exit_code"] == 0 and legacy_callback_flags:
+        print(
+            "warning: deprecated Agent Run callback flags are ignored; use explicit reports and read receipts",
+            file=sys.stderr,
+        )
     stream = sys.stdout if response["exit_code"] == 0 else sys.stderr
     print(_json_text(response["payload"], stream=stream), file=stream)
     return response["exit_code"]
 
 
-def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request_store, run_id: str | None = None):
+def _enqueue_agent_run(
+    args, *, caller_env, invocation_cwd, agent_store, request_store, run_id: str | None = None, hub_agent_reader=None,
+):
     """Existing enqueue semantics, with request-local inputs and service-owned stores.
 
     No process environment, working directory or output stream is changed. The
@@ -7526,20 +7545,14 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             # may only restate it -- so admitting the caller to the Session
             # answers both halves of the turn it is about to queue.
             _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
-        callback_session_id, callback_mode, callback_notice = _resolve_callback_route(
-            args,
-            caller_context,
-            target_session_id=session_id,
-        )
+        callback_session_id = _resolve_failure_notice_route(caller_context, target_session_id=session_id)
         if callback_session_id:
             try:
                 _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
             except TaskCliError:
-                if callback_mode != AGENT_RUN_CALLBACK_FAILURE_ONLY:
-                    raise
                 # The failure notice is a guarantee Avibe adds, not a route the caller asked for: a caller
                 # Session it cannot post to leaves the run without that notice instead of refusing the run.
-                callback_session_id, callback_mode = None, None
+                callback_session_id = None
         close_after = bool(getattr(args, "close_after", False))
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
@@ -7548,6 +7561,14 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
         # every later turn reads; it is checked against the Agent's catalog once the Session is reserved (below).
         model_override = (getattr(args, "model", None) or "").strip() or None
         effort_override = (getattr(args, "reasoning_effort", None) or "").strip() or None
+        speed_override = getattr(args, "speed", None) or None
+        if speed_override not in (None, *SESSION_SPEED_CHOICES):
+            raise TaskCliError(
+                f"invalid --speed '{speed_override}'",
+                code="invalid_arguments",
+                hint="Pass --speed fast or --speed standard.",
+                help_command="vibe agent run --help",
+            )
         if session_policy == "none":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -7588,7 +7609,7 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
                 agent_store=agent_store,
             )
         override_fields: dict = {}
-        if model_override or effort_override:
+        if model_override or effort_override or speed_override:
             # Checked only after the reservation, which admitted the caller to the source Session or the Agent, so a
             # refusal tells nothing about a Session or Agent the caller cannot reach; a refused pair releases the
             # reservation (the ``except`` below). The pair is the one the Session will run on: each override over the
@@ -7600,8 +7621,24 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
                 reasoning_effort=(
                     fork_result.reasoning_effort if fork_result else effort_override or agent.reasoning_effort
                 ),
+                speed=speed_override,
+                hub_agent_reader=hub_agent_reader,
                 help_command="vibe agent run --help",
             )
+        if speed_override and session_id:
+            from core.services import sessions as sessions_service
+
+            # A new Session starts at the standard tier and a fork keeps its source's; an explicit --speed sets it
+            # with the same Session write the Web picker makes.
+            from storage.db import get_cached_sqlite_engine
+
+            with get_cached_sqlite_engine().begin() as conn:
+                sessions_service.update_session(
+                    conn,
+                    session_id,
+                    speed="fast" if speed_override == "fast" else None,
+                    authorization_context=caller_authorization,
+                )
         source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
         if fork_result:
             provenance_metadata = {
@@ -7619,8 +7656,12 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
         )
         if close_after:
             provenance_metadata[AGENT_RUN_CLOSE_AFTER_METADATA_KEY] = True
-        if callback_mode:
-            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = callback_mode
+        if bool(getattr(args, "no_reply", False)):
+            from core.scheduled_tasks import AGENT_RUN_NO_REPLY_METADATA_KEY
+
+            provenance_metadata[AGENT_RUN_NO_REPLY_METADATA_KEY] = True
+        if callback_session_id:
+            provenance_metadata[AGENT_RUN_CALLBACK_MODE_METADATA_KEY] = AGENT_RUN_CALLBACK_FAILURE_ONLY
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
@@ -7647,10 +7688,8 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
             expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
         reserved_session_id = None
-        # One ``run`` object. Everything the caller's own flags already decided --
-        # session policy, delivery intent, fork source, close-after, sync/async --
-        # stays out; what Avibe resolved for it (the Session, its scope and
-        # visibility, the callback route) stays in.
+        # One run object: resolved identity and placement, plus an explicit no-reply policy.
+        # The failure-only callback route stays internal.
         payload = {
             "run": _present_fields(
                 {
@@ -7661,13 +7700,10 @@ def _enqueue_agent_run(args, *, caller_env, invocation_cwd, agent_store, request
                     "session_id": session_id,
                     "scope_id": _scope_id_payload_from_session(session_id),
                     "visibility": target.visibility if session_id else visibility,
-                    # Only a callback is reported here; a failure-only route is not one (bots.md D4).
-                    "callback_session_id": None if callback_mode else callback_session_id,
+                    **({"no_reply": True} if bool(getattr(args, "no_reply", False)) else {}),
                 }
             ),
         }
-        if callback_notice:
-            payload["callback_notice"] = callback_notice
         return _cli_payload("agent_run", **payload, **override_fields), callback_session_id
     except Exception:
         if reserved_session_id:
@@ -8986,6 +9022,264 @@ def _session_queue_remove(args, invocation: _ServiceInvocation):
     return notify_live_ui
 
 
+#: The one model family each single-vendor native CLI runs; Vibey and OpenCode run every family on their menus.
+_NATIVE_BACKEND_VENDORS = {"claude": "anthropic", "codex": "openai"}
+_VENDOR_FAMILY_LABELS = {"anthropic": "Claude", "openai": "GPT"}
+
+
+def _remote_hub_agent_reader():
+    """Model Hub's Agent payload from the running service, the read the Web route picker makes."""
+    from vibe.model_hub_client import ModelHubRemoteService
+
+    return ModelHubRemoteService().get_agent_sources
+
+
+def _route_menu(backend: str, *, hub_agent_reader, help_command: str, provider: Optional[str] = None) -> dict:
+    from vibe import api
+
+    menu = api.route_menu_options(backend, hub_agent_reader=hub_agent_reader, provider=provider)
+    if not menu.get("ok"):
+        raise TaskCliError(
+            menu.get("error") or "failed to load model options",
+            code="agent_models_unavailable",
+            details={"backend": backend},
+            help_command=help_command,
+        )
+    return menu
+
+
+def _session_route(payload: dict, agent_store) -> tuple[Any, str, dict]:
+    """A Session's Agent, backend, and effective model/effort/speed, with where each value comes from."""
+    from core.agent_session_context import session_model_settings
+
+    agent_name = (payload.get("agent_name") or "").strip()
+    agent = agent_store.get(agent_name) if agent_name else agent_store.get_default_agent()
+    backend = (payload.get("agent_backend") or "").strip() or (agent.backend if agent else "")
+    # Dispatch's own resolution: an explicitly pinned null is the Session's setting, not inheritance.
+    model, effort, explicit = session_model_settings(
+        payload,
+        fallback_model=agent.model if agent else None,
+        fallback_reasoning_effort=agent.reasoning_effort if agent else None,
+    )
+    current = {
+        "model": model,
+        "reasoning_effort": effort,
+        "speed": "fast" if payload.get("speed") == "fast" else "standard",
+        "from": {
+            name: "session" if name in explicit or payload.get(name) else "agent"
+            for name in ("model", "reasoning_effort")
+        },
+    }
+    return agent, backend, current
+
+
+def _route_applies_from(backend: str) -> str:
+    """When a Session's model, effort, or speed change reaches a Turn that is already running.
+
+    Vibey resolves its route again for every model request, so its running Turn takes the change at the next
+    one. A native CLI is given its model when a Turn starts, so its running Turn keeps what it started with.
+    """
+    return "next_request" if is_builtin_backend(backend) else "next_turn"
+
+
+def _session_turn_running(conn, session_id: str, payload: dict) -> bool:
+    from sqlalchemy import select
+
+    from storage.models import session_turns
+
+    if str(payload.get("agent_status") or "") == "running":
+        return True
+    open_turn = conn.execute(
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == str(session_id))
+        .where(session_turns.c.state != "terminal")
+        .limit(1)
+    ).first()
+    return open_turn is not None
+
+
+def _bot_session_refusal(conn, session_id: str, caller_env=None) -> Optional[TaskCliError]:
+    """A Bot Session's model is its user's: only the user (no calling Agent Session) or that Bot itself changes it.
+
+    This guards against one Agent changing another's Bot by mistake; it is not a security boundary.
+    """
+    from storage.agent_session_rows import is_bot_session
+
+    if not is_bot_session(conn, session_id):
+        return None
+    caller_session_id = _default_session_id_from_caller(caller_context_from_env(caller_env))
+    if not caller_session_id or caller_session_id == str(session_id):
+        return None
+    return TaskCliError(
+        f"session '{session_id}' is a Bot's Session, and its model, effort, and speed are its user's choice",
+        code="bot_model_is_users",
+        hint=(
+            "Only the user or that Bot itself changes them. Ask the user, or message the Bot with "
+            "`vibe agent run --bot <bot> --message ...`."
+        ),
+        details={"session_id": session_id},
+    )
+
+
+def _menu_entry(menu: dict, model: Optional[str]) -> Optional[dict]:
+    return next((entry for entry in menu.get("models") or [] if model and entry.get("value") == model), None)
+
+
+def _check_session_route(
+    menu: dict,
+    *,
+    backend: str,
+    current: dict,
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+    speed: Optional[str],
+    menu_command: str,
+    help_command: str,
+) -> tuple[dict, list[str]]:
+    """Check a requested model/effort/speed against a Session's menu; returns the writes and any notes.
+
+    Mirrors the Web route picker: a model whose efforts no longer include the current one clears the effort
+    (the Session then uses its Agent's default), and fast stays on across a model without a fast tier, which
+    then runs at the standard tier. A Hub menu and Vibey's are authoritative; a Direct Claude Code or Codex
+    catalog may lag a release, so a same-family value it does not list is a warning.
+    """
+    authoritative = bool(menu.get("authoritative"))
+    notes: list[str] = []
+    writes: dict = {}
+    target_model = current.get("model")
+    if model:
+        expected_vendor = _NATIVE_BACKEND_VENDORS.get(backend)
+        if expected_vendor:
+            from vibe.models_dev_catalog import model_vendor
+
+            vendor = model_vendor(model)
+            if vendor and vendor != expected_vendor:
+                backend_label = display_name_for_backend(backend)
+                family = _VENDOR_FAMILY_LABELS[expected_vendor]
+                raise TaskCliError(
+                    f"a {backend_label} Session runs only {family} models, not '{model}'",
+                    code="model_family_unsupported",
+                    hint=(
+                        f"To use '{model}', start a new Session on an Agent that runs it (a Vibey Agent runs every "
+                        "family) with a brief of the work so far, or switch this Session's Agent in the Web UI."
+                    ),
+                    details={"backend": backend, "model": model},
+                    help_command=help_command,
+                )
+        if _menu_entry(menu, model) is None:
+            message = f"model '{model}' is not on this Session's {backend} menu"
+            if authoritative:
+                raise TaskCliError(
+                    message,
+                    code="session_model_unavailable",
+                    hint=f"Run `{menu_command}` to list the models it can switch to.",
+                    details={"backend": backend, "model": model},
+                    help_command=help_command,
+                )
+            notes.append(f"{message}; it may be a typo or newer than the catalog")
+        writes["model"] = model
+        target_model = model
+    entry = _menu_entry(menu, target_model)
+    allowed = list(entry.get("reasoning_efforts") or []) if entry else None
+    if reasoning_effort:
+        if allowed is not None and reasoning_effort not in allowed and (allowed or authoritative):
+            message = (
+                f"reasoning effort '{reasoning_effort}' is not offered for model '{target_model}'"
+                + (f"; it offers {', '.join(allowed)}" if allowed else "; it takes none")
+            )
+            if authoritative:
+                raise TaskCliError(
+                    message,
+                    code="session_effort_unavailable",
+                    hint=f"Run `{menu_command}` to list each model's efforts.",
+                    details={"model": target_model, "reasoning_effort": reasoning_effort, "allowed": allowed},
+                    help_command=help_command,
+                )
+            notes.append(message)
+        writes["reasoning_effort"] = reasoning_effort
+    elif model and current.get("reasoning_effort") and allowed is not None and current["reasoning_effort"] not in allowed:
+        writes["reasoning_effort"] = None
+        notes.append(
+            f"reasoning effort '{current['reasoning_effort']}' is not offered for '{model}', so it was cleared and the "
+            "Session uses its Agent's default; pass --reasoning-effort to choose one"
+        )
+    if speed == "fast":
+        if not entry or not entry.get("fast"):
+            offered = [item["value"] for item in menu.get("models") or [] if item.get("fast")]
+            raise TaskCliError(
+                f"model '{target_model}' has no fast tier on this Session",
+                code="fast_unavailable",
+                hint=(
+                    f"Fast is offered on: {', '.join(offered)}."
+                    if offered
+                    else "Fast mode needs a Model Hub route to an OpenAI or Anthropic model that has a fast tier."
+                ),
+                details={"model": target_model, "fast_models": offered},
+                help_command=help_command,
+            )
+        if entry.get("fast") == "unconfirmed":
+            notes.append(f"the last fast response on '{target_model}' did not confirm it ran at the fast tier")
+    elif speed is None and model and current.get("speed") == "fast" and not (entry and entry.get("fast")):
+        notes.append(f"'{model}' has no fast tier, so the Session runs at the standard tier until fast is available")
+    if speed:
+        writes["speed"] = "fast" if speed == "fast" else None
+    return writes, notes
+
+
+def cmd_session_models(args):
+    from core.services import sessions as sessions_service
+
+    help_command = "vibe session models --help"
+    session_id = None
+    try:
+        session_id = _resolve_caller_session_id(args, help_command=help_command)
+        engine = _open_session_engine(read_only=True)
+        with engine.connect() as conn:
+            try:
+                payload = sessions_service.get_active_session(conn, session_id)
+            except LookupError as exc:
+                raise _session_not_found(session_id) from exc
+            turn_running = _session_turn_running(conn, session_id, payload)
+            refusal = _bot_session_refusal(conn, session_id)
+        _agent, backend, current = _session_route(payload, _agent_store(read_only=True))
+        current["turn_running"] = turn_running
+        menu = _route_menu(backend, hub_agent_reader=_remote_hub_agent_reader(), help_command=help_command)
+        notes = [
+            "Changes apply from the running Turn's next model request; there is no need to wait for it or stop it."
+            if _route_applies_from(backend) == "next_request"
+            else "Changes apply from the next Turn; a running Turn keeps its model, effort, and speed."
+        ]
+        expected_vendor = _NATIVE_BACKEND_VENDORS.get(backend)
+        if expected_vendor:
+            notes.append(
+                f"A {display_name_for_backend(backend)} Session runs only {_VENDOR_FAMILY_LABELS[expected_vendor]} "
+                "models; another family needs a new Session."
+            )
+        if not menu.get("authoritative"):
+            notes.append("This catalog may lag a release; a same-family model it does not list is accepted with a warning.")
+        result = page_sequence(menu.get("models") or [], _page_request_from_args(args, help_command=help_command))
+        command = ["vibe", "session", "models"]
+        _add_optional_arg(command, "--session-id", getattr(args, "session_id", None))
+        _print_cli_payload(
+            "session_models",
+            session_id=session_id,
+            agent=payload.get("agent_name") or (_agent.name if _agent else None),
+            backend=backend,
+            current=current,
+            changeable=refusal is None,
+            **({"reason": refusal.code, "hint": refusal.hint} if refusal else {}),
+            models=list(result.items),
+            source=menu.get("source"),
+            live=bool(menu.get("live")),
+            notes=notes,
+            **_paginated_fields(result, command=command),
+        )
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def cmd_session_update(args):
     return _control_command("session.update", args)
 
@@ -8998,15 +9292,20 @@ def _session_update(args, invocation: _ServiceInvocation):
     session_id = None
     try:
         if_untitled = bool(getattr(args, "if_untitled", False))
+        model = (getattr(args, "model", None) or "").strip() or None
+        reasoning_effort = (getattr(args, "reasoning_effort", None) or "").strip() or None
+        speed = getattr(args, "speed", None) or None
+        route_requested = bool(model or reasoning_effort or speed)
         if if_untitled and (
             getattr(args, "title", None) is None
             or getattr(args, "visibility", None) is not None
             or getattr(args, "scope_id", None) is not None
+            or route_requested
         ):
             raise TaskCliError(
                 "--if-untitled applies only to --title",
                 code="invalid_arguments",
-                hint="Pass --title with --if-untitled, and change visibility or scope in a separate call.",
+                hint="Pass --title with --if-untitled, and change other fields in a separate call.",
                 help_command="vibe session update --help",
             )
         updates = {}
@@ -9026,11 +9325,11 @@ def _session_update(args, invocation: _ServiceInvocation):
                     help_command="vibe session update --help",
                 ).session_scope
             )
-        if not updates:
+        if not updates and not route_requested:
             raise TaskCliError(
                 "no update field supplied",
                 code="missing_session_update",
-                hint="Pass --title, --visible, --hidden, or --scope-id.",
+                hint="Pass --title, --visible, --hidden, --scope-id, --model, --reasoning-effort, or --speed.",
                 help_command="vibe session update --help",
             )
         session_id = _resolve_caller_session_id(
@@ -9038,6 +9337,29 @@ def _session_update(args, invocation: _ServiceInvocation):
             help_command="vibe session update --help",
             caller_env=invocation.caller_env,
         )
+        route_menu = None
+        route_backend = ""
+        if route_requested:
+            if speed not in (None, *SESSION_SPEED_CHOICES):
+                raise TaskCliError(
+                    f"invalid --speed '{speed}'",
+                    code="invalid_arguments",
+                    hint="Pass --speed fast or --speed standard.",
+                    help_command="vibe session update --help",
+                )
+            # The menu is read before the write transaction, which must stay short;
+            # the write below checks the request again against the row it updates.
+            with invocation.stores.session_engine.connect() as conn:
+                route_session = sessions_service.get_active_session(conn, session_id)
+                refusal = _bot_session_refusal(conn, session_id, invocation.caller_env)
+                if refusal is not None:
+                    raise refusal
+                _agent, route_backend, _current = _session_route(route_session, invocation.stores.agent_store)
+            route_menu = _route_menu(
+                route_backend,
+                hub_agent_reader=invocation.stores.hub_agent_reader,
+                help_command="vibe session update --help",
+            )
         with invocation.stores.session_engine.begin() as conn:
             # Hold the write lock from before the read, so a rename committed by the
             # Web UI cannot land between the --if-untitled check and this write.
@@ -9047,6 +9369,33 @@ def _session_update(args, invocation: _ServiceInvocation):
             previous_session = sessions_service.get_active_session(conn, session_id)
             title_source = (previous_session.get("metadata") or {}).get("title_source")
             updated = not (if_untitled and title_source in DELIBERATE_TITLE_SOURCES)
+            route_fields: dict = {}
+            if route_menu is not None:
+                _agent, backend, current = _session_route(previous_session, invocation.stores.agent_store)
+                if backend != route_backend:
+                    raise TaskCliError(
+                        f"session '{session_id}' moved to another backend while this update was checked",
+                        code="session_route_changed",
+                        hint="Run `vibe session models` again and retry.",
+                        help_command="vibe session update --help",
+                    )
+                writes, notes = _check_session_route(
+                    route_menu,
+                    backend=backend,
+                    current=current,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    speed=speed,
+                    menu_command=f"vibe session models --session-id {session_id}",
+                    help_command="vibe session update --help",
+                )
+                updates.update(writes)
+                route_fields = {
+                    "applies_from": _route_applies_from(backend),
+                    "turn_running": _session_turn_running(conn, session_id, previous_session),
+                }
+                if notes:
+                    route_fields["notes"] = notes
             payload = (
                 sessions_service.update_session(conn, session_id, **updates)
                 if updated
@@ -9058,6 +9407,7 @@ def _session_update(args, invocation: _ServiceInvocation):
         "agent_session",
         updated=updated,
         session=_session_row(payload, brief=False),
+        **route_fields,
     )
     if not updated:
         return response
@@ -17121,7 +17471,9 @@ def cmd_doctor(args=None):
             deep=bool(getattr(args, "doctor_deep", False)),
         )
         if getattr(args, "json", False):
-            _print_cli_payload("doctor_repair", **result)
+            payload = dict(result)
+            kind = payload.pop("kind", "doctor_repair")
+            _print_cli_payload(kind, **payload)
         else:
             _print_doctor_repair_result(result)
         return 0 if result.get("ok") else 1
@@ -17198,9 +17550,9 @@ def get_latest_version() -> dict:
     Returns:
         {"current": str, "latest": str, "has_update": bool, "error": str|None}
     """
-    from vibe.upgrade import get_latest_version_info
+    from vibe.upgrade import get_latest_version_info, prerelease_updates_enabled
 
-    return get_latest_version_info(__version__)
+    return get_latest_version_info(__version__, prereleases=prerelease_updates_enabled())
 
 
 def cmd_check_update(args=None):
@@ -17288,6 +17640,7 @@ def cmd_upgrade():
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,
             target_version=info.get("latest"),
+            package_spec=info.get("package_spec"),
         )
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
@@ -18794,7 +19147,7 @@ def build_parser():
         help="Run an Avibe Agent",
         description=(
             "New background Session, existing Session, or a fork. Runs are async. "
-            "Needs Avibe running; no offline enqueue/auto-start."
+            "Needs Avibe running."
         ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -18820,12 +19173,18 @@ def build_parser():
         const="foreground",
         help="Make the new Session user-facing",
     )
-    agent_run_parser.add_argument("--model", help="Model the new Session keeps ('vibe agent models')")
-    agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
+    agent_run_parser.add_argument("--model", help="The new Session's model ('vibe agent models')")
+    agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Its reasoning effort")
+    agent_run_parser.add_argument("--speed", choices=SESSION_SPEED_CHOICES, metavar="SPEED", help="fast or standard")
     agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
-    agent_run_parser.add_argument("--callback", action="store_true", help="Return the final reply to this Session")
-    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Return it to this Session instead")
-    agent_run_parser.add_argument("--no-callback", action="store_true", help="No-op (the default)")
+    agent_run_parser.add_argument("--callback", action="store_true", help="Deprecated no-op")
+    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Deprecated no-op")
+    agent_run_parser.add_argument("--no-callback", action="store_true", help="Deprecated no-op (the default)")
+    agent_run_parser.add_argument(
+        "--no-reply",
+        action="store_true",
+        help="Existing Session/Bot: no delegation or read receipt",
+    )
     agent_run_parser.add_argument(
         "--close-after",
         action="store_true",
@@ -19139,10 +19498,29 @@ def build_parser():
     session_queue_remove_parser.add_argument("message_id", help="Queued message ID")
     _add_session_target_arg(session_queue_remove_parser)
     _add_json_noop(session_queue_remove_parser)
+    session_models_parser = session_subparsers.add_parser(
+        "models",
+        help="Show a Session's model, effort, and speed, and what it can switch to",
+        description=(
+            "Show one Session's current model, reasoning effort, and speed, and the menu it can switch to: "
+            "the models, the efforts each allows, and which have a fast tier. The same menu as the Web "
+            "model picker. Switch with `vibe session update --model/--reasoning-effort/--speed`."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session models --help",
+    )
+    _add_session_target_arg(session_models_parser)
+    _add_pagination_args(session_models_parser, help_command="vibe session models --help")
+    _add_json_noop(session_models_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
-        help="Update a session's title, visibility, or scope",
-        description="Update one active Session. Moving scope never changes its stored working directory.",
+        help="Update a session's title, visibility, scope, model, reasoning effort, or speed",
+        description=(
+            "Update one active Session. Moving scope never changes its stored working directory. "
+            "A model, effort, or speed change reaches a running Vibey Turn at its next model request, and a "
+            "Claude Code, Codex, or OpenCode Session at its next Turn (the reply's `applies_from`); "
+            "`vibe session models` lists the values it accepts."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session update --help",
     )
@@ -19173,6 +19551,15 @@ def build_parser():
     session_update_parser.add_argument(
         "--scope-id",
         help="Move to an existing scopes.id, or pass 'none' to make the Session standalone.",
+    )
+    session_update_parser.add_argument(
+        "--model", help="Model for the Session from now on ('vibe session models')"
+    )
+    session_update_parser.add_argument(
+        "--reasoning-effort", metavar="EFFORT", help="Reasoning effort for the Session from now on"
+    )
+    session_update_parser.add_argument(
+        "--speed", choices=SESSION_SPEED_CHOICES, help="fast: the vendor's faster, pricier tier; standard: the default"
     )
     _add_json_noop(session_update_parser)
 
@@ -20520,6 +20907,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     # further by the effective Project role of each session the command touches.
     ("session", "list"): "viewer",
     ("session", "get"): "viewer",
+    ("session", "models"): "editor",
     ("session", "update"): "editor",
     ("session", "send-now"): "editor",
     ("session", "queue", "list"): "editor",
@@ -20910,6 +21298,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_session_send_now(args))
         if args.session_command == "update":
             sys.exit(cmd_session_update(args))
+        if args.session_command == "models":
+            sys.exit(cmd_session_models(args))
         parser.error("session command is required")
     if args.command == "vault":
         if args.vault_command == "list":

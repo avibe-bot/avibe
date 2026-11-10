@@ -96,10 +96,10 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
     <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent
         closeLabel={t('harness.createDialog.cancel')}
-        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[500px] flex-col items-center gap-5 overflow-y-auto rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
+        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[500px] flex-col items-center gap-5 overflow-y-auto rounded-2xl p-7"
       >
         {/* Hero icon — 64x64 violet-soft tile with glow */}
-        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-glow-md-violet">
+        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-decor-md-violet">
           <Sparkles className="size-[30px]" />
         </div>
 
@@ -108,7 +108,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
           <DialogDescription className="text-[12px] italic text-muted">{t('harness.createDialog.subtitle')}</DialogDescription>
         </div>
 
-        <div className="flex w-full flex-col gap-2.5 rounded-xl border border-border bg-foreground/[0.015] px-[18px] py-4">
+        <div className="flex w-full flex-col gap-2.5 rounded-xl border border-edge bg-foreground/[0.015] px-[18px] py-4 shadow-elevation-0">
           <p className="text-[12.5px] leading-[1.65] text-foreground">
             {t('harness.createDialog.body')}
           </p>
@@ -121,7 +121,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
             {t('harness.createDialog.projectLabel')}
           </label>
           {projects === null ? (
-            <div className="flex items-center gap-2 rounded-md border border-border-strong bg-surface-2 px-3 py-2 text-[12px] text-muted">
+            <div className="flex items-center gap-2 rounded-md border border-edge bg-surface-2 px-3 py-2 text-[12px] text-muted shadow-elevation-0">
               <Loader2 className="size-3 animate-spin" />
               {t('common.loading')}
             </div>
@@ -155,7 +155,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="rounded-lg border border-border-strong px-4 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
+            className="rounded-lg border border-edge px-4 py-2 text-[12px] font-medium text-foreground transition disabled:opacity-50 bg-field hover:bg-field-hover active:bg-field-hover"
           >
             {t('harness.createDialog.cancel')}
           </button>

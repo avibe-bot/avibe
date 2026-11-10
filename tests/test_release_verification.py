@@ -6,7 +6,6 @@ import json
 from http.server import BaseHTTPRequestHandler
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 import shutil
@@ -191,10 +190,7 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, monkey
     for name in files:
         target = remote / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        if name == "tests/test_distribution_artifacts.py" or (
-            workflow_name == "publish.yml"
-            and (name.startswith("tests/e2e/") or name == "tests/__init__.py")
-        ):
+        if name == "tests/test_distribution_artifacts.py":
             shutil.copy2(ROOT / name, target)
         else:
             target.write_text("print('workflow-owned automation')\n", encoding="utf-8")
@@ -224,20 +220,35 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, monkey
         b"Released skill content\n"
     ).hexdigest()
     if workflow_name == "publish.yml":
+        assert _step(job, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.source_sha }}"
+        resolve = _step(_job("publish.yml", "resolve-tag"), "Resolve tag")["run"]
+        assert 'if [ "${{ github.event_name }}" = "push" ]; then' in resolve
+        assert 'WORKFLOW_SHA="$SOURCE_SHA"' in resolve
         upload = _step(job, "Upload GitHub release assets")
         script = "release-automation/scripts/github_release.py"
         assert f"python {script} ensure-draft" in upload["run"]
         result = subprocess.run([sys.executable, str(tmp_path / script), "ensure-draft"],
                                 cwd=tmp_path, capture_output=True, text=True)
         assert result.returncode == 0 and "workflow-owned automation" in result.stdout
-        assert not (tmp_path / "tests/e2e/test_retired_updater_bridge.py").exists()
-        collected = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/e2e/test_retired_updater_bridge.py"],
-            cwd=destination, env={**os.environ, "PYTHONPATH": ""},
-            capture_output=True, text=True, timeout=15,
-        )
-        assert collected.returncode == 0, collected.stdout + collected.stderr
-        assert "1 test collected" in collected.stdout
+
+
+@pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
+def test_workflow_owned_checkout_loads_its_scripts_alone(tmp_path, workflow_name, job_name, checkout_name, workflow_ref):
+    # Load each checked-out script from a tree holding only the declared files,
+    # so a helper it reads beside itself must be declared too (#3472 dropped one).
+    files = _step(_job(workflow_name, job_name), checkout_name)["with"]["sparse-checkout"].splitlines()
+    for name in files:
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+    for name in files:
+        if name.startswith("scripts/") and name.endswith(".py"):
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", "import runpy, sys; runpy.run_path(sys.argv[1], run_name='sparse_probe')",
+                 str(tmp_path / name)],
+                cwd=tmp_path, capture_output=True, text=True, timeout=60,
+            )
+            assert result.returncode == 0, f"{name}: {result.stderr[-800:]}"
 
 
 def test_preview_python_assets_build_from_the_desktop_source_sha():
@@ -264,8 +275,7 @@ def test_preview_upload_validates_all_existing_bytes_before_runtime_then_package
     dist = tmp_path / "dist"
     dist.mkdir()
     names = ["vibe-show-runtime-node-linux-arm64.tgz", "show-runtime-manifest.json",
-             "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz",
-             "avibe_memory-1.0.0-py3-none-any.whl"]
+             "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz"]
     for name in names:
         (dist / name).write_bytes(b"immutable asset")
     desktop_asset = "desktop-dist/Avibe-1.0.0rc1-macos-aarch64.dmg"
@@ -395,6 +405,58 @@ def _step(job: dict, name: str) -> dict:
     return step
 
 
+def _evaluate_release_ai_if(
+    expression: str,
+    *,
+    tag: str,
+    event: str = "push",
+    ref: str | None = None,
+    build_result: str = "success",
+    desktop_result: str = "success",
+    resolve_result: str = "success",
+    desktop_enabled: bool = True,
+    updater_enabled: bool = False,
+    certum_result: str = "success",
+    updater_result: str = "skipped",
+    backstop_result: str = "success",
+    cancelled: bool = False,
+) -> bool:
+    """Evaluate the small GitHub expression subset used by release_ai jobs."""
+    input_tag = tag if event == "workflow_dispatch" else ""
+    ref = ref or ("master" if event == "workflow_dispatch" else tag)
+    expression = expression.strip().removeprefix("${{").removesuffix("}}").strip()
+    replacements = {
+        "needs.release-backstop.result": "backstop_result",
+        "needs.build-assets.result": "build_result",
+        "needs.desktop-packages.result": "desktop_result",
+        "needs.resolve-desktop-release.result": "resolve_result",
+        "needs.resolve-desktop-release.outputs.enabled": "desktop_enabled",
+        "needs.resolve-desktop-release.outputs.updater_enabled": "updater_enabled",
+        "needs.certum-windows-sign.result": "certum_result",
+        "needs.windows-updater-finalize.result": "updater_result",
+        "github.event.inputs.tag": "input_tag",
+        "github.ref_name": "ref",
+    }
+    for source, target in replacements.items():
+        expression = expression.replace(source, target)
+    expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
+    expression = " ".join(expression.split())
+    return bool(eval(expression, {"__builtins__": {}}, {
+        "backstop_result": backstop_result,
+        "build_result": build_result,
+        "desktop_result": desktop_result,
+        "resolve_result": resolve_result,
+        "desktop_enabled": "true" if desktop_enabled else "false",
+        "updater_enabled": "true" if updater_enabled else "false",
+        "certum_result": certum_result,
+        "updater_result": updater_result,
+        "input_tag": input_tag,
+        "ref": ref,
+        "cancelled": lambda: cancelled,
+        "startsWith": lambda value, prefix: value.startswith(prefix),
+    }))
+
+
 def test_official_finalization_serializes_cross_version_decision_and_publication():
     workflow = yaml.safe_load((ROOT / ".github/workflows/publish.yml").read_text())
     job = workflow["jobs"]["finalize-github-release"]
@@ -436,135 +498,22 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     assert "--only-binary=:all: --no-deps uv==" in setup["run"]
     assert job["steps"].index(setup) < job["steps"].index(consumer)
     assert job["steps"].index(consumer) < job["steps"].index(_step(job, "Upload GitHub release assets"))
-    assert "tests/e2e/test_install_command.py" in consumer["run"]
-    assert not setup.get("if") and not setup.get("continue-on-error")
-    assert not consumer.get("if") and not consumer.get("continue-on-error")
-
-
-def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_pypi():
-    """MUC-004: released old wheels, built new wheels, Docker and pytest all gate publication."""
-    job = _job("publish.yml", "build")
-    bridge = _step(job, "Build and verify inert old-updater bridge")
-    consumer = _step(job, "Run release install and upgrade regressions")
-    upload = _step(job, "Upload GitHub release assets")
-    assert job["steps"].index(bridge) < job["steps"].index(consumer) < job["steps"].index(upload)
-    checkout = _step(job, "Checkout release automation")
-    assert checkout["with"]["ref"] == "${{ needs.resolve-tag.outputs.workflow_sha }}"
-    assert _step(job, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.tag }}"
-    resolve = _step(_job("publish.yml", "resolve-tag"), "Resolve tag")["run"]
-    assert 'if [ "${{ github.event_name }}" = "push" ]; then' in resolve
-    assert 'WORKFLOW_SHA="$SOURCE_SHA"' in resolve
-    assert set((
-        "tests/__init__.py",
-        "tests/e2e/test_retired_updater_bridge.py",
-        "tests/e2e/test_install_command.py",
-        "tests/e2e/retired_updater_probe.py",
-        "tests/e2e/github_release_fixture.py",
-    )) <= set(checkout["with"]["sparse-checkout"].splitlines())
+    for contract in (
+        "tests/test_upgrade_flow.py", "tests/test_install_script.py",
+        "tests/e2e/test_install_command.py", "VIBE_INSTALL_TEST_WHEEL=", "docker info",
+    ):
+        assert contract in consumer["run"]
     assert "build" in _job("publish.yml", "publish-avibe-os")["needs"]
     assert "finalize-github-release" in _job("publish.yml", "publish-avibe-os")["needs"]
-    assert consumer["env"]["GH_TOKEN"] == "${{ github.token }}"
-    commands = consumer["run"]
-    for contract in (
-        "tests/e2e/test_retired_updater_bridge.py",
-        "AVIBE_RELEASE_GATE=1",
-        "AVIBE_CORE_WHEEL=",
-        "AVIBE_BRIDGE_WHEEL=",
-        "AVIBE_OLD_CORE_WHEEL=",
-        "AVIBE_OLD_COMPANION_WHEEL=",
-        "gh release download v3.1.0",
-        "7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924",
-        "ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0",
-        "sha256sum -c -",
-        "docker info",
-    ):
-        assert contract in commands
-    assert "dist/avibe_memory-*-py3-none-any.whl" in upload["run"]
-    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=. -v" in commands
-    assert "TARGET_VERSION=\"$(python release-automation/scripts/release_package_version.py \"$RELEASE_TAG\")\"" in commands
-    assert 'realpath "$VIBE_INSTALL_TEST_WHEEL"' in commands
-    assert "realpath old-release/avibe_memory-3.1.0-py3-none-any.whl" in commands
-
-
-@pytest.mark.parametrize(
-    ("tag", "forward"),
-    [
-        ("v3.0.14", False),
-        ("v3.1.0rc1", False),
-        ("v3.1.0", False),
-        ("v3.1.0.post1", True),
-        ("v3.1.1rc1", True),
-        ("v3.2.0", True),
-        ("v4.0.0", True),
-    ],
-)
-def test_muc_004_retirement_gate_replays_from_workflow_checkout(tmp_path, tag, forward):
-    """MUC-004: old tag has no gate; forward tag executes the complete workflow checkout."""
-    job = _job("publish.yml", "build")
-    step = _step(job, "Run release install and upgrade regressions")
-    gate = "TARGET_VERSION=" + step["run"].split("TARGET_VERSION=", 1)[1]
-    automation = tmp_path / "release-automation"
-    for name in _step(job, "Checkout release automation")["with"]["sparse-checkout"].splitlines():
-        sources = sorted(ROOT.glob(name)) if any(char in name for char in "*?[") else [ROOT / name]
-        assert sources, f"sparse-checkout pattern has no repository matches: {name}"
-        for source in sources:
-            relative = source.relative_to(ROOT)
-            target = automation / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    (binaries / "python").write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
-    (binaries / "python").chmod(0o755)
-    # The runner's installed console script: sys.path[0] is the launcher's own
-    # directory, never the working directory the gate changed into.
-    (binaries / "pytest_console.py").write_text(
-        "import sys\nfrom pytest import console_main\nsys.exit(console_main())\n"
-    )
-    (binaries / "pytest").write_text(
-        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(binaries / 'pytest_console.py'))} \"$@\"\n"
-    )
-    (binaries / "pytest").chmod(0o755)
-    # Without the pinned artifacts and the release-gate flag the collected test skips.
-    env = {name: value for name, value in os.environ.items() if not name.startswith("AVIBE_")}
-    result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", gate], cwd=tmp_path,
-        env={**env, "RELEASE_TAG": tag, "PYTHONPATH": "",
-             "RUNNER_TEMP": str(tmp_path / "runner-temp"),
-             "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}"},
-        capture_output=True, text=True, timeout=60,
-    )
-    collected = "tests/e2e/test_retired_updater_bridge.py::" in result.stdout
-    assert collected is forward
-    if forward:
-        assert result.returncode != 0
-        assert "1 skipped" in result.stdout
-        assert "did not pass in the release run" in result.stdout
-    else:
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "No forward Memory retirement upgrade" in result.stdout
-
-
-def test_muc_004_release_gate_cannot_skip_missing_artifacts_or_docker(monkeypatch):
-    from tests.e2e import test_retired_updater_bridge as upgrade_bridge
-
-    monkeypatch.setenv("AVIBE_RELEASE_GATE", "1")
-    for name in ("AVIBE_CORE_WHEEL", "AVIBE_BRIDGE_WHEEL", "AVIBE_OLD_CORE_WHEEL", "AVIBE_OLD_COMPANION_WHEEL"):
-        monkeypatch.delenv(name, raising=False)
-    with pytest.raises(pytest.fail.Exception, match="requires all four"):
-        upgrade_bridge.test_released_updater_replaces_companion_without_touching_user_data(Path("/unused"))
-    for name in ("AVIBE_CORE_WHEEL", "AVIBE_BRIDGE_WHEEL", "AVIBE_OLD_CORE_WHEEL", "AVIBE_OLD_COMPANION_WHEEL"):
-        monkeypatch.setenv(name, "/unused")
-    monkeypatch.setattr(upgrade_bridge, "_docker_available", lambda: False)
-    with pytest.raises(pytest.fail.Exception, match="requires Docker"):
-        upgrade_bridge.test_released_updater_replaces_companion_without_touching_user_data(Path("/unused"))
+    assert not setup.get("if") and not setup.get("continue-on-error")
+    assert not consumer.get("if") and not consumer.get("continue-on-error")
 
 
 @pytest.mark.parametrize("workflow_name", ["publish.yml", "release_ai.yml"])
 @pytest.mark.parametrize(
     "state",
     ["empty", "identical", "partial", "core-mismatch", "core-sdist-mismatch",
-     "runtime-mismatch", "bridge-mismatch", "missing-bridge", "missing-wheel", "empty-sdist", "read-failure"],
+     "runtime-mismatch", "retired-bridge", "missing-wheel", "empty-sdist", "read-failure"],
 )
 def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_name, state):
     workspace = tmp_path / "release source 中文"
@@ -582,7 +531,6 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     if workflow_name == "publish.yml":
         # Preserve the optional legacy package upload path too.
         packages["vibe_remote-3.0.14-py3-none-any.whl"] = b"legacy shim"
-    packages["avibe_memory-3.1.0-py3-none-any.whl"] = b"inert bridge"
     runtimes = {
         **{f"vibe-show-runtime-node-{platform}.tgz": platform.encode()
            for platform in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64")},
@@ -603,20 +551,22 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     if state not in {"empty", "identical"}:
         existing = {name: all_assets[name] for name in (
             "avibe_os-3.1.0-py3-none-any.whl", "avibe_os-3.1.0.tar.gz", "show-runtime-manifest.json",
-            "avibe_memory-3.1.0-py3-none-any.whl",
         )}
+    if state == "retired-bridge":
+        # A leftover local wheel is not published, and a historical bridge is
+        # never fetched, overwritten or deleted, even if its bytes differ.
+        name = "avibe_memory-3.1.0-py3-none-any.whl"
+        (dist / name).write_bytes(b"leftover local bridge")
+        existing[name] = b"published historical bridge"
     mismatch = {
         "core-mismatch": "avibe_os-3.1.0-py3-none-any.whl",
         "core-sdist-mismatch": "avibe_os-3.1.0.tar.gz",
         "runtime-mismatch": "show-runtime-manifest.json",
-        "bridge-mismatch": "avibe_memory-3.1.0-py3-none-any.whl",
     }.get(state)
     if mismatch:
         existing[mismatch] = b"already published different bytes"
     if state == "missing-wheel":
         (dist / "avibe_os-3.1.0-py3-none-any.whl").unlink()
-    if state == "missing-bridge":
-        (dist / "avibe_memory-3.1.0-py3-none-any.whl").unlink()
     if state == "empty-sdist":
         (dist / "avibe_os-3.1.0.tar.gz").write_bytes(b"")
 
@@ -661,10 +611,11 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
                             "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe", "SOURCE_SHA": "a" * 40},
         capture_output=True, text=True, timeout=20,
     )
-    success = state in {"empty", "identical", "partial"}
+    success = state in {"empty", "identical", "partial", "retired-bridge"}
     assert (result.returncode == 0) is success, result.stdout + result.stderr
     events = [json.loads(line) for line in (workspace / "events.jsonl").read_text().splitlines()]
     uploads = [event for event in events if event[1] == "upload"]
+    assert not any("avibe_memory-" in argument for event in events for argument in event)
     if not success:
         assert not uploads
     else:
@@ -679,6 +630,96 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     assert not list(temporary.iterdir())
 
 
+@pytest.mark.parametrize(
+    ("tag", "event", "ref", "expected"),
+    [
+        ("gh-v3.2.6rc1", "push", "gh-v3.2.6rc1", True),
+        ("v3.2.5", "push", "v3.2.5", True),
+        ("", "workflow_dispatch", "master", False),
+        ("", "push", "feature/certum-signing", False),
+    ],
+)
+def test_certum_job_condition_covers_rc_and_stable_only(tag, event, ref, expected):
+    condition = _job("release_ai.yml", "certum-windows-sign")["if"]
+    assert _evaluate_release_ai_if(
+        condition,
+        tag=tag,
+        event=event,
+        ref=ref,
+        desktop_enabled=True,
+    ) is expected
+
+
+def test_release_ai_dry_evaluation_table_for_rc_and_stable_tags():
+    """Show which release_ai jobs run after the stable signing migration."""
+    jobs = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
+    cases = [
+        (
+            "gh-v3.2.6rc1",
+            False,
+            {
+                "release-backstop",
+                "resolve-desktop-release",
+                "desktop-packages",
+                "certum-windows-sign",
+                "resolve-show-runtime-ref",
+                "show-runtime-bundles",
+                "build-assets",
+                "release",
+            },
+        ),
+        (
+            "v3.2.5",
+            True,
+            {
+                "release-backstop",
+                "resolve-desktop-release",
+                "desktop-packages",
+                "certum-windows-sign",
+                "windows-updater-finalize",
+                "release",
+            },
+        ),
+    ]
+    for tag, updater_enabled, expected in cases:
+        ran = {"release-backstop", "resolve-desktop-release"}
+        if _evaluate_release_ai_if(
+            jobs["desktop-packages"]["if"], tag=tag, desktop_enabled=True,
+        ):
+            ran.add("desktop-packages")
+        certum = _evaluate_release_ai_if(
+            jobs["certum-windows-sign"]["if"], tag=tag, desktop_enabled=True,
+        )
+        if certum:
+            ran.add("certum-windows-sign")
+        if _evaluate_release_ai_if(
+            jobs["windows-updater-finalize"]["if"],
+            tag=tag,
+            desktop_enabled=True,
+            updater_enabled=updater_enabled,
+            certum_result="success" if certum else "skipped",
+        ):
+            ran.add("windows-updater-finalize")
+        show_runtime = _evaluate_release_ai_if(
+            jobs["resolve-show-runtime-ref"]["if"], tag=tag, desktop_enabled=True,
+        )
+        if show_runtime:
+            ran.update({"resolve-show-runtime-ref", "show-runtime-bundles", "build-assets"})
+        build_result = "success" if show_runtime else "skipped"
+        updater_result = "success" if updater_enabled and certum else "skipped"
+        if _evaluate_release_ai_if(
+            jobs["release"]["if"],
+            tag=tag,
+            build_result=build_result,
+            desktop_result="success",
+            desktop_enabled=True,
+            certum_result="success" if certum else "skipped",
+            updater_result=updater_result,
+        ):
+            ran.add("release")
+        assert ran == expected, tag
+
+
 @pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
 @pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
 @pytest.mark.parametrize("desktop_result", ["success", "skipped", "failure", "cancelled"])
@@ -691,18 +732,47 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
 ):
     workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
     jobs = workflow["jobs"]
-    preview_condition = "startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
+    preview_condition = "needs.release-backstop.result == 'success' && startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
     for name in ("resolve-show-runtime-ref",):
         assert jobs[name]["if"] == preview_condition
-    assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
-    assert jobs["build-assets"]["needs"] == ["resolve-desktop-release", "show-runtime-bundles"]
+    assert jobs["show-runtime-bundles"]["needs"] == ["release-backstop", "resolve-show-runtime-ref"]
+    assert jobs["build-assets"]["needs"] == ["release-backstop", "resolve-desktop-release", "show-runtime-bundles"]
     assert jobs["release"]["needs"] == [
-        "build-assets", "resolve-desktop-release", "desktop-packages",
+        "release-backstop", "build-assets", "resolve-desktop-release", "desktop-packages",
         "certum-windows-sign", "windows-updater-finalize",
     ]
     # Evaluate the actual bounded job expression for both event kinds. This
     # catches skipped-needs propagation without replacing the condition itself.
+    certum_result = "success" if (
+        (tag.startswith("gh-v") or tag.startswith("v")) and desktop_enabled and
+        desktop_result == "success" and resolve_result == "success"
+    ) else "skipped"
+    result = _evaluate_release_ai_if(
+        jobs["release"]["if"],
+        tag=tag,
+        event=event,
+        build_result=build_result,
+        desktop_result=desktop_result,
+        resolve_result=resolve_result,
+        desktop_enabled=desktop_enabled,
+        certum_result=certum_result,
+        updater_result="skipped",
+        cancelled=cancelled,
+    )
+    expected = not cancelled and resolve_result == "success" and (
+        build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
+    ) and (not desktop_enabled or desktop_result == "success") and (
+        not desktop_enabled or certum_result == "success"
+    )
+    if tag.startswith("gh-v") and not desktop_enabled:
+        expected = False
+    assert result == expected
+
+
+def test_release_condition_rejects_failed_backstop():
+    jobs = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())["jobs"]
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
+    expression = expression.replace("needs.release-backstop.result", "backstop_result")
     expression = expression.replace("needs.build-assets.result", "build_result")
     expression = expression.replace("needs.desktop-packages.result", "desktop_result")
     expression = expression.replace("needs.resolve-desktop-release.result", "resolve_result")
@@ -713,20 +783,9 @@ def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
     expression = re.sub(r"!(?!=)", " not ", expression.replace("&&", " and ").replace("||", " or "))
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
-        "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
-        "resolve_result": resolve_result, "desktop_enabled": "true" if desktop_enabled else "false",
-        "certum_result": (
-            "success" if tag.startswith("gh-v") and desktop_enabled and
-            desktop_result == "success" and resolve_result == "success" else "skipped"
-        ),
-        "updater_result": "skipped",
-        "ref": "master" if event == "workflow_dispatch" else tag,
-        "cancelled": lambda: cancelled,
-        "startsWith": lambda value, prefix: value.startswith(prefix),
+        "backstop_result": "failure", "build_result": "success", "desktop_result": "success",
+        "resolve_result": "success", "desktop_enabled": "false", "certum_result": "skipped",
+        "updater_result": "skipped", "input_tag": "", "ref": "v4.2.0",
+        "cancelled": lambda: False, "startsWith": lambda value, prefix: value.startswith(prefix),
     })
-    expected = not cancelled and resolve_result == "success" and (
-        build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
-    ) and (not (tag.startswith("gh-v") or desktop_enabled) or desktop_result == "success")
-    if tag.startswith("gh-v") and not desktop_enabled:
-        expected = False
-    assert result == expected
+    assert result is False

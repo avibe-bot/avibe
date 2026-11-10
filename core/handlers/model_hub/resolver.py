@@ -203,6 +203,7 @@ def source_runnable(
 
 
 _CLAUDE_FAMILY_ALIASES = {
+    "fable": "fable",
     "opus": "opus",
     "opus[1m]": "opus",
     "sonnet": "sonnet",
@@ -232,7 +233,13 @@ def matching_v1_model_id(
     source: ModelHubSourceConfig,
     include_manual: bool = False,
 ) -> str | None:
-    """Match one inventory id using the established literal/native Claude policy."""
+    """Match one inventory id using the established literal/native Claude policy.
+
+    A Claude family alias is a selector the Claude CLI rewrites to a concrete id
+    before any request, so no Source can be asked for it by name. It therefore
+    selects the newest observed member of its family on every Source, and falls
+    back to literal identity only where a Hub Source lists no such member.
+    """
 
     observed_models = tuple(
         model
@@ -240,12 +247,13 @@ def matching_v1_model_id(
         if (include_manual or model.provenance == "discovered") and not model.retired
     )
 
-    if (
+    native_claude = (
         backend == "claude"
         and source.vendor == "anthropic"
         and source.supply_channel == "native_cli"
-    ):
-        family = _CLAUDE_FAMILY_ALIASES.get(requested_model)
+    )
+    family = _CLAUDE_FAMILY_ALIASES.get(requested_model) if backend == "claude" else None
+    if native_claude or family is not None:
         requested_version: tuple[int, ...] | None = None
         parsed_request = _parsed_claude_model_id(requested_model)
         if family is None and parsed_request is not None:
@@ -267,7 +275,8 @@ def matching_v1_model_id(
                 if requested_version is not None and candidate_version != requested_version:
                     continue
                 matches.append((candidate_version, candidate_date or 0, model.id))
-            return max(matches)[2] if matches else None
+            if matches or native_claude:
+                return max(matches)[2] if matches else None
 
     return next(
         (model.id for model in observed_models if model.id == requested_model),

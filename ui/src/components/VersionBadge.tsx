@@ -2,11 +2,10 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   useApi,
-  type UpdateInterruptionCounts,
   type VersionInfo,
   type UpgradeResult,
 } from '../context/ApiContext';
-import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal } from 'lucide-react';
+import { Download, X, RefreshCw, Check, AlertCircle, GitCommitHorizontal, ExternalLink } from 'lucide-react';
 import clsx from 'clsx';
 import { ToggleSwitch } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
@@ -28,7 +27,6 @@ import {
 } from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 
 // Dev / regression builds carry long versions like
@@ -61,11 +59,28 @@ function normalizeVersion(value: string): string {
   ].join('');
 }
 
-type RemoteUpdateConfirmation = {
-  target: string;
-  delivery: 'prompt' | 'install' | 'runtime';
-  counts?: UpdateInterruptionCounts;
-};
+// A version (in the PEP 440 form above) is a pre-release when it has a pre or dev segment.
+function isPrereleaseVersion(version: string): boolean {
+  const match = PEP440.exec(version);
+  return Boolean(match && (match[2] || match[6]));
+}
+
+// Whether `version`'s release (X.Y.Z, before any pre-release) precedes `other`'s.
+function releasePrecedes(version: string, other: string): boolean {
+  const release = (value: string) => (PEP440.exec(value)?.[1] ?? '').split('.').map(Number);
+  const [a, b] = [release(version), release(other)];
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference) return difference < 0;
+  }
+  return false;
+}
+
+// Release candidates are published as GitHub-only `gh-vX.Y.ZrcN` tags (docs/release.md).
+function releaseNotesUrl(version: string): string {
+  const tag = isPrereleaseVersion(version) ? `gh-v${version}` : `v${version}`;
+  return `https://github.com/avibe-bot/avibe/releases/tag/${encodeURIComponent(tag)}`;
+}
 
 const REMOTE_RECONNECT_POLL_MS = 2000;
 const REMOTE_RECONNECT_TIMEOUT_MS = 120_000;
@@ -90,7 +105,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [upgrading, setUpgrading] = React.useState(false);
   const [restarting, setRestarting] = React.useState(false);
   const [upgradeResult, setUpgradeResult] = React.useState<UpgradeResult | null>(null);
-  const [remoteConfirmation, setRemoteConfirmation] = React.useState<RemoteUpdateConfirmation | null>(null);
   const [remoteRequesting, setRemoteRequesting] = React.useState(false);
   const [remoteRequestError, setRemoteRequestError] = React.useState<string | null>(null);
   const [remoteUpdateTimedOut, setRemoteUpdateTimedOut] = React.useState(false);
@@ -98,6 +112,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [remoteDelivery, setRemoteDelivery] = React.useState<'prompt' | 'install' | null>(null);
   const [autoUpdate, setAutoUpdate] = React.useState<boolean | null>(null);
   const [savingAutoUpdate, setSavingAutoUpdate] = React.useState(false);
+  const [prereleases, setPrereleases] = React.useState<boolean | null>(null);
+  const [savingPrereleases, setSavingPrereleases] = React.useState(false);
   const popupRef = React.useRef<HTMLDivElement>(null);
   const popupId = React.useId();
 
@@ -117,6 +133,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     try {
       const config = await api.getConfig();
       setAutoUpdate(config.update?.auto_update ?? true);
+      setPrereleases(config.update?.prereleases === true);
     } catch (e) {
       console.error('Failed to load config:', e);
     }
@@ -131,6 +148,28 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       console.error('Failed to save auto-update setting:', e);
     } finally {
       setSavingAutoUpdate(false);
+    }
+  };
+
+  // One switch per instance: the Runtime's `update.prereleases`, or the desktop
+  // app's own update channel when the desktop app owns updates.
+  const handlePrereleasesToggle = async (enabled: boolean) => {
+    setSavingPrereleases(true);
+    try {
+      if (desktopActions) {
+        // The shell rechecks on its new channel and publishes the result.
+        await desktopActions.setPrereleases(enabled);
+        setDesktopUpdateState((previous) => previous && { ...previous, prereleases: enabled });
+      } else {
+        await api.mutateConfig([setConfigField(['update', 'prereleases'], enabled)]);
+        setPrereleases(enabled);
+        setUpgradeResult(null);
+        void checkVersion(true);
+      }
+    } catch (e) {
+      console.error('Failed to save the pre-release update setting:', e);
+    } finally {
+      setSavingPrereleases(false);
     }
   };
 
@@ -287,18 +326,61 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       }
       return;
     }
-    if (!capabilities.can_manage_instance || (isDesktopManaged && !canRequestRemoteUpdate)) return;
+    if (!capabilities.can_manage_instance) return;
+    // Clicking Update is the decision to update, interruption included: the
+    // request carries that consent, so the server's active-work check never
+    // asks a second time.
+    const options = { confirmInterrupt: true };
+    if (!isDesktopManaged) {
+      if (upgrading) return;
+      setUpgrading(true);
+      setUpgradeResult(null);
+      try {
+        const result = await api.doUpgrade(options);
+        setUpgradeResult(result);
+        if (result.ok && result.restarting) {
+          setRestarting(true);
+          scheduleUpgradeReload(() => window.location.reload());
+        } else if (result.ok) {
+          void checkVersion(true);
+        }
+      } catch (error) {
+        setUpgradeResult({ ok: false, message: String(error), output: null, restarting: false });
+      } finally {
+        setUpgrading(false);
+      }
+      return;
+    }
+    if (!canRequestRemoteUpdate || remoteRequesting) return;
     // Preserve the exact manifest target on the wire; normalization is display-only.
     const target = versionInfo?.latest;
     if (!target) return;
+    setRemoteRequesting(true);
     setRemoteRequestError(null);
-    setIsPopupOpen(false);
-    setRemoteConfirmation({
-      target,
-      delivery: isDesktopManaged
-        ? versionInfo?.remote_install_allowed === true ? 'install' : 'prompt'
-        : 'runtime',
-    });
+    try {
+      const result = await api.requestDesktopUpdate(target, options);
+      if (!result.ok) {
+        setRemoteRequestError(result.error);
+        if (result.error === 'update_in_progress') void checkVersion(true);
+      } else {
+        setRemoteDelivery(result.delivery);
+        setRemoteUpdateTimedOut(false);
+        // Keep tracking this receipt even if the host disconnects before its
+        // next version response. An acknowledgement is not installation success.
+        setVersionInfo((previous) => previous && ({
+          ...previous,
+          remote_request: {
+            request_id: result.request_id, target,
+            phase: 'acknowledged', progress: null, error_code: null,
+            updated_at: new Date().toISOString(),
+          },
+        }));
+      }
+    } catch {
+      setRemoteRequestError('request_failed');
+    } finally {
+      setRemoteRequesting(false);
+    }
   };
 
   const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
@@ -338,6 +420,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   );
   const currentVersion = (hasVersionSkew ? runtimeVersion : shellVersion ?? runtimeVersion) || '...';
   const isSourceBuild = !inDesktopShell && versionInfo?.build?.kind === 'source';
+  // Running a pre-release with only an older stable release on offer: name that row the latest
+  // stable release, so it does not read as older than "latest".
+  const awaitingStable = !hasUpdate && latestVersion !== null && !isPrereleaseVersion(latestVersion)
+    && isPrereleaseVersion(normalizeVersion(currentVersion))
+    && releasePrecedes(latestVersion, normalizeVersion(currentVersion));
+  // A shell that predates the switch reports no `prereleases`, and keeps its menu item.
+  const prereleaseSwitch = isDesktopManaged
+    ? (desktopActions && typeof desktopUpdateState?.prereleases === 'boolean' ? desktopUpdateState.prereleases : null)
+    : (versionInfo && capabilities.can_manage_instance && !isSourceBuild ? prereleases : null);
   const sourceRevision = versionInfo?.build?.revision;
   const shortSourceRevision = sourceRevision?.slice(0, 12) || t('dashboard.unknownRevision');
   const displayVersion = isSourceBuild ? shortSourceRevision : shortenVersion(currentVersion);
@@ -373,61 +464,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const handleBadgeClick = () => {
     if (inDesktopShell && desktopUpdaterStatus !== 'available') {
       window.location.href = 'avibe://updates';
-    }
-  };
-
-  const submitRemoteUpdateRequest = async () => {
-    if (!remoteConfirmation || !capabilities.can_manage_instance || remoteRequesting) return;
-    const confirmation = remoteConfirmation;
-    setRemoteRequesting(true);
-    setRemoteRequestError(null);
-    try {
-      const options = { confirmInterrupt: Boolean(confirmation.counts) };
-      if (confirmation.delivery === 'runtime') {
-        // Old clients can still omit confirmation. New clients explicitly opt in.
-        const result = await api.doUpgrade(options);
-        if (result.error === 'confirmation_required') {
-          setRemoteConfirmation({ ...confirmation, counts: result.counts });
-          return;
-        }
-        setUpgradeResult(result);
-        if (result.ok && result.restarting) {
-          setRestarting(true);
-          scheduleUpgradeReload(() => window.location.reload());
-        } else if (result.ok) {
-          void checkVersion(true);
-        }
-      } else {
-        if (!isDesktopManaged || desktopActions) return;
-        const result = await api.requestDesktopUpdate(confirmation.target, options);
-        if (!result.ok) {
-          if (result.error === 'confirmation_required') {
-            setRemoteConfirmation({ ...confirmation, counts: result.counts });
-            return;
-          }
-          setRemoteRequestError(result.error);
-          if (result.error === 'update_in_progress') void checkVersion(true);
-        } else {
-          setRemoteDelivery(result.delivery);
-          setRemoteUpdateTimedOut(false);
-          // Keep tracking this receipt even if the host disconnects before its
-          // next version response. An acknowledgement is not installation success.
-          setVersionInfo((previous) => previous && ({
-            ...previous,
-            remote_request: {
-              request_id: result.request_id, target: confirmation.target,
-              phase: 'acknowledged', progress: null, error_code: null,
-              updated_at: new Date().toISOString(),
-            },
-          }));
-        }
-      }
-      setRemoteConfirmation(null);
-      setIsPopupOpen(true);
-    } catch {
-      setRemoteRequestError('request_failed');
-    } finally {
-      setRemoteRequesting(false);
     }
   };
 
@@ -522,7 +558,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           : t('dashboard.desktopRemoteUpdateError');
 
   return (
-    <>
     <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
@@ -560,7 +595,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               collisionPadding: 12,
             } : {})}
             className={clsx(
-              'z-50 rounded-lg border border-border bg-popover p-0 text-popover-foreground shadow-xl',
+              'z-50 rounded-lg border border-edge bg-popover p-0 text-popover-foreground shadow-elevation-2',
               isDesktop
                 ? 'max-h-[var(--radix-popover-content-available-height)] w-72 overflow-y-auto'
                 : mobileHeaderPopoverClassName,
@@ -622,9 +657,24 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
               {/* Latest Version */}
               {!isSourceBuild && latestVersion && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted">{t('dashboard.latestVersion')}</span>
-                  <span className="font-mono font-medium text-foreground">{latestVersion}</span>
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="shrink-0 text-muted">{t(awaitingStable ? 'dashboard.latestStableVersion' : 'dashboard.latestVersion')}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    {isPrereleaseVersion(latestVersion) && (
+                      <span className={badgeVariants({ variant: 'info' })}>{t('dashboard.prereleaseBadge')}</span>
+                    )}
+                    <a
+                      href={releaseNotesUrl(latestVersion)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex min-w-0 items-center gap-1 rounded-sm font-mono font-medium text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      title={t('dashboard.releaseNotes')}
+                      aria-label={t('dashboard.releaseNotesFor', { version: latestVersion })}
+                    >
+                      <span className="break-all">{latestVersion}</span>
+                      <ExternalLink size={12} className="shrink-0 text-muted" aria-hidden="true" />
+                    </a>
+                  </span>
                 </div>
               )}
 
@@ -644,14 +694,14 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 })}</p>
               )}
               {remoteDesktopWeb && remoteRequest && (
-                <div role="status" className="space-y-2 rounded-md border border-border px-3 py-2 text-sm">
+                <div role="status" className="space-y-2 rounded-md border border-edge px-3 py-2 text-sm shadow-elevation-0">
                   <p>{remoteStatusText}</p>
                   {remoteRequest.phase === 'failed' && remoteRequest.error_code === 'requires_host' && (
                     <p>{t('dashboard.desktopRemoteUpdateRequiresHost')}</p>
                   )}
                 </div>
               )}
-              {remoteRequestError && !remoteConfirmation && (
+              {remoteRequestError && (
                 <p role="alert" className="text-sm text-destructive-ink">{remoteErrorText}</p>
               )}
 
@@ -672,7 +722,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   <span>{t('dashboard.upgradeSuccess')}</span>
                 </div>
               ) : isDesktopManaged && desktopUpdateState?.phase === 'disabled' ? (
-                <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted">
+                <div className="flex items-center gap-2 rounded-md border border-edge bg-muted/30 px-3 py-2 text-sm text-muted shadow-elevation-0">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.checkFailed')}</span>
                 </div>
@@ -708,7 +758,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               ) : versionInfo && (!versionInfo.error || desktopUpdateState?.phase === 'current') ? (
                 <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
                   <Check size={16} className="shrink-0" />
-                  <span>{t('dashboard.upToDate')}</span>
+                  <span>{t(awaitingStable ? 'dashboard.awaitingStableRelease' : 'dashboard.upToDate')}</span>
                 </div>
               ) : versionInfo?.error && !nativeUpdateStateAvailable ? (
                 <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
@@ -762,6 +812,24 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
                 </div>
               )}
+
+              {prereleaseSwitch !== null && (
+                <div className={clsx(
+                  'flex items-center justify-between gap-3',
+                  isDesktopManaged && 'border-t border-border pt-3',
+                )}>
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground">{t('dashboard.prereleaseUpdates')}</div>
+                    <div className="text-xs text-muted">{t('dashboard.prereleaseUpdatesHint')}</div>
+                  </div>
+                  <ToggleSwitch
+                    enabled={prereleaseSwitch}
+                    onClick={() => handlePrereleasesToggle(!prereleaseSwitch)}
+                    disabled={savingPrereleases || checking || upgrading || restarting}
+                    label={t('dashboard.prereleaseUpdates')}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Actions */}
@@ -799,61 +867,5 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         )}
       </div>
     </Popover>
-
-    <Dialog
-      open={remoteConfirmation !== null && capabilities.can_manage_instance}
-      onOpenChange={(open) => {
-        if (!open && !remoteRequesting) setRemoteConfirmation(null);
-      }}
-    >
-      <DialogContent className="max-w-md" closeLabel={t('common.close')}>
-        <DialogHeader>
-          <DialogTitle>{t('dashboard.desktopRemoteUpdateConfirmTitle', {
-            target: remoteConfirmation?.target ?? latestVersion ?? '',
-          })}</DialogTitle>
-          <DialogDescription>
-            {t('dashboard.desktopRemoteUpdateConfirmDescription', {
-              delivery: remoteConfirmation?.delivery === 'runtime'
-                ? t('dashboard.runtimeUpdateDelivery')
-                : remoteConfirmation?.delivery === 'install'
-                ? t('dashboard.desktopRemoteUpdateDeliveryInstall')
-                : t('dashboard.desktopRemoteUpdateDeliveryPrompt'),
-            })}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2 text-sm text-muted">
-          <p>{remoteConfirmation?.counts
-            ? t('dashboard.desktopRemoteUpdateInterruptions', remoteConfirmation.counts)
-            : t('dashboard.desktopRemoteUpdateCheckWork')}</p>
-          {remoteConfirmation?.counts?.unknown && <p>{t('dashboard.desktopRemoteUpdateUnknownWork')}</p>}
-          <p>{t('dashboard.updateInterruptWarning')}</p>
-          {remoteRequestError && <p role="alert" className="text-destructive-ink">{t('dashboard.desktopRemoteUpdateError')}</p>}
-
-        </div>
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => setRemoteConfirmation(null)}
-            disabled={remoteRequesting}
-          >
-            {t('common.cancel')}
-          </Button>
-          <Button
-            type="button"
-            variant="brand"
-            onClick={() => void submitRemoteUpdateRequest()}
-            disabled={remoteRequesting}
-          >
-            {remoteRequesting
-              ? t('dashboard.desktopRemoteUpdateRequesting')
-              : remoteConfirmation?.counts
-                ? t('dashboard.desktopRemoteUpdateConfirmInterrupt')
-                : t('dashboard.desktopRemoteUpdateConfirm')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-    </>
   );
 };

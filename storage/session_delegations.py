@@ -75,6 +75,10 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
             session_delegations.c.recipient_session_id == sender,
             session_delegations.c.state.in_(("open", "notified", "answered")),
         ).values(state="answered", updated_at=at)).rowcount
+        if _object(run["metadata_json"]).get("no_reply") is True:
+            # The run is still delivered and traceable, but it is informational:
+            # it answers an existing reverse delegation without opening another.
+            continue
         # Once B answers A, further progress/final/supplemental messages stay
         # answers. Only A sending again rearms A→B; wording/turns are not judged.
         if run["source_kind"] != "agent" or answered:
@@ -182,6 +186,16 @@ def eligible_pair(
     )).mappings().first()
     if pair is None:
         return None
+    run = conn.execute(select(agent_runs.c.metadata_json).where(
+        agent_runs.c.id == pair["run_id"],
+    )).mappings().first()
+    if run is None:
+        return None
+    metadata = _object(run["metadata_json"])
+    if metadata.get("no_reply") is True:
+        # An older same-epoch binary can open this pair during rollback.
+        # Retire it even when pending work would otherwise defer the receipt.
+        return {**dict(pair), "unavailable": True}
     recipient = pair["recipient_session_id"]
     for session_id in (pair["sender_session_id"], recipient):
         session = conn.execute(select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)).first()
@@ -200,12 +214,7 @@ def eligible_pair(
             return None
     if any(_has_rows(conn, query) for query in pending_return_queries(pair["sender_session_id"], recipient)):
         return None
-    run = conn.execute(select(agent_runs.c.metadata_json).where(
-        agent_runs.c.id == pair["run_id"],
-    )).mappings().first()
-    if run is None:
-        return None
-    return {**dict(pair), "metadata": _object(run["metadata_json"])}
+    return {**dict(pair), "metadata": metadata}
 
 
 def acknowledge_sync_return(engine, run_id: str) -> None:

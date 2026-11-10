@@ -28,9 +28,13 @@ def test_selects_immediately_previous_publication_including_same_graph_rcs(monke
         _release("gh-v3.2.5rc19", "2026-11-08T01:00:00Z"),
         _release("gh-v3.2.5rc20", "2026-11-08T02:00:00Z"),
         _release("gh-v3.2.5rc21", "2026-11-08T03:00:00Z", draft=True),
+        # Managed-runtime releases share the repository but carry no Avibe wheel.
+        _release("model-hub-engine-v8.0.63-1", "2026-11-10T04:24:07Z"),
+        _release("git-runtime-v2.55.0-1", "2026-11-10T05:00:00Z"),
     ]
     monkeypatch.setattr(contract, "_run", lambda *args: json.dumps([releases[:2], releases[2:]]))
     assert contract.previous_release("test/repo")["tag_name"] == "gh-v3.2.5rc20"
+    assert contract.previous_release("test/repo", release_tag="gh-v3.2.5rc25")["tag_name"] == "gh-v3.2.5rc20"
     assert contract.previous_release("test/repo", release_tag="gh-v3.2.5rc20")["tag_name"] == "gh-v3.2.5rc19"
     with pytest.raises(RuntimeError, match="No published predecessor"):
         contract.previous_release("test/repo", release_tag="v9.0.0")

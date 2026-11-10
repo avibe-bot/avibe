@@ -171,8 +171,9 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   in-memory store and logs the loss, so the re-resolve that follows (§3.5) cannot declare the refused tool natively
   again. The narrow rules of #2551 fire on a real error before output, unchanged in form:
   - `Unsupported tool type: <type>` for a declared type → hosted tool `call`;
-  - `Invalid encrypted_content in search_result block` while the request replays a web-search result → `web_search`
-    `replay`;
+  - `Invalid encrypted_content in search_result block`, with or without the backticks Anthropic puts around both
+    names (amended 2026-11-10: the measured message has them), while the request replays a web-search result →
+    `web_search` `replay`;
   - Gemini's `Tool call context circulation is not enabled` while the request declares Google Search →
     `web_search` `call` (amended 2026-10-27, `vibey-gemini-native.md` §4);
   - **new:** an upstream image endpoint that refuses the model or the endpoint before producing anything →
