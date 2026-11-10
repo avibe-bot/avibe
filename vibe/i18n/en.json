@@ -291,14 +291,16 @@
   },
   "vault": {
     "signing": {
-      "invalidKey": "Signing requires a valid pinned compressed secp256k1 public key. No signature was delivered. Keep the existing key and its protection unchanged; repair the public-key metadata before retrying.",
+      "invalidKey": "Signing requires a valid pinned public key that matches the scheme: a compressed secp256k1 key for secp256k1 schemes, or a Solana Ed25519 key for ed25519. No signature was delivered. Keep the existing key and its protection unchanged; repair the public-key metadata before retrying.",
       "protectedUnsupported": "Protected Bitcoin Taproot signing requires the typed transaction approval workflow and a compatible sandbox. Keep legacy and SegWit-v0 inputs unsupported.",
       "missingContext": "Protected signing requires a verifiable signing context. Recreate the request with the complete operation details.",
       "invalidDigest": "The signing digest must be exactly 32 bytes encoded as hexadecimal.",
       "invalidParameters": "The signing request contains unsupported parameters. Only empty-tree BIP86 key-path signing is supported; script trees and Merkle roots are not supported.",
       "invalidContext": "The signing context is invalid or does not match the request. Check its type, digest, fields and canonical encoding, then recreate the request. Agent operations require the avault-agent-operation:v1 domain followed by a newline and non-empty operation text.",
-      "contextSchemeMismatch": "Bitcoin Taproot contexts require schnorr-secp256k1-bip341-keypath; EVM and EIP-712 contexts require an ECDSA scheme. Recreate the request with a compatible pairing.",
-      "invalidSignature": "The returned signature has an invalid encoding or does not verify against the pinned key and requested digest. It was not delivered as a successful result."
+      "contextSchemeMismatch": "Bitcoin Taproot contexts require schnorr-secp256k1-bip341-keypath; EVM and EIP-712 contexts require an ECDSA scheme; Solana transaction contexts require ed25519. Recreate the request with a compatible pairing.",
+      "invalidSignature": "The returned signature has an invalid encoding or does not verify against the pinned key and the requested digest or message. It was not delivered as a successful result.",
+      "invalidInput": "The signing input does not match the scheme. ed25519 signs the exact message bytes: provide message_hex (hexadecimal, at most 1 MiB) and no digest. secp256k1 schemes sign a 32-byte digest and do not accept message_hex.",
+      "protectedSolanaUnsupported": "Protected Solana keys and protected Solana signing are not supported yet. Nothing was created, requested or signed. Use a standard Solana key."
     },
     "requestNotification": {
       "title": "A vault request needs your attention",
