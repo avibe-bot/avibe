@@ -217,6 +217,11 @@ def check_profile(
                 actual_values = set(actual)
             except (TypeError, ValueError):
                 actual_values = set()
+        if key == "com.apple.developer.associated-domains" and "*" in actual_values:
+            # Provisioning-profile entitlements are an allowlist. A wildcard
+            # grant here covers this domain; the archived app is still checked
+            # below for the exact webcredentials domain it signs.
+            continue
         if not set(required) <= actual_values:
             raise TestFlightError(
                 f"The profile does not grant the required {key} values; "
