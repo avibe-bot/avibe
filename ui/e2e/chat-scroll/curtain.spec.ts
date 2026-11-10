@@ -75,22 +75,28 @@ for (const bar of ['on screen', 'below the screen'] as const) {
   cells.push({ host: 'group', source: 'inside', bar, phase: 'turned back', change: 'grows' });
 }
 
-/** Places the item matching `selector` (the first) `y` px below the transcript's top, once any older page the
- *  place asks for has come in (the scroller holds the reader through it, which is not what is watched here). */
+/** Places the item matching `selector` (the first) `y` px below the transcript's top, where no older page comes in
+ *  any more: an older page is fetched while the reader is within ChatPage's prefetch band of the loaded top
+ *  (olderPrefetchBand: eight screens, never less than 4000 px), and its landing (the scroller holding the reader
+ *  through it) is not what is watched here. So it places the item again until the reader is past that band, or
+ *  nothing older is left, however long the pages take to come in. */
 async function place(page: Page, selector: string, y: number) {
   const put = () => transcript(page).evaluate((scroller, [sel, at]) => {
     const el = scroller.querySelector(sel as string)!;
     scroller.scrollTop += el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - (at as number);
+    const band = Math.max(4000, scroller.clientHeight * 8);
+    const first = scroller.querySelector('[data-message-id]')?.getAttribute('data-message-id');
+    // ChatPage asks for an older page only while scrollTop <= the band.
+    return { clear: scroller.scrollTop > band || first === 'msg_00000', first };
   }, [selector, y] as const);
-  const firstRow = () => transcript(page).locator('[data-message-id]').first().getAttribute('data-message-id');
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const loadedFrom = await firstRow();
-    await put();
-    await page.waitForTimeout(700);
-    if ((await firstRow()) === loadedFrom) break;
-  }
-  await put();
-  await page.waitForTimeout(400);
+  // A page asked for lands once the reader rests: place, and look again a moment later.
+  await expect.poll(async () => (await put()).clear, { timeout: 30_000, intervals: [900] }).toBe(true);
+  await page.waitForTimeout(600);
+  const placed = await put();
+  expect(placed.clear).toBe(true);
+  await page.waitForTimeout(600);
+  // Nothing came in since.
+  expect((await put()).first).toBe(placed.first);
 }
 
 /** `exact`: two takes in a row read the same (WebKit samples a running animation at each read: a take that spans
@@ -257,7 +263,11 @@ async function watch(page: Page, host: Host, sourceSelector: string, steps: { wh
 for (const cell of cells) {
   const name = `${cell.host}, the other ${cell.source}${cell.bar ? `, collapse bar ${cell.bar}` : ''}, ${cell.phase}, the other ${cell.change}`;
   test(`a curtain stays on what it covers while another disclosure moves it (${name})`, async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 1100 });
+    // Three times slower motion, the setup taps, and placing past the prefetch band take longer than a default test.
+    test.setTimeout(90_000);
+    // Tall enough that a curtain's band stays on screen (where its edge is judged) all the way, however far the
+    // other one pushes it and however late a slow runner reads the first frames.
+    await page.setViewportSize({ width: 390, height: 1400 });
     await page.route('**/api/**', (route) => route.fulfill({ status: 503, json: { error: 'No backend in this fixture' } }));
     await page.goto(`/e2e/chat-scroll/fixture.html?images=0&${QUERY}`);
     await expect(transcript(page).locator('[data-message-id]').first()).toBeVisible();
@@ -275,11 +285,10 @@ for (const cell of cells) {
       }, selector);
       await page.waitForTimeout(900);
     };
-    // Every chip used by this cell must have its steps loaded, including the source above/below the host.
-    // Otherwise "both grow" also contains the source's skeleton shrinking into its empty body, so a row can
-    // legitimately pass its final resting place. Loading motion has separate coverage in motion.spec.ts.
-    const chips = [...(cell.host === 'chip' ? [HOSTS.chip] : []), ...(cell.source !== 'inside' ? [source] : [])];
-    for (const chip of chips) {
+    // A chip's steps load the first time it opens (its skeleton gives way to them, and it grows or shrinks by as
+    // much): that is its own, not what this is about, so every chip the cell taps (the host or the other one) has
+    // them loaded first.
+    for (const chip of [HOSTS[cell.host], source].filter((selector) => selector.includes('activity:'))) {
       await tap(chip);
       await expect(transcript(page).locator(chip).locator('[aria-busy="true"]')).toHaveCount(0);
       await tap(chip);

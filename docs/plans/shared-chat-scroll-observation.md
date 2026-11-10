@@ -5,6 +5,11 @@
 This is a browser-test-only follow-up to the shared-base failures observed on
 November 10, 2026. No dependency, product, scroll-restore, or deployment changes.
 The branch starts from GitHub master `e13468888f206fb29d764ad113b85e3be6500e86`.
+After its second head passed full CI and exact-head review, it ordinary-merged
+master `8d35744c20c766910f8fee82d9b72161a769ae82`. The merge preserves #3490's
+prefetch-band setup, taller curtain viewport, source-chip preload, and on-time
+mutation samples. Relative to that base, the curtain change is only the explicit
+loaded-body assertion; interpolation and glide observation remain this PR's fixes.
 
 - A chip/panel handoff always draws exactly one shared icon and label. The label
   travels through a real intermediate position instead of jumping to an endpoint.
@@ -43,7 +48,9 @@ With the existing `activityDelay=150` fixture parameter, the original setup
 fails the same monotonicity assertion on Chromium (7.529px) and WebKit (7.543px).
 Preloading both participating chips and checking that their busy body is gone
 passes both engines with the same delay. The committed fixture keeps its normal
-zero delay. Loading/reveal motion remains covered by `motion.spec.ts`.
+zero delay. The preload loop subsequently landed independently in #3490; this
+branch keeps that loop and adds the explicit loaded-body assertion.
+Loading/reveal motion remains covered by `motion.spec.ts`.
 
 ### Return-to-latest glide: recording cutoff violates the rest contract
 
@@ -73,9 +80,11 @@ path that invalidates the helper, not a claim about those traces' hidden refs.
 #3487's group/above/on-screen/opening/grows trace had 156 exact reads but just one
 eligible non-null edge. Its coverage failure is not a geometry violation or a
 mixed-time read: edges below the viewport or between laid-out nodes are excluded
-by the existing observer. Source preloading is not yet proven to address this
-eligibility window. Its Chromium paging page-2 drift (1.34375px) is a separate
-scroll/anchor investigation; no thresholds or product behavior are changed here.
+by the observer. #3490 subsequently enlarged the fixture viewport to keep the
+edge on screen and landed that change on master; this merge preserves it rather
+than adding another sampling workaround. Its Chromium paging page-2 drift
+(1.34375px) remains a separate scroll/anchor investigation; no thresholds or
+product behavior are changed here.
 
 ## Validation
 
@@ -106,6 +115,13 @@ Normal parallelism only (`workers: 1`), no load generation or Incus operations:
 - Temporary glide mutations (restored): suppressing all glide writes fails the
   bounded landing assertion with 996px left; slowing the actual motion to
   1000–1200ms fails the unchanged <500ms motion-duration assertion on both engines.
+
+- After ordinary-merging current master and reinstalling its locked UI dependencies,
+  the selected 22 browser cases passed across two invocations: the first completed
+  19 before the shell's 120-second budget interrupted it; the remaining three
+  WebKit glide cases passed separately. No browser assertion failed. This also
+  covers #3490's changed no-restore-write sampling case. Build, lint, and types
+  passed on the merged base.
 
 PR review and the full CI backstop remain the delivery gates. This lane does not
 merge or deploy.

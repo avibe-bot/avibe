@@ -7044,7 +7044,6 @@
     "add": "添加 MCP",
     "addTitle": "添加 MCP",
     "refresh": "刷新",
-    "refreshAll": "刷新",
     "remove": "删除",
     "removeConfirm": "删除 MCP 服务器 {{name}}？",
     "removeAvibeHint": "将从 Avibe 中移除该服务器。",
@@ -7059,7 +7058,7 @@
     "projectEmpty": "此项目还没有项目 MCP",
     "globalBadge": "全局",
     "failed": "MCP 操作失败。",
-    "pasteHint": "粘贴 mcpServers JSON。环境变量和请求头的值会以明文保存在本机。",
+    "pasteHint": "粘贴 mcpServers JSON。",
     "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
     "source": {
       "avibe": "Avibe",
@@ -7101,7 +7100,7 @@
     },
     "addedCount": "已添加 {{count}} 个。",
     "addedPartial": "已添加 {{count}} 个；失败：{{failed}}",
-    "addSubtitle": "粘贴 MCP 配置 JSON，添加到 Avibe 后自动注册，所有 Agent 可用 vibe mcp 调用",
+    "addSubtitle": "添加成功后，所有 Agent 都可调用",
     "unchangedCount": "{{count}} 个已存在。",
     "succeededCount": "成功 {{count}} 个",
     "failedCount": "失败 {{count}} 个：",
@@ -7118,8 +7117,8 @@
     "addResultHint": "这些服务器需要登录后才能提供工具。",
     "loginComplete": "MCP 登录完成",
     "addMode": "添加方式",
-    "addModeJson": "粘贴 JSON",
-    "addModeForm": "表单",
+    "addModeJson": "粘贴 JSON 导入",
+    "addModeForm": "填写",
     "form": {
       "name": "名称",
       "target": "URL 或命令",
@@ -7132,12 +7131,11 @@
       "removeRow": "移除",
       "advanced": "高级",
       "cwd": "工作目录",
-      "hint": "这些值会以明文保存在本机。OAuth、超时、工具过滤或 ${VAR} 引用请使用 JSON 页签。",
       "issues": {
         "invalidUrl": "URL 无效。",
         "unclosedQuote": "有未闭合的引号。",
-        "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用 JSON 页签。",
-        "windowsPath": "这里无法可靠解析 Windows 路径，请使用 JSON 页签。"
+        "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用「粘贴 JSON 导入」。",
+        "windowsPath": "这里无法可靠解析 Windows 路径，请使用「粘贴 JSON 导入」。"
       },
       "namePlaceholder": "docs",
       "kindHttp": "HTTP",
