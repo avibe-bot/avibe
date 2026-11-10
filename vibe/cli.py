@@ -19767,27 +19767,22 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign with a local keypair. secp256k1 schemes sign a 32-byte digest given with --digest. "
-            "A Solana key signs with --scheme ed25519 and --message-hex: the exact serialized message "
-            "bytes, signed as given. --message-hex is not a digest; do not hash the message first. "
-            "Standard keys sign immediately via avault and return the public signature inline. "
-            "Protected keys — and standard keys marked always-ask — instead create a pending per-use "
-            "request you approve in the browser; then 'vibe vault await <request-id>' returns the "
-            "public signature. Protected Solana keys cannot sign yet."
+            "Sign with a local keypair. secp256k1 schemes sign a 32-byte --digest. A Solana key signs "
+            "with --scheme ed25519 --message-hex: the exact serialized message bytes, not a digest, so "
+            "do not hash them first. Standard keys sign immediately via avault and return the public "
+            "signature inline. Protected keys — and standard keys marked always-ask — instead create a "
+            "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
+            "returns the public signature. Protected Solana keys cannot sign yet."
         ),
-        epilog=(
-            "Examples:\n"
-            "  vibe vault sign WALLET_KEY --digest <64 hex characters>\n"
-            "  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex <serialized message as hex>"
-        ),
+        epilog="Example:\n  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex 01000103",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault sign --help",
     )
     vault_sign_parser.add_argument("name", help="Keypair secret name")
-    vault_sign_parser.add_argument("--digest", help="32-byte digest as hex; required by every secp256k1 scheme")
+    vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
-        help="Exact message bytes as hex, at most 1 MiB; required by ed25519, which refuses --digest",
+        help="Exact message bytes as hex, up to 1 MiB (ed25519 only)",
     )
     vault_sign_parser.add_argument(
         "--scheme",
@@ -19799,7 +19794,7 @@ def build_parser():
             "schnorr-secp256k1-bip341-keypath",
             "ed25519",
         ],
-        help="Signature scheme; a Solana key signs only with ed25519",
+        help="Signature scheme; a Solana key uses ed25519",
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
@@ -19807,10 +19802,7 @@ def build_parser():
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
     vault_sign_parser.add_argument(
         "--signing-context-json",
-        help=(
-            "Verifiable signing context JSON required for protected keypairs. With ed25519 the only "
-            "kind is {\"kind\": \"solana-transaction-v1\", \"messageHex\": <the same message, lower-case hex>}"
-        ),
+        help="Verifiable signing context JSON required for protected keypairs",
     )
     vault_sign_parser.add_argument(
         "--no-callback",
