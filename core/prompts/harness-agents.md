@@ -26,7 +26,8 @@ Agent rules:
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
 - Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session.
 - `--model` and `--reasoning-effort` set the model of the new Session a run creates (a blank new Session or a fork), and that Session keeps it; they are not valid with `--session-id`. With `--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session only when the requested Agent backend matches the source Session backend.
-- A run's final reply returns here only with `--callback` (`--callback-session-id <id>` sends it to that Session); a run that does not complete always reports here.
+- If a dispatched Session handles your message without writing back, Avibe sends a read receipt with its last reply once it is idle with no pending work; a run that does not complete still reports immediately.
+- Add `--no-reply` to an existing `--session-id` or `--bot` message that needs no answer or read receipt; not with `--sync` or a new/forked Session.
 - `--sync` changes waiting behavior, not session identity: runs are async by default; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 

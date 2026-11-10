@@ -255,7 +255,7 @@ export function AddSkillDialogView({
         closeLabel={t('common.close')}
         // A card near the top on a phone, not a bottom sheet: it grows in place.
         mobilePresentation="card"
-        className="max-w-[560px] w-[calc(100vw-2rem)] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:w-[calc(100vw-5rem)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-auto max-md:left-1/2 max-md:right-auto max-md:top-4 max-md:w-[calc(100vw-2rem)] max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-[-50%] max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
+        className="max-w-[560px] w-[calc(100vw-2rem)] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl p-0 sm:w-[calc(100vw-5rem)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-auto max-md:left-1/2 max-md:right-auto max-md:top-4 max-md:w-[calc(100vw-2rem)] max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-[-50%] max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
       >
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint-ink">
@@ -281,7 +281,7 @@ export function AddSkillDialogView({
           {source === 'github' ? (
             <label className="flex flex-col gap-1.5">
               <span className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('skills.addDialog.urlLabel')}</span>
-              <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border-strong bg-surface px-2.5 py-2">
+              <div className="flex min-w-0 items-center gap-2 rounded-lg border border-edge bg-surface px-2.5 py-2 shadow-elevation-0">
                 <GithubIcon className="size-3.5 shrink-0 text-muted" />
                 <input
                   value={url}
@@ -335,7 +335,7 @@ export function AddSkillDialogView({
                     onClick={() => onToggleSkill(skill.name)}
                     className={clsx(
                       'flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition',
-                      on ? 'border-mint/40 bg-mint-soft' : 'border-border bg-surface hover:border-border-strong',
+                      on ? 'border-mint/40 bg-mint-soft' : 'border-edge bg-field hover:bg-field-hover',
                     )}
                   >
                     <Checkbox checked={on} presentational />
@@ -365,7 +365,7 @@ export function AddSkillDialogView({
             <span className="truncate font-mono text-[10.5px] text-muted">{cliPreview || 'askill add …'}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <button type="button" onClick={onClose} className="rounded-lg border border-border-strong px-3.5 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]">
+            <button type="button" onClick={onClose} className="rounded-lg border border-edge px-3.5 py-2 text-[12px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover">
               {t('skills.addDialog.cancel')}
             </button>
             <Button

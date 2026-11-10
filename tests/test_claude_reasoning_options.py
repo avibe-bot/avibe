@@ -55,16 +55,15 @@ def test_claude_reasoning_options_add_xhigh_and_max_for_opus_5_5() -> None:
     assert [item["value"] for item in options] == ["__default__", "low", "medium", "high", "xhigh", "max"]
 
 
-def test_claude_reasoning_options_add_xhigh_and_max_for_fable_5() -> None:
-    options = build_claude_reasoning_options("claude-fable-5")
+@pytest.mark.parametrize("model", ["claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "fable"])
+def test_fable_reasoning_and_context_label(model: str) -> None:
+    options = build_claude_reasoning_options(model)
 
     assert [item["value"] for item in options] == ["__default__", "low", "medium", "high", "xhigh", "max"]
-
-
-def test_claude_reasoning_options_add_xhigh_and_max_for_fable_5_1() -> None:
-    options = build_claude_reasoning_options("claude-fable-5-1")
-
-    assert [item["value"] for item in options] == ["__default__", "low", "medium", "high", "xhigh", "max"]
+    assert normalize_claude_reasoning_effort(model, "xhigh") == "xhigh"
+    assert normalize_claude_reasoning_effort(model, "max") == "max"
+    assert normalize_claude_reasoning_effort(model, "none") is None
+    assert format_claude_model_label(model) == f"{model} [1M]"
 
 
 @pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-sonnet-5-5"])

@@ -15,7 +15,6 @@
    50 + 40 + 40 + 56 of fixed rows, 4 × 20 gaps and 2 × 24 padding leave the
    middle exactly H − 314. */
 .connection-dialog {
-  --connection-overlay-shadow: #00000088;
   --connection-selected-border: #5bffa059;
   --connection-logo-well: #ffffff04;
   --connection-h: 620px;
@@ -72,8 +71,9 @@
      and stays here only as the last resort for the rooms it does not. */
   overflow-x: hidden; overflow-y: auto;
   padding: var(--connection-pad); gap: var(--connection-gap); border-radius: 16px;
-  border-color: var(--border-strong); background: var(--surface-2);
-  box-shadow: 0 18px 48px var(--desktop-overlay-shadow, var(--connection-overlay-shadow));
+  /* An overlay at level 3 on the popover fill, no outline (ui/design: system/elevation/scale). */
+  border-color: var(--edge-border); background: var(--popover);
+  box-shadow: var(--elevation-3);
 }
 /* The shared dialog primitive caps every dialog it owns at `100dvh - 2rem`, and
    below its `md` edge at `90dvh` — its own defaults for dialogs that size to
@@ -155,9 +155,9 @@
 .connection-provider-text small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-provider-configured { flex: none; font-size: 11px; font-weight: 600; color: var(--mint-ink); }
 .connection-dialog .connection-more { width: 100%; justify-content: flex-start; gap: 8px; height: 38px; border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
-[data-theme='light'] .connection-dialog { --connection-overlay-shadow: #0a0a1424; --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
+[data-theme='light'] .connection-dialog { --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) .connection-dialog { --connection-overlay-shadow: #0a0a1424; --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
+  :root:not([data-theme='dark']) .connection-dialog { --connection-selected-border: #10b98160; --connection-logo-well: #eef1f780; }
 }
 .connection-heading { display: flex; gap: 12px; align-items: center; padding-right: 20px; }
 .connection-logo { width: 40px; height: 40px; flex: none; border: 1px solid var(--border); border-radius: 10px; display: grid; place-items: center; background: var(--logo-well-background, var(--connection-logo-well)); }

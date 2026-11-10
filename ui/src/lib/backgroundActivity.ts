@@ -48,14 +48,12 @@ export function activityKindI18nKey(
   return kind;
 }
 
-// Where a delegated run's result goes: back here by callback, or reported by its
-// target when the work is done. Null for every other row, and for a server that
-// does not say.
+// Only historical final-callback routes promise a result here. New runs use
+// explicit reports/read receipts (or no-reply); don't invent a second mode.
 export function activityReturnI18nKey(
   item: Pick<SessionActivityState, 'item_kind' | 'returns_here'>,
-): 'returnsHere' | 'reportsBack' | null {
-  if (activityItemKind(item) !== 'agent_run' || typeof item.returns_here !== 'boolean') return null;
-  return item.returns_here ? 'returnsHere' : 'reportsBack';
+): 'returnsHere' | null {
+  return activityItemKind(item) === 'agent_run' && item.returns_here === true ? 'returnsHere' : null;
 }
 
 // Harness rows (watch / task / delegated run) navigate to the Harness surface;

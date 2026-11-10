@@ -47,7 +47,7 @@ export const SourceRow: React.FC<{
       data-source-id={source.id}
       onClick={(event) => onOpen(source, event.currentTarget)}
       className={cn(
-        'flex h-auto min-h-[96px] w-full items-center gap-2.5 rounded-[10px] border border-border bg-background px-3 py-2 text-left transition-colors hover:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        'flex h-auto min-h-[96px] w-full items-center gap-2.5 rounded-[10px] border border-edge px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring bg-field hover:bg-field-hover active:bg-field-hover',
         adopted && source.supply_channel === 'native_cli' && 'border-cyan/30 bg-cyan/[0.04]',
         adopted && source.supply_channel === 'hub' && 'border-mint/30 bg-mint/[0.04]',
         source.state.status === 'cooldown' && 'border-gold/20 bg-gold/[0.04]',

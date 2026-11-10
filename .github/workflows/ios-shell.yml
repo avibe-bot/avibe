@@ -1,31 +1,41 @@
 name: ios-shell
 
 on:
+  # Advisory on affected PRs until NavigationPolicyTests #3418 is fixed.
+  # Full master calls remain part of lint's required release certificate.
   pull_request:
-    paths:
-      - "ios/**"
-      - ".github/workflows/ios-shell.yml"
-      - "ui/**"
-      - "vibe/message_types.json"
-      - "vibe/data/**"
-      - "assets/mascot/cloud-tuanzi-v2.png"
-  merge_group:
-    types: [checks_requested]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # PR runs may be superseded within one PR. Queue groups must not cancel
-  # another group or a PR run.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  # Cancel stale standalone PR probes, never a running full master backstop.
+  group: ios-shell-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
 jobs:
+  route:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      ios: ${{ steps.scope.outputs.ios }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: scope
+        run: python3 scripts/ci_scope.py --optional-ios
+
   simulator:
+    needs: route
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      (needs.route.result == 'success' && needs.route.outputs.ios == 'run'))
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -50,7 +50,7 @@ export const WizardChrome: React.FC<WizardChromeProps> = ({
             <button
               type="button"
               onClick={onSkip}
-              className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:border-border-strong hover:text-foreground"
+              className="rounded-md border border-edge px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-foreground bg-field hover:bg-field-hover active:bg-field-hover"
             >
               {t('common.skip')}
             </button>

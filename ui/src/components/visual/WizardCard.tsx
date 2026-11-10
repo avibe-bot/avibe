@@ -27,7 +27,7 @@ export const WizardCard: React.FC<WizardCardProps> = ({
       // Card chrome (radius / border / surface / shadow) and the large inner
       // padding kick in from sm up. On phones the wizard goes full-bleed on the
       // page background with no card; the page gutter supplies the side spacing.
-      'sm:rounded-2xl sm:border sm:bg-surface-2 sm:shadow-mint-card-lg',
+      'sm:rounded-2xl sm:border sm:bg-surface-2 sm:shadow-elevation-1',
       accent ? 'sm:border-mint/35' : 'sm:border-border',
       size === 'hero' ? 'sm:p-12 md:p-16' : 'sm:px-6 sm:py-8 md:px-12 md:py-10',
       className

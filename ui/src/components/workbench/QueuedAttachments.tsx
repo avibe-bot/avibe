@@ -44,7 +44,7 @@ const useAccessibleName = () => {
 // gap to each neighbour without overlapping it.
 const TARGET =
   'relative flex h-6 shrink-0 items-center rounded-[5px] text-muted transition-colors hover:text-foreground ' +
-  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan/40 ' +
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ' +
   "after:absolute after:-inset-x-0.5 after:-inset-y-1.5 after:content-['']";
 
 const PILL = 'flex h-5 items-center gap-1 rounded-[5px] border px-1';
@@ -73,7 +73,7 @@ const Thumb: React.FC<{ att: MessageAttachment }> = ({ att }) => {
       data-queue-attachment={failed ? 'image-unavailable' : 'image'}
       className={TARGET}
     >
-      <span className="relative flex size-5 items-center justify-center overflow-hidden rounded-[4px] border border-border bg-surface-3">
+      <span className="relative flex size-5 items-center justify-center overflow-hidden rounded-[4px] border border-edge bg-surface-3 shadow-elevation-0">
         {/* Under the picture, so the slot is never empty: this is what shows
             while the image is still loading and what remains when it fails. */}
         {failed ? (
@@ -179,7 +179,7 @@ const Disclosure: React.FC<{
       data-queue-attachment-more="true"
       className={TARGET}
     >
-      <span className={clsx(PILL, 'border-border-strong bg-muted-soft font-mono text-[10px] font-bold')}>
+      <span className={clsx(PILL, 'border-edge bg-muted-soft font-mono text-[10px] font-bold')}>
         {!expanded && t('chat.queue.attachments.more', { count })}
         <ChevronDown className={clsx('size-[9px] shrink-0', expanded && 'rotate-180')} aria-hidden="true" />
       </span>

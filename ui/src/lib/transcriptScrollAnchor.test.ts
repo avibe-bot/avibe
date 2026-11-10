@@ -2,7 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor } from './transcriptScrollAnchor';
+import { noteShift } from './layoutBox';
+import { anchorForTouched, pickScrollAnchor, resolveScrollAnchor, topInContent } from './transcriptScrollAnchor';
 
 // jsdom does no layout, so each child declares the rect it would have had. The
 // numbers below mirror the real transcript column: the scroll container carries
@@ -174,12 +175,12 @@ describe('resolveScrollAnchor', () => {
     const wrapper = document.createElement('div');
     const remounted = row({ top: 412, height: 60, id: 'h5' });
     wrapper.append(remounted);
-    expect(resolveScrollAnchor(anchor, content(wrapper))).toEqual({ el: remounted, top: 12 });
+    expect(resolveScrollAnchor(anchor, content(wrapper))).toMatchObject({ el: remounted, top: 12 });
 
     // ...or folded it into a collapsed group, which takes the row's place.
     const head = chrome({ top: 100, height: 70 });
     head.dataset.harnessMembers = 'h3 h4 h5';
-    expect(resolveScrollAnchor(anchor, content(head))).toEqual({ el: head, top: 12 });
+    expect(resolveScrollAnchor(anchor, content(head))).toMatchObject({ el: head, top: 12 });
 
     // A message that left the transcript leaves nothing to hold.
     expect(resolveScrollAnchor(anchor, content(chrome({ top: 0, height: 10 })))).toBeNull();
@@ -200,7 +201,7 @@ describe('resolveScrollAnchor', () => {
     remounted.dataset.transcriptKey = 'activity:grp_7';
     const other = chrome({ top: 0, height: 30 });
     other.dataset.transcriptKey = 'activity:grp_8';
-    expect(resolveScrollAnchor(anchor, content(other, remounted))).toEqual({ el: remounted, top: 40 });
+    expect(resolveScrollAnchor(anchor, content(other, remounted))).toMatchObject({ el: remounted, top: 40, key: 'activity:grp_7' });
     // Gone for good: nothing to hold.
     expect(resolveScrollAnchor(anchor, content(other))).toBeNull();
   });
@@ -213,7 +214,7 @@ describe('resolveScrollAnchor', () => {
     expect(anchor).toMatchObject({ el: head, rowId: 'h1', rowTop: -20 });
 
     const standalone = row({ top: 80, height: 60, id: 'h1' });
-    expect(resolveScrollAnchor(anchor, content(standalone))).toEqual({ el: standalone, top: -20 });
+    expect(resolveScrollAnchor(anchor, content(standalone))).toMatchObject({ el: standalone, top: -20 });
   });
 
   it('keeps the anchored element while it is still mounted', () => {
@@ -221,7 +222,37 @@ describe('resolveScrollAnchor', () => {
     const anchor = pick([anchored], VIEWPORT, 0)!;
     content(anchored);
 
-    expect(resolveScrollAnchor(anchor, document.body)).toEqual({ el: anchored, top: 30 });
+    expect(resolveScrollAnchor(anchor, document.body)).toBe(anchor);
+  });
+
+  // Measured inside the content, a place leaves out what a motion showed as movement (a disclosure above that
+  // pushed the row down: lib/layoutBox), and that is recorded per item. A message that re-mounts is another item.
+  it('carries a place over into the terms of the item a message re-mounted in', () => {
+    const column = document.createElement('div');
+    document.body.append(column);
+    const anchored = row({ top: 12, height: 60, id: 'h9' });
+    column.append(anchored);
+    // A disclosure above opened and pushed the row down 120px, drawn as movement.
+    noteShift(anchored, 120);
+    const anchor = pickScrollAnchor([anchored], VIEWPORT, 0, column)!;
+    expect(anchor).toMatchObject({ el: anchored, top: 12 - 120, rowTop: 12 - 120, item: anchored });
+
+    // An older page of 400px comes in and makes the row a group member: a new element in a new item...
+    anchored.remove();
+    const group = document.createElement('div');
+    const remounted = row({ top: 412, height: 60, id: 'h9' });
+    group.append(remounted);
+    column.append(group);
+    const target = resolveScrollAnchor(anchor, column)!;
+    expect(target).toMatchObject({ el: remounted, item: group });
+    // ...so what is made up is the page, not the disclosure's 120px again.
+    expect(topInContent(remounted, 0, column) - target.top).toBe(400);
+
+    // An item with motion shifts of its own leaves them out of the place too.
+    noteShift(group, 30);
+    const shifted = resolveScrollAnchor(anchor, column)!;
+    expect(topInContent(remounted, 0, column) - shifted.top).toBe(400);
+    column.remove();
   });
 });
 

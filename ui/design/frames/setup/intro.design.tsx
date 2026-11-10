@@ -27,7 +27,7 @@ const designFrames = frames([
   screen('default', '设置向导 · 介绍 · 各有所长，接力完成（Codex 评审中）', {}, { wait: relay }),
   screen('short', '设置向导 · 介绍 · 矮窗口 1366×768', {}, { width: 1366, height: 768, wait: relay }),
   screen('large', '设置向导 · 介绍 · 大屏 1920×1080', {}, { width: 1920, height: 1080, wait: relay }),
-  screen('phone', '设置向导 · 介绍 · 手机', {}, { width: 390, height: 1790, wait: relay }),
+  screen('phone', '设置向导 · 介绍 · 手机（操作栏固定在底部）', {}, { width: 390, height: 844, wait: relay }),
   screen('gateway-required', '设置向导 · 介绍 · 模型网关已关闭，需恢复后重试', { gatewayOff: true }),
   screen('read-failed', '设置向导 · 介绍 · 读取配置失败', { api: { '/api/config': { ok: false, error: 'config.json: unexpected end of JSON input' } } }),
 ]);

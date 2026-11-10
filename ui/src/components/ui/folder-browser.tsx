@@ -407,7 +407,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
         aria-describedby={undefined}
         closeLabel={t('common.close')}
         mobileSheetHeight="tall"
-        className="flex h-[min(84dvh,760px)] max-w-5xl flex-col gap-0 overflow-hidden border-border-strong bg-surface p-0 max-md:p-0 max-md:pb-0"
+        className="flex h-[min(84dvh,760px)] max-w-5xl flex-col gap-0 overflow-hidden p-0 max-md:p-0 max-md:pb-0"
         onOpenAutoFocus={(event) => {
           if (pathEditing) {
             event.preventDefault();
@@ -475,7 +475,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                   <button
                     type="button"
                     onClick={() => void submitPath()}
-                    className="shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-foreground/[0.04]"
+                    className="shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-wash"
                   >
                     {t('directoryBrowser.editPathDone')}
                   </button>
@@ -569,7 +569,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                     onClick={() => isDir && navigate(row.full)}
                     className={clsx(
                       'flex w-full items-center px-3 py-1.5 text-left text-[12.5px] transition',
-                      isDir ? 'text-foreground hover:bg-foreground/[0.04]' : 'cursor-default text-muted/70',
+                      isDir ? 'text-foreground hover:bg-wash' : 'cursor-default text-muted/70',
                     )}
                   >
                     {isDir ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
@@ -588,7 +588,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           }
           footerContent={
             <div className="flex items-center gap-3 border-t border-border bg-surface-2/80 px-3 py-2">
-              <code className="min-w-0 flex-1 truncate rounded-md border border-border-strong bg-surface-3 px-2.5 py-1.5 font-mono text-[11px] text-foreground">
+              <code className="min-w-0 flex-1 truncate rounded-md border border-edge bg-surface-3 px-2.5 py-1.5 font-mono text-[11px] text-foreground shadow-elevation-0">
                 {cwd || '—'}
               </code>
               <Button type="button" size="sm" variant="ghost" className="h-8 px-3 text-[12px]" onClick={onClose}>

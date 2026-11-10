@@ -31,7 +31,7 @@ export const EditorFontSizePopover: React.FC<{ trigger: 'activity' | 'mobile' }>
             type="button"
             variant="ghost"
             size="icon"
-            className="h-8 w-12 rounded-none text-muted hover:bg-foreground/[0.06] hover:text-foreground"
+            className="h-8 w-12 rounded-none text-muted hover:bg-wash hover:text-foreground"
             aria-label={settingsLabel}
           >
             <Settings className="size-5" />
@@ -63,7 +63,7 @@ export const EditorFontSizePopover: React.FC<{ trigger: 'activity' | 'mobile' }>
             <div
               role="group"
               aria-label={t('apps.editor.fontSize')}
-              className="flex h-8 shrink-0 items-center overflow-hidden rounded-md border border-border"
+              className="flex h-8 shrink-0 items-center overflow-hidden rounded-md border border-edge shadow-elevation-0"
             >
               <Button
                 type="button"

@@ -294,7 +294,7 @@ const AccountCard: React.FC<{
   const fetchedAt = source.fetched_at !== null ? Date.parse(source.fetched_at) : NaN;
   return (
     <article
-      className={cn('model-hub-quota-card min-w-0 rounded-xl border border-border bg-background', retained && 'model-hub-quota-card--retained')}
+      className={cn('model-hub-quota-card min-w-0 rounded-xl border border-edge bg-surface shadow-elevation-0', retained && 'model-hub-quota-card--retained')}
       aria-label={source.display_name}
       data-quota-source={source.source_id}
     >
@@ -368,7 +368,7 @@ const AccountCard: React.FC<{
 const StatCard: React.FC<{ label: string; icon: React.ReactNode; value: React.ReactNode; note: React.ReactNode; primary?: boolean }> = ({
   label, icon, value, note, primary,
 }) => (
-  <div className={cn('model-hub-usage-stat flex flex-col rounded-xl border border-border bg-background', primary && 'model-hub-quota-stat--primary')}>
+  <div className={cn('model-hub-usage-stat flex flex-col rounded-xl border border-edge bg-surface shadow-elevation-0', primary && 'model-hub-quota-stat--primary')}>
     <span className="model-hub-usage-stat-label flex items-center justify-between gap-2">{label}{icon}</span>
     <span className="model-hub-usage-stat-value font-semibold text-foreground">{value}</span>
     <span className="model-hub-usage-stat-note">{note}</span>
@@ -419,7 +419,7 @@ export const QuotaTab: React.FC<{
 
   return (
     <section className="model-hub-usage" aria-label={t('settings.models.quota.title') as string}>
-      <div className="model-hub-usage-bar flex flex-col gap-3 rounded-xl border border-border bg-surface sm:flex-row sm:items-center sm:justify-between">
+      <div className="model-hub-usage-bar flex flex-col gap-3 rounded-xl border border-edge bg-surface sm:flex-row sm:items-center sm:justify-between shadow-elevation-0">
         <div className="flex min-w-0 flex-col gap-1">
           <h2 className="model-hub-usage-title font-semibold text-foreground">{t('settings.models.quota.title')}</h2>
           <p className="model-hub-usage-note flex flex-wrap gap-x-2">
@@ -434,7 +434,7 @@ export const QuotaTab: React.FC<{
         </Button>
       </div>
       {regionFailed(quotaRead) && (
-        <div className="model-hub-usage-failure flex items-center justify-between gap-3 rounded-xl border border-border bg-background text-destructive-ink">
+        <div className="model-hub-usage-failure flex items-center justify-between gap-3 rounded-xl border border-edge bg-surface text-destructive-ink shadow-elevation-0">
           <span>{t('settings.models.toast.refreshFailed')}</span>
           <button type="button" onClick={() => void onRetry?.()} className="model-hub-action-mint shrink-0 font-semibold">
             {t('settings.models.upstream.retry')}
@@ -444,7 +444,7 @@ export const QuotaTab: React.FC<{
       {summary === null
         ? quotaRead.kind === 'loading' && <p className="model-hub-usage-pending text-muted">{t('common.loading')}</p>
         : sources.length === 0
-          ? <p className="model-hub-usage-empty rounded-xl border border-border bg-background text-center text-muted">{t('settings.models.quota.empty')}</p>
+          ? <p className="model-hub-usage-empty rounded-xl border border-edge bg-surface text-center text-muted shadow-elevation-0">{t('settings.models.quota.empty')}</p>
           : <>
               <div className={cn('model-hub-quota-stats grid gap-4', value && 'model-hub-quota-stats--valued')}>
                 <StatCard
@@ -521,7 +521,7 @@ export const QuotaTab: React.FC<{
                 )}
               </div>
               {upcoming.length > 0 && (
-                <div className="model-hub-quota-timeline flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface" aria-label={t('settings.models.quota.upcoming') as string}>
+                <div className="model-hub-quota-timeline flex flex-wrap items-center gap-2 rounded-xl border border-edge bg-surface shadow-elevation-0" aria-label={t('settings.models.quota.upcoming') as string}>
                   <span className="model-hub-quota-timeline-title flex items-center gap-1.5"><TimerReset className="size-[13px]" aria-hidden />{t('settings.models.quota.upcoming')}</span>
                   {upcoming.map(({ source, window }) => (
                     <span key={`${source.source_id}:${window.id}`} className={cn('model-hub-quota-chip flex min-w-0 max-w-full items-baseline gap-1.5', windowIsExhausted(window, now) && toneClass('danger'))}>

@@ -34,7 +34,7 @@ export function InstallOutcome({ result, className }: { result: InstallOutcomeRe
             <p className="mt-2 font-mono text-muted">{t('agentDetection.exitCode', { code: exitCode })}</p>
           )}
           {output && (
-            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded border border-border bg-background px-3 py-2 font-mono text-[11px] text-muted">
+            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded border border-edge bg-surface px-3 py-2 font-mono text-[11px] text-muted shadow-elevation-0">
               {output}
             </pre>
           )}

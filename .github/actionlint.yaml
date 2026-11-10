@@ -1,0 +1,12 @@
+# Keep aligned with scripts/ci_manifest_guard.py's pinned actionlint 1.7.12.
+self-hosted-runner:
+  labels:
+    - avibe
+paths:
+  .github/workflows/publish.yml:
+    ignore:
+      # GitHub supports concurrency.queue single|max; actionlint 1.7.12 does not.
+      # The guard independently validates this field and its cancel-in-progress
+      # constraint. Remove this exact exception when actionlint supports it.
+      # https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#concurrency
+      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'

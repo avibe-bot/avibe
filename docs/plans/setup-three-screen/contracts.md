@@ -197,6 +197,15 @@ screens and L1 extends the same assertion to three. The Back button keeps its bo
 screen 1 by staying invisible (`visibility: hidden`), which is how the reference holds the
 anchor without a layout shift.
 
+**Phones (owner amendment, 2026-11-10).** Below 760px the anchor is held by pinning, not by
+reservation: the footer is a bar stuck to the bottom of the shell's scroll window
+(`position: sticky`, safe-area padded), so the primary action has one viewport box on every
+screen and is always in reach. Nothing else is reserved there: inactive screens are not
+drawn, each screen is as tall as what it draws and starts under its own heading, the
+heading reserves no second line, and the post-action slot is a row in flow under the
+current screen. The first screen drops the empty Back row (`data-absent`) instead of
+holding it. The desktop bands keep the shared reservation below unchanged.
+
 **Shared reservation.** `.onboarding-stage` remains the box both the story and the screens
 below it occupy, so the anchor's vertical position does not depend on what a screen draws.
 Screen 2's migration offer uses the shell's primary action and a controlled review dialog;

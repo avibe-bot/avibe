@@ -8,7 +8,12 @@ import pytest
 from core.web_push import (
     DEFAULT_WEB_PUSH_TIMEOUT_SECONDS,
     DEFAULT_WEB_PUSH_TTL_SECONDS,
+    MAX_NOTIFICATION_BODY_SCALARS,
+    MAX_NOTIFICATION_PLAINTEXT_BYTES,
+    MAX_NOTIFICATION_TAG_BYTES,
+    MAX_NOTIFICATION_TITLE_SCALARS,
     load_or_create_vapid_keys,
+    serialize_notification_payload,
     send_web_push,
 )
 from storage import web_push_service
@@ -683,3 +688,42 @@ def test_send_web_push_passes_vapid_signer_and_timeout(monkeypatch, tmp_path):
     assert calls[0]["ttl"] == DEFAULT_WEB_PUSH_TTL_SECONDS
     assert not isinstance(calls[0]["vapid_private_key"], str)
     assert calls[0]["subscription_info"]["endpoint"] == "https://push.example.test/sub/1"
+
+
+def test_notification_serializer_preserves_unicode_and_shared_limits():
+    payload = {
+        "title": "任务完成" * 100,
+        "body": "已完成：你好，世界 🌏" * 100,
+        "url": "/chat/ses_123?msg=msg_456&from=notification",
+        "tag": "session:ses_123" * 20,
+        "badge_count": 3,
+        "category": "sessions",
+    }
+
+    serialized = serialize_notification_payload(payload)
+    decoded = json.loads(serialized)
+
+    assert len(decoded["title"]) <= MAX_NOTIFICATION_TITLE_SCALARS
+    assert len(decoded["body"]) <= MAX_NOTIFICATION_BODY_SCALARS
+    assert len(decoded["tag"].encode("utf-8")) <= MAX_NOTIFICATION_TAG_BYTES
+    assert "任务完成" in decoded["title"]
+    assert "🌏" in decoded["body"]
+    assert len(serialized.encode("utf-8")) <= MAX_NOTIFICATION_PLAINTEXT_BYTES
+    assert "\\u" not in serialized
+
+
+def test_notification_serializer_rejects_control_characters_in_tag():
+    with pytest.raises(ValueError, match="notification_tag_contains_control_character"):
+        serialize_notification_payload({"title": "x", "body": "y", "tag": "x\n"})
+
+
+def test_notification_serializer_rejects_unbounded_non_text_fields():
+    with pytest.raises(ValueError, match="notification_payload_too_large"):
+        serialize_notification_payload(
+            {
+                "title": "",
+                "body": "",
+                "tag": "x",
+                "extra": "x" * (MAX_NOTIFICATION_PLAINTEXT_BYTES + 1),
+            }
+        )

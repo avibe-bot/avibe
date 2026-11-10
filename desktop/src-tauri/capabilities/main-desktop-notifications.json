@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-desktop-notifications",
+  "description": "Native desktop notification preference controls for the Workbench. These commands are available only to the main window on the local Runtime origin.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": [
+    "allow-desktop-notifications-state",
+    "allow-desktop-notifications-set-enabled"
+  ]
+}

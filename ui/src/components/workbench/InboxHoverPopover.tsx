@@ -104,9 +104,9 @@ function InboxPeekRow({
     'has-[a:focus-visible]:ring-2 has-[a:focus-visible]:ring-ring',
     unread > 0
       ? quiet
-        ? 'border-l-2 border-border-strong bg-foreground/[0.04] hover:bg-foreground/[0.07] active:bg-foreground/[0.07]'
-        : 'border-l-2 border-mint bg-mint/[0.06] hover:bg-mint/[0.10] active:bg-mint/[0.10]'
-      : 'hover:bg-foreground/[0.04] active:bg-foreground/[0.04]',
+        ? 'bg-foreground/[0.04] hover:bg-foreground/[0.07] active:bg-foreground/[0.07]'
+        : 'bg-mint/[0.06] hover:bg-mint/[0.10] active:bg-mint/[0.10]'
+      : 'hover:bg-wash active:bg-wash-press',
   );
   if (bot) {
     // A Bot's conversation reads as the Bot: its avatar and name instead of "project · title"
@@ -260,7 +260,7 @@ export const InboxHoverPopover: React.FC<{
       aria-label={t('workbench.inbox.title')}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="flex w-[360px] flex-col gap-2.5 rounded-2xl border-border-strong bg-surface-2 p-3.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+      className="flex w-[360px] flex-col gap-2.5 rounded-2xl p-3.5"
     >
       {view === 'notifications' ? (
         <>
@@ -288,7 +288,7 @@ export const InboxHoverPopover: React.FC<{
               onClick={() => setView('notifications')}
               aria-label={t('workbench.notifications.open')}
               title={t('workbench.notifications.open')}
-              className="inline-flex h-[22px] items-center gap-1 rounded-md border border-border-strong px-1.5 text-[10px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+              className="inline-flex h-[22px] items-center gap-1 rounded-md border border-edge px-1.5 text-[10px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
             >
               <BellIcon className={clsx('size-3.5', mode === 'off' && 'text-muted')} />
               {mode !== 'all' && <span>{t(`workbench.notifications.mode.${mode}`)}</span>}
@@ -300,8 +300,8 @@ export const InboxHoverPopover: React.FC<{
               className={clsx(
                 'rounded-md border px-2 py-1 text-[10px] font-medium transition',
                 totalUnread === 0
-                  ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-                  : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
+                  ? 'cursor-not-allowed border-edge text-muted bg-field hover:bg-field-hover'
+                  : 'border-edge text-foreground bg-field hover:bg-field-hover',
               )}
             >
               {t('workbench.inbox.markAllRead')}
@@ -317,7 +317,7 @@ export const InboxHoverPopover: React.FC<{
                 <button
                   type="button"
                   onClick={onRetry}
-                  className="inline-flex items-center gap-1 rounded-md border border-border-strong px-2 py-1 text-[10px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
+                  className="inline-flex items-center gap-1 rounded-md border border-edge px-2 py-1 text-[10px] font-medium text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
                 >
                   <RefreshCw className="size-3" />
                   {t('common.retry')}
@@ -359,7 +359,7 @@ export const InboxHoverPopover: React.FC<{
                       type="button"
                       data-flip-id={`beyond:${section.category ?? 'all'}`}
                       onClick={() => openFullInbox('unread')}
-                      className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-foreground/[0.04] hover:text-foreground"
+                      className="rounded-lg border border-dashed border-border px-3 py-2 text-left text-[11px] leading-relaxed text-muted transition hover:bg-wash hover:text-foreground"
                     >
                       {t('workbench.inbox.moreUnreadInFull')}
                     </button>

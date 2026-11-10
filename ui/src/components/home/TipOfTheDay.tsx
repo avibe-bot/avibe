@@ -6,7 +6,7 @@ import { useIsDesktop } from '@/lib/useIsDesktop';
 import { Button } from '../ui/button';
 import type { Tip } from './homeCopy';
 
-const CONTROL_CLASS = 'grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-foreground/5 hover:text-foreground';
+const CONTROL_CLASS = 'grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-wash hover:text-foreground';
 // A horizontal swipe this far (px) on a phone turns to the next or previous tip.
 const SWIPE_PX = 40;
 
@@ -61,7 +61,7 @@ export function TipOfTheDay({
           if (from === null || to === undefined || Math.abs(to - from) < SWIPE_PX) return;
           step(to < from ? 1 : -1);
         }}
-        className="flex w-full items-center gap-3 rounded-2xl border border-border bg-surface-2 py-2.5 pl-2.5 pr-1"
+        className="flex w-full items-center gap-3 rounded-2xl border border-edge bg-surface-2 py-2.5 pl-2.5 pr-1 shadow-elevation-0"
       >
         {mark}
         <span className="flex min-w-0 flex-1 flex-col">
@@ -78,7 +78,7 @@ export function TipOfTheDay({
   return (
     <section
       aria-label={t('workbench.home.tips.label')}
-      className="flex h-13 w-full items-center gap-3 rounded-2xl border border-border bg-surface-2 pl-2.5 pr-1.5"
+      className="flex h-13 w-full items-center gap-3 rounded-2xl border border-edge bg-surface-2 pl-2.5 pr-1.5 shadow-elevation-0"
     >
       {mark}
       <span className="flex min-w-0 flex-1 items-baseline gap-3 text-sm">

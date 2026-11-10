@@ -1,11 +1,11 @@
 # Elevation, edges, state, and glow: one system for the Web UI
 
-Status: approved by the owner on 2026-11-08 (option C, no glass); being implemented.
-Frames: `ui/design/frames/system/elevation.design.tsx` (`system/elevation/*`, `approved`). The new
-tokens (`--elevation-*`, `--edge-border`, `--field*`, `--composer-shadow*`, `--dot-glow-*`,
-`--glow-soft`, `--unread-shadow`) are in `ui/src/index.css`; the rules that apply them to today's
-components, and the two existing tokens the system moves (Dark `--popover`, Light `--ring`), are in
-`ui/design/kit/elevation/elevation.css`, which empties as each part ships.
+Status: approved by the owner on 2026-11-08 (option C, no glass); shipped 2026-11-09 (#3407, #3414,
+#3425, #3426, #3431, and the other fixes below).
+Frames: `system/elevation/scale` and `system/elevation/edges` draw the system with the shipped tokens
+and primitives; every surface it touched is drawn by its own shipped frame. Tokens (`--elevation-*`,
+`--edge-border`, `--field*`, `--composer-shadow*`, `--dot-glow-*`, `--glow-soft`, `--unread-shadow`,
+`--decor-light`, `--mark-light`, and the `wash` colours) are in `ui/src/index.css`.
 
 ## Background
 
@@ -96,26 +96,40 @@ appears outside it; while an Agent works, a light sweeps its edge (2.8 s a turn,
 | 4 | One focus ring | `ring-ring`, `ring-cyan/60`, `ring-mint/60`, `/40`, `/30`; `focus:` (draws on click) mixed with `focus-visible:` | medium |
 | 5 | One segmented control | Inbox filter (glow) and Diagnostics tabs (raised thumb) hand-roll what `SegmentedRadio` already draws | small |
 | 6 | One radius for floating surfaces | Popover md, menus lg, bespoke popovers 2xl, Model Hub 10px → `rounded-xl`; dialogs already mostly `rounded-xl` | small |
-| 7 | Use or delete dead tokens | `--shadow-glow-nav-mint`, `--nav-selected-*`, `--nav-hover-bg` | small |
+| 7 | Use or delete dead tokens (lands in part 2) | `--shadow-glow-nav-mint`, `--nav-selected-*`, `--nav-hover-bg` | small |
 | 8 | Legacy colour aliases | `bg-panel`, `text-text`, `bg-text`, `text-bg`, `bg-bg` ×33, including the Popover and Command primitives | small |
 | 9 | One active-tab indicator | Editor tabs: cyan top line; Terminal tabs: mint bottom line | small |
 | 10 | Snap arbitrary radii outside approved designs | `rounded-[10px]` ×39, `[9px]` ×12, `[4px]`/`[5px]` ×14, `[14px]` ×6 | medium |
 | 11 | Two border strengths per accent | mint borders at 20/25/30/35/40/45/50/60% | wide, low priority |
-| 12 | A selected Bot's halo is cut off on the right | in the sidebar strip, the next item (Add, or the next Bot) paints over the selected avatar's halo, leaving a straight edge (`system/elevation/bots-selected-pm-before`) | small |
+| 12 | A selected Bot's halo is cut off on the right | in the sidebar strip, when the last Bot is selected, its halo ends in a straight edge beside Add (the strip's scroll box clipped it; fixed in #3433) | small |
 
-Chosen: 1, 2, 3, 4, 5, 7, 12.
+Chosen and shipped: 1 and 3 (#3440), 2 (#3432), 4 (#3439), 5 (#3437), 7 (with part 2, #3426),
+12 (#3433).
 
 ## Implementation
 
-Each part lands from the latest `master` with light/dark, desktop/phone screenshots, and moves its
-frames from `approved` to `shipped` (or deletes the ones that only repeat a shipped frame) and its
-rules out of the kit stylesheet.
+Each part landed from the latest `master` with light/dark, desktop/phone screenshots, deleted the
+approved review frames its shipped frames then matched, and took its rules out of the review kit
+(`ui/design/kit/elevation/`, removed at the end).
 
-1. Primitives: Dark `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
+1. Primitives (shipped): Dark `--popover`; Light `--ring`; Card/Panel, `field.ts` inputs, outline/secondary buttons, Popover,
    ResponsiveMenu, ContextMenu, Dialog, Toast, switch, segmented control, the composer.
-2. Call sites and state: hand-written `rounded + border-border + bg-surface` cards and bespoke
+2. Call sites and state (shipped): hand-written `rounded + border-border + bg-surface` cards and bespoke
    shadow literals onto the primitives or tokens; state glows to fill/border; card washes to the
-   edge; navigation onto `--nav-selected-*` (fix 7).
-3. Glow theming: dot and microphone glows follow the theme; Light brand decoration and unread cards
-   as same-hue soft shadows; the new-session button's drop shadow.
-4. One small PR per chosen fix (1 and 3 share their call sites and land together).
+   edge; navigation onto `--nav-selected-*` (fix 7). The dead tokens go with it:
+   `--shadow-mint-card*`, `--shadow-glow-nav-mint`, `--nav-hover-bg` (the nav hovers with the
+   shared `foreground/[0.04]` wash), and the desktop and connection overlay shadows.
+   `--card-wash` stays for the onboarding provider cards. Deliberately unchanged: the Agents
+   "Run" button keeps its mint tint; chat bubbles; the new-Agent dialog's `border-2` choice tiles;
+   the Model Hub drawer's directional shadow; the onboarding stylesheet.
+3. Glow theming (shipped): every glow role but `cta` mixes its hue from the theme's accent (Dark
+   unchanged), and dots are 6px at 60% in Light. Brand decoration (icon tiles, eyebrow badges,
+   success seals) draws `shadow-decor-*`: the glow in Dark, `--glow-soft` in Light. A brand mark (the
+   logo image, the Apps launcher) draws `shadow-mark-*`: the glow in Dark, nothing in Light. An unread
+   card draws `shadow-unread`; a listening voice card draws `shadow-elevation-2-live`; the phone tab
+   bar's new-session button keeps only the brand button's glow. Where no approved frame drew a case,
+   the text above decides: the mint eyebrow, the success seals, and the Doctor tile take the soft
+   shadow like every other decoration, and the press ring (a live microphone) takes the theme's mint.
+4. One small PR per chosen fix (1 and 3 share their call sites and landed together): the hover and
+   press wash is `bg-wash` / `bg-wash-press` (`bg-surface-wash*` on an element resting on
+   `bg-surface`); hovers that step up from their own resting tint keep their step.

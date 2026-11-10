@@ -931,17 +931,14 @@ def test_claude_snapshot_ignores_native_default_models(monkeypatch, tmp_path):
 
     assert "custom-claude-model" not in snapshot["models"]
     assert "custom-fast-model" not in snapshot["models"]
-    assert snapshot["models"][:2] == ["claude-fable-5-1", "claude-fable-5"]
-    assert snapshot["model_labels"]["claude-fable-5-1"] == "claude-fable-5-1 [1M]"
-    assert [option["value"] for option in snapshot["reasoning_options"]["claude-fable-5-1"]] == [
-        "__default__",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
-    assert snapshot["models"][2] == "claude-opus-5-5"
+    assert snapshot["models"][:3] == ["claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]
+    for model in ("claude-fable-5-2", "claude-fable-5-1", "fable"):
+        assert model in snapshot["models"]
+        assert snapshot["model_labels"][model] == f"{model} [1M]"
+        assert [option["value"] for option in snapshot["reasoning_options"][model]] == [
+            "__default__", "low", "medium", "high", "xhigh", "max",
+        ]
+    assert snapshot["models"][3] == "claude-opus-5-5"
     assert snapshot["model_labels"]["claude-opus-5-5"] == "claude-opus-5-5 [1M]"
     assert [option["value"] for option in snapshot["reasoning_options"]["claude-opus-5-5"]] == [
         "__default__",
@@ -1010,7 +1007,7 @@ def test_remote_hidden_tombstone_overrides_stale_local_visible(monkeypatch, tmp_
     assert "retired-model" not in snapshot["models"]
 
 
-def test_gpt_6_sol_generations_and_luna_follow_astra_in_the_bundled_catalog():
+def test_gpt_6_models_keep_existing_priorities_when_adding_terra():
     codex = {
         entry["id"]: entry
         for entry in backend_model_catalog.visible_backend_model_entries(
@@ -1019,10 +1016,11 @@ def test_gpt_6_sol_generations_and_luna_follow_astra_in_the_bundled_catalog():
     }
     ordered = sorted(codex.values(), key=lambda entry: entry["priority"])
 
-    assert [entry["id"] for entry in ordered[:4]] == [
-        "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
+    assert [entry["id"] for entry in ordered[:5]] == [
+        "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra",
     ]
-    for model in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"):
+    assert codex["gpt-6.1-terra"]["reasoning_efforts"] == ["none", "low", "medium", "high", "xhigh", "max"]
+    for model in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra"):
         assert codex[model]["visibility"] == "list"
     for model in ("gpt-6-sol", "gpt-6-luna"):
         assert codex[model]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]

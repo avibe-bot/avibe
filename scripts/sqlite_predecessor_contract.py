@@ -281,13 +281,32 @@ def _projection_probe(action: str, home: Path) -> dict:
 
 
 def _run(*args: str, **kwargs) -> str:
+    if args[:2] == ("gh", "api") or args[:3] == ("gh", "release", "download"):
+        # Lazy import: isolated --probe processes must import only the actual
+        # predecessor wheel, not this checkout's scripts or dependencies.
+        from scripts.release_asset_download import run_gh_read
+
+        return run_gh_read(*args[1:], **kwargs)
     result = subprocess.run(args, check=True, capture_output=True, text=True, **kwargs)
     return result.stdout
 
 
+def _is_avibe_release(tag: str) -> bool:
+    from scripts.release_package_version import package_version_from_release_tag
+
+    try:
+        package_version_from_release_tag(tag)
+    except ValueError:
+        return False
+    return True
+
+
 def previous_release(repo: str, *, release_tag: str | None = None) -> dict:
     pages = json.loads(_run("gh", "api", f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp"))
-    releases = [item for page in pages for item in page if not item["draft"] and item.get("published_at")]
+    # The repository also publishes managed-runtime assets (model-hub-engine-v*,
+    # git-runtime-v*); they carry no Avibe wheel and are never a predecessor.
+    releases = [item for page in pages for item in page if not item["draft"] and item.get("published_at")
+                and _is_avibe_release(item["tag_name"])]
     # A rerun of an already-published target still compares with its immediate
     # predecessor, not with itself or a release published after that target.
     target = next((item for item in releases if item["tag_name"] == release_tag), None)
@@ -446,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"Published predecessor {tag} lacks a checksummed {name}")
     with tempfile.TemporaryDirectory(prefix="sqlite-predecessor-") as directory:
         home = Path(directory).resolve()
-        _run("gh", "release", "download", tag, "--repo", args.repo, "--pattern", name, "--dir", str(home))
+        _run("gh", "release", "download", tag, "--repo", args.repo, "--pattern", name, "--dir", str(home), "--clobber")
         wheel = home / name
         digest = "sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest()
         if digest != asset["digest"]:

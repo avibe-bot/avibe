@@ -40,17 +40,42 @@ from pathlib import Path
 
 TEAM_ID = "68B2SQ6YK3"
 BUNDLE_ID = "bot.avibe.ios"
+NOTIFICATION_SERVICE_BUNDLE_ID = "bot.avibe.ios.notification-service"
 APPLICATION_IDENTIFIER = f"{TEAM_ID}.{BUNDLE_ID}"
+NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER = (
+    f"{TEAM_ID}.{NOTIFICATION_SERVICE_BUNDLE_ID}"
+)
 INTERNAL_GROUP = "Avibe Internal"
 KEYCHAIN_NAME = "avibe-ios-signing.keychain-db"
 ASC_API = "https://api.appstoreconnect.apple.com"
-# The entitlement the app's passkeys need; the profile must grant it.
-REQUIRED_ENTITLEMENTS = {"com.apple.developer.associated-domains": ["webcredentials:avibe.bot"]}
+PRIVATE_KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios"
+SHARED_KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios.push"
+# Kept as the shared-group alias for older callers and fixtures.
+KEYCHAIN_ACCESS_GROUP = SHARED_KEYCHAIN_ACCESS_GROUP
+MAIN_REQUIRED_ENTITLEMENTS = {
+    "aps-environment": ["production"],
+    "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+    "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+    "keychain-access-groups": [
+        PRIVATE_KEYCHAIN_ACCESS_GROUP,
+        SHARED_KEYCHAIN_ACCESS_GROUP,
+    ],
+}
+NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS = {
+    "com.apple.security.application-groups": ["group.bot.avibe.ios"],
+    "keychain-access-groups": [SHARED_KEYCHAIN_ACCESS_GROUP],
+}
+FORBIDDEN_ENTITLEMENTS = {
+    "com.apple.developer.usernotifications.filtering",
+}
+# Kept as the main-app alias for callers and older tests.
+REQUIRED_ENTITLEMENTS = MAIN_REQUIRED_ENTITLEMENTS
 
 SECRET_NAMES = (
     "IOS_DISTRIBUTION_P12_BASE64",
     "IOS_DISTRIBUTION_P12_PASSWORD",
     "IOS_APP_STORE_PROFILE_BASE64",
+    "IOS_NOTIFICATION_SERVICE_PROFILE_BASE64",
     "IOS_APPLE_TEAM_ID",
     "IOS_APP_STORE_CONNECT_KEY_ID",
     "IOS_APP_STORE_CONNECT_ISSUER_ID",
@@ -109,14 +134,42 @@ def app_store_connect_key(value: str) -> bytes:
 # Provisioning profile
 
 
-def check_profile(profile: dict, *, now: datetime | None = None) -> None:
-    """An App Store profile for this app, current, granting the entitlements it needs."""
+def keychain_profile_grant_covers(required_group: str, grant: object) -> bool:
+    """Whether one profile allowlist entry authorizes an exact signed group."""
+    if not isinstance(grant, str):
+        return False
+    if grant == required_group:
+        return True
+    if grant.count("*") != 1 or not grant.endswith(".*"):
+        return False
+    prefix = grant[:-1]
+    return prefix.startswith(f"{TEAM_ID}.") and required_group.startswith(prefix)
+
+
+def check_profile(
+    profile: dict,
+    *,
+    bundle_id: str = BUNDLE_ID,
+    required_entitlements: dict[str, list[str]] = MAIN_REQUIRED_ENTITLEMENTS,
+    now: datetime | None = None,
+) -> None:
+    """Validate a current App Store profile and its target entitlements."""
     now = now or datetime.now(timezone.utc)
     entitlements = profile.get("Entitlements", {})
+    forbidden = set(FORBIDDEN_ENTITLEMENTS)
+    if bundle_id == NOTIFICATION_SERVICE_BUNDLE_ID:
+        forbidden.add("aps-environment")
+    present_forbidden = sorted(forbidden.intersection(entitlements))
+    if present_forbidden:
+        raise TestFlightError(
+            "The profile contains forbidden entitlements: "
+            + ", ".join(present_forbidden)
+        )
     if TEAM_ID not in profile.get("TeamIdentifier", []):
         raise TestFlightError(f"The profile is not for Team {TEAM_ID}")
-    if entitlements.get("application-identifier") != APPLICATION_IDENTIFIER:
-        raise TestFlightError(f"The profile is not for {APPLICATION_IDENTIFIER}")
+    application_identifier = f"{TEAM_ID}.{bundle_id}"
+    if entitlements.get("application-identifier") != application_identifier:
+        raise TestFlightError(f"The profile is not for {application_identifier}")
     if profile.get("ProvisionedDevices") or profile.get("ProvisionsAllDevices"):
         raise TestFlightError("The profile is a development or ad hoc profile, not App Store")
     if entitlements.get("get-task-allow"):
@@ -124,9 +177,56 @@ def check_profile(profile: dict, *, now: datetime | None = None) -> None:
     expires = profile.get("ExpirationDate")
     if not isinstance(expires, datetime) or expires.replace(tzinfo=expires.tzinfo or timezone.utc) <= now:
         raise TestFlightError("The App Store profile has expired; regenerate it in the Apple Developer account")
-    for key in REQUIRED_ENTITLEMENTS:
-        if key not in entitlements:
+    for key, required in required_entitlements.items():
+        actual = entitlements.get(key)
+        if key == "aps-environment" and actual != "production":
+            raise TestFlightError("The App Store profile must grant aps-environment=production")
+        if actual is None:
             raise TestFlightError(f"The profile does not grant {key}; enable it on the App ID and regenerate")
+        if key == "keychain-access-groups":
+            if isinstance(actual, str):
+                actual_values = [actual]
+            elif isinstance(actual, list):
+                actual_values = actual
+            else:
+                actual_values = []
+            grants_are_well_formed = all(
+                isinstance(grant, str) for grant in actual_values
+            )
+            requirements_are_covered = all(
+                any(
+                    keychain_profile_grant_covers(required_group, grant)
+                    for grant in actual_values
+                )
+                for required_group in required
+            )
+            if (
+                not actual_values
+                or not grants_are_well_formed
+                or not requirements_are_covered
+            ):
+                raise TestFlightError(
+                    "The profile must cover every required keychain-access-groups "
+                    "value with an exact grant or same-Team wildcard"
+                )
+            continue
+        if isinstance(actual, str):
+            actual_values = {actual}
+        else:
+            try:
+                actual_values = set(actual)
+            except (TypeError, ValueError):
+                actual_values = set()
+        if key == "com.apple.developer.associated-domains" and "*" in actual_values:
+            # Provisioning-profile entitlements are an allowlist. A wildcard
+            # grant here covers this domain; the archived app is still checked
+            # below for the exact webcredentials domain it signs.
+            continue
+        if not set(required) <= actual_values:
+            raise TestFlightError(
+                f"The profile does not grant the required {key} values; "
+                "enable them on the App ID and regenerate"
+            )
 
 
 def profile_certificate_hashes(profile: dict) -> set[str]:
@@ -161,14 +261,16 @@ def distribution_identities(listing: str) -> dict[str, str]:
     return found
 
 
-def export_options(profile_name: str) -> dict:
+def export_options(profile_names: dict[str, str] | str) -> dict:
+    if isinstance(profile_names, str):
+        profile_names = {BUNDLE_ID: profile_names}
     return {
         "method": "app-store-connect",
         "destination": "upload",
         "teamID": TEAM_ID,
         "signingStyle": "manual",
         "signingCertificate": "Apple Distribution",
-        "provisioningProfiles": {BUNDLE_ID: profile_name},
+        "provisioningProfiles": profile_names,
         "manageAppVersionAndBuildNumber": False,
         "uploadSymbols": True,
     }
@@ -209,17 +311,44 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
     if not identities:
         raise TestFlightError(f"IOS_DISTRIBUTION_P12_BASE64 holds no Apple Distribution identity of Team {TEAM_ID}")
 
-    # Profile: checked, and issued for the identity just imported.
-    profile_path = work_dir / "AppStore.mobileprovision"
-    profile_path.write_bytes(decode_base64(values["IOS_APP_STORE_PROFILE_BASE64"], "IOS_APP_STORE_PROFILE_BASE64"))
-    profile = decode_profile(profile_path)
-    check_profile(profile)
-    if not profile_certificate_hashes(profile) & identities.keys():
-        raise TestFlightError("The App Store profile was not issued for the imported distribution certificate")
-    uuid = profile["UUID"]
-    for directory in profile_directories(home):
-        directory.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(profile_path, directory / f"{uuid}.mobileprovision")
+    # Both targets must have real App Store profiles before archive signing.
+    profile_specs = [
+        (
+            "app",
+            BUNDLE_ID,
+            "IOS_APP_STORE_PROFILE_BASE64",
+            MAIN_REQUIRED_ENTITLEMENTS,
+        ),
+        (
+            "notification-service",
+            NOTIFICATION_SERVICE_BUNDLE_ID,
+            "IOS_NOTIFICATION_SERVICE_PROFILE_BASE64",
+            NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+        ),
+    ]
+    profiles: dict[str, dict] = {}
+    profile_uuids: dict[str, str] = {}
+    for label, bundle_id, secret_name, required_entitlements in profile_specs:
+        profile_path = work_dir / f"{label}.mobileprovision"
+        profile_path.write_bytes(decode_base64(values[secret_name], secret_name))
+        profile = decode_profile(profile_path)
+        check_profile(
+            profile,
+            bundle_id=bundle_id,
+            required_entitlements=required_entitlements,
+        )
+        if not profile_certificate_hashes(profile) & identities.keys():
+            raise TestFlightError(
+                f"{secret_name} was not issued for the imported distribution certificate"
+            )
+        profiles[label] = profile
+        profile_uuids[label] = profile["UUID"]
+        for directory in profile_directories(home):
+            directory.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(
+                profile_path,
+                directory / f"{profile['UUID']}.mobileprovision",
+            )
 
     # App Store Connect key: for the upload (xcodebuild) and the API calls here.
     key_dir = work_dir / "private_keys"
@@ -229,21 +358,33 @@ def prepare(environment: dict[str, str], *, work_dir: Path, env_file: Path, home
     key_path.chmod(0o600)
 
     options_path = work_dir / "ExportOptions.plist"
-    options_path.write_bytes(plistlib.dumps(export_options(profile["Name"])))
-    (work_dir / "profile-uuid").write_text(uuid)
+    profile_names = {
+        BUNDLE_ID: profiles["app"]["Name"],
+        NOTIFICATION_SERVICE_BUNDLE_ID: profiles["notification-service"]["Name"],
+    }
+    options_path.write_bytes(plistlib.dumps(export_options(profile_names)))
+    (work_dir / "profile-uuids").write_text(
+        json.dumps(profile_uuids, sort_keys=True)
+    )
 
     with env_file.open("a", encoding="utf-8") as output:
         for name, value in {
             "IOS_SIGNING_KEYCHAIN": str(keychain),
-            "IOS_PROFILE_NAME": profile["Name"],
-            "IOS_PROFILE_UUID": uuid,
+            "IOS_PROFILE_NAME": profiles["app"]["Name"],
+            "IOS_PROFILE_UUID": profile_uuids["app"],
+            "IOS_NOTIFICATION_SERVICE_PROFILE_NAME": profiles["notification-service"]["Name"],
+            "IOS_NOTIFICATION_SERVICE_PROFILE_UUID": profile_uuids["notification-service"],
             "IOS_EXPORT_OPTIONS": str(options_path),
             "IOS_ASC_KEY_PATH": str(key_path),
             "IOS_ASC_KEY_ID": values["IOS_APP_STORE_CONNECT_KEY_ID"],
             "IOS_ASC_ISSUER_ID": values["IOS_APP_STORE_CONNECT_ISSUER_ID"],
         }.items():
             output.write(f"{name}={value}\n")
-    print(f"Apple Distribution identity and App Store profile {profile['Name']!r} ({uuid}) are ready.", flush=True)
+    print(
+        "Apple Distribution identity and App Store profiles are ready for "
+        f"{BUNDLE_ID} and {NOTIFICATION_SERVICE_BUNDLE_ID}.",
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,36 +398,141 @@ def archived_app(archive: Path) -> Path:
     return apps[0]
 
 
-def check_signed_app(info: dict, entitlements: dict, *, build: str) -> None:
-    if info.get("CFBundleIdentifier") != BUNDLE_ID:
-        raise TestFlightError(f"The archived app is {info.get('CFBundleIdentifier')!r}, not {BUNDLE_ID}")
+def archived_notification_service_extensions(app: Path) -> list[Path]:
+    extensions = sorted(app.rglob("*.appex"))
+    extension_ids = [
+        plistlib.loads((extension / "Info.plist").read_bytes()).get("CFBundleIdentifier")
+        for extension in extensions
+    ]
+    if set(extension_ids) != {NOTIFICATION_SERVICE_BUNDLE_ID} or len(extensions) != 1:
+        raise TestFlightError(
+            "The archive must contain exactly one "
+            f"{NOTIFICATION_SERVICE_BUNDLE_ID} extension, found {extension_ids}"
+        )
+    return extensions
+
+
+def check_signed_bundle(
+    info: dict,
+    entitlements: dict,
+    *,
+    bundle_id: str,
+    application_identifier: str,
+    required_entitlements: dict[str, list[str]],
+    build: str,
+    require_encryption_declaration: bool = False,
+) -> None:
+    if info.get("CFBundleIdentifier") != bundle_id:
+        raise TestFlightError(
+            f"The archived bundle is {info.get('CFBundleIdentifier')!r}, not {bundle_id}"
+        )
     if info.get("CFBundleVersion") != build:
         raise TestFlightError(f"The archived build number is {info.get('CFBundleVersion')!r}, not {build}")
-    if info.get("ITSAppUsesNonExemptEncryption") is not False:
+    if require_encryption_declaration and info.get("ITSAppUsesNonExemptEncryption") is not False:
         raise TestFlightError("Info.plist must declare ITSAppUsesNonExemptEncryption = false")
-    if entitlements.get("application-identifier") != APPLICATION_IDENTIFIER:
-        raise TestFlightError("The app is not signed for " + APPLICATION_IDENTIFIER)
+    if entitlements.get("application-identifier") != application_identifier:
+        raise TestFlightError("The bundle is not signed for " + application_identifier)
     if entitlements.get("get-task-allow"):
-        raise TestFlightError("The app is signed with get-task-allow; that is a development signature")
-    for key, required in REQUIRED_ENTITLEMENTS.items():
-        if not set(required) <= set(entitlements.get(key, [])):
-            raise TestFlightError(f"The app's {key} entitlement lacks {required}")
+        raise TestFlightError("The bundle is signed with get-task-allow; that is a development signature")
+    forbidden = set(FORBIDDEN_ENTITLEMENTS)
+    if bundle_id == NOTIFICATION_SERVICE_BUNDLE_ID:
+        forbidden.add("aps-environment")
+    present_forbidden = sorted(forbidden.intersection(entitlements))
+    if present_forbidden:
+        raise TestFlightError(
+            "The signed bundle contains forbidden entitlements: "
+            + ", ".join(present_forbidden)
+        )
+    for key, required in required_entitlements.items():
+        actual = entitlements.get(key, [])
+        if key == "aps-environment" and actual != "production":
+            raise TestFlightError("The signed app must carry aps-environment=production")
+        actual_values = {actual} if isinstance(actual, str) else set(actual)
+        if key == "keychain-access-groups" and actual_values != set(required):
+            raise TestFlightError(
+                "The bundle must carry exactly the required "
+                "keychain-access-groups values"
+            )
+        if (
+            key == "com.apple.developer.associated-domains"
+            and actual_values != set(required)
+        ):
+            raise TestFlightError(
+                "The bundle must carry exactly the required "
+                f"{key} values {required}"
+            )
+        if not set(required) <= actual_values:
+            raise TestFlightError(f"The bundle's {key} entitlement lacks {required}")
+
+
+def check_signed_app(info: dict, entitlements: dict, *, build: str) -> None:
+    check_signed_bundle(
+        info,
+        entitlements,
+        bundle_id=BUNDLE_ID,
+        application_identifier=APPLICATION_IDENTIFIER,
+        required_entitlements=MAIN_REQUIRED_ENTITLEMENTS,
+        build=build,
+        require_encryption_declaration=True,
+    )
 
 
 def verify_archive(archive: Path, *, build: str) -> dict:
     app = archived_app(archive)
-    info = plistlib.loads((app / "Info.plist").read_bytes())
-    entitlements = plistlib.loads(
-        run(["codesign", "-d", "--entitlements", "-", "--xml", str(app)], capture=True) or plistlib.dumps({})
-    )
-    check_signed_app(info, entitlements, build=build)
-    # codesign writes signature details to stderr.
-    details = subprocess.run(["codesign", "-dvv", str(app)], capture_output=True, text=True).stderr
-    if f"TeamIdentifier={TEAM_ID}" not in details or "Authority=Apple Distribution:" not in details:
-        raise TestFlightError("The app is not signed by this Team's Apple Distribution identity")
+    extensions = archived_notification_service_extensions(app)
+    bundles = [
+        (
+            app,
+            BUNDLE_ID,
+            APPLICATION_IDENTIFIER,
+            MAIN_REQUIRED_ENTITLEMENTS,
+            True,
+        ),
+        (
+            extensions[0],
+            NOTIFICATION_SERVICE_BUNDLE_ID,
+            NOTIFICATION_SERVICE_APPLICATION_IDENTIFIER,
+            NOTIFICATION_SERVICE_REQUIRED_ENTITLEMENTS,
+            False,
+        ),
+    ]
+    for bundle, bundle_id, application_identifier, required, is_main in bundles:
+        info = plistlib.loads((bundle / "Info.plist").read_bytes())
+        entitlements = plistlib.loads(
+            run(
+                ["codesign", "-d", "--entitlements", "-", "--xml", str(bundle)],
+                capture=True,
+            )
+            or plistlib.dumps({})
+        )
+        check_signed_bundle(
+            info,
+            entitlements,
+            bundle_id=bundle_id,
+            application_identifier=application_identifier,
+            required_entitlements=required,
+            build=build,
+            require_encryption_declaration=is_main,
+        )
+        details = subprocess.run(
+            ["codesign", "-dvv", str(bundle)],
+            capture_output=True,
+            text=True,
+        ).stderr
+        if (
+            f"TeamIdentifier={TEAM_ID}" not in details
+            or "Authority=Apple Distribution:" not in details
+        ):
+            raise TestFlightError(
+                f"{bundle_id} is not signed by this Team's Apple Distribution identity"
+            )
     run(["codesign", "--verify", "--deep", "--strict", str(app)])
-    version = info["CFBundleShortVersionString"]
-    print(f"Archived {BUNDLE_ID} {version} ({build}) is signed for App Store distribution.", flush=True)
+    version = plistlib.loads((app / "Info.plist").read_bytes())["CFBundleShortVersionString"]
+    print(
+        f"Archived {BUNDLE_ID} with {NOTIFICATION_SERVICE_BUNDLE_ID} "
+        f"{version} ({build}) is signed for App Store distribution.",
+        flush=True,
+    )
     return {"version": version, "build": build}
 
 
@@ -432,11 +678,12 @@ def cleanup(work_dir: Path, *, home: Path) -> None:
     if keychain.exists():
         # Deleting the keychain also drops it from the search list.
         subprocess.run(["security", "delete-keychain", str(keychain)], check=False)
-    uuid_file = work_dir / "profile-uuid"
-    if uuid_file.exists():
-        uuid = uuid_file.read_text().strip()
+    uuids_file = work_dir / "profile-uuids"
+    if uuids_file.exists():
+        uuids = json.loads(uuids_file.read_text())
         for directory in profile_directories(home):
-            (directory / f"{uuid}.mobileprovision").unlink(missing_ok=True)
+            for uuid in uuids.values():
+                (directory / f"{uuid}.mobileprovision").unlink(missing_ok=True)
     shutil.rmtree(work_dir, ignore_errors=True)
 
 

@@ -159,15 +159,15 @@ const ExecutorPrice: React.FC<{ candidate: HostedExecutorCandidate }> = ({ candi
   return <OrderPrice text={t(`settings.models.tools.cost.per1k.${price.unit}`, { usd: formatSmallUsd(price.usd_per_1k) })} title={title} href={price.url} />;
 };
 
-/** What the search order's ⓘ explains: how the automatic order is built, and where the built-in service sends a query. */
+/** Explain the automatic order and which service receives a query. */
 const SearchOrderHint: React.FC<{ tool: HostedWebSearchToolStatus; custom: boolean }> = ({ tool, custom }) => {
   const { t } = useTranslation();
-  const keyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
+  const keyless = tool.service_vendors?.some((vendor) => vendor.facts.built_in) === true;
   return (
     <span className="flex flex-col gap-2">
       <span>{t(keyless ? 'settings.models.searchServices.orderAutoKeyless' : 'settings.models.searchServices.orderAuto')}</span>
       {custom && <span>{t('settings.models.searchServices.orderCustom')}</span>}
-      {keyless && <span>{t('settings.models.searchServices.keylessQueryDestination')}</span>}
+      <span>{t('settings.models.searchServices.queryDestination')}</span>
     </span>
   );
 };
@@ -185,10 +185,12 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
   const movable = candidates.filter(candidateEnabled);
   const custom = tool.executor_order !== null;
   const candidateName = (candidate: HostedExecutorCandidate): string => {
-    if (candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID) return t('settings.models.searchServices.vendorName.exa-mcp') as string;
     const vendor = candidate.kind === 'service'
       ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
       : undefined;
+    // A built-in service has no Source row: its localized catalog name stands in.
+    if (vendor?.facts.built_in) return t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string;
+    if (candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID) return t('settings.models.searchServices.vendorName.exa-mcp') as string;
     return lookup.source(candidate.source_id)?.display_name
       ?? (vendor ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string : lookup.name(candidate.source_id));
   };
@@ -267,7 +269,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
               pending={pending}
               label={t(activeWeb ? 'settings.models.searchServices.order' : 'settings.models.tools.order.title') as string}
               listRef={list}
-              rowClassName={(candidate) => cn('model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background', !candidateEnabled(candidate) && 'is-off')}
+              rowClassName={(candidate) => cn('model-hub-tool-executor-row grid items-center rounded-lg border border-edge bg-surface shadow-elevation-0', !candidateEnabled(candidate) && 'is-off')}
               rowAttrs={(candidate) => ({ 'data-executor': candidate.source_id })}
               onReorder={(shown, from, to) => { setRequested(null); onSave(tool.name, { executor_order: executorOrderAfterReorder(tool.executor_order, shown, from, to) }); }}
             >
@@ -276,7 +278,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                 const vendor = candidate.kind === 'service'
                   ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
                   : undefined;
-                const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
+                const keyless = candidate.kind === 'service' && vendor?.facts.built_in === true;
                 const name = candidateName(candidate);
                 const cooldown = candidate.kind === 'service' && candidate.cooldown_until !== null
                   ? cooldownTime(candidate.cooldown_until, i18n.language)
@@ -349,7 +351,7 @@ const PairRow: React.FC<{ tool: HostedToolName; pair: PairEvidence; lookup: Sour
   const refusal = pair.kind === 'refused' ? pair.refusal : null;
   const date = formatMonthDay(pair.kind === 'refused' ? pair.refusal.at : pair.success.at);
   return (
-    <li className="model-hub-tool-pair-row grid items-center rounded-lg border border-border bg-background" data-pair={`${pair.sourceId}:${pair.modelId}`}>
+    <li className="model-hub-tool-pair-row grid items-center rounded-lg border border-edge bg-surface shadow-elevation-0" data-pair={`${pair.sourceId}:${pair.modelId}`}>
       <span className="flex min-w-0 items-center gap-2">
         <SourceGlyph source={lookup.source(pair.sourceId)} />
         <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
@@ -512,7 +514,7 @@ const ImageModels: React.FC<{ tool: HostedImageToolStatus; lookup: SourceLookup;
                   const source = lookup.source(model.source_id);
                   const name = lookup.name(model.source_id);
                   return (
-                    <li key={pairValue(model)} className="model-hub-tool-image-row grid items-center rounded-lg border border-border bg-background" data-image-model={`${model.source_id}:${model.model_id}`}>
+                    <li key={pairValue(model)} className="model-hub-tool-image-row grid items-center rounded-lg border border-edge bg-surface shadow-elevation-0" data-image-model={`${model.source_id}:${model.model_id}`}>
                       <span className="flex min-w-0 flex-col gap-0.5">
                         <span className="flex min-w-0 flex-wrap items-center gap-2">
                           <span className="truncate font-mono font-semibold text-foreground" title={model.model_id}>{model.model_id}</span>
@@ -578,9 +580,9 @@ type ServiceActions = {
 const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save } & ServiceActions> = ({ tool, lookup, pending, onSave, onAddService, onOpenService, onRetryService }) => {
   const { t } = useTranslation();
   const noServices = !tool.service_vendors?.some((vendor) => !vendor.facts.built_in && vendor.source_ids.length > 0);
-  const hasKeyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
+  const hasKeyless = tool.service_vendors?.some((vendor) => vendor.facts.built_in) === true;
   return <div className="flex flex-col gap-4 border-t border-border p-4">
-    <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3">
+    <div className="flex items-center justify-between gap-4 rounded-lg border border-edge bg-surface p-3 shadow-elevation-0">
       <div className="flex min-w-0 flex-col gap-1"><h4 className="font-semibold text-foreground">{t('settings.models.searchServices.preferNative')}</h4><p className="model-hub-tool-note">{t(tool.prefer_native ? 'settings.models.searchServices.nativeOn' : 'settings.models.searchServices.nativeOff')}</p></div>
       <ToggleSwitch enabled={tool.prefer_native} disabled={pending} label={t('settings.models.searchServices.preferNative')} onClick={() => onSave('web_search', { prefer_native: !tool.prefer_native })} />
     </div>
@@ -599,13 +601,13 @@ const ToolCard: React.FC<{ tool: HostedToolStatus; lookup: SourceLookup; pending
   const name = t(`settings.models.tools.tool.${tool.name}.name`) as string;
   const summary = refusalSummary(tool.status);
   return (
-    <section className="model-hub-tool-card overflow-hidden rounded-xl border border-border bg-surface" aria-label={name} data-tool={tool.name}>
+    <section className="model-hub-tool-card overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0" aria-label={name} data-tool={tool.name}>
       <header className="model-hub-tool-card-head flex items-center gap-3">
         <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE.cyan)}><Icon className={cn('size-[17px]', ACCENT_ICON.cyan)} /></span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="flex min-w-0 flex-wrap items-center gap-2">
             <h3 className="model-hub-tool-name font-bold text-foreground">{name}</h3>
-            <code className="model-hub-pill model-hub-fill-0a border border-border font-mono font-normal text-muted">{tool.name}</code>
+            <code className="model-hub-pill model-hub-fill-0a border border-edge font-mono font-normal text-muted">{tool.name}</code>
           </span>
           <span className="model-hub-tool-description">{t(`settings.models.tools.tool.${tool.name}.description`)}</span>
         </span>
@@ -669,7 +671,7 @@ export const ToolsTab: React.FC<{
         <p className="model-hub-tools-subtitle">{t(searchServicesActive(webSearchTool(status)) ? 'settings.models.searchServices.subtitle' : 'settings.models.tools.subtitle')}</p>
       </div>
       {regionFailed(read) && (
-        <div className="model-hub-usage-failure flex items-center justify-between gap-3 rounded-xl border border-border bg-background text-destructive-ink">
+        <div className="model-hub-usage-failure flex items-center justify-between gap-3 rounded-xl border border-edge bg-surface text-destructive-ink shadow-elevation-0">
           <span>{t('settings.models.toast.refreshFailed')}</span>
           <button type="button" onClick={onRetry} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>
         </div>

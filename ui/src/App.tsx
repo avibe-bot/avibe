@@ -112,7 +112,7 @@ import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCap
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
-import { isNativeShell } from './lib/native';
+import { isNativeShell, onNativePushOpened } from './lib/native';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
 import {
@@ -274,7 +274,6 @@ const WebPushNotificationNavigator = () => {
     const navigate = useNavigate();
 
     useEffect(() => {
-        if (!('serviceWorker' in navigator)) return;
         const launchNavigation = createWebPushLaunchNavigation(takeResumedWebPushLaunchPath, navigate);
 
         const onMessage = (event: MessageEvent) => {
@@ -287,11 +286,20 @@ const WebPushNotificationNavigator = () => {
         };
 
         const unsubscribeResume = onPageReactivated(() => launchNavigation.reactivated());
-        navigator.serviceWorker.addEventListener('message', onMessage);
+        const hasServiceWorker = 'serviceWorker' in navigator;
+        if (hasServiceWorker) {
+            navigator.serviceWorker.addEventListener('message', onMessage);
+        }
+        const unsubscribeNative = onNativePushOpened((path) => {
+            launchNavigation.notificationClick(path);
+        });
         return () => {
             launchNavigation.dispose();
             unsubscribeResume();
-            navigator.serviceWorker.removeEventListener('message', onMessage);
+            unsubscribeNative();
+            if (hasServiceWorker) {
+                navigator.serviceWorker.removeEventListener('message', onMessage);
+            }
         };
     }, [navigate]);
 
@@ -626,7 +634,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
             {authorizationUnavailable ? (
                 <div
                     role="status"
-                    className="fixed inset-x-3 bottom-3 z-[100] mx-auto flex max-w-xl items-center justify-between gap-3 border border-border bg-surface px-3 py-2 text-sm text-text shadow-lg"
+                    className="fixed inset-x-3 bottom-3 z-[100] mx-auto flex max-w-xl items-center justify-between gap-3 border border-edge bg-popover px-3 py-2 text-sm text-text shadow-elevation-2"
                 >
                     <span>{t('remoteAuthorization.unavailable.body')}</span>
                     <Button
@@ -687,7 +695,7 @@ const LibraryRoute = () => {
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (
-    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-border bg-surface">
+    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0">
       <Suspense fallback={<AppsRouteFallback />}>
         <LibraryAppBody initialTab={initialTab} />
       </Suspense>
@@ -918,7 +926,17 @@ const router = createBrowserRouter(
       )}
     />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
-      <Route element={<AuthGuard><BotsProvider><BotHoldProvider><AppShell /></BotHoldProvider></BotsProvider></AuthGuard>}>
+      <Route
+        element={(
+          <AuthGuard>
+            <BotsProvider>
+              <BotHoldProvider>
+                <AppShell />
+              </BotHoldProvider>
+            </BotsProvider>
+          </AuthGuard>
+        )}
+      >
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>

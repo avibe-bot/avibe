@@ -123,7 +123,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
   };
 
   const chipClass =
-    'flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl border border-border bg-surface-2/40 px-2.5 py-2.5 text-[12px] font-medium text-muted transition-colors hover:text-foreground active:bg-foreground/[0.05]';
+    'flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl border border-edge bg-surface-2/40 px-2.5 py-2.5 text-[12px] font-medium text-muted transition-colors hover:text-foreground active:bg-foreground/[0.05] shadow-elevation-0';
 
   const sheetTitle: Record<FooterSheet, string> = {
     account: t('more.account'),
@@ -156,7 +156,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
         ref={setDrawer}
         data-state={state}
         onAnimationEnd={onDrawerAnimationEnd}
-        className="motion-sheet pointer-events-auto absolute inset-x-0 bottom-0 max-h-[72dvh] overflow-y-auto rounded-t-3xl border-x border-t border-border bg-surface px-4 pb-[calc(var(--mobile-nav-center-rise)+1rem)] pt-2 shadow-[0_-16px_40px_-12px_rgba(0,0,0,0.55)]"
+        className="motion-sheet pointer-events-auto absolute inset-x-0 bottom-0 max-h-[72dvh] overflow-y-auto rounded-t-3xl border-x border-t border-edge bg-surface px-4 pb-[calc(var(--mobile-nav-center-rise)+1rem)] pt-2 shadow-elevation-3-up"
       >
         {/* Grabber. */}
         <div className="mx-auto mb-3 h-1 w-10 shrink-0 rounded-full bg-border" />
@@ -342,7 +342,7 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
                 type="button"
                 aria-label={t('common.close')}
                 onClick={() => setSheet(null)}
-                className="absolute right-0 top-0 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+                className="absolute right-0 top-0 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-wash hover:text-foreground"
               >
                 <X className="size-4" />
               </button>

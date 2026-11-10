@@ -840,6 +840,24 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('No model matches this search')).toBeTruthy();
   });
 
+  it.each(['Fable 5.2', 'fable-5-2', 'claude fable 5.2'])(
+    'finds an unlabelled model by the name its ID spells: %s',
+    async (query) => {
+      const user = userEvent.setup();
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([
+        model('claude-fable-5-2', { display_name: null }),
+        model('claude-fable-5-1', { display_name: null }),
+      ]));
+      renderDialog();
+
+      const box = screen.getByLabelText('Search name or model ID') as HTMLInputElement;
+      await waitFor(() => expect(box.disabled).toBe(false));
+      await user.type(box, query);
+      expect(screen.getByRole('button', { name: 'Reorder claude-fable-5-2' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Reorder claude-fable-5-1' })).toBeNull();
+    },
+  );
+
   it('falls back to a read-only list when the server predates the catalog', async () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(undefined));
     const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels');

@@ -60,7 +60,7 @@ describe('AppsLauncher foreground affordance', () => {
     expect(trigger).toBeTruthy();
     expect(button.className).toContain('bg-cyan-soft');
     expect(button.className).toContain('text-foreground');
-    expect(button.className).toContain('shadow-glow-sm-cyan');
+    expect(button.className).toContain('shadow-mark-sm-cyan');
     expect(button.querySelector('svg')?.className.baseVal).toContain('text-cyan-ink');
 
     fireEvent.mouseEnter(trigger!);

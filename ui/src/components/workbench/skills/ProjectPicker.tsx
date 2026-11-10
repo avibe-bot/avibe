@@ -55,7 +55,7 @@ export function ProjectPickerView({ projects, value, onChange, open, onOpenChang
               }}
               className={clsx(
                 'flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[12.5px] transition',
-                on ? 'bg-mint-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.04]',
+                on ? 'bg-mint-soft text-foreground' : 'text-foreground hover:bg-wash',
               )}
             >
               <Folder className={clsx('size-3.5 shrink-0', on ? 'text-mint-ink' : 'text-muted')} />

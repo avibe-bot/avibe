@@ -82,7 +82,7 @@ function AccessModeSelect({
           aria-label={t('chat.showPage.sharingModeCurrent', {
             mode: t(`chat.showPage.sharingModes.${value}`),
           })}
-          className="flex h-9 w-40 items-center gap-2 rounded-md border border-border bg-background px-3 text-left text-[13px] font-medium text-foreground outline-none transition hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex h-9 w-40 items-center gap-2 rounded-md border border-edge px-3 text-left text-[13px] font-medium text-foreground outline-none transition focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 bg-field hover:bg-field-hover active:bg-field-hover"
         >
           <CurrentIcon data-access-icon={value} className="size-4 shrink-0 text-cyan-ink" />
           <span className="min-w-0 flex-1 truncate">{t(`chat.showPage.sharingModes.${value}`)}</span>
@@ -116,7 +116,7 @@ function AccessModeSelect({
               }}
               className={clsx(
                 'flex w-full items-start gap-2.5 rounded-sm px-2.5 py-2 text-left transition-colors',
-                selected ? 'bg-mint/[0.1]' : 'hover:bg-foreground/[0.05]',
+                selected ? 'bg-mint/[0.1]' : 'hover:bg-wash',
               )}
             >
               <Icon
@@ -311,7 +311,7 @@ function AudienceCombobox({
           ref={listRef}
           role="listbox"
           aria-label={t('chat.showPage.shareAudienceOptions')}
-          className="absolute left-0 top-9 z-50 max-h-44 w-[calc(100%-2.375rem)] overflow-y-auto rounded-md border border-border bg-background p-1 shadow-lg"
+          className="absolute left-0 top-9 z-50 max-h-44 w-[calc(100%-2.375rem)] overflow-y-auto rounded-md border border-edge bg-popover p-1 shadow-elevation-2"
         >
           {directoryLoading ? (
             <div className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] text-muted">
@@ -335,7 +335,7 @@ function AudienceCombobox({
                 onClick={() => commit(option)}
                 className={clsx(
                   'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs transition-colors',
-                  index === activeIndex ? 'bg-mint/[0.1]' : 'hover:bg-foreground/[0.05]',
+                  index === activeIndex ? 'bg-mint/[0.1]' : 'hover:bg-wash',
                 )}
               >
                 <OptionIcon className="size-3.5 shrink-0 text-muted" />
@@ -772,7 +772,7 @@ export function ShowPageSharingSettings({
                     entries it neither replaces nor absorbs. */}
                 <div className="max-h-40 space-y-1 overflow-y-auto">
                   {organizationId ? (
-                    <div className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-foreground/[0.03] px-2 py-1.5">
+                    <div className="flex min-h-8 items-center gap-2 rounded-md border border-edge bg-foreground/[0.03] px-2 py-1.5 shadow-elevation-0">
                       <Building2 className="size-3.5 shrink-0 text-cyan-ink" />
                       <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
                         {directory?.organization_name
@@ -800,7 +800,7 @@ export function ShowPageSharingSettings({
                     return (
                       <div
                         key={showAccessEntryKey(entry)}
-                        className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-foreground/[0.03] px-2 py-1.5"
+                        className="flex min-h-8 items-center gap-2 rounded-md border border-edge bg-foreground/[0.03] px-2 py-1.5 shadow-elevation-0"
                       >
                         <EntryIcon className="size-3.5 shrink-0 text-muted" />
                         <span

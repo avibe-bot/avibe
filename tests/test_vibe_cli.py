@@ -5476,6 +5476,22 @@ def test_cmd_doctor_passes_deep_mode_to_diagnostics(monkeypatch, capsys):
     capsys.readouterr()
 
 
+def test_cmd_doctor_json_repair_emits_a_single_payload_kind(capsys):
+    parser = cli.build_parser()
+    # Exercise the real result producer without changing installed runtimes.
+    args = parser.parse_args(["doctor", "repair", "model-hub-engine", "--dry-run", "--json"])
+
+    assert cli.cmd_doctor(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["kind"] == "doctor_repair"
+    assert payload["ok"] is True
+    assert payload["dry_run"] is True
+    assert payload["results"][0]["target"] == "model-hub-engine"
+    assert payload["results"][0]["status"] == "planned"
+
+
 def test_doctor_bare_dry_run_does_not_request_repair():
     parser = cli.build_parser()
     args = parser.parse_args(["doctor", "--dry-run"])

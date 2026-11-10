@@ -44,7 +44,7 @@ export const SourcesCard: React.FC<{
   // sources so users never have to coordinate a second scroll area here; beside
   // the routes it sticks near the top so its wires stay readable.
   return (
-    <section className="model-hub-upstream-card relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+    <section className="model-hub-upstream-card relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-edge bg-surface shadow-elevation-0">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
@@ -89,8 +89,8 @@ export const SourcesCard: React.FC<{
           {t('settings.models.upstream.addSubscription')}
         </Button>
         {services ? <ResponsiveMenu open={addOpen} onOpenChange={setAddOpen} sheetTitle={t('settings.models.searchServices.addProvider')} trigger={<Button ref={addTrigger} variant="outline" size="xs" className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"><Plus className="size-3" />{t('settings.models.searchServices.addProvider')}</Button>}>
-          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-surface-2" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddApiKey(addTrigger.current); }}>{t('settings.models.upstream.addApiKey')}</button>
-          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-surface-2" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddSearchService?.(addTrigger.current); }}>{t('settings.models.searchServices.menu')}</button>
+          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-wash" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddApiKey(addTrigger.current); }}>{t('settings.models.upstream.addApiKey')}</button>
+          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-wash" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddSearchService?.(addTrigger.current); }}>{t('settings.models.searchServices.menu')}</button>
         </ResponsiveMenu> : <Button
           variant="outline"
           size="xs"

@@ -167,6 +167,7 @@ async def dispatch_model_hub_rpc(
         return await asyncio.to_thread(
             service.models_dev_matches,
             payload.get("query"),
+            refresh_if_stale=payload.get("refresh_if_stale") is True,
         )
     if operation == "set_agent_chain":
         return await service.set_agent_chain(

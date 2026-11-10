@@ -496,7 +496,9 @@ async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkey
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
-    monkeypatch.setattr(search_chain, "KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS", 0.01)
+    from vibe.model_hub_runtime.api_key_vendors import search_service
+
+    monkeypatch.setitem(search_service("exa-mcp", "search")["limits"], "attempt_seconds", 0.01)
     semaphore = service._keyless_exa_call_semaphore
     for _ in range(3):
         await semaphore.acquire()
@@ -844,7 +846,7 @@ async def test_search_read_and_chain_activate_together(tmp_path, monkeypatch):
         (DEEPSEEK, "service"),
         (KEYLESS_EXA_SOURCE_ID, "service"),
     ]
-    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek", "exa-mcp"}
+    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek", "exa-mcp", "parallel-mcp"}
     answer = await run(service, turn=frozen)
     assert len(calls) == 1 and calls[0][0] == EXA
     assert answer["record"]["status"] == "completed"

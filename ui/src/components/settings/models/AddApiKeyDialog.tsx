@@ -319,7 +319,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="model-hub-add-key-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
-          className="model-hub-add-key-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0 shadow-xl outline-none"
+          className="model-hub-add-key-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-edge bg-popover p-0 shadow-elevation-3 outline-none"
           onEscapeKeyDown={(event) => { if (!canCancel) event.preventDefault(); }}
           onPointerDownOutside={(event) => { if (!canCancel) event.preventDefault(); }}
         >

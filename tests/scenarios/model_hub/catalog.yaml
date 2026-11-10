@@ -49,6 +49,8 @@ capability:
     - tests/test_model_hub_migration_bearer.py
     - tests/test_model_hub_transport_leases.py
     - tests/test_model_hub_hosted_executor.py
+    - tests/test_model_hub_parallel.py
+    - tests/test_model_hub_keyless_catalog.py
     - tests/test_model_hub_search_chain.py
     - tests/test_model_hub_hosted_evidence.py
     - tests/test_model_hub_hosted_images.py
@@ -2675,6 +2677,11 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_search_chain.py::test_vendor_request_mapping_meter_and_evidence
     related_tests:
+      - tests/test_model_hub_keyless_catalog.py::test_json_only_keyless_vendor_roundtrip_dispatch_and_session_reuse
+      - tests/test_model_hub_parallel.py::test_parallel_opt_in_dispatch_headers_and_teardown
+      - tests/test_model_hub_parallel.py::test_parallel_persisted_collision_blocks_registered_dispatch
+      - tests/test_model_hub_parallel.py::test_parallel_ignores_environment_https_proxy
+      - tests/test_model_hub_parallel.py::test_parallel_search_exchange_owns_retry_and_size
       - tests/test_model_hub_search_chain.py::test_order_placement_is_read_only_and_survives_reload
       - tests/test_model_hub_search_chain.py::test_skip_precedence_terminal_reason_and_attempts_without_execution
       - tests/test_model_hub_search_chain.py::test_billing_is_a_function_of_sent_status_and_original_results

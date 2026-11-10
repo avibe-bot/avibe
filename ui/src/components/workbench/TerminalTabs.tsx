@@ -216,7 +216,7 @@ export const TerminalTabs: React.FC<{
               key={tab.key}
               className={clsx(
                 'group/tab flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] transition',
-                tab.key === active ? 'bg-surface text-foreground shadow-[inset_0_-2px_0_0_var(--mint)]' : 'text-muted hover:bg-foreground/[0.05]',
+                tab.key === active ? 'bg-surface text-foreground shadow-[inset_0_-2px_0_0_var(--mint)]' : 'text-muted hover:bg-wash',
               )}
             >
               {editing && editing.key === tab.key ? (
@@ -261,7 +261,7 @@ export const TerminalTabs: React.FC<{
             onClick={addTab}
             aria-label={t('apps.terminal.newTab')}
             title={t('apps.terminal.newTab')}
-            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+            className="grid size-6 shrink-0 place-items-center rounded-md text-muted transition hover:bg-wash hover:text-foreground"
           >
             <Plus className="size-3.5" strokeWidth={2.5} />
           </button>
@@ -284,7 +284,7 @@ export const TerminalTabs: React.FC<{
             <span
               className={clsx(
                 'flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium',
-                persistentReady ? 'border-mint/30 bg-mint/[0.08] text-mint-ink' : 'border-border bg-surface text-muted',
+                persistentReady ? 'border-mint/30 bg-mint/[0.08] text-mint-ink' : 'border-edge text-muted bg-field',
               )}
             >
               <span className={clsx('size-1.5 rounded-full', dotClass)} />

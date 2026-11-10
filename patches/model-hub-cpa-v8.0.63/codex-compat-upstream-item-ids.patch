@@ -1,0 +1,309 @@
+diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
+index dc3f3c5..ad1b632 100644
+--- a/internal/runtime/executor/codex_executor_execute.go
++++ b/internal/runtime/executor/codex_executor_execute.go
+@@ -102,7 +102,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 	sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, "codex executor", doc, isCompat, targetModel, baseURL)
+ 
+ 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+-	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
++	httpReq, upstreamBody, err := e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, isCompat, opts.Headers)
+ 	if err != nil {
+ 		return resp, err
+ 	}
+@@ -302,7 +302,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+ 	optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuthDoc(doc, ctx, opts.Headers, e.cfg, auth, isCompat)
+ 
+ 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+-	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
++	httpReq, upstreamBody, err := e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, isCompat, opts.Headers)
+ 	if err != nil {
+ 		return resp, err
+ 	}
+diff --git a/internal/runtime/executor/codex_executor_request.go b/internal/runtime/executor/codex_executor_request.go
+index 1acd7d7..3465fb8 100644
+--- a/internal/runtime/executor/codex_executor_request.go
++++ b/internal/runtime/executor/codex_executor_request.go
+@@ -145,6 +145,12 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
+ }
+ 
+ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, doc *ojson.Doc, auth *cliproxyauth.Auth, headerSets ...http.Header) (*http.Request, []byte, error) {
++	return e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, false, headerSets...)
++}
++
++// cacheHelperDocWithCompat applies the Codex input-ID rules for the resolved model's
++// compatibility mode before finalizing the request.
++func (e *CodexExecutor) cacheHelperDocWithCompat(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, doc *ojson.Doc, auth *cliproxyauth.Auth, isCompat bool, headerSets ...http.Header) (*http.Request, []byte, error) {
+ 	var headers http.Header
+ 	if len(headerSets) > 0 {
+ 		headers = headerSets[0]
+@@ -190,7 +196,7 @@ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.F
+ 	if cache.ID != "" {
+ 		helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cache.ID)
+ 	}
+-	helps.SanitizeCodexInputItemIDsDoc(doc)
++	helps.SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat)
+ 	helps.FinalizePayloadDoc(ctx, doc)
+ 	var rawJSON []byte
+ 	if doc != nil {
+diff --git a/internal/runtime/executor/codex_executor_signature_test.go b/internal/runtime/executor/codex_executor_signature_test.go
+index ff23e2f..e9bb351 100644
+--- a/internal/runtime/executor/codex_executor_signature_test.go
++++ b/internal/runtime/executor/codex_executor_signature_test.go
+@@ -480,3 +480,71 @@ func TestCodexExecutorDisambiguatesConfigIndex(t *testing.T) {
+ 		t.Fatalf("content text = %q, want keep me", gotText)
+ 	}
+ }
++
++func TestCodexExecutorExecuteStreamKeepsUpstreamIDsOverTheLimitForCompatModel(t *testing.T) {
++	// A real xAI X search turn: the tool-call reasoning and its custom tool call share a
++	// <turn>_<call> suffix and are 84 runes each, over the Codex ID limit.
++	const (
++		toolReasoningID = "tco_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789ab"
++		customToolID    = "ctc_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789ab"
++	)
++	for _, isCompat := range []bool{true, false} {
++		var gotBody []byte
++		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			body, errRead := io.ReadAll(r.Body)
++			if errRead != nil {
++				t.Fatalf("read body: %v", errRead)
++			}
++			gotBody = body
++			w.Header().Set("Content-Type", "text/event-stream")
++			_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"background\":false,\"error\":null}}\n\n"))
++		}))
++
++		cfg := &config.Config{
++			CodexKey: []config.CodexKey{{
++				APIKey:  "test-api-key",
++				BaseURL: server.URL,
++				Models:  []config.CodexModel{{Name: "grok-4.6", Alias: "grok-4.6", IsCompat: isCompat}},
++			}},
++		}
++		executor := NewCodexExecutor(cfg)
++		auth := &cliproxyauth.Auth{
++			Provider:   "codex",
++			Attributes: map[string]string{"base_url": server.URL, "api_key": "test-api-key"},
++		}
++		payload := []byte(`{"model":"grok-4.6","stream":true,"store":false,"input":[` +
++			`{"type":"reasoning","id":"` + toolReasoningID + `","summary":[],"encrypted_content":"xai-opaque-ciphertext"},` +
++			`{"type":"custom_tool_call","id":"` + customToolID + `","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"},` +
++			`{"role":"user","content":[{"type":"input_text","text":"again"}]}` +
++			`]}`)
++
++		streamResult, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
++			Model:   "grok-4.6",
++			Payload: payload,
++		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Stream: true})
++		if err != nil {
++			t.Fatalf("isCompat=%v: ExecuteStream error: %v", isCompat, err)
++		}
++		for range streamResult.Chunks {
++		}
++		server.Close()
++
++		input := ojson.GetBytes(gotBody, "input").Array()
++		if isCompat {
++			if len(input) != 3 || input[0].Get("id").String() != toolReasoningID ||
++				input[0].Get("encrypted_content").String() != "xai-opaque-ciphertext" ||
++				input[1].Get("id").String() != customToolID {
++				t.Fatalf("compat model: xAI-issued IDs not replayed verbatim: %s", gotBody)
++			}
++			continue
++		}
++		// Without compat: the foreign ciphertext and the overlong reasoning ID go, and the
++		// custom tool call's ID is shortened to the Codex limit, as before.
++		if len(input) != 3 || input[0].Get("encrypted_content").Exists() || input[0].Get("id").Exists() {
++			t.Fatalf("non-compat model: reasoning not stripped as before: %s", gotBody)
++		}
++		if id := input[1].Get("id").String(); len([]rune(id)) != 64 || id == customToolID {
++			t.Fatalf("non-compat model: custom tool call ID = %q, want it shortened to 64 runes", id)
++		}
++	}
++}
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index 6074124..360f2ba 100644
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -114,7 +114,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 	sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, "codex executor", doc, isCompat, targetModel, baseURL)
+ 
+ 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+-	httpReq, upstreamBody, err := e.cacheHelperDoc(ctx, from, url, req, doc, auth, opts.Headers)
++	httpReq, upstreamBody, err := e.cacheHelperDocWithCompat(ctx, from, url, req, doc, auth, isCompat, opts.Headers)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
+index bafe8f3..33299f3 100644
+--- a/internal/runtime/executor/codex_websockets_execute.go
++++ b/internal/runtime/executor/codex_websockets_execute.go
+@@ -111,7 +111,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 	if errPromptCache != nil {
+ 		return resp, errPromptCache
+ 	}
+-	helps.SanitizeCodexInputItemIDsDoc(doc)
++	helps.SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat)
+ 	if useSIWC {
+ 		applyCodexSIWCWebsocketBodyRulesDoc(doc, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})
+ 	}
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index d533e83..6661530 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -936,7 +936,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+ 	if errPromptCache != nil {
+ 		return nil, errPromptCache
+ 	}
+-	helps.SanitizeCodexInputItemIDsDoc(doc)
++	helps.SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat)
+ 	if useSIWC {
+ 		applyCodexSIWCWebsocketBodyRulesDoc(doc, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})
+ 	}
+diff --git a/internal/runtime/executor/helps/codex_input_ids.go b/internal/runtime/executor/helps/codex_input_ids.go
+index a538c70..8f06e39 100644
+--- a/internal/runtime/executor/helps/codex_input_ids.go
++++ b/internal/runtime/executor/helps/codex_input_ids.go
+@@ -29,11 +29,19 @@ const (
+ // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
+ // other overlong input item IDs.
+ func SanitizeCodexInputItemIDs(body []byte) []byte {
++	return SanitizeCodexInputItemIDsWithCompat(body, false)
++}
++
++// SanitizeCodexInputItemIDsWithCompat is SanitizeCodexInputItemIDs for a model whose
++// compatibility mode may be enabled. A compatible upstream issues its own item IDs,
++// and some exceed the Codex limit, so with isCompat an overlong ID is kept verbatim:
++// it is neither prefixed nor shortened, and encrypted reasoning carrying one is not removed.
++func SanitizeCodexInputItemIDsWithCompat(body []byte, isCompat bool) []byte {
+ 	if len(body) == 0 {
+ 		return body
+ 	}
+ 	doc := ojson.NewDoc(body)
+-	if !SanitizeCodexInputItemIDsDoc(doc) {
++	if !SanitizeCodexInputItemIDsWithCompatDoc(doc, isCompat) {
+ 		return body
+ 	}
+ 	return doc.Bytes()
+@@ -43,6 +51,12 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
+ // removes encrypted reasoning items whose IDs exceed the Codex limit, and deterministically
+ // shortens other overlong input item IDs.
+ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
++	return SanitizeCodexInputItemIDsWithCompatDoc(doc, false)
++}
++
++// SanitizeCodexInputItemIDsWithCompatDoc applies the ID rules in place on doc, preserving
++// overlong upstream-issued IDs for compatibility models.
++func SanitizeCodexInputItemIDsWithCompatDoc(doc *ojson.Doc, isCompat bool) bool {
+ 	if doc == nil || doc.Len() == 0 {
+ 		return false
+ 	}
+@@ -52,9 +66,16 @@ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
+ 	}
+ 
+ 	items := input.Array()
++	verbatim := func(item ojson.Result) bool {
++		itemID := item.Get("id")
++		return isCompat && itemID.Type == ojson.String && len([]rune(itemID.String())) > codexInputItemIDLimit
++	}
+ 	idStates := make(map[string]uint8, len(items))
+ 	hasDropped := false
+ 	for _, item := range items {
++		if verbatim(item) {
++			continue
++		}
+ 		if shouldDropCodexEncryptedReasoningItem(item) {
+ 			hasDropped = true
+ 			continue
+@@ -87,6 +108,9 @@ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
+ 	}
+ 	changed := false
+ 	for idx, item := range items {
++		if verbatim(item) {
++			continue
++		}
+ 		if shouldDropCodexEncryptedReasoningItem(item) {
+ 			dropped[idx] = true
+ 			changed = true
+diff --git a/internal/runtime/executor/helps/codex_input_ids_test.go b/internal/runtime/executor/helps/codex_input_ids_test.go
+index 1df4d9b..2b9ce99 100644
+--- a/internal/runtime/executor/helps/codex_input_ids_test.go
++++ b/internal/runtime/executor/helps/codex_input_ids_test.go
+@@ -457,3 +457,76 @@ func BenchmarkSanitizeCodexInputItemIDsLargeHistory(b *testing.B) {
+ 		benchmarkSanitizeCodexInputItemIDsOutput = SanitizeCodexInputItemIDs(body)
+ 	}
+ }
++
++// xAI issues input item IDs over the Codex limit: in a real X search turn the tool-call
++// reasoning (tco_) and custom tool call (ctc_) are 84 runes and share a <turn>_<call> suffix,
++// and a web search call (ws_) is 83. A compat model gets every such ID back verbatim; other
++// item types are covered too, since the rule is the ID's length, not its type.
++var overlongUpstreamItems = []struct {
++	name string
++	item string
++	id   string
++}{
++	{"reasoning", `{"type":"reasoning","id":"%s","summary":[],"encrypted_content":"xai-opaque"}`,
++		"tco_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789ab"},
++	{"custom_tool_call", `{"type":"custom_tool_call","id":"%s","call_id":"xs_call-1","name":"x_keyword_search","input":"{}"}`,
++		"ctc_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789ab"},
++	{"web_search_call", `{"type":"web_search_call","id":"%s","status":"completed"}`,
++		"ws_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789abc"},
++	{"function_call", `{"type":"function_call","id":"%s","call_id":"call_1","name":"read","arguments":"{}"}`,
++		"fc_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789abc"},
++	{"message", `{"type":"message","id":"%s","role":"assistant"}`,
++		"msg_6b0014d0-e12f-9b38-ac33-4df9412f3045_call-fbb80085-357f-4d3e-b850-0123456789ab"},
++}
++
++func overlongUpstreamBody(item, id string) []byte {
++	return []byte(`{"input":[` + fmt.Sprintf(item, id) +
++		`,{"type":"function_call","id":"call_2","call_id":"call_2","name":"read","arguments":"{}"}]}`)
++}
++
++func TestSanitizeCodexInputItemIDsWithCompatKeepsUpstreamIDsOverTheLimitVerbatim(t *testing.T) {
++	for _, tc := range overlongUpstreamItems {
++		t.Run(tc.name, func(t *testing.T) {
++			if len([]rune(tc.id)) <= codexInputItemIDLimit {
++				t.Fatalf("fixture ID is %d runes, want over %d", len([]rune(tc.id)), codexInputItemIDLimit)
++			}
++			body := overlongUpstreamBody(tc.item, tc.id)
++
++			got := SanitizeCodexInputItemIDsWithCompat(body, true)
++
++			items := ojson.GetBytes(got, "input").Array()
++			if len(items) != 2 || items[0].Raw != ojson.GetBytes(body, "input.0").Raw {
++				t.Fatalf("upstream item not kept verbatim: %s", got)
++			}
++			// IDs within the limit are normalized as before.
++			if actual := items[1].Get("id").String(); actual != "fc_call_2" {
++				t.Fatalf("short function_call ID = %q, want fc_call_2", actual)
++			}
++		})
++	}
++}
++
++func TestSanitizeCodexInputItemIDsWithoutCompatIsUnchanged(t *testing.T) {
++	for _, tc := range overlongUpstreamItems {
++		t.Run(tc.name, func(t *testing.T) {
++			body := overlongUpstreamBody(tc.item, tc.id)
++
++			got := SanitizeCodexInputItemIDsWithCompat(body, false)
++
++			if string(got) != string(SanitizeCodexInputItemIDs(body)) {
++				t.Fatalf("without compat the result differs from SanitizeCodexInputItemIDs:\n%s\n%s", got, SanitizeCodexInputItemIDs(body))
++			}
++			items := ojson.GetBytes(got, "input").Array()
++			if tc.name == "reasoning" {
++				if len(items) != 1 {
++					t.Fatalf("overlong encrypted reasoning not removed: %s", got)
++				}
++				return
++			}
++			actual := items[0].Get("id").String()
++			if len([]rune(actual)) != codexInputItemIDLimit || actual == tc.id {
++				t.Fatalf("ID = %q, want %q shortened to %d runes", actual, tc.id, codexInputItemIDLimit)
++			}
++		})
++	}
++}

@@ -99,7 +99,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
     <Dialog open onOpenChange={(next) => { if (!next) close(); }}>
       <DialogContent
         closeLabel={t('workbench.newProjectDialog.cancel')}
-        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl p-5"
       >
         <div className="flex min-w-0 items-start gap-3">
           <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint/[0.08] text-mint-ink">
@@ -120,7 +120,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
           <button
             type="button"
             onClick={() => setPhase('pick')}
-            className="flex items-center gap-2 rounded-md border border-border-strong bg-surface-2 px-3 py-2 text-left text-[12px] font-mono text-foreground transition hover:bg-foreground/[0.04]"
+            className="flex items-center gap-2 rounded-md border border-edge px-3 py-2 text-left text-[12px] font-mono text-foreground transition bg-field hover:bg-field-hover active:bg-field-hover"
           >
             <FolderOpen className="size-3.5 shrink-0 text-gold-ink" />
             <span className="flex-1 truncate">{folderPath || '—'}</span>

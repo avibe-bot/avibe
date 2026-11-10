@@ -89,7 +89,7 @@ const ItemRow: React.FC<{
     <div
       className={cn(
         'flex flex-col gap-2 rounded-xl border px-3.5 py-3 sm:flex-row sm:items-center sm:gap-3',
-        checked ? 'border-mint/40 bg-mint-soft/40' : 'border-border',
+        checked ? 'border-mint/40 bg-mint-soft/40' : 'border-edge shadow-elevation-0',
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -504,7 +504,7 @@ export const MigrationDialog: React.FC<{
               </div>
             ))}
             {selectsApiKeys && (
-              <div className="flex items-start gap-3 rounded-xl border border-border px-3.5 py-3">
+              <div className="flex items-start gap-3 rounded-xl border border-edge px-3.5 py-3 shadow-elevation-0">
                 <Checkbox
                   checked={cleanApiKeys}
                   onCheckedChange={(checked) => {

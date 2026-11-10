@@ -86,7 +86,7 @@ const MenuItem: React.FC<{ icon: LucideIcon; onClick: () => void; danger?: boole
     onClick={onClick}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-2 text-left text-[13px] font-normal',
-      danger ? 'text-pink-ink hover:bg-pink/[0.08] hover:text-pink-ink' : 'text-foreground hover:bg-foreground/[0.04]',
+      danger ? 'text-pink-ink hover:bg-pink/[0.08] hover:text-pink-ink' : 'text-foreground hover:bg-wash',
     )}
   >
     <Icon className={clsx('size-3.5 shrink-0', danger ? '' : 'text-muted')} />
@@ -386,7 +386,7 @@ const MobileSessionRow: React.FC<{
       <button
         type="button"
         onClick={onOpen}
-        className="press press-surface flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 py-2.5 text-left hover:bg-foreground/[0.04] active:bg-foreground/[0.04]"
+        className="press press-surface flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 py-2.5 text-left hover:bg-wash active:bg-wash-press"
       >
         <span className={clsx('size-1.5 shrink-0 rounded-full', DOT[session.agent_status] ?? DOT.idle)} />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
@@ -598,14 +598,14 @@ export const ProjectsPage: React.FC = () => {
         <button
           type="button"
           onClick={() => void refreshProjects()}
-          className="flex items-center justify-center gap-2 rounded-xl border border-border bg-surface px-4 py-10 text-sm text-muted transition hover:text-foreground"
+          className="flex items-center justify-center gap-2 rounded-xl border border-edge bg-surface px-4 py-10 text-sm text-muted transition hover:text-foreground shadow-elevation-0"
         >
           <RotateCw className="size-4" />
           {t('projects.loadFailed')}
         </button>
       )}
       {projects !== null && list.length === 0 && !projectsError && (
-        <div className="rounded-xl border border-border bg-surface px-4 py-10 text-center text-sm text-muted">
+        <div className="rounded-xl border border-edge bg-surface px-4 py-10 text-center text-sm text-muted shadow-elevation-0">
           {t('projects.empty')}
         </div>
       )}
@@ -624,7 +624,7 @@ export const ProjectsPage: React.FC = () => {
         const hasHiddenCachedSessions = allSessionRows.length > visibleSessionCount;
         const hasMoreSessions = hasHiddenCachedSessions || !!state.cursor;
         return (
-          <div key={project.id} data-flip-id={`project:${project.id}`} className={clsx('overflow-hidden rounded-xl border border-border bg-surface', projectsHandover)}>
+          <div key={project.id} data-flip-id={`project:${project.id}`} className={clsx('overflow-hidden rounded-xl border border-edge bg-surface shadow-elevation-0', projectsHandover)}>
             <MobileProjectRow
               dragHandle={dragHandle}
               project={project}

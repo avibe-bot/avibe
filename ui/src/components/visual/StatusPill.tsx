@@ -11,9 +11,9 @@ interface StatusPillProps extends React.HTMLAttributes<HTMLSpanElement> {
 
 const TONE_CLASSES: Record<Tone, { wrapper: string; dot: string }> = {
   running: { wrapper: 'border-mint/40 bg-mint/[0.12] text-foreground', dot: 'bg-mint shadow-glow-dot-mint' },
-  stopped: { wrapper: 'border-border-strong bg-surface-2 text-muted', dot: 'bg-muted' },
+  stopped: { wrapper: 'border-edge bg-field text-muted', dot: 'bg-muted' },
   warning: { wrapper: 'border-gold/40 bg-gold/[0.12] text-gold-ink', dot: 'bg-gold' },
-  idle: { wrapper: 'border-border bg-surface text-muted', dot: 'bg-muted' },
+  idle: { wrapper: 'border-edge bg-field text-muted', dot: 'bg-muted' },
 };
 
 export const StatusPill: React.FC<StatusPillProps> = ({ tone = 'idle', label, indicator, className, ...props }) => {

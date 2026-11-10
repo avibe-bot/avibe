@@ -1,4 +1,4 @@
-// Shape and light: the radius scale, the elevation shadows, the card washes, and the accent glow
+// Shape and light: the radius scale, the elevation levels, and the accent glow
 // scale of `src/index.css`, each drawn with the utility a component writes. A glow's geometry and
 // colour live in the token; `glowScale.test.mjs` holds the scale to its rule.
 import { cn } from '@/lib/utils';
@@ -18,18 +18,13 @@ const radii = [
   ['rounded-full', '徽标、开关、头像'],
 ] as const;
 
+// The elevation levels (ui/design: system/elevation/scale): a shadow says how high a surface sits.
 const elevations = [
-  ['shadow-sm', '输入框'],
-  ['shadow-md', '弹出层'],
-  ['shadow-lg', '菜单、提示条'],
-  ['shadow-xl', '对话框、生命周期弹层'],
-  ['shadow-2xl', '手机底部面板'],
-] as const;
-
-const washes = [
-  ['shadow-mint-card-sm', '卡片薄光'],
-  ['shadow-mint-card', '卡片光'],
-  ['shadow-mint-card-lg', '主卡片光'],
+  ['shadow-elevation-0', '卡片、面板、列表行的边'],
+  ['shadow-elevation-1', '输入框条、滑块、开关圆钮'],
+  ['shadow-elevation-2', '菜单、弹出层、提示条、Dock'],
+  ['shadow-elevation-3', '对话框、搜索面板、聚焦窗口'],
+  ['shadow-elevation-3-up', '手机底部面板'],
 ] as const;
 
 // The sized rungs, smallest first: blur 12 → 48, spread a quarter of the blur.
@@ -56,7 +51,6 @@ const roles = [
   ['shadow-glow-cta-cyan', 'cta'],
   ['shadow-glow-cta-violet', 'cta'],
   ['shadow-glow-cta-gold', 'cta'],
-  ['shadow-glow-nav-mint', 'nav · 侧栏选中行'],
   ['shadow-glow-onboarding-mint', 'onboarding · 引导卡片悬停'],
 ] as const;
 
@@ -85,15 +79,10 @@ const shapeSheet = () => (
         </Specimen>
       ))}
     </Section>
-    <Section title="投影" note="浮在内容上方的层">
+    <Section title="投影" note="阴影只表示高度：0 贴地的边、1 抬起、2 浮起、3 遮罩层">
       {elevations.map(([className, use]) => (
-        <Specimen key={className} name={className} use={use} className="w-36">
-          <div className={cn('h-20 w-28 rounded-xl border border-border bg-card', className)} />
-        </Specimen>
-      ))}
-      {washes.map(([className, use]) => (
         <Specimen key={className} name={className} use={use} className="w-40">
-          <div className={cn('h-20 w-28 rounded-xl border border-border bg-card', className)} />
+          <div className={cn('h-20 w-28 rounded-xl border border-edge bg-popover', className)} />
         </Specimen>
       ))}
     </Section>
@@ -102,7 +91,7 @@ const shapeSheet = () => (
 
 const glowSheet = () => (
   <Sheet>
-    <Section title="光晕阶梯" note="居中、扩散为模糊的四分之一，颜色在两个主题下都是暗色霓虹">
+    <Section title="光晕阶梯" note="居中、扩散为模糊的四分之一，颜色是当前主题自己的强调色">
       {sized.map(([className, use]) => (
         <Specimen key={className} name={className} use={use} className="w-44">
           <div className={cn(glowTile, className)} />

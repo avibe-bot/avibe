@@ -1680,6 +1680,7 @@
     "mainSessionProtected": "The desktop mini's main session is managed by Avibe and cannot be archived or edited."
   },
   "hostedTools": {
+    "keylessParallel": "Parallel (free)",
     "keylessExa": "Exa (free)",
     "rateLimitSwitch": "Rate-limited: {sources}; switched to {provider}. Retry after the cooldown, or use Retry now in Models › Tools.",
     "errorCode": {

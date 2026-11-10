@@ -370,6 +370,31 @@ def test_matching_v1_claude_aliases_persist_concrete_observed_id():
     assert _matching_v1_model_id(backend="claude", requested_model="claude-opus-4-6-20250101", source=source) is None
 
 
+def test_matching_v1_fable_alias_uses_observed_family_but_pinned_version_never_downgrades():
+    source = _source(
+        "src_fable01", ("fable", "claude-fable-5", "claude-fable-5-1", "claude-fable-5-2"),
+        kind="subscription", channel="native_cli", credential_ref=None,
+    )
+    assert _matching_v1_model_id(backend="claude", requested_model="fable", source=source) == "claude-fable-5-2"
+    assert _matching_v1_model_id(backend="claude", requested_model="claude-fable-5-1", source=source) == "claude-fable-5-1"
+    source.models = [model for model in source.models if model.id != "claude-fable-5-2"]
+    assert _matching_v1_model_id(backend="claude", requested_model="fable", source=source) == "claude-fable-5-1"
+    assert _matching_v1_model_id(backend="claude", requested_model="claude-fable-5-2", source=source) is None
+
+
+@pytest.mark.parametrize(
+    ("backend", "model", "vendor"),
+    [("claude", "claude-fable-5-2", "anthropic"), ("vibey", "claude-fable-5-2", "anthropic"),
+     ("codex", "gpt-6.1-terra", "openai"), ("opencode", "gpt-6.1-terra", "openai"),
+     ("vibey", "gpt-6.1-terra", "openai")],
+)
+def test_new_api_models_resolve_only_the_exact_observed_id(backend, model, vendor):
+    source = _source("src_exactnew", (model,), vendor=vendor)
+    assert _matching_v1_model_id(backend=backend, requested_model=model, source=source) == model
+    assert _matching_v1_model_id(backend=backend, requested_model=f"{vendor}/{model}", source=source) is None
+    assert _matching_v1_model_id(backend=backend, requested_model="fable", source=source) is None
+
+
 def test_matching_v1_is_literal_for_non_native_and_codex():
     source = _source("src_literal1", ("claude-opus-4-6-20260115",), vendor="anthropic")
     assert _matching_v1_model_id(backend="claude", requested_model="claude-opus-4-6", source=source) is None

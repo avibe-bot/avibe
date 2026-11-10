@@ -60,9 +60,10 @@ export const MenuDrawer: React.FC<{
           }}
           tabIndex={-1}
           className={cn(
-            'fixed z-50 flex flex-col bg-card shadow-2xl outline-none',
+            'fixed z-50 flex flex-col bg-popover outline-none',
             'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:duration-300 data-[state=closed]:duration-200',
-            isMobile ? SHEET : DRAWER,
+            // Level 3; a phone's sheet casts upward from the bottom edge (ui/design: system/elevation/scale).
+            isMobile ? cn(SHEET, 'shadow-elevation-3-up') : cn(DRAWER, 'shadow-elevation-3'),
           )}
         >
           {isMobile && <div className="mx-auto mt-2.5 h-1.5 w-10 shrink-0 rounded-full bg-border-strong" aria-hidden />}
@@ -86,7 +87,7 @@ export const MenuDrawer: React.FC<{
                 {subtitle}
               </DialogPrimitive.Description>
             </div>
-            <DialogPrimitive.Close className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring sm:size-7">
+            <DialogPrimitive.Close className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:size-7">
               <X className="size-5" />
               <span className="sr-only">{t('common.close')}</span>
             </DialogPrimitive.Close>

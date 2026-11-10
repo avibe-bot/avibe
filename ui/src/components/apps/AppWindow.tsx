@@ -320,8 +320,8 @@ export const AppWindow: React.FC<{
         // window shrinks toward the Dock (inline transform above) and stops taking pointer events.
         win.minimized ? 'pointer-events-none opacity-0' : 'pointer-events-auto',
         focused
-          ? 'border-border-strong shadow-[0_28px_60px_-12px_rgba(0,0,0,0.7)]'
-          : 'border-border shadow-[0_16px_40px_-16px_rgba(0,0,0,0.6)]',
+          ? 'border-edge shadow-elevation-3'
+          : 'border-edge shadow-elevation-2',
       )}
       style={style}
     >
@@ -413,7 +413,7 @@ export const AppWindow: React.FC<{
                 // the window minimized and inert, so leave it shown instead.
                 if (!standaloneTab) wm.minimize(win.id);
               }}
-              className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+              className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-wash hover:text-foreground"
             >
               <MessageCircle className="size-3.5" />
             </button>
@@ -446,7 +446,7 @@ export const AppWindow: React.FC<{
               // Stop the titlebar drag/focus gesture from starting on this click.
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+              className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-wash hover:text-foreground"
             >
               <ExternalLink className="size-3.5" />
             </a>

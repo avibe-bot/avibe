@@ -19,6 +19,7 @@ struct NativeShellMetadata: Equatable {
         "app": 1,
         "haptics": 1,
         "keyboardResizesViewport": 1,
+        "push": 1,
         "viewport": 1,
         "voice": 1,
     ]
@@ -76,6 +77,10 @@ enum NativeBridgeMethod: String, CaseIterable {
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
     case navigationHistoryChanged = "navigation.historyChanged"
+    case pushStatus = "push.status"
+    case pushSubscribe = "push.subscribe"
+    case pushUnsubscribe = "push.unsubscribe"
+    case pushOpenedAck = "push.openedAck"
     case viewportSetOuterScrollLocked = "viewport.setOuterScrollLocked"
     case voicePermission = "voice.permission"
 }
@@ -145,6 +150,7 @@ enum NativeBridgeError: Error, Equatable {
     case invalidArgument(String)
     case invalidRequest
     case unsupported
+    case failed(String)
 
     var code: String {
         switch self {
@@ -156,6 +162,8 @@ enum NativeBridgeError: Error, Equatable {
             return "invalid_request"
         case .unsupported:
             return "unsupported"
+        case .failed:
+            return "failed"
         }
     }
 
@@ -169,6 +177,8 @@ enum NativeBridgeError: Error, Equatable {
             return "The native bridge request is malformed."
         case .unsupported:
             return "The native bridge method is not supported by this shell."
+        case .failed(let message):
+            return message
         }
     }
 
@@ -191,7 +201,31 @@ enum NativeBridgeConfiguration {
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool = { _, _ in false },
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
-        showAccount: @escaping () -> Void = {}
+        showAccount: @escaping () -> Void = {},
+        pushStatus: @escaping @MainActor (
+            String?,
+            WebOrigin
+        ) async throws -> [String: Any] = { _, _ in
+            ["state": "unavailable"]
+        },
+        pushSubscribe: @escaping @MainActor (
+            String,
+            Bool,
+            WebOrigin
+        ) async throws -> [String: Any] = { _, _, _ in
+            throw NativePushError.unavailable
+        },
+        pushUnsubscribe: @escaping @MainActor (
+            WebOrigin
+        ) async throws -> [String: Any] = { _ in
+            throw NativePushError.unavailable
+        },
+        pushOpenedAck: @escaping @MainActor (
+            String,
+            WebOrigin
+        ) -> Bool = { _, _ in
+            false
+        }
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
@@ -203,7 +237,11 @@ enum NativeBridgeConfiguration {
             setAccountActionAvailable: setAccountActionAvailable,
             historyDidChange: historyDidChange,
             colorSchemeDidChange: colorSchemeDidChange,
-            showAccount: showAccount
+            showAccount: showAccount,
+            pushStatus: pushStatus,
+            pushSubscribe: pushSubscribe,
+            pushUnsubscribe: pushUnsubscribe,
+            pushOpenedAck: pushOpenedAck
         )
         controller.addScriptMessageHandler(
             handler,
@@ -311,9 +349,41 @@ enum NativeBridgeConfiguration {
             });
           }
 
+          const pushOpenedType = "avibe:native:push.opened";
+          const pushOpenedHandlers = new Set();
+          const deliveredPushOpenedIds = new Set();
+          let pendingPushOpened = null;
+          const deliverPushOpened = (detail, handler) => {
+            const id = detail?.id;
+            if (typeof id !== "string" || id.length === 0 || deliveredPushOpenedIds.has(id)) return;
+            deliveredPushOpenedIds.add(id);
+            handler(detail);
+            void call("push.openedAck", { id }).catch(() => {});
+          };
+          window.addEventListener(pushOpenedType, (nativeEvent) => {
+            if (pushOpenedHandlers.size === 0) {
+              pendingPushOpened = nativeEvent.detail;
+              return;
+            }
+            for (const handler of Array.from(pushOpenedHandlers)) {
+              deliverPushOpened(nativeEvent.detail, handler);
+            }
+          });
+
           const on = (event, handler) => {
             if (typeof event !== "string" || typeof handler !== "function") return () => {};
             const type = `avibe:native:${event}`;
+            if (event === "push.opened") {
+              pushOpenedHandlers.add(handler);
+              const pending = pendingPushOpened;
+              pendingPushOpened = null;
+              if (pending) {
+                queueMicrotask(() => {
+                  if (pushOpenedHandlers.has(handler)) deliverPushOpened(pending, handler);
+                });
+              }
+              return () => pushOpenedHandlers.delete(handler);
+            }
             const listener = (nativeEvent) => handler(nativeEvent.detail);
             window.addEventListener(type, listener);
             return () => window.removeEventListener(type, listener);
@@ -428,6 +498,22 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let pushStatus: @MainActor (
+        String?,
+        WebOrigin
+    ) async throws -> [String: Any]
+    private let pushSubscribe: @MainActor (
+        String,
+        Bool,
+        WebOrigin
+    ) async throws -> [String: Any]
+    private let pushUnsubscribe: @MainActor (
+        WebOrigin
+    ) async throws -> [String: Any]
+    private let pushOpenedAck: @MainActor (
+        String,
+        WebOrigin
+    ) -> Bool
 
     init(
         policy: NativeBridgePolicy,
@@ -436,7 +522,23 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         setAccountActionAvailable: @escaping (WKWebView, Bool) -> Bool,
         historyDidChange: @escaping (WKWebView) -> Bool,
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool,
-        showAccount: @escaping () -> Void
+        showAccount: @escaping () -> Void,
+        pushStatus: @escaping @MainActor (
+            String?,
+            WebOrigin
+        ) async throws -> [String: Any],
+        pushSubscribe: @escaping @MainActor (
+            String,
+            Bool,
+            WebOrigin
+        ) async throws -> [String: Any],
+        pushUnsubscribe: @escaping @MainActor (
+            WebOrigin
+        ) async throws -> [String: Any],
+        pushOpenedAck: @escaping @MainActor (
+            String,
+            WebOrigin
+        ) -> Bool
     ) {
         self.policy = policy
         self.metadata = metadata
@@ -445,6 +547,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.pushStatus = pushStatus
+        self.pushSubscribe = pushSubscribe
+        self.pushUnsubscribe = pushUnsubscribe
+        self.pushOpenedAck = pushOpenedAck
     }
 
     func userContentController(
@@ -468,11 +574,161 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         case .failure(let error):
             reply(replyHandler, error: error)
         case .success(let request):
+            if request.method == .pushStatus
+                || request.method == .pushSubscribe
+                || request.method == .pushUnsubscribe
+                || request.method == .pushOpenedAck
+            {
+                handlePush(
+                    request,
+                    instanceOrigin: policy.instanceOrigin,
+                    replyHandler: replyHandler
+                )
+                return
+            }
             handle(
                 request,
                 sourceWebView: message.webView,
                 replyHandler: replyHandler
             )
+        }
+    }
+
+    private func handlePush(
+        _ request: NativeBridgeRequest,
+        instanceOrigin: WebOrigin,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        switch request.method {
+        case .pushStatus:
+            guard
+                request.params.isEmpty
+                    || (
+                        request.params.count == 1
+                            && request.params["vapidPublicKey"] is String
+                    )
+            else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "push.status accepts an optional vapidPublicKey string."
+                    )
+                )
+                return
+            }
+            let vapidPublicKey = request.params["vapidPublicKey"] as? String
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                do {
+                    let result = try await self.pushStatus(
+                        vapidPublicKey,
+                        instanceOrigin
+                    )
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(
+                        replyHandler,
+                        error: .failed(
+                            (error as? NativePushError)?.bridgeMessage
+                                ?? "The native push status is unavailable."
+                        )
+                    )
+                }
+            }
+        case .pushSubscribe:
+            guard
+                let vapidPublicKey = request.params["vapidPublicKey"] as? String,
+                request.params.keys.allSatisfy({
+                    $0 == "vapidPublicKey" || $0 == "forceResubscribe"
+                }),
+                request.params.count <= 2,
+                request.params["forceResubscribe"] == nil
+                    || request.params["forceResubscribe"] is Bool
+            else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "push.subscribe requires a vapidPublicKey string and accepts an optional forceResubscribe boolean."
+                    )
+                )
+                return
+            }
+            let forceResubscribe =
+                request.params["forceResubscribe"] as? Bool ?? false
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                do {
+                    let result = try await self.pushSubscribe(
+                        vapidPublicKey,
+                        forceResubscribe,
+                        instanceOrigin
+                    )
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(
+                        replyHandler,
+                        error: .failed(
+                            (error as? NativePushError)?.bridgeMessage
+                                ?? "The native push subscription is unavailable."
+                        )
+                    )
+                }
+            }
+        case .pushUnsubscribe:
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "push.unsubscribe does not accept parameters."
+                    )
+                )
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                do {
+                    let result = try await self.pushUnsubscribe(instanceOrigin)
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(
+                        replyHandler,
+                        error: .failed(
+                            (error as? NativePushError)?.bridgeMessage
+                                ?? "The native push unsubscribe is unavailable."
+                        )
+                    )
+                }
+            }
+        case .pushOpenedAck:
+            guard
+                request.params.count == 1,
+                let id = request.params["id"] as? String,
+                !id.isEmpty
+            else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "push.openedAck requires a non-empty id string."
+                    )
+                )
+                return
+            }
+            guard pushOpenedAck(id, instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: [:])
+        default:
+            reply(replyHandler, error: .unsupported)
         }
     }
 
@@ -564,6 +820,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             reply(replyHandler, result: NSNull())
+        case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck:
+            reply(replyHandler, error: .unsupported)
         case .hapticsImpact:
             guard
                 let rawStyle = request.params["style"] as? String,

@@ -288,12 +288,13 @@ const ACCEPTED_BRAND_RATIOS = new Map([
   // it and this guard could not see it. Naming --violet-foreground brings it under
   // the same pin as the rest instead of leaving it undeclared.
   ['dark fill: --violet-foreground on --violet', 4.38],
-  // The light ring is the light brand mint at 50%, which composites to ~1.5:1 — a hint
-  // drawn beside a focused control, not the only cue for it. Dark needs no entry: the
-  // same token over the dark surfaces clears the non-text floor on its own.
-  ['light ring: --ring over --card', 1.61],
-  ['light ring: --ring over --background', 1.55],
-  ['light ring: --ring over --surface-3', 1.53],
+  // The light ring is the light brand mint, opaque (owner, 2026-11-08): a field has no
+  // border at rest, so the ring is its focus edge, and the brand value stays rather than
+  // darkening to reach 3:1. Dark needs no entry: the same token over the dark surfaces
+  // clears the non-text floor on its own.
+  ['light ring: --ring over --card', 2.54],
+  ['light ring: --ring over --background', 2.35],
+  ['light ring: --ring over --surface-3', 2.24],
 ]);
 const PIN_TOLERANCE = 0.01;
 const consultedBrandRatios = new Set();

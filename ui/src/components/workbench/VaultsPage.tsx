@@ -114,7 +114,7 @@ const SecretRow: React.FC<{
   const revealBlocked = !!entryIssue && !revealInBrowser;
   const hasMenu = canManage || canReveal;
   return (
-    <li className="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-xl border border-border bg-surface px-4 py-3 md:flex-nowrap">
+    <li className="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-xl border border-edge bg-surface px-4 py-3 md:flex-nowrap shadow-elevation-0">
       <div
         className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${
           isKeypair ? 'bg-violet/10 text-violet-ink' : 'bg-accent/10 text-accent-ink'
@@ -184,7 +184,7 @@ const SecretRow: React.FC<{
                   aria-label={t('vaults.fields.revealField')}
                   value={selectedField ?? ''}
                   onChange={(event) => onRevealFieldChange(event.target.value)}
-                  className="rounded-md border border-border bg-surface px-2 py-1 font-mono text-foreground"
+                  className="rounded-md border border-field-edge px-2 py-1 font-mono text-foreground bg-field"
                 >
                   {fields.map((field) => <option key={field} value={field}>{field}</option>)}
                 </select>
@@ -203,7 +203,7 @@ const SecretRow: React.FC<{
                     setMenuOpen(false);
                     openVaultsInBrowser({ kind: 'reveal', secretName: s.name, field: selectedField });
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash"
                 >
                   <ExternalLink className="size-4 text-muted" />
                   {t('vaults.reveal.showInBrowser')}
@@ -223,7 +223,7 @@ const SecretRow: React.FC<{
                     setMenuOpen(false);
                     onReveal(s, selectedField);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 >
                   {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Eye className="size-4 text-muted" />}
                   {t('vaults.reveal.show')}
@@ -237,7 +237,7 @@ const SecretRow: React.FC<{
                     setMenuOpen(false);
                     onReveal(s, selectedField);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 >
                   {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Copy className="size-4 text-muted" />}
                   {t('vaults.reveal.copy')}
@@ -253,7 +253,7 @@ const SecretRow: React.FC<{
                 setMenuOpen(false);
                 onEdit(s);
               }}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash"
             >
               <Pencil className="size-4 text-muted" />
               {t('vaults.editSecret')}
@@ -1029,7 +1029,7 @@ export const VaultsPage: React.FC = () => {
                 <X className="size-3.5" />
               </Button>
             ) : null}
-            <kbd aria-hidden className="pointer-events-none absolute right-3 top-2 rounded border border-border px-1 text-xs text-muted">/</kbd>
+            <kbd aria-hidden className="pointer-events-none absolute right-3 top-2 rounded border border-edge px-1 text-xs text-muted shadow-elevation-0">/</kbd>
           </div>
           <VaultTagDropdown secrets={secrets} selected={selected} onToggle={toggleTag} onClear={() => updateView({ tag: [], skill: [] })} />
           <SegmentedRadio
@@ -1059,9 +1059,9 @@ export const VaultsPage: React.FC = () => {
           {t('vaults.loading')}
         </div>
       ) : secrets.length === 0 ? (
-        <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
+        <div className="rounded-2xl border border-edge bg-surface p-8 text-center text-sm text-muted shadow-elevation-0">{t('vaults.empty')}</div>
       ) : visibleSecrets.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">
+        <div className="flex flex-col items-center gap-2 rounded-2xl border border-edge bg-surface p-8 text-center text-sm text-muted shadow-elevation-0">
           {t('vaults.filter.empty')}
           <Button variant="ghost" size="sm" onClick={clearFilters}>{t('vaults.filter.reset')}</Button>
         </div>
@@ -1093,7 +1093,7 @@ export const VaultsPage: React.FC = () => {
         </ul>
       )}
       {canReadVaultState && showAudit && (
-        <div className="rounded-2xl border border-border bg-surface p-4">
+        <div className="rounded-2xl border border-edge bg-surface p-4 shadow-elevation-0">
           <div className="mb-2 text-sm font-semibold">{t('vaults.audit.title')}</div>
           {audit.length === 0 ? (
             <div className="text-sm text-muted">{t('vaults.audit.empty')}</div>

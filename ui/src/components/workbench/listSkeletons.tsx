@@ -80,7 +80,7 @@ export const MobileProjectCardsSkeleton = ({ rows, quiet = false }: { rows: numb
     <div role={quiet ? undefined : 'status'} aria-busy={quiet ? undefined : true} className="flex flex-col gap-2">
       {!quiet && <span className="sr-only">{t('common.loading')}</span>}
       {Array.from({ length: rows }, (_, index) => (
-        <SkeletonShimmer key={index} className="rounded-xl border border-border bg-surface">
+        <SkeletonShimmer key={index} className="rounded-xl border border-edge bg-surface shadow-elevation-0">
           <div className="flex items-center pr-1.5">
             <div className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5">
               <Skeleton className="size-4 rounded-[4px]" />
@@ -97,7 +97,7 @@ export const MobileProjectCardsSkeleton = ({ rows, quiet = false }: { rows: numb
  *  「Mark read」 row), whose preview runs two lines on a phone and one on a wider screen.
  *  A Bot's card leads with its 24px avatar, a Session's with its project tag. */
 const InboxCardSkeleton = ({ kind, index }: { kind: 'bot' | 'session'; index: number }) => (
-  <SkeletonShimmer className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
+  <SkeletonShimmer className="flex flex-col gap-3 rounded-xl border border-edge bg-surface p-4 shadow-elevation-0">
     <div className={clsx('flex items-center gap-2 text-[11px]', kind === 'bot' && 'h-6')}>
       {kind === 'bot' ? (
         <Skeleton className="size-6 rounded-full" />
