@@ -1,5 +1,8 @@
 # CI scope: routed PRs, thin merge groups, full master
 
+> Status, November 10, 2026: the `master` merge queue was removed; `merge_group`
+> CI is dormant. PR routing and the full master backstop remain in force.
+
 Owner decision: November 9, 2026. This replaces PR/queue affected routing while
 preserving the narrative-only PR fast path. The merge queue still validates its
 exact combined tree, but does not repeat every test already required on a PR.

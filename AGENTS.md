@@ -218,7 +218,8 @@ there rather than expanding this index.
 
 ### PR Delivery
 
-- `master` requires the merge queue in both CLI and Web UI: merge intent means enqueue the verified head, wait for `MERGED`, then clean up; never push directly to `master` or bypass the queue. The `pr-delivery-loop` skill owns queue recovery and close-out.
+- `master` has no merge queue. A Merge-ready PR (exact-head Codex pass, green PR CI, no unresolved threads, `CLEAN`) is merged directly by the orchestrator with `gh pr merge N --squash --match-head-commit <sha>`; read back `MERGED` and the merge commit. Never push directly to `master` or bypass required checks. Login, authorization, security, Vault and signing-boundary PRs still wait for the owner's approval.
+- After every landing, `lint.yml` still runs the full master backstop; a red master gets a named fix-forward owner. Every release, stable included, is cut only from a SHA whose full master backstop is green (`docs/release.md`).
 
 - Codex review is triggered automatically by cyhhao after pushes; do not add a trigger while that review is running. When the current head's review fails (Codex reports "Something went wrong"), is never picked up, or stalls (its Watch reports `Codex review stalled`), post `@codex review` yourself and verify pickup; the exact-head review gate is unchanged.
 - load and follow the `pr-delivery-loop` skill for every implementation task;
