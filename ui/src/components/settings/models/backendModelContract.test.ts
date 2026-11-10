@@ -229,7 +229,7 @@ describe('backend model catalog contract', () => {
   });
 
   it('keeps every models.dev field the ranking is stated in', async () => {
-    stubFetch(200, { ok: true, contract_version: CONTRACT_VERSION, matches: [MATCH] });
+    const fetchMock = stubFetch(200, { ok: true, contract_version: CONTRACT_VERSION, matches: [MATCH] });
 
     const [read] = await modelsApi.searchModelsDev('glm');
 
@@ -238,6 +238,7 @@ describe('backend model catalog contract', () => {
     // the ranking to the order it served — so its survival is asserted rather
     // than inferred from a fixture that could have omitted it.
     expect(read?.first_party).toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/models/catalog/models-dev?query=glm&refresh=if-stale');
   });
 
   it('sends the guarded tail and the displayed suppliers verbatim', async () => {

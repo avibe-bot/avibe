@@ -157,6 +157,31 @@ def test_models_dev_search_falls_back_to_stale_cache(monkeypatch, tmp_path):
 
 
 @pytest.mark.real_catalog_refresh
+def test_models_dev_search_without_refresh_revalidates_stale_cache(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "fetched_at": 0,
+                "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+                "catalog": _catalog(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    replacement = {
+        "openai": {
+            "name": "OpenAI",
+            "models": {"replacement-model": {"name": "Replacement model"}},
+        }
+    }
+    monkeypatch.setattr(models_dev_catalog, "load_models_dev_catalog", lambda: replacement)
+
+    assert models_dev_catalog.search_models_dev("replacement-model")[0]["model_id"] == "replacement-model"
+
+
+@pytest.mark.real_catalog_refresh
 def test_models_dev_stale_cache_is_scoped_to_its_url(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
@@ -182,6 +207,208 @@ def test_models_dev_stale_cache_is_scoped_to_its_url(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="unavailable"):
         models_dev_catalog.search_models_dev("deepseek-v4")
+
+
+@pytest.mark.real_catalog_refresh
+def test_models_dev_cache_expires_at_the_three_hour_boundary(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(models_dev_catalog.time, "time", lambda: now)
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append((request, timeout))
+        return _Response(_catalog(), headers={"ETag": '"catalog-v2"'})
+
+    monkeypatch.setattr(models_dev_catalog.urllib.request, "urlopen", urlopen)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "fetched_at": now - models_dev_catalog.MODELS_DEV_CACHE_TTL_SECONDS + 1,
+                "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+                "catalog": _catalog(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert models_dev_catalog.load_models_dev_catalog() == _catalog()
+    assert calls == []
+
+    cache_path.write_text(
+        json.dumps(
+            {
+                "fetched_at": now - models_dev_catalog.MODELS_DEV_CACHE_TTL_SECONDS,
+                "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+                "catalog": _catalog(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert models_dev_catalog.load_models_dev_catalog() == _catalog()
+    assert len(calls) == 1
+
+
+@pytest.mark.real_catalog_refresh
+def test_models_dev_conditional_not_modified_keeps_the_cached_copy(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    previous = {
+        "fetched_at": 10.0,
+        "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+        "etag": '"catalog-v1"',
+        "last_modified": "Tue, 10 Nov 2026 01:00:00 GMT",
+        "catalog": _catalog(),
+    }
+    models_dev_catalog._write_cache(previous)
+    monkeypatch.setattr(models_dev_catalog.time, "time", lambda: 42.0)
+    seen = {}
+
+    def not_modified(request, timeout):
+        seen["etag"] = request.headers.get("If-none-match")
+        seen["last_modified"] = request.headers.get("If-modified-since")
+        raise urllib.error.HTTPError(
+            models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+            304,
+            "Not Modified",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(models_dev_catalog.urllib.request, "urlopen", not_modified)
+
+    assert models_dev_catalog._fetch_catalog(previous) == _catalog()
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert seen == {"etag": '"catalog-v1"', "last_modified": "Tue, 10 Nov 2026 01:00:00 GMT"}
+    assert cached["catalog"] == _catalog()
+    assert cached["fetched_at"] == 42.0
+    assert cached["etag"] == '"catalog-v1"'
+    assert cached["last_modified"] == "Tue, 10 Nov 2026 01:00:00 GMT"
+
+
+@pytest.mark.real_catalog_refresh
+def test_models_dev_successful_refresh_replaces_the_cached_copy(monkeypatch, tmp_path):
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    old = {"old": {"models": {"old-model": {"name": "Old"}}}}
+    new = {"new": {"models": {"new-model": {"name": "New"}}}}
+    previous = {
+        "fetched_at": 10.0,
+        "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+        "etag": '"catalog-v1"',
+        "catalog": old,
+    }
+    models_dev_catalog._write_cache(previous)
+    monkeypatch.setattr(models_dev_catalog.time, "time", lambda: 42.0)
+    monkeypatch.setattr(
+        models_dev_catalog.urllib.request,
+        "urlopen",
+        lambda request, timeout: _Response(
+            new,
+            headers={"ETag": '"catalog-v2"', "Last-Modified": "Tue, 10 Nov 2026 02:00:00 GMT"},
+        ),
+    )
+
+    assert models_dev_catalog._fetch_catalog(previous) == new
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert cached["catalog"] == new
+    assert cached["etag"] == '"catalog-v2"'
+    assert cached["last_modified"] == "Tue, 10 Nov 2026 02:00:00 GMT"
+    assert cached["fetched_at"] == 42.0
+
+
+@pytest.mark.real_catalog_refresh
+def test_models_dev_search_revalidation_shares_one_background_fetch(monkeypatch, tmp_path):
+    import threading
+
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    models_dev_catalog._write_cache({
+        "fetched_at": 0,
+        "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+        "catalog": _catalog(),
+    })
+    monkeypatch.setattr(models_dev_catalog.time, "time", lambda: 1_000_000.0)
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_flight", False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_failed", False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_started_at", None)
+    release = threading.Event()
+    started = threading.Event()
+    calls = []
+
+    def fetch(_previous):
+        calls.append(threading.current_thread().name)
+        started.set()
+        release.wait(timeout=5)
+        return _catalog()
+
+    monkeypatch.setattr(models_dev_catalog, "_fetch_catalog", fetch)
+    results = []
+    readers = [
+        threading.Thread(
+            target=lambda: results.append(
+                models_dev_catalog.search_models_dev(
+                    "deepseek-v4",
+                    refresh_if_stale=True,
+                )
+            )
+        )
+        for _ in range(8)
+    ]
+    for reader in readers:
+        reader.start()
+    assert started.wait(timeout=5)
+    for reader in readers:
+        reader.join(timeout=5)
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "models-dev-refresh":
+            thread.join(timeout=5)
+
+    assert len(results) == len(readers)
+    assert all(result[0]["model_id"] == "deepseek-v4" for result in results)
+    assert calls == ["models-dev-refresh"]
+
+
+@pytest.mark.real_catalog_refresh
+def test_models_dev_search_returns_stale_results_when_revalidation_times_out(monkeypatch, tmp_path):
+    import threading
+
+    cache_path = tmp_path / "models-dev.json"
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
+    models_dev_catalog._write_cache({
+        "fetched_at": 0,
+        "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+        "catalog": _catalog(),
+    })
+    monkeypatch.setattr(models_dev_catalog.time, "time", lambda: 1_000_000.0)
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_flight", False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_failed", False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_started_at", None)
+
+    def timed_out(_previous):
+        calls.append(True)
+        raise TimeoutError("models.dev timed out")
+
+    calls = []
+    monkeypatch.setattr(models_dev_catalog, "_fetch_catalog", timed_out)
+
+    matches = models_dev_catalog.search_models_dev(
+        "deepseek-v4",
+        refresh_if_stale=True,
+    )
+    for thread in threading.enumerate():
+        if thread.name == "models-dev-refresh":
+            thread.join(timeout=5)
+    retry_matches = models_dev_catalog.search_models_dev(
+        "deepseek-v4",
+        refresh_if_stale=True,
+    )
+
+    assert matches[0]["model_id"] == "deepseek-v4"
+    assert retry_matches[0]["model_id"] == "deepseek-v4"
+    assert calls == [True]
 
 
 def test_model_vendor_map_is_versioned_unambiguous_and_ordered():

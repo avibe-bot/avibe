@@ -672,8 +672,11 @@ export const modelsApi: ModelsApi = {
     // ever poured into a draft.
     in_list: modelCandidates(r.candidates?.in_list, 'manual'),
   })),
+  // The server treats this as a non-blocking, deduplicated gate rather than a
+  // fetch command. Sending it on each debounced query lets the next keystroke
+  // see a copy that arrived after the dialog's first search.
   searchModelsDev: (query, signal) => call<{ matches: ModelsDevMatch[] }>(
-    `/api/models/catalog/models-dev?query=${encodeURIComponent(query)}`,
+    `/api/models/catalog/models-dev?query=${encodeURIComponent(query)}&refresh=if-stale`,
     { signal },
   ).then((r) => r.matches ?? []),
   addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),

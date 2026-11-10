@@ -5142,9 +5142,14 @@ def model_hub_models_dev_get():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        matches = _model_hub_service().models_dev_matches(
-            request.args.get("query"),
-        )
+        query = request.args.get("query")
+        if request.args.get("refresh") == "if-stale":
+            matches = _model_hub_service().models_dev_matches(
+                query,
+                refresh_if_stale=True,
+            )
+        else:
+            matches = _model_hub_service().models_dev_matches(query)
         return _model_hub_success(matches=matches)
     except ModelHubError as exc:
         return _model_hub_error(exc)
