@@ -246,18 +246,15 @@ def test_a_report_names_each_case_by_its_node_id(tmp_path: Path) -> None:
     assert reports.outcomes["windows-agent"] == {}
 
 
-def test_publish_release_evidence_from_its_nested_automation_checkout(tmp_path: Path) -> None:
-    """publish.yml runs its release case from ``release-automation/`` inside the release checkout.
+def test_release_evidence_from_a_nested_automation_checkout(tmp_path: Path) -> None:
+    """Explicit root keeps node IDs and JUnit names relative to nested release automation.
 
-    Pytest finds the outer checkout's configuration from there and takes it as the root, so unless
-    the command roots itself every node id and JUnit class name carries ``release-automation/``
-    and the gate sees no covered case (the v3.2.3 publication failed this way). Runs publish.yml's
-    own selecting arguments in that layout, then the gate as the workflow does.
+    Pytest otherwise inherits the outer checkout's configuration and prefixes node IDs
+    with the nested directory. Keep this generic evidence regression even though the
+    retired Memory updater no longer needs a nested publish.yml gate.
     """
 
-    release_args = [arg for arg in release_pytest_commands(WORKFLOWS / "publish.yml")[1]
-                    if arg != "tests/e2e/test_retired_updater_bridge.py"]
-    command = ["tests/test_x.py", *release_args]
+    command = ["tests/test_x.py", "--rootdir=."]
     outer = tmp_path / "release"
     outer.mkdir()
     outer.joinpath("pyproject.toml").write_text("[tool.pytest.ini_options]\nmarkers = []\n", encoding="utf-8")
@@ -301,33 +298,20 @@ def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path
         check_release_evidence(junit, workflow, wrong_root, scenario_root=scenarios)
 
 
-
+def test_release_workflows_select_only_current_contracts() -> None:
     model_workflow = (WORKFLOWS / "model-hub-e2e.yml").read_text(encoding="utf-8")
-    publish_workflow = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
 
     assert "--release" in model_workflow
     assert "--workflow .github/workflows/model-hub-e2e.yml" in model_workflow
     assert "--pytest-root ." in model_workflow
     assert '--junitxml="$RUNNER_TEMP/model-hub-e2e-junit/model-hub-e2e.xml"' in model_workflow
-    assert "--release" in publish_workflow
-    assert "--workflow .github/workflows/publish.yml" in publish_workflow
-    assert "(cd release-automation && python scripts/ci_scenario_evidence.py --release" in publish_workflow
-    assert "--pytest-root ." in publish_workflow
-    assert "scripts/ci_scenario_evidence.py" in publish_workflow
-    assert "scripts/pytest_collection.py" in publish_workflow
-    assert ".github/workflows/publish.yml" in publish_workflow
-    assert "tests/scenarios/**/catalog.yaml" in publish_workflow
-    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=." in publish_workflow
-    assert '--junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml"' in publish_workflow
-
     assert release_pytest_commands(WORKFLOWS / "model-hub-e2e.yml") == [
         ("-m", "e2e_model_hub", "tests/e2e", "-p", "no:cacheprovider")
     ]
-    publish_commands = release_pytest_commands(WORKFLOWS / "publish.yml")
-    assert publish_commands[1] == ("tests/e2e/test_retired_updater_bridge.py", "--rootdir=.")
-    assert covered_test_evidence()[
-        "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data"
-    ].rows == ["MUC-004"]
+    assert release_pytest_commands(WORKFLOWS / "publish.yml") == [
+        ("tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py")
+    ]
+    assert all("MUC-004" not in evidence.rows for evidence in covered_test_evidence().values())
 
 
 def test_the_lint_unit_shards_count_as_running_the_whole_unit_suite() -> None:
@@ -355,7 +339,6 @@ def test_release_gating_is_read_from_the_release_workflows() -> None:
 
     assert evidence["tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent"].rows == ["MH-ROUTING-001"]
     assert "tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent" in gated
-    assert "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data" in gated
 
 
 def test_a_covered_rows_partial_evidence_case_is_evidence_too(tmp_path: Path) -> None:
