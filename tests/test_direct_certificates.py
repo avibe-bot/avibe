@@ -606,6 +606,16 @@ def test_terminal_order_retry_at_does_not_starve_active_current_fetch(setup):
     assert result.status == "failed" and env.backend.calls[-1][:2] == ("GET", "certificates/current")
 
 
+def test_current_null_keeps_short_recovery_when_existing_leaf_is_still_valid(setup):
+    """A null current response must retry within five minutes, not six hours."""
+    env = setup
+    active = installed(env)
+    env.backend.current = {"certificate_pem": None, "public_key_fingerprint": None,
+                           "certificate_not_after": None, "direct_access_allowed": True}
+    waiting = due(env, active)
+    assert waiting.ready and waiting.next_poll_at - env.clock.now <= 300
+
+
 def test_current_retry_at_survives_successful_pending_order_install(setup):
     """Order progress must not erase the current endpoint's separate retry bound."""
     env = setup

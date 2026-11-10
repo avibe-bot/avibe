@@ -629,7 +629,6 @@ class DirectCertificateClient:
                 state.active_csr_pem = state.csr_pem
         if current:
             state.next_current_at = _current_deadline(state, now)
-            state.current_not_before = max(state.current_not_before, state.next_current_at)
             if pem is None:
                 state.next_current_at = min(state.next_current_at, now + 300)
         else:
