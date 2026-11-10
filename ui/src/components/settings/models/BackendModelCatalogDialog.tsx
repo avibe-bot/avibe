@@ -43,6 +43,7 @@ import { BackendModelPickerDialog } from './BackendModelPickerDialog';
 import { GuardDialog } from './GuardDialog';
 import { GuardImpact, type GuardPicture, type GuardPlan } from './GuardImpact';
 import { agreementCovers } from './guardedWrite';
+import { modelSearchMatches } from './modelSearch';
 import { apiFailure, modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
 import { catalogSaveFailureKey, catalogSaveLeftUnloaded } from './serverCopy';
@@ -80,12 +81,8 @@ type Announcement = {
   count: number;
 } | null;
 
-const matchesQuery = (model: BackendModel, query: string, renderedLabel: string): boolean => {
-  if (query === '') return true;
-  const needle = query.toLowerCase();
-  return model.id.toLowerCase().includes(needle)
-    || renderedLabel.toLowerCase().includes(needle);
-};
+const matchesQuery = (model: BackendModel, query: string, renderedLabel: string): boolean =>
+  modelSearchMatches(query, [model.id, renderedLabel]);
 
 /** A focused removal the user is being asked about, with the route preview the
  *  confirmation shows. */
