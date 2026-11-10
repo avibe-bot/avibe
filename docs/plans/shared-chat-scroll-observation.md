@@ -45,19 +45,37 @@ Preloading both participating chips and checking that their busy body is gone
 passes both engines with the same delay. The committed fixture keeps its normal
 zero delay. Loading/reveal motion remains covered by `motion.spec.ts`.
 
-### Return-to-latest glide: unresolved shared-base failure
+### Return-to-latest glide: recording cutoff violates the rest contract
 
 PR #3483's Chromium-touch trace recorded scrollTop 8596 throughout, against
-bottom 9592: this was not simply a glide landing a little short. The trace shows
-a completed Playwright click, but does not expose the product's rest-state refs.
-The same failure occurred on master run `42807861392`. Both browser projects
-pass the unchanged focused test locally.
+bottom 9592: this was not simply a glide landing a little short. The same failure
+occurred on master run `42807861392` and this PR's first CI run `42816944256`.
+The last trace had 47 stationary samples spanning 779.6ms. Both browser projects
+pass the unchanged focused test locally under normal event delivery.
 
-The product waits for rest before starting the glide, with a 1500ms lost
-`scrollend` fallback, while the test records 700ms after clicking. This is a
-candidate explanation, not an established cause of that CI trace. Leave
-`scroll.spec.ts` and the product unchanged; retain shared-browser ownership
-rather than attributing this to a lock update or declaring a product regression.
+The product intentionally waits for rest before starting the glide, with a
+1500ms lost-`scrollend` fallback. The old helper stopped recording 700ms after
+the click, which can be before a supported glide has even begun. Withholding
+`scrollend` at the document capture boundary deterministically reproduces the
+stationary, 996px-short failure on both engines without changing product code.
+
+`scroll.spec.ts` now waits, with the ordinary bounded assertion timeout, for the
+recorder's actual landing frame. It does not extend a fixed sleep. The same
+motion assertions still require at least five intermediate frames, a motion
+duration strictly between 150ms and 500ms, deceleration, a far-distance cut, and
+following the tail. The test is table-driven over delivered and lost scrollend;
+both pass with the new observation boundary. The precise missing event/rest
+state in the CI traces is not exposed, so event loss is a demonstrated supported
+path that invalidates the helper, not a claim about those traces' hidden refs.
+
+### Separate observations not fixed here
+
+#3487's group/above/on-screen/opening/grows trace had 156 exact reads but just one
+eligible non-null edge. Its coverage failure is not a geometry violation or a
+mixed-time read: edges below the viewport or between laid-out nodes are excluded
+by the existing observer. Source preloading is not yet proven to address this
+eligibility window. Its Chromium paging page-2 drift (1.34375px) is a separate
+scroll/anchor investigation; no thresholds or product behavior are changed here.
 
 ## Validation
 
@@ -79,6 +97,15 @@ Normal parallelism only (`workers: 1`), no load generation or Incus operations:
   - An overshooting disclosure easing failed the unchanged curtain
     monotonicity assertion (about 21px vs <=1px) on both engines, even after
     the fixture preload fix.
+
+- Follow-up focused checks after the glide observation fix: 12 passed across
+  both engines (delivered/lost scrollend, interruption/reduced motion, label
+  interpolation, and row/group curtain cells). Build, lint, and types passed again.
+- Withheld-scrollend regression: the original helper failed both engines with
+  996px left; the landing-frame helper passed both.
+- Temporary glide mutations (restored): suppressing all glide writes fails the
+  bounded landing assertion with 996px left; slowing the actual motion to
+  1000–1200ms fails the unchanged <500ms motion-duration assertion on both engines.
 
 PR review and the full CI backstop remain the delivery gates. This lane does not
 merge or deploy.
