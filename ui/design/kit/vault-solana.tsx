@@ -21,12 +21,13 @@ const noop = () => {};
  * The Add dialog's signing-key builder with Solana chosen. It sits where the secp256k1 builder sits
  * today, below Name. avault creates or checks the key, so nothing here shows an address before saving.
  */
-export function SolanaKeyBuilder({ source, importText = '', importRejected = false }: {
+export function SolanaKeyBuilder({ source, importText = '', importFailed = false }: {
   source: 'generate' | 'import';
   /** What the person pasted. Frames use text that is not a key. */
   importText?: string;
-  /** avault refused the pasted text when the form was submitted. */
-  importRejected?: boolean;
+  /** avault did not import the pasted text when the form was submitted. It reports no reason the
+   *  form could name, so the message says what to check and does not claim the text was the cause. */
+  importFailed?: boolean;
 }) {
   const { t } = useTranslation();
   const d = useDraft();
@@ -79,8 +80,13 @@ export function SolanaKeyBuilder({ source, importText = '', importRejected = fal
               )}
               className="font-mono text-xs"
             />
-            {importRejected ? (
-              <span className="text-xs text-destructive-ink">{d('这不是有效的 Solana 私钥。', "This isn't a valid Solana secret key.")}</span>
+            {importFailed ? (
+              <span className="text-xs text-destructive-ink">
+                {d(
+                  '导入失败。请确认粘贴的是 Solana CLI 密钥对或 base58 私钥，然后重试。',
+                  "The key couldn't be imported. Check that it's a Solana CLI keypair or a base58 secret key, then try again.",
+                )}
+              </span>
             ) : (
               <span className="text-xs text-muted">
                 {d(

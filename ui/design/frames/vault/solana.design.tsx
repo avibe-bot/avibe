@@ -41,7 +41,7 @@ const part = (name: string, title: string, height: number, node: ReactNode, onPh
 const designFrames = frames([
   part('create-generate', '添加密钥 · 签名密钥选 Solana · 生成', 260, <SolanaKeyBuilder source="generate" />),
   part('create-import', '添加密钥 · 签名密钥选 Solana · 导入', 360, <SolanaKeyBuilder source="import" />),
-  part('create-import-rejected', '添加密钥 · Solana 导入 · avault 拒绝了粘贴的内容', 340, <SolanaKeyBuilder source="import" importText="[12, 34, 56]" importRejected />),
+  part('create-import-failed', '添加密钥 · Solana 导入 · avault 没有导入粘贴的内容', 360, <SolanaKeyBuilder source="import" importText="[12, 34, 56]" importFailed />),
   part('create-protected', '添加密钥 · 选了保护档的 Solana 密钥（保护档上线前）', 120, <SolanaProtectedNotice />),
   part('create-generate-phone', '添加密钥 · Solana · 生成 · 手机', 280, <SolanaKeyBuilder source="generate" />, true),
   part('create-import-phone', '添加密钥 · Solana · 导入 · 手机', 400, <SolanaKeyBuilder source="import" />, true),
