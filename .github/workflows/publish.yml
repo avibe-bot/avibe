@@ -269,6 +269,7 @@ jobs:
           JS
       - name: Record Show Runtime identity
         if: steps.canonical.outputs.reused != 'true'
+        shell: bash
         env:
           RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
           LOCK_SHA: ${{ needs.resolve-show-runtime-ref.outputs.lock_sha }}
