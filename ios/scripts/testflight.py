@@ -52,9 +52,15 @@ PRIVATE_KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios"
 SHARED_KEYCHAIN_ACCESS_GROUP = f"{TEAM_ID}.bot.avibe.ios.push"
 # Kept as the shared-group alias for older callers and fixtures.
 KEYCHAIN_ACCESS_GROUP = SHARED_KEYCHAIN_ACCESS_GROUP
+# avibe.bot holds the account passkey; sandbox.avibe.bot is the Protected Vault
+# passkey's relying party, which WKWebView offers only to an associated app.
+ASSOCIATED_DOMAINS = [
+    "webcredentials:avibe.bot",
+    "webcredentials:sandbox.avibe.bot",
+]
 MAIN_REQUIRED_ENTITLEMENTS = {
     "aps-environment": ["production"],
-    "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+    "com.apple.developer.associated-domains": ASSOCIATED_DOMAINS,
     "com.apple.security.application-groups": ["group.bot.avibe.ios"],
     "keychain-access-groups": [
         PRIVATE_KEYCHAIN_ACCESS_GROUP,

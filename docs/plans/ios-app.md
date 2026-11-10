@@ -504,15 +504,23 @@ microphone trust are still limited to the selected instance origin; account
 management trust is never promoted to instance, child, Show Page, or iframe
 content.
 
-### Known risk: Protected Vault passkeys
+### Protected Vault passkeys
 
-Protected Vault setup and unlock run WebAuthn with PRF inside the cross-origin
-`https://sandbox.avibe.bot` iframe (`docs/plans/vault-crypto-sandbox.md`). Apple
-ties passkey use in third-party apps to the relying party's `webcredentials`
-associated domain. Whether a WebAuthn ceremony in a cross-origin iframe works
-inside the shell, even with `webcredentials:sandbox.avibe.bot` and a matching
-`apple-app-site-association` on that host, is unverified. Phase 0 must test it;
-the fallback is to open Vault approvals in Safari.
+Protected Vault runs WebAuthn with PRF on `https://sandbox.avibe.bot`
+(`docs/plans/vault-crypto-sandbox.md`): unlock and the second step of setup in
+the cross-origin iframe, passkey creation and every approval in the sandbox's
+top-level window. Apple ties passkey use in third-party apps to the relying
+party's `webcredentials` associated domain, so the app lists
+`webcredentials:sandbox.avibe.bot` and that host serves a matching
+`apple-app-site-association`
+(`docs/plans/2026-11-10-ios-protected-vault-passkey.md`, owner decision
+2026-11-11). The shell adds no Vault code; Protected Vault stays an ordinary
+cross-origin browsing context, and the protected tier needs iOS 18 for PRF.
+
+Still unverified on a device: whether the system accepts a PRF assertion from
+the cross-origin iframe in a non-browser app. If it does not, unlock and
+setup's second step move into the sandbox's top-level window. If passkeys fail
+in the shell outright, the fallback is to open Vault approvals in Safari.
 
 ## 8. Push
 
