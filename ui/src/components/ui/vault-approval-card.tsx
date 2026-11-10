@@ -131,7 +131,8 @@ const bindingsIssued = (reply: VaultAgentBindingsBatchResult) => reply.ok;
 const ROW = 'flex items-start gap-2.5 text-sm';
 const ROW_LABEL = 'w-[74px] shrink-0 pt-0.5 text-[12px] text-muted';
 
-const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+/** One labeled row of the approval's detail list. */
+export const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div className={ROW}>
     <span className={ROW_LABEL}>{label}</span>
     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">{children}</div>
