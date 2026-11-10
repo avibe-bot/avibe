@@ -164,6 +164,7 @@ vibe start --allow-downgrade
 - 使用 `--no-open-browser` 时，服务和 Web UI 的启动/复用逻辑不变，但不会额外拉起系统浏览器窗口
 - **保留已运行的进程** — 需要明确重启时请使用 `vibe restart`
 - `vibe start` 和 `vibe restart` 会拒绝运行比最近一次激活更旧的安装，例如 `PATH` 中更靠前的旧 `vibe`。错误信息会写明两个版本以及应改用的启动器；如确实要运行旧版本，请加 `--allow-downgrade`。桌面应用只给出警告。
+- 在 macOS 和 Linux 上，如果调用方的 `PATH` 缺少登录 shell `PATH` 中的任何一项（例如通过非交互 SSH 或 cron 启动），`vibe start` 和 `vibe restart` 会让 Avibe 以及所有 Agent Session 使用登录 shell 的 `PATH`。调用方已包含全部条目时（例如终端），其 `PATH` 保持不变；调用方放在系统目录之前的条目（例如服务单元的虚拟环境）仍排在最前。每次启动只以 `$SHELL -l -i -c` 运行一次登录 shell，只读取 `PATH`；10 秒内没有结果时，Avibe 使用调用方的 `PATH` 启动并给出提示。
 - 由桌面应用启动时，只复用或替换该应用自己 Runtime 的主服务和 Web UI。如果这里运行的是另一个 Avibe，会说明原因并以状态码 3 退出，那个 Avibe 继续运行。
 
 ### `vibe stop`
