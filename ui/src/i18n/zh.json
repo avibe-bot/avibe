@@ -7133,6 +7133,7 @@
     "addSubtitle": "添加成功后，所有 Agent 都可调用",
     "unchangedCount": "{{count}} 个已存在。",
     "succeededCount": "成功 {{count}} 个",
+    "savedNotConnected": "已保存，但无法连接：{{reason}}。你可以在列表中刷新、配置或删除它。",
     "failedCount": "失败 {{count}} 个：",
     "failedLine": "{{name}} — {{error}}",
     "callHint": "vibe mcp {{name}} <tool>",
@@ -7163,6 +7164,7 @@
       "cwd": "工作目录",
       "issues": {
         "invalidUrl": "URL 无效。",
+        "missingScheme": "这看起来是网址，请在开头加上 https://。",
         "unclosedQuote": "有未闭合的引号。",
         "shellOperator": "不支持 | && ; > 等 shell 操作符，请使用「粘贴 JSON 导入」。",
         "windowsPath": "这里无法可靠解析 Windows 路径，请使用「粘贴 JSON 导入」。"

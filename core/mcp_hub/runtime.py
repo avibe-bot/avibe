@@ -671,8 +671,13 @@ class McpRuntime:
                 server = await asyncio.to_thread(mcp_scope.load_server, name)
                 if server.state != "ok":
                     return {"name": name.name, "status": "added", "state": server.state}
-                body = json.loads(await self._refresh_locked(name, wait_stdio=True))
-                return {"name": name.name, "status": "added", **{k: body[k] for k in ("revision", "toolCount", "auth") if k in body}}
+                try:
+                    body = json.loads(await self._refresh_locked(name, wait_stdio=True))
+                    return {"name": name.name, "status": "added", **{k: body[k] for k in ("revision", "toolCount", "auth") if k in body}}
+                except McpHubError as exc:
+                    server = await asyncio.to_thread(mcp_scope.load_server, name)
+                    warning = {"type": exc.type, "message": exc.message, **({"messageKey": exc.message_key} if exc.message_key else {})}
+                    return {"name": name.name, "status": "added", "state": server.state, "warning": warning}
         except McpHubError as exc:
             return {"name": name.name, "status": "failed", "error": exc.message, "type": exc.type, **({"messageKey": exc.message_key} if exc.message_key else {})}
 

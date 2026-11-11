@@ -6,7 +6,7 @@
  * through a shell and never variable-expanded; anything that needs a shell or
  * is ambiguous is rejected with a pointer to the JSON tab.
  */
-export type McpTargetIssue = 'invalidUrl' | 'unclosedQuote' | 'shellOperator' | 'windowsPath';
+export type McpTargetIssue = 'invalidUrl' | 'missingScheme' | 'unclosedQuote' | 'shellOperator' | 'windowsPath';
 
 export type McpTarget =
   | { kind: 'empty' }
@@ -43,6 +43,9 @@ export function parseMcpTarget(input: string): McpTarget {
       return { kind: 'error', issue: 'invalidUrl' };
     }
     return { kind: 'http', url: text };
+  }
+  if (!/\s/.test(text) && /^(?=[^/:]+\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\:\d+|\/)/.test(text)) {
+    return { kind: 'error', issue: 'missingScheme' };
   }
   const tokens: string[] = [];
   let current: string | null = null;
