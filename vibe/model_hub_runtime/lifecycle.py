@@ -282,6 +282,25 @@ class EngineLifecycle:
             raise JournalError("engine_generation_identity_invalid")
         return manifest, archive
 
+    @staticmethod
+    def _quarantined(generation: dict[str, Any], value: dict[str, Any]) -> bool:
+        return any(key in value["quarantine"] for key in (
+            generation["asset_release_tag"], f"install:{generation['install_dir']}",
+        ))
+
+    @staticmethod
+    def _failure_key(generation: EngineGeneration, value: dict[str, Any]) -> str:
+        # A forced repair is a new immutable installation, not a new release.
+        # Its failure says nothing about the same-release old working install.
+        old = value["pending"]["old"] if value["pending"] else value["active"]
+        if old and old["asset_release_tag"] == generation.asset_release_tag and old["install_dir"] != generation.install_dir:
+            return f"install:{generation.install_dir}"
+        return generation.asset_release_tag
+
+    def _quarantine(self, generation: EngineGeneration, value: dict[str, Any], reason: str) -> None:
+        value["quarantine"][self._failure_key(generation, value)] = reason
+        value["staged"] = [g for g in value["staged"] if not self._quarantined(g, value)]
+
     def authorize(self, generation: EngineGeneration, *, value: dict[str, Any], verify_installed: bool = True) -> None:
         """Re-authorize one retained identity without reviving old channel memory."""
         from packaging.version import Version
@@ -289,7 +308,7 @@ class EngineLifecycle:
         from core.model_hub_engine_channel import ResolutionAction, authenticate, avibe_version_qualifies
 
         manifest, archive = self._manifest(generation)
-        if generation.asset_release_tag in value["quarantine"]:
+        if self._quarantined(generation.document(), value):
             raise JournalError("engine_quarantined")
         if generation.origin == "bundled":
             if self.journal.provenance(generation.manifest_sha256, kind="manifest") != self.manager.bundled_manifest_bytes():
@@ -405,10 +424,11 @@ class EngineLifecycle:
             pending = value["pending"]
             selected = pending["old"] if pending else value["active"]
             if pending and pending["reason"] in {"update", "required", "confirmation", "package"}:
-                tag = pending["candidate"]["asset_release_tag"]
-                value["interrupted"][tag] = value["interrupted"].get(tag, 0) + 1
-                if value["interrupted"][tag] > 1:
-                    value["quarantine"][tag] = "activation_interrupted"
+                candidate = EngineGeneration.read(pending["candidate"], self.manager.runtime_dir)
+                key = self._failure_key(candidate, value)
+                value["interrupted"][key] = value["interrupted"].get(key, 0) + 1
+                if value["interrupted"][key] > 1:
+                    self._quarantine(candidate, value, "activation_interrupted")
             target = self._recovery_target(selected, value=value)
             value.update(
                 active=target.document() if target else selected, pending=None, launch=None,
@@ -419,7 +439,7 @@ class EngineLifecycle:
             )
             if target is not None:
                 value["staged"] = [g for g in value["staged"] if g["asset_release_tag"] != target.asset_release_tag]
-            value["staged"] = [g for g in value["staged"] if g["asset_release_tag"] not in value["quarantine"]]
+            value["staged"] = [g for g in value["staged"] if not self._quarantined(g, value)]
             self._save(value)
             self.recovered = True
             self._ready = not value["blocked"]
@@ -657,8 +677,7 @@ class EngineLifecycle:
             if exc.os_errno is None and exc.reason not in {"previous_engine_alive", "engine_untracked"}:
                 with self.mutation():
                     value = self._load() or self.journal.empty()
-                    value["quarantine"][generation.asset_release_tag] = "preflight_failed"
-                    value["staged"] = [g for g in value["staged"] if g["asset_release_tag"] != generation.asset_release_tag]
+                    self._quarantine(generation, value, "preflight_failed")
                     self._save(value)
                     self._status.update(state="rolled_back", last_result="preflight_failed")
                     self.publish_status()
@@ -730,8 +749,7 @@ class EngineLifecycle:
                 self.recovered = False
                 raise
             value = self._load()
-            value["quarantine"][generation.asset_release_tag] = type(failure).__name__
-            value["staged"] = [g for g in value["staged"] if g["asset_release_tag"] != generation.asset_release_tag]
+            self._quarantine(generation, value, type(failure).__name__)
             value["launch"] = None  # provisional process was positively stopped
             # Known failing candidates are persisted before any fallback start.
             self._save(value)
@@ -765,7 +783,7 @@ class EngineLifecycle:
                     isinstance(rollback_failure, EngineUnavailableError)
                     and (rollback_failure.os_errno is not None or rollback_failure.reason in {"previous_engine_alive", "engine_untracked"})
                 ):
-                    value["quarantine"][previous.asset_release_tag] = type(rollback_failure).__name__
+                    self._quarantine(previous, value, type(rollback_failure).__name__)
                 value.update(pending=None, launch=None, blocked="engine_rollback_failed")
                 self._save(value)
                 self._status["state"] = "blocked"

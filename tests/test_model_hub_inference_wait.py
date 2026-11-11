@@ -55,7 +55,7 @@ def test_connected_inference_waits_for_its_owner(
     tmp_path,
     protocol: str,
     phase: str,
-    cancel: bool,
+    cancel: bool | str,
     entrypoint: str,
 ) -> None:
     """MH-RUNTIME-009: connected inference ends by completion or owner cancellation."""
@@ -178,7 +178,7 @@ def test_connected_inference_waits_for_its_owner(
                         json={"model": "shared-model", "stream": streaming},
                         headers={"Authorization": f"Bearer {token}"},
                     ) as response:
-                        assert response.status == 200
+                        assert response.status in ({200, 503} if cancel == "withdraw" else {200})
                         return await response.read()
             handle = await client.invoke(source, "patient-model", {}, stream=streaming)
             try:
@@ -199,7 +199,13 @@ def test_connected_inference_waits_for_its_owner(
             # Spend several connection budgets while the server owns the wait.
             done, _pending = await asyncio.wait({task}, timeout=0.1)
             assert not done, "inference was terminated solely because model output was delayed"
-            if cancel:
+            if cancel == "withdraw":
+                adapter._engine_admission.close("engine_withdrawn")
+                await adapter._engine_admission.interrupt()
+                body = await asyncio.wait_for(task, timeout=2)
+                assert b"engine_withdrawn" in body
+                await asyncio.wait_for(request_finished.wait(), timeout=2)
+            elif cancel:
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, timeout=2)
@@ -229,3 +235,9 @@ def test_connected_inference_waits_for_its_owner(
             await runner.cleanup()
 
     asyncio.run(run())
+
+
+def test_withdrawal_before_stream_handle_preserves_observed_usage(monkeypatch, tmp_path):
+    test_connected_inference_waits_for_its_owner(
+        monkeypatch, tmp_path, protocol="anthropic", phase="prelude", cancel="withdraw", entrypoint="gateway",
+    )

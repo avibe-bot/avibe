@@ -291,9 +291,13 @@ install-claim schema unless an additive migration is actually needed.
 | `blocked` | Neither candidate nor a safe fallback can run: report an actionable dependency error and stop Model Hub only; Avibe and unrelated backends continue. |
 
 Reuse the adapter's routing and installation serialization and the supervisor,
-but keep network/staging and drains outside the swap fence. The engine-specific
-lifecycle does not teach generic managed runtimes channel semantics. Durability
-order is explicit:
+but keep network/staging and drains outside the swap fence. A failed same-release
+repair sibling is quarantined by its immutable installation, not by the shared
+release tag: the prior healthy installation remains eligible for rollback and
+ordinary required-file repair. This applies to preflight, real-config health and
+interrupted repair recovery; integrity, provenance, minimum and current withdrawal
+checks still apply to the rollback target. Other failed candidate releases remain
+release-quarantined. Durability order is explicit:
 
 1. Stage exact verified manifests/archives into immutable generations, with
    digest-addressed cache names. Stage-only callers execute no version probe.

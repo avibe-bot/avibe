@@ -853,6 +853,8 @@ class EngineSupervisor:
                 outcome = reap_marked_processes(logger, "Model Hub engine", worker_fingerprint=witness)
                 if outcome == "unconfirmed":
                     raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+                if outcome == "reaped":
+                    logger.warning("Reaped a Model Hub engine left running by an earlier service")
                 if self._load_engine_records_locked() is None:
                     # Preserve damaged ownership evidence only after the durable
                     # witness's marker sweep has conclusively resolved it.

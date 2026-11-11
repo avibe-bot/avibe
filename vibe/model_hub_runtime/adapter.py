@@ -30,6 +30,7 @@ from core.handlers.model_hub.adapter import (
     EngineEnsureResult,
     EngineHealth,
     EngineStatus,
+    InvokeCancelledError,
     ObservationDiscovery,
     ObservationOutcome,
     OAuthFlowState,
@@ -3481,15 +3482,18 @@ class CLIProxyEngineAdapter:
                 before_auth_fingerprints={identity: record.fingerprint for identity, record in before.items()},
                 grant_write_possible=expects == "none",
             )
-        except Exception:
+            with self._oauth_lock:
+                flow.engine_release = self.engine_release()
+                flow.lease = self._engine_admission.retain()
+                flow.lease.abort = lambda: self._fail_flow(flow, "models.engine.withdrawn")
+                self._oauth_flows[flow.flow_id] = flow
+        except BaseException:
+            # The provider is reserved before the first startup await. A
+            # withdrawal/user cancellation must release it just like a failed
+            # request; no registered flow exists to expire the reservation.
             with self._oauth_lock:
                 self._active_oauth_providers.discard(auth_provider)
             raise
-        with self._oauth_lock:
-            flow.engine_release = self.engine_release()
-            flow.lease = self._engine_admission.retain()
-            flow.lease.abort = lambda: self._fail_flow(flow, "models.engine.withdrawn")
-            self._oauth_flows[flow.flow_id] = flow
         return flow.snapshot()
 
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
@@ -3728,6 +3732,23 @@ class CLIProxyEngineAdapter:
                 # next admission checks it, finds the lost configuration, and
                 # restores it once the open streams end (#2753, #2755).
                 await run_owned_in_thread(self.supervisor.recheck_engine)
+            return handle
+        except InvokeCancelledError as exc:
+            release()
+            if not transport_lease.interrupted:
+                raise
+            # The transport already joined its cancellation cleanup. Publish a
+            # terminal withdrawal handle rather than erasing pre-handle wire
+            # facts in the generic admission cancellation translation. All
+            # service consumers meter this outcome exactly as a returned one.
+            handle = completed_handle(RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR, http_status=None,
+                error_code="engine_withdrawn", redacted_message=None,
+                stream_started=exc.observed.model_output_started,
+                model_id=model_id, source_id=source_id, usage=exc.observed.usage,
+                served_tier=exc.observed.served_tier,
+            ), observed=exc.observed)
+            handle.engine_release = admitted_engine_release
             return handle
         except BaseException:
             release()

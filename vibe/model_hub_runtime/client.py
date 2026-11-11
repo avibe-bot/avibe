@@ -2250,10 +2250,10 @@ def _protocol_error_outcome(
     return outcome
 
 
-def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
+def completed_handle(outcome: RawCallOutcome, *, observed: ProtocolSSEState | None = None) -> EngineInvokeHandle:
     future = asyncio.get_running_loop().create_future()
     future.set_result(outcome)
-    return EngineInvokeHandle(stream=None, outcome=future)
+    return EngineInvokeHandle(stream=None, outcome=future, observed=observed)
 
 
 def buffered_prelude_handle(

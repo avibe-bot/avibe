@@ -97,6 +97,25 @@ def test_native_fixture_bootstrap_needs_no_host_reverse_dns(tmp_path, monkeypatc
         finish(supervisor, processes)
 
 
+def test_native_launch_witness_recovery_reports_the_reaped_engine(tmp_path, monkeypatch, caplog):
+    owner, supervisor, _baseline, _observations, processes = real_owner(tmp_path, monkeypatch)
+    try:
+        owner.ensure_running()
+        first = supervisor._process
+        caplog.clear()
+        owner.recover()
+        assert first.poll() is not None
+        assert "Reaped a Model Hub engine left running by an earlier service" in caplog.text
+        owner.ensure_running()
+        assert supervisor._process.pid != first.pid
+        caplog.clear()
+        supervisor.stop_for_activation()
+        owner.recover()
+        assert "Reaped a Model Hub engine left running by an earlier service" not in caplog.text
+    finally:
+        finish(supervisor, processes)
+
+
 def test_native_preflight_swap_identity_fence_and_real_process_death(tmp_path, monkeypatch):
     owner, supervisor, baseline, observations, processes = real_owner(tmp_path, monkeypatch)
     try:

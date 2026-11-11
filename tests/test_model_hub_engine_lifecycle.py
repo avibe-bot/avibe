@@ -112,7 +112,9 @@ def test_provenance_is_exact_bytes_not_channel_history(tmp_path):
         store.provenance(digest, kind="envelope")
 
 
-def fixture_manifest(root: Path, *, version: str = "v8.0.63", build: int = 2) -> bytes:
+def fixture_manifest(
+    root: Path, *, version: str = "v8.0.63", build: int = 2, archive_format: str | None = None,
+) -> bytes:
     import io
     import tarfile
     import zipfile
@@ -126,8 +128,9 @@ def fixture_manifest(root: Path, *, version: str = "v8.0.63", build: int = 2) ->
     # These are signed/digested byte fixtures, not native health-test engines.
     # Neither staging nor RecordingSupervisor may execute a version probe.
     binary = f"#!/bin/sh\necho 'CLIProxyAPI Version: {version.removeprefix('v')}'\n".encode()
-    archive = root / ("engine.zip" if windows else "engine.tar.gz")
-    if windows:
+    archive_format = archive_format or ("zip" if windows else "tar.gz")
+    archive = root / ("engine.zip" if archive_format == "zip" else "engine.tar.gz")
+    if archive_format == "zip":
         with zipfile.ZipFile(archive, "w") as zipped:
             zipped.writestr(bin_path, binary)
     else:
@@ -141,7 +144,7 @@ def fixture_manifest(root: Path, *, version: str = "v8.0.63", build: int = 2) ->
         "release_tag": version, "asset_release_tag": f"model-hub-engine-{version}-{build}",
         "source_sha": "a" * 40, "license": "MIT", "assets": [{
             "platform": platform,
-            "url": archive.as_uri(), "format": "zip" if windows else "tar.gz", "size_bytes": archive.stat().st_size,
+            "url": archive.as_uri(), "format": archive_format, "size_bytes": archive.stat().st_size,
             "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
             "binary_sha256": hashlib.sha256(binary).hexdigest(), "bin_path": bin_path,
         }],
@@ -366,7 +369,9 @@ def signed_candidate(owner, tmp_path, *, build=2, version="v8.0.63"):
     from vibe.model_hub_runtime.engine_channel import EngineChannel
 
     directory = tmp_path / f"candidate-{build}"
-    local = json.loads(fixture_manifest(directory, build=build, version=version))["assets"][0]
+    # The owned signed-channel contract uses tar.gz on ALL six platforms,
+    # including Windows. Do not put locally packaged zip bytes under that name.
+    local = json.loads(fixture_manifest(directory, build=build, version=version, archive_format="tar.gz"))["assets"][0]
     raw = json.loads(manifest_bytes(build=build, version=version))
     host = owner.manager.host_platform()
     asset = next(item for item in raw["assets"] if item["platform"] == host)
@@ -374,7 +379,7 @@ def signed_candidate(owner, tmp_path, *, build=2, version="v8.0.63"):
     manifest = json.dumps(raw).encode()
     name = asset["url"].rsplit("/", 1)[1]
     cached = owner.manager.runtime_dir / "downloads" / f"{asset['sha256']}-{name}"
-    cached.write_bytes((directory / ("engine.zip" if host.startswith("windows") else "engine.tar.gz")).read_bytes())
+    cached.write_bytes((directory / "engine.tar.gz").read_bytes())
     signer = Signer()
     envelope = signed(signer, releases=[release_entry(manifest)])
     owner.manager.offline = False
@@ -386,6 +391,82 @@ def signed_candidate(owner, tmp_path, *, build=2, version="v8.0.63"):
     assert decision.action.value == "adopt"
     generation = owner.stage_decision(decision)
     return generation, signer, manifest, envelope
+
+
+@pytest.mark.parametrize("host", ["windows-amd64", "windows-arm64", "linux-amd64"])
+def test_signed_candidate_archive_matches_channel_contract_on_every_host(tmp_path, monkeypatch, host):
+    from core import managed_runtime
+
+    runtime_host = {"windows-amd64": "win32-x64", "windows-arm64": "win32-arm64", "linux-amd64": "linux-x64"}[host]
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: runtime_host)
+    monkeypatch.setattr("vibe.model_hub_runtime.installer.windows_native_arm64", lambda: False)
+    owner, _supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
+    candidate, _signer, manifest, _envelope = signed_candidate(owner, tmp_path)
+    asset = next(item for item in json.loads(manifest)["assets"] if item["platform"] == host)
+    assert asset["url"].endswith(".tar.gz")
+    assert owner.manager._verified_manifest_binary(
+        Path(candidate.install_dir), *owner._manifest(candidate),
+    ) is not None
+
+
+@pytest.mark.parametrize("phase", ["preflight", "start", "interrupted"])
+@pytest.mark.parametrize("origin", ["bundled", "channel"])
+def test_failed_same_release_repair_preserves_the_old_healthy_install(tmp_path, monkeypatch, phase, origin):
+    from vibe.model_hub_runtime.lifecycle import EngineGeneration
+    from vibe.model_hub_runtime.supervisor import EngineUnavailableError
+
+    owner, supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
+    if origin == "channel":
+        active, _signer, _manifest, _envelope = signed_candidate(owner, tmp_path)
+        owner.activate(active)
+    owner.ensure_running()
+    old = owner.journal.load()["active"]
+    result = owner.stage_required(force=True)
+    assert result["ok"], result
+    replacement = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
+    assert replacement.asset_release_tag == old["asset_release_tag"]
+    assert replacement.install_dir != old["install_dir"]
+    if phase == "preflight":
+        def fail_preflight(_generation):
+            raise EngineUnavailableError("models.engine.health_failed")
+        monkeypatch.setattr(owner, "preflight", fail_preflight)
+        with pytest.raises(EngineUnavailableError):
+            owner.activate(replacement, reason="required")
+    elif phase == "start":
+        original = supervisor.ensure_running
+
+        def fail_replacement():
+            target, _managed = owner.startable()
+            if target == replacement:
+                raise EngineUnavailableError("models.engine.health_failed")
+            return original()
+
+        monkeypatch.setattr(supervisor, "ensure_running", fail_replacement)
+        with pytest.raises(EngineUnavailableError):
+            owner.activate(replacement, reason="required")
+    else:
+        import uuid
+
+        value = owner.journal.load()
+        value["pending"] = {
+            "id": uuid.uuid4().hex, "old": old, "candidate": replacement.document(),
+            "run_intent": True, "reason": "required",
+        }
+        value["interrupted"][f"install:{replacement.install_dir}"] = 1
+        owner._save(value)
+        owner.recover()
+    value = owner.journal.load()
+    assert value["active"] == old and value["pending"] is None and value["blocked"] is None
+    assert supervisor.running == old
+    assert old["asset_release_tag"] not in value["quarantine"]
+    assert f"install:{replacement.install_dir}" in value["quarantine"]
+    owner.authorize(EngineGeneration.read(old, owner.manager.runtime_dir), value=value)
+    with pytest.raises(journal.JournalError, match="quarantined"):
+        owner.authorize(replacement, value=value)
+    assert all(g["install_dir"] != replacement.install_dir for g in value["staged"])
+    # Ordinary demand and required-file repair still name the settled old owner.
+    assert owner.ensure_running() == "test connection"
+    assert owner.stage_required()["ok"]
 
 
 def test_signed_channel_commit_is_separate_from_running_and_bundled_legacy(tmp_path, monkeypatch):

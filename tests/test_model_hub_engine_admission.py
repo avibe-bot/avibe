@@ -24,6 +24,71 @@ def adapter():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_at", ["client", "inventory", "request"])
+@pytest.mark.parametrize("withdrawal", [False, True], ids=["user_cancel", "withdrawal"])
+async def test_oauth_start_cancellation_releases_unregistered_provider(tmp_path, monkeypatch, cancel_at, withdrawal):
+    import threading
+
+    from vibe.model_hub_runtime import adapter as module
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    entered = threading.Event()
+    finish = threading.Event()
+    state = EngineStateStore(tmp_path / "state")
+
+    def pause(phase):
+        if phase == cancel_at:
+            entered.set()
+            assert finish.wait(5)
+
+    class Client:
+        def management_request(self, *_args, **_kwargs):
+            pause("request")
+            return {"state": "fixture-state", "url": "https://oauth.example.test"}
+
+    client = Client()
+
+    def get_client():
+        pause("client")
+        return client
+
+    def inventory(_client):
+        pause("inventory")
+        return {}
+
+    monkeypatch.setattr(module, "_auth_inventory", inventory)
+    owner = CLIProxyEngineAdapter(supervisor=SimpleNamespace(client=get_client), state_store=state)
+    operation = asyncio.create_task(owner.start_oauth("src_fixture123", "anthropic"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert owner._active_oauth_providers == {"claude"}
+        if withdrawal:
+            owner._engine_admission.close("engine_withdrawn")
+            await owner._engine_admission.interrupt()
+        else:
+            operation.cancel()
+        # The thread must finish before its lease/reservation can be released.
+        await asyncio.sleep(0)
+        assert not operation.done()
+        finish.set()
+        with pytest.raises(EngineUnavailableError if withdrawal else asyncio.CancelledError):
+            await asyncio.wait_for(operation, 5)
+        assert owner._active_oauth_providers == set()
+        assert owner._oauth_flows == {}
+        assert owner._engine_admission.idle.is_set()
+        owner._engine_admission.reopen()
+        flow = await owner.start_oauth("src_fixture123", "anthropic")
+        assert flow.flow_id in owner._oauth_flows
+        owner._release_provider(owner._oauth_flows[flow.flow_id])
+        assert owner._engine_admission.idle.is_set()
+    finally:
+        finish.set()
+        if not operation.done():
+            operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_routine_drain_releases_routing_for_admitted_continuations():
     owner = adapter()
     flow = owner._engine_admission.retain()
@@ -119,6 +184,8 @@ async def test_routine_drain_upgrades_to_learned_withdrawal_budget(monkeypatch):
     assert await drain is True
 
 
+@pytest.mark.asyncio
+async def test_operation_lease_and_result_stamp_survive_later_selection():
     started = asyncio.Event()
     finish = asyncio.Event()
 
