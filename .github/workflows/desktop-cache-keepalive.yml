@@ -6,15 +6,16 @@ name: desktop-cache-keepalive
 # still require a real master run to validate.
 #
 # This workflow reads and never writes. It checks out nothing, holds no secret,
-# and has no save step, so it cannot change what a release restores. An entry
-# that is gone stays gone until desktop-package.yml's warm-up saves it again,
-# and is reported here before a release finds out. Schedules are not used
-# because this repository's run hours late. The Windows entry is left alone: a
-# lookup needs a Windows runner, and a cold Windows build is still shorter than
-# a warm macOS one.
+# and has no save step, so it cannot change what a release restores. A missing
+# entry stays gone until desktop-package.yml's warm-up saves it again, and the
+# warning tells the operator to run that warm-up. The five-day schedule is the
+# retention attempt; the Windows entry is left alone because a lookup needs a
+# Windows runner and a cold Windows build is still shorter than a warm macOS one.
 on:
   push:
     branches: [master]
+  schedule:
+    - cron: "41 18 */5 * *"
   workflow_dispatch:
 
 permissions:
@@ -139,17 +140,17 @@ jobs:
             state=kept now=""
             if [ -z "$key" ]; then
               state=missing
-              echo "::warning title=Desktop cache missing::master has no $name cache for $target; a release rebuilds it from source until the warm-up saves one."
+              echo "::warning title=Desktop cache missing::master has no $name cache for $target; a release rebuilds it from source until the warm-up saves one. Run the next desktop warm-up."
             elif [ "$hit" != true ]; then
               state=unreadable
-              echo "::warning title=Desktop cache unreadable::$key is listed on master but a lookup cannot restore it."
+              echo "::warning title=Desktop cache unreadable::$key is listed on master but a lookup cannot restore it. Run the next desktop warm-up."
             else
               now="$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/master \
                 --key "$key" --sort created_at --order desc --limit 1 \
                 --json lastAccessedAt --jq '.[0].lastAccessedAt // ""')"
               if ! [[ "$now" > "$seen" ]]; then
                 state=not-refreshed
-                echo "::warning title=Desktop cache not refreshed::The lookup did not move the last access of $key ($seen); it is not protected from eviction."
+                echo "::warning title=Desktop cache not refreshed::The lookup did not move the last access of $key ($seen); it is not protected from eviction. Run the next desktop warm-up."
               fi
             fi
             echo "| $name | $target | $state | $seen | $now |" >> "$GITHUB_STEP_SUMMARY"
