@@ -232,11 +232,11 @@ Rules:
 
 ### `direct`: which path carries the instance origin
 
-Proposed for remote direct paths ([the App side](remote-direct-ios.md)); not
-implemented by any shell yet. The shell can carry the instance origin's
-connections over a direct path instead of Cloudflare Tunnel. The origin does
-not change, so the Web UI needs to know only one thing: connections it opened
-before a change stay on the path they were opened on.
+Specified for remote direct paths ([the App side](remote-direct-ios.md)). A
+shell can carry the instance origin's connections over a direct path instead
+of Cloudflare Tunnel. The origin does not change, so the Web UI needs to know
+only one thing: connections it opened before a change stay on the path they
+were opened on.
 
 - `transport` is `"tunnel"` (Cloudflare Tunnel, the default) or `"direct"`.
   It describes the calling document's instance; a shell with no direct

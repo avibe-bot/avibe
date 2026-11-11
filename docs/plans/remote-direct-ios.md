@@ -22,7 +22,7 @@ WKWebView on the account's data store (runtime, child windows, hidden transports
 
 | Component | Where | Owns | Plan row |
 | --- | --- | --- | --- |
-| Transport | `DirectTransporting`, a protocol with no implementation yet | The iroh endpoint, the native rendezvous fetch, probing, and network-change handling. Reports when the selected instance has a usable path, and opens byte streams over it. | A2 |
+| Transport | `DirectTransporting`, a protocol with no implementation yet | The iroh endpoint, the native rendezvous fetch, probing, and network-change handling. Reports when the selected instance has a usable path, and opens byte streams over it. It is told when the App is on the tunnel although it reported a path usable, and decides when to probe again. | A2 |
 | CONNECT listener | `DirectConnectListener` | One loopback socket on a port the system chooses. Refuses everything but `CONNECT <instance host>:443`, then relays bytes. | A3 |
 | Path controller | `DirectPathController` | The transport state (tunnel or direct), the tags, and every decision to install or remove the route. | A3 |
 | Route owner | `DirectRouteOwner` | The only code that writes `proxyConfigurations` on an account data store. | A3 |
@@ -51,6 +51,7 @@ Rules:
 
 - A transport report is bound to the selection it was requested for. A report that arrives after that selection ended is dropped.
 - Before a route is installed, the controller asks `MobileSessionCoordinator.isCurrentRuntime` for the lease, as the App's route and WebView registration already do, and compares the tag's store identifier with the current one. A late result therefore never installs a route on a store that is going away or has gone.
+- `isCurrentRuntime` is also false while the coordinator runs a request of its own with no account transition: `pushManagementRequest` holds `phase = .operation` until its request ends. A route that becomes ready in that window is not installed either. The App stays on the tunnel, the transport is told, and its next report is admitted. This is the conservative reading; section 9 asks whether it should be otherwise.
 - Within a selection, a rendezvous generation that a newer one replaced is never accepted again. Generations never repeat, so this costs a correct transport nothing.
 - A route for a new generation is a new route: the old listener and its relays are closed first.
 
@@ -116,23 +117,24 @@ Automated, in `ios-shell` on the simulator:
 - the tag rules: late reports, a replaced generation, instance switch, account switch, sign-out, store rotation, background and foreground;
 - that nothing binds a socket or writes `proxyConfigurations` without a transport;
 - the bridge: `direct.status()` and the event's payload, in an instance main frame only;
-- one WebKit-level test: a `WKWebView` on a real data store loads through the installed route into a stand-in instance. It proves that the simulator's WebKit sends its CONNECT to the listener for the matched host, that a subdomain is refused, and that the route's removal takes effect. It uses plain HTTP inside the tunnel, so it proves nothing about TLS, certificates, or a real network.
+- one WebKit-level test: a `WKWebView` on a real data store loads through the installed route into a stand-in instance. It proves that the simulator's WebKit sends its CONNECT for the matched host to the listener and that a document loads through the relay. The page is plain HTTP on port 443 of an unqualified host name, which needs no certificate and is outside App Transport Security, so the test proves nothing about TLS, certificates, or a real network. Subdomain refusal and route removal are tested at the listener and the controller, not through WebKit.
 
 On devices, in the Phase 1 matrix (A5): Local Network permission states, suspension and resume, Wi-Fi and cellular changes, a blackholed path, and whether WebKit on iOS applies a route change to new connections as promptly as on macOS.
 
 ## 9. Open for the iOS owner
 
-1. **Where native fetches the rendezvous (D3).** The plan says "the same-origin transport that push management uses", but `MobileAuthTransport` is pinned to the control-plane origin and cannot make a same-origin request to an instance. Two ways fit the App's rules: a fixed script in the runtime primary WebView's `WKContentWorld.defaultClient`, which needs no new WebView and no new release barrier; or a second hidden transport on the instance origin. We would start with the first.
+1. **Where native fetches the rendezvous (D3).** It needs a native same-origin request to the instance on the account's data store. `MobileAuthTransport` cannot make it: it is pinned to the control-plane origin. Two ways fit the App's rules: a fixed script in the runtime primary WebView's `WKContentWorld.defaultClient`, which needs no new WebView and no new release barrier; or a second hidden transport on the instance origin. We would start with the first.
 2. **Local Network permission (D4)** and **the minimum iOS version (D5)**: unchanged from the Phase 1 plan. Neither is touched by the listener, the route, or the bridge.
 3. **Background policy.** Returning to the tunnel on every background is the conservative reading of TN2277. If a brief app switch should keep the route, that needs device evidence first.
 4. **The capability's name and payload**, before the Web UI half spreads to instances.
+5. **Admission while the coordinator is busy** (section 3). Reusing `isCurrentRuntime` unchanged means a route that is ready during a push management request is refused once. Admitting on the lease alone needs a coordinator check without the `phase` term, which is the iOS owner's to add or refuse.
 
 ## 10. Pull requests
 
 | PR | Content | Needs |
 | --- | --- | --- |
-| This document and the bridge spec | Documentation only | iOS owner's review |
-| Web UI half (I4) | `ui/` only; inert without the capability | Ours; the capability's name is the one thing to settle |
-| Listener, route, state, bridge (A3, A4) | Swift, inactive without a transport | iOS owner's review |
+| #3530: this document and the bridge spec | Documentation only | iOS owner's review |
+| #3532: Web UI half (I4) | `ui/` only; inert without the capability | Ours; it waits for the capability's name to be accepted here |
+| #3537: listener, route, state, bridge (A3, A4) | Swift, inactive without a transport | iOS owner's review |
 | Transport (A1, A2) | iroh, rendezvous fetch, probing | The iOS 17.0 build question, then the iOS owner's review |
 | Device validation (A5) | The Phase 1 matrix and a TestFlight build | The iOS owner or the owner |
