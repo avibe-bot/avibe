@@ -2950,6 +2950,7 @@ scenarios:
     test:
       - tests/test_model_hub_engine_channel.py::test_an_index_is_accepted_and_keeps_deciding_whenever_it_was_issued
       - tests/test_model_hub_engine_channel_client.py::test_the_recorded_index_keeps_deciding_when_no_newer_one_can_be_fetched
+      - tests/test_model_hub_engine_channel_client.py::test_no_clock_is_read_to_accept_an_index_or_to_decide_from_it
       - tests/test_model_hub_engine_channel_client.py::test_a_machine_that_never_receives_a_withdrawal_keeps_following_the_index_it_has
 next_priority:
   - MH-PROTOCOL-004

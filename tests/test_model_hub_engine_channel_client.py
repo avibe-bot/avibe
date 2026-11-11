@@ -255,6 +255,44 @@ def test_the_recorded_index_keeps_deciding_when_no_newer_one_can_be_fetched(tmp_
     assert (tmp_path / "engine" / "channel" / "state.json").read_bytes() == recorded
 
 
+def test_no_clock_is_read_to_accept_an_index_or_to_decide_from_it(tmp_path, monkeypatch) -> None:
+    """MH-ENGINE-CHANNEL-013: an index cannot age, by its date or by how long ago it was accepted.
+
+    The other cases show that an index dated long ago or far ahead is
+    accepted. A limit on how long ago it was accepted could not show there,
+    and would need the time: so the time is taken away.
+    """
+
+    from core import model_hub_engine_channel as contract
+
+    class NoClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            raise AssertionError("the engine channel read the wall clock")
+
+        utcnow = today = now
+
+    monkeypatch.setattr(contract, "datetime", NoClock)
+    monkeypatch.setattr(engine_channel, "datetime", NoClock, raising=False)
+    signer = Signer()
+    newest = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    channel, _ = _channel(tmp_path, signer, _index(signer, 5, revoked=[tombstone(NEWER, newest)]))
+
+    assert channel.refresh().state == "accepted"
+    assert channel.snapshot().payload.sequence == 5
+    assert channel.resolve(current=BUNDLED).action is ResolutionAction.ADOPT
+    assert channel.resolve(current=NEWER).action is ResolutionAction.WITHDRAW
+    # Neither hold is decided by the time either.
+    offline, _ = _channel(
+        tmp_path, signer, manager=EngineRuntimeManager(runtime_dir=tmp_path / "engine", offline=True)
+    )
+    below_floor, _ = _channel(tmp_path, signer, roots=signer.roots(floor=100))
+    assert [reader.resolve(current=BUNDLED).reason for reader in (offline, below_floor)] == [
+        "offline",
+        "index_below_floor",
+    ]
+
+
 def test_a_machine_that_never_receives_a_withdrawal_keeps_following_the_index_it_has(tmp_path) -> None:
     """MH-ENGINE-CHANNEL-013: the limit of having no expiry, stated as behaviour.
 
