@@ -6840,6 +6840,7 @@
       "editRecheck": "Check again",
       "editRemove": "Remove",
       "editRemoveConfirm": "Remove this key from Model Hub?",
+      "editRemoveImpact": "Assistants using this key will have no model until you add another. Remove anyway?",
       "editRemoving": "Removing…",
       "editRemoveFailed": "Could not remove the key. Try again.",
       "addMoreTitle": "Add more",

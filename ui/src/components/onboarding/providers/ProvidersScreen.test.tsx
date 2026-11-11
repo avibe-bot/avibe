@@ -614,6 +614,36 @@ describe('ProvidersScreen — the stage', () => {
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionAdd' });
   });
 
+  it('AUTH-SETUP-139 asks once more before removing a key assistants still route to', async () => {
+    serve({ sources: [savedKey('src_used', 'anthropic')], listing: { src_used: ['claude-opus'] } });
+    const hop = { backend: 'vibey', menu_model: 'claude-opus', source_id: 'src_used', model_id: 'claude-opus', position: 1 };
+    const gap = { backend: 'vibey', model_id: 'claude-opus', agents: ['main'] };
+    const remove = vi.spyOn(modelsApi, 'deleteSource').mockImplementation(async (id, confirmation) => {
+      if (!confirmation) {
+        throw new ApiCallError('source_in_route_chain', undefined, true, [gap] as never, [], [hop] as never, 409);
+      }
+      server.sources = server.sources.filter((item) => item.id !== id);
+      return { removed_hops: [hop] as never, interrupted: [gap] as never };
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('connected'));
+
+    await user.click(cardFor('anthropic'));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
+    // The guard named an Agent the removal leaves without a model: asked, not forced.
+    expect(await within(dialog).findByText(/Assistants using this key will have no model/)).toBeTruthy();
+    expect(remove).toHaveBeenCalledTimes(1);
+
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(remove).toHaveBeenLastCalledWith('src_used', { force: true, would_remove_hops: [hop], would_interrupt: [gap] });
+    await waitFor(() => expect(cardFor('anthropic').dataset.state).toBe('empty'));
+  });
+
   it('names a subscription by its sign-in, not by a mask it cannot have', async () => {
     // A subscription has no key to mask by construction. A card describing itself by
     // its mask alone would fall through to the offer an empty card makes and invite

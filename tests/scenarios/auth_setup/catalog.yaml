@@ -996,6 +996,7 @@ scenarios:
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 says nothing passed in Chinese, and stays quiet once any key passes
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 replaces a rejected key from its card, and the card reports the key that passed
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 removes a key from its card after a confirmation
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 asks once more before removing a key assistants still route to
     reason: >-
       Covered is bounded to the real provider screen against a controlled source
       API. The server half — a listing the provider refuses with 401/403 reaching

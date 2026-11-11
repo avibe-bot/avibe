@@ -9,9 +9,9 @@
 // the new one before it commits, and keeps the old key when that fails, which is the
 // same free check the card reports — so a replacement that lands is a key that passed,
 // and one that is refused leaves the card exactly as it was. Removing goes through
-// the route guard like Settings does, agreeing up front to the route hops the key
-// supplied and to nothing else: stopping an Agent is never agreed to on the
-// person's behalf, and a guard that names one ends as a failure here.
+// the route guard like Settings does: confirming the removal agrees to the route hops
+// the key supplied, and a removal that would leave assistants' models with no supply
+// is asked about once more, in this frame, before it is forced.
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { CircleX, LoaderCircle, X } from 'lucide-react';
@@ -20,7 +20,8 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { DialogOverlay } from '@/components/ui/dialog';
 import { ApiKeyField } from '@/components/settings/models/ApiKeySourceForm';
-import { confirmGuardPlan, sendAgreed } from '@/components/settings/models/guardedWrite';
+import type { GuardPlan } from '@/components/settings/models/GuardImpact';
+import { confirmGuardPlan, sendAgreed, unansweredRefusal } from '@/components/settings/models/guardedWrite';
 import { apiFailure, modelsApi } from '@/components/settings/models/modelsApi';
 import type { Source } from '@/components/settings/models/types';
 
@@ -30,6 +31,8 @@ type Phase =
   | { kind: 'idle' }
   | { kind: 'saving' }
   | { kind: 'confirmRemove' }
+  /** The guard named models the removal would leave unsupplied. */
+  | { kind: 'confirmImpact'; plan: GuardPlan }
   | { kind: 'removing' }
   | { kind: 'failed'; message: string };
 
@@ -91,13 +94,14 @@ export const SourceKeyDialog: React.FC<{
 
   const remove = async () => {
     if (busy || !writable) return;
-    if (phase.kind !== 'confirmRemove') {
+    if (phase.kind !== 'confirmRemove' && phase.kind !== 'confirmImpact') {
       setPhase({ kind: 'confirmRemove' });
       return;
     }
+    const shown = phase.kind === 'confirmImpact' ? phase.plan : null;
     setPhase({ kind: 'removing' });
     try {
-      await sendAgreed(true, null, (plan) => modelsApi.deleteSource(
+      await sendAgreed(true, shown, (plan) => modelsApi.deleteSource(
         source.id,
         plan ? confirmGuardPlan(plan) : undefined,
       ));
@@ -109,7 +113,10 @@ export const SourceKeyDialog: React.FC<{
         onClose();
         return;
       }
-      setPhase({ kind: 'failed', message: t('onboarding.providers.editRemoveFailed') });
+      const refusal = unansweredRefusal(error, true, shown);
+      setPhase(refusal
+        ? { kind: 'confirmImpact', plan: refusal }
+        : { kind: 'failed', message: t('onboarding.providers.editRemoveFailed') });
     }
   };
 
@@ -202,6 +209,7 @@ export const SourceKeyDialog: React.FC<{
                 </>
               )}
               {phase.kind === 'confirmRemove' && t('onboarding.providers.editRemoveConfirm')}
+              {phase.kind === 'confirmImpact' && t('onboarding.providers.editRemoveImpact')}
               {phase.kind === 'failed' && (
                 <>
                   <CircleX className="setup-add-status-icon setup-add-status-icon--error" aria-hidden="true" />
@@ -211,7 +219,7 @@ export const SourceKeyDialog: React.FC<{
             </span>
             <Button
               type="button"
-              variant={phase.kind === 'confirmRemove' ? 'destructive' : 'outline'}
+              variant={phase.kind === 'confirmRemove' || phase.kind === 'confirmImpact' ? 'destructive' : 'outline'}
               size="sm"
               disabled={busy || !writable}
               onClick={() => void remove()}

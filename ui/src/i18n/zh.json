@@ -6840,6 +6840,7 @@
       "editRecheck": "重新检查",
       "editRemove": "移除",
       "editRemoveConfirm": "从模型网关移除这个 Key？",
+      "editRemoveImpact": "使用这个 Key 的助手将没有可用的模型，直到你添加新的来源。仍要移除？",
       "editRemoving": "正在移除…",
       "editRemoveFailed": "无法移除这个 Key，请重试",
       "addMoreTitle": "添加更多",
