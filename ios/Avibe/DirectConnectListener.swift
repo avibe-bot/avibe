@@ -256,6 +256,8 @@ actor DirectConnectListener {
     }
 
     /// Binds `127.0.0.1` on a port the system chooses and returns that port.
+    /// A socket bound to the loopback address receives nothing from another
+    /// host.
     func start() async throws -> NWEndpoint.Port {
         guard !isStopped, listener == nil else {
             throw CancellationError()
@@ -265,14 +267,16 @@ actor DirectConnectListener {
             host: "127.0.0.1",
             port: .any
         )
-        parameters.acceptLocalOnly = true
         let listener = try NWListener(using: parameters, on: .any)
         self.listener = listener
-        listener.newConnectionHandler = { [weak self] connection in
+        listener.newConnectionHandler = { [weak self, queue] connection in
             guard let self else {
                 connection.cancel()
                 return
             }
+            // Started here, inside the listener's own handler, as the
+            // listener expects of a connection it hands over.
+            connection.start(queue: queue)
             Task {
                 await self.accept(connection)
             }
@@ -335,11 +339,10 @@ actor DirectConnectListener {
             connection.cancel()
             return
         }
-        connection.start(queue: queue)
         guard relays.count < limits.maxConnections else {
             onFailure(.capacity)
             Task {
-                await Self.refuse(connection, status: 503)
+                await Self.refuse(connection, status: 503, within: 1)
                 connection.cancel()
             }
             return
@@ -389,7 +392,11 @@ actor DirectConnectListener {
             case .accepted(let data):
                 earlyData = data
             case .refused(let status):
-                await refuse(connection, status: status)
+                await refuse(
+                    connection,
+                    status: status,
+                    within: limits.headSeconds
+                )
                 return
             case .incomplete:
                 return
@@ -416,7 +423,11 @@ actor DirectConnectListener {
                 return
             }
             onFailure(.streamUnavailable)
-            await refuse(connection, status: gatewayStatus(for: error))
+            await refuse(
+                connection,
+                status: gatewayStatus(for: error),
+                within: limits.headSeconds
+            )
             return
         }
         defer {
@@ -443,11 +454,16 @@ actor DirectConnectListener {
                 onFailure(.instanceRefused(status))
                 await refuse(
                     connection,
-                    status: (400...599).contains(status) ? status : 502
+                    status: (400...599).contains(status) ? status : 502,
+                    within: limits.headSeconds
                 )
             } else {
                 onFailure(.noAnswer)
-                await refuse(connection, status: gatewayStatus(for: error))
+                await refuse(
+                    connection,
+                    status: gatewayStatus(for: error),
+                    within: limits.headSeconds
+                )
             }
             return
         }
@@ -588,10 +604,16 @@ actor DirectConnectListener {
         }
     }
 
-    /// Answers a request that will not be tunnelled, then lets the client
-    /// read the answer before the connection closes.
-    private static func refuse(_ connection: NWConnection, status: Int) async {
-        _ = try? await withDeadline(1) {
+    /// Answers a request that will not be tunnelled, then gives the client
+    /// `seconds` to read the answer and close. Closing first, with bytes of
+    /// the client's still unread, would reset the connection and could cost
+    /// it the answer.
+    private static func refuse(
+        _ connection: NWConnection,
+        status: Int,
+        within seconds: TimeInterval
+    ) async {
+        _ = try? await withDeadline(seconds) {
             try await connection.sendAll(DirectConnectWire.refusal(status))
             try await connection.finishSending()
             while try await !connection.receiveChunk(maximumLength: 4096).isComplete {}

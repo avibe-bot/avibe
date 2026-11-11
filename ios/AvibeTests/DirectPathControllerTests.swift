@@ -224,6 +224,24 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(harness.changes, [])
         try await eventually { listeningLoopbackPorts().subtracting(listening).isEmpty }
+
+        // The selection that replaced it activates once, for its own host,
+        // and the abandoned listener is not the one left listening.
+        let current = try XCTUnwrap(transport.selections.last)
+        transport.report(.usable(generation: "g1"), for: current)
+        try await eventually { harness.changes == [self.direct] }
+        XCTAssertEqual(
+            harness.controller.status(for: harness.origin("instance-2")).transport,
+            .direct
+        )
+        XCTAssertEqual(
+            harness.controller.status(for: harness.origin("instance-1")).transport,
+            .tunnel
+        )
+        try await eventually {
+            listeningLoopbackPorts().subtracting(listening).count == 1
+        }
+        XCTAssertEqual(harness.changes, [direct])
     }
 
     /// `isCurrentRuntime` is also false while the coordinator runs a request
@@ -498,6 +516,7 @@ private final class Harness {
         isCurrentRuntime: { [unowned self] in
             self.coordinator.isCurrentRuntime($0)
         },
+        limits: .patient,
         notificationCenter: notifications,
         isInBackground: false,
         onStatusChanged: { [unowned self] in

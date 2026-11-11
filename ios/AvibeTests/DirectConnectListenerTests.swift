@@ -229,20 +229,21 @@ final class DirectConnectListenerTests: XCTestCase {
             let answer: StandInInstanceAnswer
             let status: Int
             let failure: DirectConnectFailure
+            var limits = DirectConnectLimits.patient
         }
         let cases = [
             Case(name: "the stream cannot be opened", streams: .fail, answer: .none, status: 502, failure: .streamUnavailable),
-            Case(name: "the stream does not open in time", streams: .hang, answer: .none, status: 504, failure: .streamUnavailable),
+            Case(name: "the stream does not open in time", streams: .hang, answer: .none, status: 504, failure: .streamUnavailable, limits: limits(openSeconds: 0.3)),
             Case(name: "the instance refuses the authority", streams: .open, answer: .bytes("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), status: 403, failure: .instanceRefused(403)),
             Case(name: "the ingress is stopped", streams: .open, answer: .bytes("HTTP/1.1 503 Service Unavailable\r\n\r\n"), status: 503, failure: .instanceRefused(503)),
             Case(name: "the answer is not HTTP", streams: .open, answer: .bytes("\u{16}\u{03}\u{01}\r\n\r\n"), status: 502, failure: .noAnswer),
             Case(name: "the instance closes without answering", streams: .open, answer: .finish, status: 502, failure: .noAnswer),
-            Case(name: "the instance never answers", streams: .open, answer: .none, status: 504, failure: .noAnswer),
+            Case(name: "the instance never answers", streams: .open, answer: .none, status: 504, failure: .noAnswer, limits: limits(answerSeconds: 0.3)),
         ]
 
         for testCase in cases {
             let fixture = try await makeListener(
-                limits: limits(openSeconds: 0.3, answerSeconds: 0.3),
+                limits: testCase.limits,
                 streams: testCase.streams
             )
             let client = LoopbackClient(port: fixture.port)
@@ -294,16 +295,36 @@ final class DirectConnectListenerTests: XCTestCase {
         // A connection that ends gives its slot back.
         first.close()
         firstStream.instanceFinishes()
+        try await eventually { firstStream.isCancelled }
         try await eventually {
             let retry = LoopbackClient(port: fixture.port)
             defer { retry.close() }
             try await retry.send(self.canonicalHead)
-            return (try? await fixture.streams.waitForStream(
-                count: 3,
-                timeout: .milliseconds(300)
-            )) != nil
+            // Served: a third stream is opened for it. Still over the
+            // limit: it is answered and closed.
+            let refusal = Recorder<Data>()
+            let reading = Task {
+                refusal.record(try await retry.receiveUntilClosed())
+            }
+            defer { reading.cancel() }
+            try await eventually {
+                fixture.streams.opened.count >= 3 || !refusal.values.isEmpty
+            }
+            return fixture.streams.opened.count >= 3
         }
         second.close()
+    }
+
+    func testListensOnTheLoopbackAddressOnlyOnAPortTheSystemChooses() async throws {
+        let fixture = try await makeListener()
+        let another = try await makeListener()
+
+        // The scan reports only sockets bound to 127.0.0.1, so a listener on
+        // the wildcard address would not be in it.
+        let listening = listeningLoopbackPorts()
+        XCTAssertTrue(listening.contains(fixture.port.rawValue))
+        XCTAssertTrue(listening.contains(another.port.rawValue))
+        XCTAssertNotEqual(fixture.port, another.port)
     }
 
     func testStoppingClosesEveryConnectionAndItsStream() async throws {
@@ -439,12 +460,14 @@ final class DirectConnectListenerTests: XCTestCase {
         let failures: Recorder<DirectConnectFailure>
     }
 
+    /// The standard sizes, with deadlines a loaded simulator cannot miss.
+    /// A test about one deadline shortens that one.
     private func limits(
-        headSeconds: TimeInterval = 5,
-        openSeconds: TimeInterval = 5,
-        answerSeconds: TimeInterval = 5,
+        headSeconds: TimeInterval = 60,
+        openSeconds: TimeInterval = 60,
+        answerSeconds: TimeInterval = 60,
         maxConnections: Int = 64,
-        lingerSeconds: TimeInterval = 30,
+        lingerSeconds: TimeInterval = 60,
         chunkBytes: Int = 64 * 1024
     ) -> DirectConnectLimits {
         DirectConnectLimits(
@@ -459,7 +482,7 @@ final class DirectConnectListenerTests: XCTestCase {
     }
 
     private func makeListener(
-        limits: DirectConnectLimits = .standard,
+        limits: DirectConnectLimits = .patient,
         streams mode: StandInStreamSource.Mode = .open
     ) async throws -> Fixture {
         let streams = StandInStreamSource(mode: mode)
@@ -503,10 +526,23 @@ final class DirectConnectListenerTests: XCTestCase {
 
 // MARK: - Stand-ins shared with the path controller tests
 
+extension DirectConnectLimits {
+    /// The standard sizes, with deadlines a loaded simulator cannot miss.
+    static let patient = DirectConnectLimits(
+        headBytes: 4096,
+        headSeconds: 60,
+        openSeconds: 60,
+        answerSeconds: 60,
+        maxConnections: 64,
+        lingerSeconds: 60,
+        chunkBytes: 64 * 1024
+    )
+}
+
 struct DirectTestTimeout: Error {}
 
 func eventually(
-    timeout: Duration = .seconds(10),
+    timeout: Duration = .seconds(30),
     _ condition: @escaping () async throws -> Bool
 ) async throws {
     let clock = ContinuousClock()
