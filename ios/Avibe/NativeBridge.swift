@@ -18,8 +18,8 @@ struct NativeShellMetadata: Equatable {
         "accountPresentation": 2,
         "app": 1,
         "badge": 1,
-        "haptics": 1,
         "direct": 1,
+        "haptics": 1,
         "keyboardResizesViewport": 1,
         "push": 1,
         "viewport": 1,
@@ -76,10 +76,10 @@ enum NativeBridgeMethod: String, CaseIterable {
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
     case badgeSet = "badge.set"
+    case directStatus = "direct.status"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
-    case directStatus = "direct.status"
     case navigationHistoryChanged = "navigation.historyChanged"
     case pushStatus = "push.status"
     case pushSubscribe = "push.subscribe"

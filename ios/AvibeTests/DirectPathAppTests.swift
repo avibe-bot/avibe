@@ -286,7 +286,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushKeychain: InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
                 pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter()
+                pushNotificationCenter: SilentPushNotificationCenter(),
+                badgeCenter: SilentBadgeCenter()
             )
         } else {
             app = AppModel(
@@ -295,7 +296,8 @@ final class DirectPathAppTests: XCTestCase {
                 pushKeychain: InMemoryPushKeychainStore(),
                 pushGenerationStore: InMemoryPushGenerationStore(),
                 pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: SilentPushNotificationCenter()
+                pushNotificationCenter: SilentPushNotificationCenter(),
+                badgeCenter: SilentBadgeCenter()
             )
         }
         trackStore(of: app)
@@ -524,4 +526,13 @@ private final class SilentPushNotificationCenter: PushNotificationCentering {
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
+}
+
+/// The App icon badge is not this suite's subject, and a test sets none.
+private final class SilentBadgeCenter: AppBadgeCentering {
+    func badgeAllowed() async -> Bool {
+        false
+    }
+
+    func setBadgeCount(_ count: Int) async throws {}
 }
