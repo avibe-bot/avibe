@@ -2345,7 +2345,6 @@ class CLIProxyEngineAdapter:
                 await self._restart_lost_engine()
             return await run_owned_in_thread(call)
 
-    @engine_operation
     async def provision_credential(
         self,
         vendor: str,
@@ -2356,15 +2355,19 @@ class CLIProxyEngineAdapter:
         auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
-        return await run_owned_in_thread(
-            self.state_store.store_api_key,
-            secret,
-            vendor=vendor,
-            protocol=protocol,
-            base_url=base_url,
+        metadata = {
+            "vendor": vendor, "protocol": protocol, "base_url": base_url,
             **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
-            on_reserved=on_reserved,
-        )
+            "on_reserved": on_reserved,
+        }
+        if protocol == "search":
+            # Tool-only keys have no CPA projection or execution dependency.
+            return await run_owned_in_thread(self.state_store.store_api_key, secret, **metadata)
+        return await self._provision_engine_credential(secret, **metadata)
+
+    @engine_operation
+    async def _provision_engine_credential(self, secret: str, **metadata: Any) -> str:
+        return await run_owned_in_thread(self.state_store.store_api_key, secret, **metadata)
 
     @staticmethod
     def _search_catalog_parts(catalog: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
@@ -2965,8 +2968,14 @@ class CLIProxyEngineAdapter:
             on_reserved=on_reserved,
         )
 
-    @engine_operation
     async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        if await run_owned_in_thread(self.state_store.api_key_credential_is_search, credential_ref):
+            await self.revoke_search_credential(credential_ref)
+            return
+        await self._revoke_engine_api_key_credential(credential_ref)
+
+    @engine_operation
+    async def _revoke_engine_api_key_credential(self, credential_ref: str) -> None:
         await run_owned_in_thread(self.state_store.assert_credential_unbound, credential_ref)
         is_search = await run_owned_in_thread(
             self.state_store.api_key_credential_is_search,
@@ -2976,8 +2985,15 @@ class CLIProxyEngineAdapter:
             await run_owned_in_thread(self.supervisor.invalidate_configs)
         await run_owned_in_thread(self.state_store.revoke_api_key_credential, credential_ref)
 
-    @engine_operation
     async def revoke_credential(self, credential_ref: str) -> None:
+        metadata = await run_owned_in_thread(self.state_store.credential_metadata_if_present, credential_ref)
+        if metadata is not None and metadata.get("kind") == "api_key" and metadata.get("protocol") == "search":
+            await self.revoke_search_credential(credential_ref)
+            return
+        await self._revoke_engine_credential(credential_ref)
+
+    @engine_operation
+    async def _revoke_engine_credential(self, credential_ref: str) -> None:
         await run_owned_in_thread(
             self.state_store.assert_credential_unbound,
             credential_ref,

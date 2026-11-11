@@ -361,7 +361,12 @@ that streamed or invoked a hosted tool. Existing transports drain unchanged;
 not-yet-admitted requests wait within their caller budget or receive a retryable
 local unavailable result. Ordinary updates may remain pending under sustained
 activity. OAuth flows and credential mutations share admission leases, not only
-inference calls. Do not run two real-auth CPA processes side by side.
+inference calls. Do not run two real-auth CPA processes side by side. Tool-only
+search/fetch operations and search API-key custody have no CPA projection:
+provisioning, free checks and dedicated search retirement bypass CPA recovery
+and admission. Legacy generic retirement does so only for a readable search
+API-key identity, with the search namespace revalidated at deletion; unknown or
+model-facing credentials retain their engine fence.
 
 Rollback restores binaries/selection, **not** a stale snapshot of live credentials.
 An engine requiring irreversible data migration needs an Avibe-coordinated
