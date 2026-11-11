@@ -162,8 +162,21 @@ final class NativeBadgeTests: XCTestCase {
 
     @MainActor
     func testTheSelectedInstanceSetsTheBadgeAndOnlySigningOutClearsIt() async throws {
+        // A push-management answer larger than what the server sends before
+        // `held` is signaled, so the request stays in flight until then.
+        let held = DispatchSemaphore(value: 0)
+        let inFlight = FixtureEvent(description: "push management request in flight")
+        let heldBody = Data(("{\"pad\":\"" + String(repeating: "x", count: 100_000) + "\"}").utf8)
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
+            case ("POST", "/api/push/hold"):
+                return LocalHTTPResponse(
+                    status: 200,
+                    headers: [("Content-Type", "application/json")],
+                    body: heldBody,
+                    headersSentEvent: inFlight,
+                    bodyRelease: held
+                )
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
@@ -242,16 +255,39 @@ final class NativeBadgeTests: XCTestCase {
         try await waitUntil { center.counts.count == 1 }
         XCTAssertEqual(center.counts, [7])
 
+        // A push-management request in flight (APNs registration, provider
+        // reconciliation) keeps the account and its selection: the badge
+        // still follows the Inbox, a clear included.
+        let management = Task {
+            try await appModel.mobileSessionCoordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "POST",
+                    path: "/api/push/hold",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        await fulfillment(of: [inFlight.expectation], timeout: 20)
+        XCTAssertTrue(appModel.setBadgeCount(0, origin: one))
+        try await waitUntil { center.counts.count == 2 }
+        XCTAssertEqual(center.counts, [7, 0])
+        held.signal()
+        _ = try await management.value
+        XCTAssertTrue(appModel.setBadgeCount(7, origin: one))
+        try await waitUntil { center.counts.count == 3 }
+        XCTAssertEqual(center.counts, [7, 0, 7])
+
         // Refreshing the same account's session keeps the badge: the account's
         // Inbox has not changed hands.
         _ = try await appModel.mobileSessionCoordinator.refresh()
         try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(center.counts, [7])
+        XCTAssertEqual(center.counts, [7, 0, 7])
 
         // Signing out clears the account's badge.
         _ = try await appModel.mobileSessionCoordinator.logout()
-        try await waitUntil { center.counts.count == 2 }
-        XCTAssertEqual(center.counts, [7, 0])
+        try await waitUntil { center.counts.count == 4 }
+        XCTAssertEqual(center.counts, [7, 0, 7, 0])
         XCTAssertFalse(appModel.setBadgeCount(3, origin: one))
     }
 

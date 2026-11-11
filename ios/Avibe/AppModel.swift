@@ -327,12 +327,13 @@ final class AppModel: ObservableObject {
     }
 
     /// `badge.set` from a runtime page: only the selected instance's page
-    /// sets the badge, the rule `push.*` follows.
+    /// sets the badge, the rule `push.*` follows. A push-management request
+    /// in flight changes neither, so it does not hold the badge back.
     @discardableResult
     func setBadgeCount(_ count: Int, origin: WebOrigin) -> Bool {
         guard
             let runtime = route.runtime,
-            sessionCoordinator.isCurrentRuntime(runtime),
+            sessionCoordinator.isSelectedRuntime(runtime),
             WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
         else {
             return false

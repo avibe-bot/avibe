@@ -977,8 +977,14 @@ final class MobileSessionCoordinator {
     }
 
     func isCurrentRuntime(_ runtime: MobileRuntimeContext) -> Bool {
+        phase == .ready && isSelectedRuntime(runtime)
+    }
+
+    /// Whether `runtime` is still this account's selected instance, whatever
+    /// exclusive operation runs meanwhile (a push-management request keeps the
+    /// account, the store, and the selection as they are).
+    func isSelectedRuntime(_ runtime: MobileRuntimeContext) -> Bool {
         guard
-            phase == .ready,
             runtime.generation == generation,
             runtime.websiteDataStoreIdentifier == websiteDataStore.identifier,
             let snapshot,
