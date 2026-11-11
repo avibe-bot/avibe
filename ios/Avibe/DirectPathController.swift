@@ -112,7 +112,7 @@ final class DirectPathController {
         isCurrentRuntime: @escaping (MobileRuntimeContext) -> Bool,
         limits: DirectConnectLimits = .standard,
         notificationCenter: NotificationCenter = .default,
-        isInBackground: Bool = UIApplication.shared.applicationState == .background,
+        isInBackground: Bool? = nil,
         onStatusChanged: @escaping (DirectPathStatus) -> Void
     ) {
         self.websiteDataStore = websiteDataStore
@@ -121,7 +121,9 @@ final class DirectPathController {
         self.isCurrentRuntime = isCurrentRuntime
         self.limits = limits
         self.notificationCenter = notificationCenter
+        // The App can be launched into the background.
         self.isInBackground = isInBackground
+            ?? (UIApplication.shared.applicationState == .background)
         self.onStatusChanged = onStatusChanged
 
         // The route leaves with the store it was installed on.
