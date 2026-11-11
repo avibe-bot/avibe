@@ -66,6 +66,9 @@ final class AppModel: ObservableObject {
     private let pushNotificationCenter: PushNotificationCentering?
     private let pushOpenedNow: () -> Date
     private let pushOpenedLifetime: TimeInterval
+    /// The App icon badge: the selected instance's Inbox total, which its Web
+    /// UI sets through `badge.set` (and a push sets while the App is away).
+    private let nativeBadge: NativeBadge
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -137,7 +140,8 @@ final class AppModel: ObservableObject {
             UserDefaultsPushInstallationMarkerStore(),
         pushNotificationCenter: PushNotificationCentering? = nil,
         pushOpenedNow: @escaping () -> Date = Date.init,
-        pushOpenedLifetime: TimeInterval = 120
+        pushOpenedLifetime: TimeInterval = 120,
+        badgeCenter: AppBadgeCentering? = nil
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -147,6 +151,7 @@ final class AppModel: ObservableObject {
         self.pushNotificationCenter = pushNotificationCenter
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
+        nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
 
@@ -318,6 +323,26 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// `badge.set` from a runtime page: only the selected instance's page
+    /// sets the badge, the rule `push.*` follows.
+    @discardableResult
+    func setBadgeCount(_ count: Int, origin: WebOrigin) -> Bool {
+        guard
+            let runtime = route.runtime,
+            sessionCoordinator.isCurrentRuntime(runtime),
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
+        else {
+            return false
+        }
+        nativeBadge.set(count)
+        return true
+    }
+
+    /// Settles once every badge change asked for so far has been applied.
+    func badgeSettled() async {
+        await nativeBadge.settled()
+    }
+
     private func handlePushTap(_ tap: PushNotificationTap) {
         guard hasCompletedBootstrap else {
             pendingPushTap = tap
@@ -396,6 +421,8 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         clearPendingPushOpened()
+        // The badge counted the previous account's Inbox.
+        nativeBadge.clear()
         stopRuntime()
         switch route {
         case .browser:

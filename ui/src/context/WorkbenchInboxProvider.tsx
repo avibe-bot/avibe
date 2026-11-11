@@ -15,6 +15,7 @@ import { badgeTotal as loudUnread, unreadByCategory as splitUnread } from '../li
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
 import { useConsumerActivation } from '../lib/useConsumerActivation';
+import { hasNativeCapability, setNativeBadge } from '../lib/native';
 import { onPageReactivated } from '../lib/pageActivity';
 import {
   createWorkbenchSessionReadOwnership,
@@ -1258,13 +1259,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // fails, or redirects on an expired session. Once loaded, a real 0 clears it.
   // A fresh authoritative map reasserts the badge even when its numeric sum
   // is unchanged: a worker may have written an older sum between reads.
+  //
+  // The native App (WKWebView, no Badging API) takes the same total through its
+  // bridge, 0 included; a shell without the capability is left as it was.
   useEffect(() => {
     const nav = navigator as Navigator & {
       setAppBadge?: (contents?: number) => Promise<void>;
       clearAppBadge?: () => Promise<void>;
     };
-    if (!('setAppBadge' in nav)) return;
     if (!badgeKnown) return;
+    if (setNativeBadge(badgeTotal)) return;
+    if (!('setAppBadge' in nav)) return;
     const op = badgeTotal > 0 ? nav.setAppBadge?.(badgeTotal) : nav.clearAppBadge?.();
     void op?.catch?.(() => {});
     // Fence a background worker read that started before this authoritative
@@ -1294,6 +1299,15 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       unsubscribeResume();
       navigator.serviceWorker.removeEventListener('message', onWorkerMessage);
     };
+  }, [refreshUnread]);
+
+  // In the native App a push sets the icon badge while the App is away (its
+  // notification service extension stamps the instance's total). Coming back,
+  // read the counts again: the fresh map reasserts the badge above, so the icon
+  // never keeps a number from while the App was away.
+  useEffect(() => {
+    if (!hasNativeCapability('badge')) return;
+    return onPageReactivated(() => void refreshUnread());
   }, [refreshUnread]);
 
   // Browser tabs have no Badging API. Keep their favicon useful while the
