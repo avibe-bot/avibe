@@ -5604,7 +5604,7 @@ def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp
 
 
 def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes_setup(monkeypatch, tmp_path):
-    """AUTH-SETUP-162: CLI card's Default model -> candidates -> catalog write -> Agent model -> runnable route -> completion.
+    """AUTH-SETUP-163: CLI card's Default model -> candidates -> catalog write -> Agent model -> runnable route -> completion.
 
     In the setup wizard a Hub-owned CLI assistant's Default model card opens the model
     picker instead of the route editor. Its Agent starts on a model no provider supplies,

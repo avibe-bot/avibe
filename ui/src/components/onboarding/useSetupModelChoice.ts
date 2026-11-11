@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import type { ApiContextType } from '../../context/ApiContext';
 import type { AgentBackendId } from '@/lib/agentBackends';
 import { compatibleEffort } from '@/lib/effortOptions';
+import { MAIN_BOT_HANDLE } from '@/lib/bots';
 import { useLatestRef } from '@/lib/useLatestRef';
 import { draftRowFor, type ChosenCandidate } from '../settings/models/backendCatalog';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
@@ -23,7 +24,7 @@ type Choice = { pick: ChosenCandidate; writing: boolean; failure: SetupChoiceFai
 type ShownOffer = BuiltinModelOffer & { epoch: number };
 
 export type SetupModelChoiceDeps = {
-  api: Pick<ApiContextType, 'getVibeAgent' | 'updateVibeAgent'>;
+  api: Pick<ApiContextType, 'getVibeAgent' | 'updateVibeAgent' | 'listVibeAgents'>;
   models: Pick<ModelsApi, 'getAgentModelCandidates' | 'putAgentModels'>;
   agentReads?: CollectionReadAuthority<AgentSupply[]>;
   /** The showing of the screen: it moves every time the screen is activated. */
@@ -51,6 +52,11 @@ export type SetupModelChoiceDeps = {
  *   is therefore settled by a read of the Agent, not by the writes' answers: until that
  *   read shows the chosen model the choice is held, entry waits on it, and Retry applies
  *   it again. A lost reply to a write that did land settles the same way.
+ * - **The main Bot.** Its Agent runs on Vibey's model (`bots.md` D9), and setup is where
+ *   the person first chooses one, so a choice for Vibey is the main Bot's too — but only
+ *   while the main Bot is still following: on Vibey's model, or Vibey had none yet. A
+ *   main Bot on a different model was set that way by someone, and setup does not
+ *   replace it. The choice stands only when both read as chosen.
  */
 export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
   const latest = useLatestRef(deps);
@@ -58,6 +64,14 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
   const [choices, setChoices] = useState<Partial<Record<AgentBackendId, Choice>>>({});
   const tokens = useRef<Partial<Record<AgentBackendId, number>>>({});
   const writing = useRef<Partial<Record<AgentBackendId, boolean>>>({});
+  /**
+   * The main Bot's Agent a choice carries along, decided once, before the first write of
+   * a choice that has not stood yet. A half-done choice leaves the main Bot off Vibey's
+   * model, so deciding again — on Retry, on the same row pressed again, or on another
+   * row picked instead — would read it as set apart on purpose and leave it behind. Held
+   * until a choice stands.
+   */
+  const followers = useRef<Partial<Record<AgentBackendId, string | null>>>({});
 
   const read = useCallback(async (backend: AgentBackendId) => {
     const token = (tokens.current[backend] ?? 0) + 1;
@@ -87,7 +101,14 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
     // The efforts the chosen model takes: what the list holds for it, else what the
     // candidate states — the row the write would add.
     let efforts: readonly string[] = pick.candidate.reasoning_efforts;
+    // Who follows this choice, decided from the Agents as they were before it: the first
+    // write below can start the server's own fill of an Agent with no model.
+    let follower = followers.current[backend];
     try {
+      if (follower === undefined) {
+        follower = backend === 'vibey' ? await followingMainBot(api, target) : null;
+        followers.current[backend] = follower;
+      }
       const supply = (await agentReads.readValue()).find((row) => row.backend === backend);
       if (!supply) throw new Error('supply_unread');
       const baseline = supply.catalog_models ?? [];
@@ -104,6 +125,14 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
       const updated = await api.updateVibeAgent(target, effort === (current.agent.reasoning_effort ?? null)
         ? { model } : { model, reasoning_effort: effort });
       if (!updated?.ok) throw new Error('agent_update_failed');
+      if (follower) {
+        const main = await api.getVibeAgent(follower, { cache: false });
+        if (!main?.ok) throw new Error('agent_unread');
+        const mainEffort = compatibleEffort(main.agent.reasoning_effort, row.reasoning_efforts);
+        const followed = await api.updateVibeAgent(follower, mainEffort === (main.agent.reasoning_effort ?? null)
+          ? { model } : { model, reasoning_effort: mainEffort });
+        if (!followed?.ok) throw new Error('agent_update_failed');
+      }
     } catch (error) {
       // A refusal committed nothing, which is the one answer a write can be trusted for.
       refused = apiFailure(error)?.code === CANDIDATES_CHANGED;
@@ -111,9 +140,10 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
     // The choice stands when the Agent reads as the whole of it: the chosen model, with
     // an effort that model takes. The server's own fill can name the model without the
     // write that moves the effort ever landing.
-    const confirmed = !refused && await api.getVibeAgent(target, { cache: false })
+    const stands = (name: string) => api.getVibeAgent(name, { cache: false })
       .then((result) => !!result?.ok && result.agent.model === model
         && compatibleEffort(result.agent.reasoning_effort, efforts) === (result.agent.reasoning_effort ?? null), () => false);
+    const confirmed = !refused && await stands(target) && (!follower || await stands(follower));
     const failure: SetupChoiceFailure | null = refused ? { model, kind: 'suppliersChanged' }
       : confirmed ? null : { model, kind: 'failed' };
     if (refused) {
@@ -123,6 +153,7 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
     // Still writing until the reads it set off have settled: entry acts on the same
     // shared reads, and a click in between would race them.
     if (confirmed) {
+      delete followers.current[backend];
       try { await agentReads.refresh(); } catch { /* The redraw below reports what it cannot read. */ }
     }
     try { await latest.current.onSettled(backend); } finally {
@@ -159,4 +190,27 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
       return !!choice && (choice.writing || choice.failure?.kind === 'failed');
     },
   };
+}
+
+/**
+ * The main Bot's Agent when it is still following Vibey's model, else `null`.
+ *
+ * Following means: on the model the Vibey Agent has now, or Vibey has none yet (a fresh
+ * setup, where whatever the main Bot runs on was put there for it, not chosen). A read
+ * that fails decides nothing, so it is thrown, and the choice is retried whole.
+ */
+async function followingMainBot(
+  api: Pick<ApiContextType, 'getVibeAgent' | 'listVibeAgents'>,
+  vibeyAgent: string,
+): Promise<string | null> {
+  const [listed, vibey] = await Promise.all([
+    api.listVibeAgents({ backend: 'vibey', includeDisabled: true, cache: false }),
+    api.getVibeAgent(vibeyAgent, { cache: false }),
+  ]);
+  if (!listed?.ok || !vibey?.ok) throw new Error('agent_unread');
+  const main = listed.agents.find((agent) => agent.bot?.builtin && agent.bot.handle === MAIN_BOT_HANDLE);
+  if (!main || main.name === vibeyAgent) return null;
+  const vibeyModel = vibey.agent.model?.trim() || null;
+  const mainModel = main.model?.trim() || null;
+  return !vibeyModel || !mainModel || mainModel === vibeyModel ? main.name : null;
 }
