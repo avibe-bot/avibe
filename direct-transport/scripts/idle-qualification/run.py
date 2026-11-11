@@ -17,7 +17,11 @@ CASES = (
     "quiet_no_stream",
     "quiet_open_stream",
     "moderate_loss",
-    "short_outage",
+    "outage_1500",
+    "outage_2500",
+    "outage_3000",
+    "outage_3500",
+    "outage_5000",
 )
 SETUP = """
 set -euo pipefail
@@ -40,10 +44,14 @@ def main():
     parser.add_argument("--peer-exe", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--variant", required=True)
-    parser.add_argument("--max-close-ms", type=int)
+    parser.add_argument("--idle-ms", type=int, required=True)
+    parser.add_argument("--keep-alive-ms", type=int, required=True)
+    parser.add_argument("--gate", action="store_true", help="assert source bounds plus margin and 3-second outage tolerance")
     args = parser.parse_args()
     if sys.platform != "linux" or os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Actions Linux runner only; never run on the live desktop")
+    if args.idle_ms <= 0 or not 0 < args.keep_alive_ms < args.idle_ms:
+        raise SystemExit("invalid timing pair")
     args.sidecar = args.sidecar.resolve(strict=True)
     args.peer_exe = args.peer_exe.resolve(strict=True)
     args.out = args.out.resolve()
@@ -61,9 +69,17 @@ def main():
             "AVDT_TEST_BINARY=" + str(args.sidecar),
             "AVDT_IDLE_FAULT_HOOK=" + str(hook),
             "AVDT_IDLE_FAULT_LOG=" + str(faults),
+            "AVDT_IDLE_KEEP_ALIVE_MS=" + str(args.keep_alive_ms),
         ]
-        if args.max_close_ms is not None:
-            env.append("AVDT_IDLE_MAX_CLOSE_MS=" + str(args.max_close_ms))
+        if args.gate:
+            # Single-path, low-RTT source bounds, not the observed best case.
+            # Three-PTO floors on delayed real networks are outside this gate.
+            env.extend([
+                "AVDT_IDLE_MAX_CLOSE_BOTH_MS=" + str(2 * args.idle_ms + 3000),
+                "AVDT_IDLE_MAX_CLOSE_S2C_MS=" + str(2 * args.idle_ms + 3000),
+                "AVDT_IDLE_MAX_CLOSE_C2S_MS=" + str(3 * args.idle_ms + args.keep_alive_ms + 3000),
+                "AVDT_IDLE_MIN_OUTAGE_MS=3000",
+            ])
         command = [
             "sudo", "env", *env, "unshare", "--net", "--pid", "--fork",
             "--mount-proc", "--kill-child=SIGKILL", "--", "bash", "-c", SETUP,
@@ -98,6 +114,11 @@ def main():
         results = list(pool.map(case, CASES))
     report = {
         "variant": args.variant,
+        "idle_ms": args.idle_ms,
+        "keep_alive_ms": args.keep_alive_ms,
+        "mode": "qualification" if args.gate else "measurement",
+        "source_bound_margin_ms": 3000 if args.gate else None,
+        "minimum_survivable_outage_ms": 3000 if args.gate else None,
         "client_sha256_before": before,
         "client_sha256_after": digest(args.peer_exe),
         "sidecar_sha256": digest(args.sidecar),

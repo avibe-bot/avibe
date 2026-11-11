@@ -27,8 +27,8 @@ jobs:
         timing:
           - idle: 4000
             keepalive: 1250
-          - idle: 3000
-            keepalive: 750
+          - idle: 6000
+            keepalive: 1500
     env:
       VARIANT: ${{ matrix.variant }}
       IDLE_MS: ${{ matrix.timing.idle }}

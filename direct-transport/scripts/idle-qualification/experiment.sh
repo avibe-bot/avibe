@@ -28,7 +28,7 @@ python3 - "$IDLE_MS" "$KEEP_ALIVE_MS" <<'PY'
 from pathlib import Path
 import sys
 idle,keep=map(int,sys.argv[1:])
-assert (idle,keep) in ((8000,2500),(4000,1250),(3000,750))
+assert (idle,keep) in ((4000,1250),(6000,1500))
 p=Path('src/main.rs'); s=p.read_text(); old='.datagram_receive_buffer_size(None)'
 assert s.count(old)==1
 s=s.replace(old, old+f'''
@@ -57,5 +57,6 @@ cargo build --locked --bin avibe-direct-transport
 cp target/debug/avibe-direct-transport "$work/server"
 python3 "$root/scripts/idle-qualification/run.py" \
   --sidecar "$work/server" --peer-exe "$work/stock-client-tests" \
-  --out "$work/evidence/qualification" --variant "$VARIANT-$IDLE_MS-$KEEP_ALIVE_MS"
+  --out "$work/evidence/qualification" --variant "$VARIANT-$IDLE_MS-$KEEP_ALIVE_MS" \
+  --idle-ms "$IDLE_MS" --keep-alive-ms "$KEEP_ALIVE_MS"
 sha256sum --check "$work/evidence/stock-client.sha256"

@@ -34,15 +34,16 @@ type ConnectionError = iroh::endpoint::ConnectionError;
 const HARD_WAIT: Duration = Duration::from_secs(45);
 const HOOK_WAIT: Duration = Duration::from_secs(10);
 const WINDOW: Duration = Duration::from_secs(60);
-/// Quiet time between warmup and the fault: sweep the phase of keep-alive and
-/// the stock client's independent NAT-traversal round timer.
-const SETTLE_MS: [u64; 15] = [
-    500, 1000, 1700, 2300, 2900, 3500, 4100, 4700, 5300, 5900, 6500, 7100, 7700, 11500, 15500,
-];
+/// Quiet time between the warmup roundtrip and the fault, one per trial, so the
+/// three trials start the fault at different phases of both keep-alive timers.
+const SETTLE_MS: [u64; 3] = [500, 1700, 2900];
 /// The sidecar's no-open-stream policy (`NO_STREAM_TIMEOUT` in `src/main.rs`).
 const NO_STREAM: Duration = Duration::from_secs(300);
-const OUTAGE: Duration = Duration::from_millis(1500);
-const HEALTHY: Duration = Duration::from_secs(10);
+/// Time for the NAT traversal rounds that follow a new connection to finish,
+/// so that they do not move the keep-alive phase an outage trial is aimed at.
+const QNT_SETTLE: Duration = Duration::from_secs(10);
+/// How long a connection is watched after it has recovered from an outage.
+const HEALTHY: Duration = Duration::from_secs(5);
 
 const COUNTERS: [&str; 14] = [
     "udp_tx_datagrams",
@@ -97,6 +98,18 @@ fn emit(mut result: Value) {
 
 fn millis(duration: Duration) -> u64 {
     duration.as_millis() as u64
+}
+
+/// The first of `names` the runner has set to a non-empty value, in milliseconds.
+fn env_ms(names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("{names:?} takes milliseconds, not {value:?}"))
+        })
 }
 
 fn counters(connection: &Connection) -> [u64; 14] {
@@ -472,14 +485,18 @@ async fn quiet(
     None
 }
 
-/// Fresh trials across timer phases of one blackhole mode: how long the stock client takes to
+/// Three fresh trials of one blackhole mode: how long the stock client takes to
 /// notice, and why its connection ended. A measurement; the only gate is the
-/// optional `AVDT_IDLE_MAX_CLOSE_MS`.
+/// runner's optional bound for this direction, `AVDT_IDLE_MAX_CLOSE_BOTH_MS`,
+/// `_C2S_MS` or `_S2C_MS`, or else the older `AVDT_IDLE_MAX_CLOSE_MS`.
 async fn blackhole(mode: &str) {
     require_isolated_runner();
-    let max_close_ms = std::env::var("AVDT_IDLE_MAX_CLOSE_MS")
-        .ok()
-        .map(|value| value.parse::<u64>().expect("AVDT_IDLE_MAX_CLOSE_MS"));
+    let direction_bound = match mode {
+        "both" => "AVDT_IDLE_MAX_CLOSE_BOTH_MS",
+        "client-to-server" => "AVDT_IDLE_MAX_CLOSE_C2S_MS",
+        _ => "AVDT_IDLE_MAX_CLOSE_S2C_MS",
+    };
+    let max_close_ms = env_ms(&[direction_bound, "AVDT_IDLE_MAX_CLOSE_MS"]);
     let mut failures = Vec::new();
     for (trial, settle_ms) in SETTLE_MS.into_iter().enumerate() {
         let listener = listener().await;
@@ -527,6 +544,7 @@ async fn blackhole(mode: &str) {
             "elapsed_ms": millis(elapsed),
             "duration_ms": millis(elapsed),
             "hook_apply_ms": millis(applied - hook_started),
+            "max_close_ms": max_close_ms,
             "close_reason": closed.as_ref().map(close_reason),
             "sidecar_peer_closed": sidecar_reason,
             "sidecar_elapsed_ms": sidecar_elapsed_ms,
@@ -761,93 +779,178 @@ async fn moderate_loss() {
     );
 }
 
-/// Six 1.5 s outages in both directions, each followed by a roundtrip and 10 s
-/// of health. Rounds 0-2 are quiet during the outage, as an idle App would be.
-/// Rounds 3-5 put one byte in flight first, so the outage is certain to drop
-/// packets and recovery has to come from retransmission.
-#[tokio::test]
-#[ignore = "isolated idle qualification"]
-async fn short_outage() {
+/// Six fresh connections through one both-way outage of `outage_ms`: nothing
+/// sent during it (trials 0-2) and one request byte sent just after the cut
+/// (trials 3-5), each at 0.1, 0.5 and 0.9 of the sidecar's keep-alive interval
+/// after the sidecar last heard from the client.
+///
+/// A measurement. A connection that closes, or a request that is lost, is
+/// recorded as `survived: false` and the next trial runs. The test fails only
+/// when setup fails, a UDP port is uncovered, the fault dropped nothing of a
+/// request in flight, or `AVDT_IDLE_MIN_OUTAGE_MS` says this outage is short
+/// enough that every trial must survive.
+async fn outage(outage_ms: u64) {
     require_isolated_runner();
-    let kind = "short_outage";
-    let listener = listener().await;
-    let mut sidecar = Sidecar::start(listener.local_addr().unwrap()).await;
-    let client = client().await;
-    let fault = Fault::new(&client, &sidecar);
-    fault.clear().await;
-    let mut live = Live::establish(&mut sidecar, &client, &listener).await;
-    let uncovered = fault.uncovered_ports();
-    sleep(Duration::from_millis(SETTLE_MS[0])).await;
+    let keep_alive_ms = env_ms(&["AVDT_IDLE_KEEP_ALIVE_MS"])
+        .expect("AVDT_IDLE_KEEP_ALIVE_MS is the keep-alive interval of the sidecar under test");
+    let must_survive =
+        env_ms(&["AVDT_IDLE_MIN_OUTAGE_MS"]).is_some_and(|threshold| outage_ms <= threshold);
+    let outage = Duration::from_millis(outage_ms);
     let mut failures = Vec::new();
-    for round in 0..6u8 {
-        let in_flight = round >= 3;
+    for trial in 0..6u8 {
+        let in_flight = trial >= 3;
         let traffic = if in_flight {
             "one_byte_in_flight"
         } else {
             "quiet"
         };
-        let byte = 0x40 + round;
+        let phase = Duration::from_millis(keep_alive_ms * [1, 5, 9][usize::from(trial % 3)] / 10);
+        let listener = listener().await;
+        let mut sidecar = Sidecar::start(listener.local_addr().unwrap()).await;
+        let client = client().await;
+        let fault = Fault::new(&client, &sidecar);
+        // The first hook run also says roughly how long the next one will take.
+        let hook_cost_started = Instant::now();
+        fault.clear().await;
+        let hook_cost = hook_cost_started.elapsed();
+        let mut live = Live::establish(&mut sidecar, &client, &listener).await;
+        sleep(QNT_SETTLE).await;
+        // A received packet restarts the sidecar's keep-alive timer, and the
+        // last one it receives here is the client's acknowledgement of the
+        // reply: the phase is counted from the end of this roundtrip.
+        live.roundtrip(0x60 + trial)
+            .await
+            .expect("anchor roundtrip");
+        let anchor = Instant::now();
+        let uncovered = fault.uncovered_ports();
+        assert!(
+            live.connection.close_reason().is_none(),
+            "connection closed before the fault"
+        );
+        let paths = paths(&live.connection);
         let before = counters(&live.connection);
+        // Aim the hook's return, when the cut is in effect, at the phase.
+        sleep(phase.saturating_sub(anchor.elapsed() + hook_cost)).await;
         let hook_started = Instant::now();
         fault.apply("both").await;
         let applied = Instant::now();
+        let request_byte = 0x70 + trial;
         let sent = if in_flight {
-            live.app_sends(byte).await
+            live.app_sends(request_byte).await
         } else {
             Ok(())
         };
-        sleep(OUTAGE.saturating_sub(applied.elapsed())).await;
+        sleep(outage.saturating_sub(applied.elapsed())).await;
         let outage_at_least = applied.elapsed();
         let (hook, client_dropped, server_dropped) = fault.clear().await;
         let cleared = Instant::now();
-        let roundtrip = match (sent, in_flight) {
-            (Err(error), _) => Err(error),
-            (Ok(()), true) => live.complete_roundtrip(byte).await,
-            (Ok(()), false) => live.roundtrip(byte).await,
+        let request = match sent {
+            Ok(()) if in_flight => live.complete_roundtrip(request_byte).await,
+            sent => sent,
         };
-        let recovery = cleared.elapsed();
-        let closed = timeout(HEALTHY, live.connection.closed()).await.ok();
+        let request_done = cleared.elapsed();
+        let roundtrip = match &request {
+            Ok(()) => live.roundtrip(0x50 + trial).await,
+            Err(_) => Err("not attempted: the request in flight failed".to_owned()),
+        };
+        let recovery = if in_flight {
+            request_done
+        } else {
+            cleared.elapsed()
+        };
+        let recovered = request.is_ok() && roundtrip.is_ok();
+        let closed = if recovered {
+            timeout(HEALTHY, live.connection.closed()).await.ok()
+        } else {
+            live.connection.close_reason()
+        };
+        let survived = recovered && closed.is_none();
+        let mut lines = ControlLines::default();
+        let sidecar_reason = timeout(Duration::from_millis(250), lines.peer_closed(&mut sidecar))
+            .await
+            .ok()
+            .flatten();
         emit(json!({
-            "kind": kind,
+            "kind": "outage",
             "mode": "both",
-            "trial": round,
+            "trial": trial,
             "traffic": traffic,
-            // Rules fully in effect for at least this long, and no rule present
-            // outside the longer span that includes both hook runs.
+            "outage_ms": outage_ms,
+            // The cut was fully in effect for at least this long, and no rule
+            // existed outside the longer span that includes both hook runs.
             "outage_at_least_ms": millis(outage_at_least),
             "outage_at_most_ms": millis(cleared - hook_started),
-            "recovery_roundtrip_ms": millis(recovery),
-            "roundtrip_error": roundtrip.as_ref().err(),
-            "healthy_ms": millis(HEALTHY),
-            "duration_ms": millis(hook_started.elapsed()),
+            "keep_alive_ms": keep_alive_ms,
+            "phase_ms": millis(phase),
+            // When the cut took effect, counted from the anchor roundtrip.
+            "fault_phase_at_least_ms": millis(hook_started - anchor),
+            "fault_phase_at_most_ms": millis(applied - anchor),
+            "hook_apply_ms": millis(applied - hook_started),
+            "survived": survived,
             "closed": closed.is_some(),
             "close_reason": closed.as_ref().map(close_reason),
+            "sidecar_peer_closed": sidecar_reason,
+            "request_error": request.as_ref().err(),
+            "roundtrip_error": roundtrip.as_ref().err(),
+            // From the restore to the request completing, or for a quiet trial
+            // to the first roundtrip completing; meaningful when it succeeded.
+            "recovery_ms": millis(recovery),
+            "must_survive": must_survive,
+            "duration_ms": millis(hook_started.elapsed()),
             "client_counters": counters_since(&before, &live.connection),
+            "paths_before_fault": paths,
             "ports": fault.ports,
             "uncovered_udp_ports": uncovered,
             "hook": hook,
         }));
-        if let Err(error) = &roundtrip {
-            failures.push(format!("round {round}: {error}"));
-        }
-        if let Some(error) = &closed {
-            failures.push(format!("round {round}: closed by {error:?}"));
+        drop(live);
+        stop_sidecar(sidecar).await;
+        close_client(client).await;
+        if !uncovered.is_empty() {
+            failures.push(format!(
+                "trial {trial}: UDP ports {uncovered:?} bypass the fault"
+            ));
         }
         if in_flight && client_dropped == 0 {
             failures.push(format!(
-                "round {round}: the outage dropped no client packet ({server_dropped} server)"
+                "trial {trial}: the outage dropped no client packet ({server_dropped} server)"
             ));
         }
-        if !failures.is_empty() {
-            break;
+        if must_survive && !survived {
+            failures.push(format!(
+                "trial {trial}: did not survive a {outage_ms} ms outage"
+            ));
         }
     }
-    drop(live);
-    stop_sidecar(sidecar).await;
-    close_client(client).await;
-    assert!(failures.is_empty(), "{failures:?}");
-    assert!(
-        uncovered.is_empty(),
-        "UDP ports {uncovered:?} bypass the fault"
-    );
+    assert!(failures.is_empty(), "{outage_ms} ms outage: {failures:?}");
+}
+
+#[tokio::test]
+#[ignore = "isolated idle qualification"]
+async fn outage_1500() {
+    outage(1500).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated idle qualification"]
+async fn outage_2500() {
+    outage(2500).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated idle qualification"]
+async fn outage_3000() {
+    outage(3000).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated idle qualification"]
+async fn outage_3500() {
+    outage(3500).await;
+}
+
+#[tokio::test]
+#[ignore = "isolated idle qualification"]
+async fn outage_5000() {
+    outage(5000).await;
 }
