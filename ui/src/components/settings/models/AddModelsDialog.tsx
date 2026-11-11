@@ -15,6 +15,7 @@ import { modelsApi } from './modelsApi';
 import type { AgentBackend, AgentSupply, BackendModel } from './types';
 
 const NOTHING: ReadonlySet<string> = new Set();
+const SUPPLIERS_CHANGED = 'settings.models.gateway.catalog.saveSuppliersChanged';
 const NO_MODELS: readonly BackendModel[] = [];
 
 /** A row written in the editor, as a pick: no supplier was shown, so none is promised. */
@@ -44,6 +45,9 @@ export const AddModelsDialog: React.FC<{
   const [read, setRead] = React.useState<{ backend: AgentBackend; models: readonly BackendModel[] } | null>(null);
   const [editing, setEditing] = React.useState<{ seedId: string } | null>(null);
   const [busy, setBusy] = React.useState(false);
+  /** A refused agreement about suppliers is asked again: the picker re-reads its
+   *  candidates and opens with the same models picked, showing today's suppliers. */
+  const [reask, setReask] = React.useState<ReadonlySet<string> | undefined>(undefined);
 
   // What the list holds, for the picker's 「already in the list」 and the
   // editor's duplicate check. The write reads the list again for its baseline.
@@ -69,6 +73,7 @@ export const AddModelsDialog: React.FC<{
       if (!result.ok) {
         // The picks stay on screen; the sentence says what to do about them.
         showToast(t(result.reason) as string, 'error');
+        if (result.reason === SUPPLIERS_CHANGED) setReask(new Set(picks.map((pick) => pick.candidate.id)));
         return;
       }
       setEditing(null);
@@ -83,6 +88,7 @@ export const AddModelsDialog: React.FC<{
         backend={backend}
         listedIds={listed}
         busy={busy}
+        seedPicked={reask}
         onCancel={() => {
           // A write in flight belongs to this dialog: it cannot be walked away from.
           if (busy) return;

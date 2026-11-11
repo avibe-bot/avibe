@@ -174,7 +174,13 @@ describe('NewAgentDialog', () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(supply as never);
     vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({ builtin: [], providers: [], in_list: [] });
     vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
-    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(supply as never);
+    // The list the add saves: the typed model reasons, at `high` only.
+    const saved = { ...supply, catalog_models: [{
+      id: 'my-finetune', display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null,
+      input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: true,
+      reasoning_efforts: ['high'], locked: false, routeable: true,
+    }] };
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(saved as never);
     const onClose = vi.fn();
     const LocationProbe = () => {
       const location = useLocation();
@@ -207,6 +213,9 @@ describe('NewAgentDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue('router')).toBeTruthy();
     expect(screen.getByRole('combobox').textContent).toContain('my-finetune');
+    // The effort menu is the saved row's, not the ladder from before the add.
+    expect(screen.getByRole('button', { name: 'high' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'medium' })).toBeNull();
   });
 
   it('reads the model list again when Settings uncovers the open dialog', () => {

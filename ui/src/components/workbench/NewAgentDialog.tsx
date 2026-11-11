@@ -71,7 +71,16 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   }, [backend, open]);
   const [editorOpen, setEditorOpen] = useState(false);
   // Added in place, the new model is the one the Agent will use.
-  const addModel = useAddModelDialog(backend, open, (modelId) => setModel(modelId));
+  // The list the add saved is the catalog now, so the effort menu follows the new
+  // model's own efforts before Create is pressed.
+  const addModel = useAddModelDialog(backend, open, (modelId, catalog) => {
+    if (catalog) {
+      setModelOptions(catalog.models.map((m) => ({ value: m, label: modelOptionLabel(m, catalog.modelLabels) })));
+      setReasoningOptions(catalog.reasoningOptions ?? {});
+      setHubAnswered(catalog.effortMenus !== undefined);
+    }
+    setModel(modelId);
+  });
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
