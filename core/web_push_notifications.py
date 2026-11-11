@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import literal_column, or_, select
 
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
@@ -942,15 +942,20 @@ def _web_push_owner_metadata_for_message(
     depend on session creation time. For upgraded rows, still honor the legacy
     stored session owner, but only after checking newer trusted user-message
     metadata.
+
+    Messages enter this ledger on acceptance, not submission. SQLite's rowid
+    orders those inserts even when the wall clock steps backwards; timestamp-
+    prefixed message IDs and transcript timestamps do not. Keep the result's
+    rowid as an upper bound so a later prompt cannot steal its notification.
     """
 
     if not message_id:
         return None, {}
+    insertion_order = literal_column("messages.rowid")
     agent_row = conn.execute(
         select(
             messages.c.session_id,
-            messages_service.transcript_order_value(messages).label("transcript_at"),
-            messages.c.id,
+            insertion_order,
             messages.c.type,
             messages.c.metadata_json,
         )
@@ -960,13 +965,11 @@ def _web_push_owner_metadata_for_message(
         .where(messages.c.type.in_(_NOTIFIABLE_TYPES))
     ).first()
     if not agent_row or not agent_row[0] or not _is_notifiable_message(
-        agent_row[3],
-        _parse_metadata(agent_row[4]),
+        agent_row[2],
+        _parse_metadata(agent_row[3]),
     ):
         return None, {}
-    session_id, transcript_at, row_id = agent_row[0], agent_row[1], agent_row[2]
-
-    user_order = messages_service.transcript_order_value(messages)
+    session_id, result_insertion_order = agent_row[0], agent_row[1]
 
     user_rows = conn.execute(
         select(messages.c.metadata_json)
@@ -981,13 +984,8 @@ def _web_push_owner_metadata_for_message(
                 messages.c.metadata_json.contains(WEB_PUSH_USER_KEYS_METADATA),
             )
         )
-        .where(
-            or_(
-                user_order < transcript_at,
-                and_(user_order == transcript_at, messages.c.id < row_id),
-            )
-        )
-        .order_by(user_order.desc(), messages.c.id.desc())
+        .where(insertion_order < result_insertion_order)
+        .order_by(insertion_order.desc())
     ).all()
     for user_row in user_rows:
         try:
