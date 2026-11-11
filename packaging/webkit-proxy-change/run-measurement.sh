@@ -7,6 +7,28 @@ repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 probe_dir=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$out" "$out/derived" "$out/xcresult" "$probe_dir/generated"
 exec > >(tee "$out/runner.log") 2>&1
+stage_results="$out/stages.jsonl"
+: > "$stage_results"
+printf '{"status":"running","label":"%s"}\n' "$label" > "$out/summary.json"
+finalize_summary() {
+  python3 - "$out/summary.json" "$stage_results" "$1" <<'PY'
+import json, sys
+p, stages_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
+data = json.load(open(p))
+stages = [json.loads(line) for line in open(stages_path)]
+names = ("build-for-testing", "product-validation", "install", "test-launch", "direct-minimal", "cold-minimal", "full-matrix")
+if not stages:
+    cause = data.get("reason", "setup failed before build")
+    stages = [{"stage": name, "status": "skipped", "verdict": "unmeasured", "exit": None, "cause": cause} for name in names]
+    if data.get("status") != "unavailable":
+        stages.insert(0, {"stage": "setup", "status": "failed", "exit": status, "cause": "see runner.log"})
+data.update({"status": "unavailable" if data.get("status") == "unavailable" else "passed" if status == 0 else "failed",
+             "exit": status, "stages": stages})
+json.dump(data, open(p, "w"), sort_keys=True)
+print(json.dumps(data, sort_keys=True))
+PY
+}
+trap 'finalize_summary "$?"' EXIT
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode_26.6.app/Contents/Developer}"
 
@@ -40,7 +62,7 @@ print(f"{version}|{identifier}")
 runtime=""
 if [[ "$label" == "17.0" ]]; then
   runtime_dir="$out/runtime-install"
-  bash "$repo_root/packaging/iroh-apple/prepare-ios-runtime.sh" "$runtime_dir"
+  python3 "$probe_dir/validate-stage.py" timeout 300 bash "$repo_root/packaging/iroh-apple/prepare-ios-runtime.sh" "$runtime_dir"
   # The shared installer may choose 17.1+ as a fallback; this lane must not
   # silently call that result the requested 17.0 measurement.
   source "$runtime_dir/ios-runtime.env"
@@ -73,7 +95,7 @@ cleanup_hosts() {
   sudo -n sed -i '' "\\|$marker|d" /etc/hosts || true
   sudo -n ifconfig lo0 -alias 127.0.0.2 || true
 }
-trap cleanup_hosts EXIT
+trap 'finalize_summary "$?"; cleanup_hosts' EXIT
 sudo -n ifconfig lo0 alias 127.0.0.2 255.0.0.0
 while read -r ip host; do
   [[ -z "$host" ]] && continue
@@ -96,7 +118,7 @@ cleanup_fixture() {
     sudo -n kill -KILL "$fixture_pid" 2>/dev/null || true
   fi
 }
-trap 'cleanup_fixture; cleanup_hosts' EXIT
+trap 'finalize_summary "$?"; cleanup_fixture; cleanup_hosts' EXIT
 sudo -n env PATH="$PATH" node "$probe_dir/fixture.mjs" "$out/cert" >"$out/fixture.stdout" 2>&1 &
 fixture_pid=$!
 echo "$fixture_pid" > "$out/fixture.pid"
@@ -122,77 +144,84 @@ cleanup_device() {
   xcrun simctl shutdown "$device_id" >/dev/null 2>&1 || true
   xcrun simctl delete "$device_id" >/dev/null 2>&1 || true
 }
-trap 'cleanup_device; cleanup_fixture; cleanup_hosts' EXIT
+trap 'finalize_summary "$?"; cleanup_device; cleanup_fixture; cleanup_hosts' EXIT
 xcrun simctl boot "$device_id"
-xcrun simctl bootstatus "$device_id" -b
+# Exact 17.0 first boot took 381s in the preceding run; bound it without
+# rejecting that observed healthy migration. Newest boot took 101s.
+boot_timeout=180
+[[ "$label" == "17.0" ]] && boot_timeout=480
+python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
 
 project="$probe_dir/WebKitProxyChange.xcodeproj"
-set +e
-xcodebuild build-for-testing -project "$project" -scheme WebKitProxyChange \
+app="$out/derived-data/Build/Products/Debug-iphonesimulator/ProbeHost.app"
+blocked_by=""
+test_status=0
+
+# Each stage records its own exit, or an explicit unmeasured dependency skip.
+run_stage() {
+  local stage=$1
+  shift
+  if [[ -n "$blocked_by" ]]; then
+    printf '{"stage":"%s","status":"skipped","verdict":"unmeasured","exit":null,"cause":"%s failed"}\n' "$stage" "$blocked_by" >> "$stage_results"
+    return 0
+  fi
+  set +e
+  "$@" 2>&1 | tee "$out/$stage.log"
+  local status=${PIPESTATUS[0]}
+  set -e
+  if [[ "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal || "$stage" == "full-matrix" ) ]]; then
+    set +e
+    python3 "$probe_dir/validate-stage.py" "$stage" "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
+    status=${PIPESTATUS[0]}
+    set -e
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    blocked_by=$stage
+    test_status=$status
+    printf '{"stage":"%s","status":"failed","exit":%s,"cause":"see %s.log and evidence log"}\n' "$stage" "$status" "$stage" >> "$stage_results"
+  else
+    printf '{"stage":"%s","status":"passed","exit":0}\n' "$stage" >> "$stage_results"
+  fi
+}
+
+validate_products() {
+  python3 "$probe_dir/validate-stage.py" timeout 60 xcodebuild -showBuildSettings -json \
+    -project "$project" -scheme WebKitProxyChange -configuration Debug \
+    -destination "platform=iOS Simulator,id=$device_id" \
+    -derivedDataPath "$out/derived-data" CODE_SIGNING_ALLOWED=NO > "$out/build-settings.json" || return $?
+  python3 "$probe_dir/validate-stage.py" bundle "$app" "$out/build-settings.json"
+}
+
+test_method() {
+  local stage=$1 method=$2 seconds=$3
+  python3 "$probe_dir/validate-stage.py" timeout "$seconds" \
+    xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
+    -destination "platform=iOS Simulator,id=$device_id" \
+    -derivedDataPath "$out/derived-data" \
+    -resultBundlePath "$out/xcresult/$stage.xcresult" \
+    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
+    "-only-testing:WebKitProxyChangeTests/WebKitProxyChangeTests/$method" \
+    CODE_SIGNING_ALLOWED=NO
+}
+
+run_stage build-for-testing python3 "$probe_dir/validate-stage.py" timeout 600 \
+  xcodebuild build-for-testing -project "$project" -scheme WebKitProxyChange \
   -destination "platform=iOS Simulator,id=$device_id" \
-  -derivedDataPath "$out/derived-data" \
-  CODE_SIGNING_ALLOWED=NO | tee "$out/build-for-testing.log"
-build_status=${PIPESTATUS[0]}
-set -e
+  -derivedDataPath "$out/derived-data" CODE_SIGNING_ALLOWED=NO
+run_stage product-validation validate_products
+run_stage install python3 "$probe_dir/validate-stage.py" timeout 60 xcrun simctl install "$device_id" "$app"
+run_stage test-launch test_method test-launch testHostLaunch 150
+run_stage direct-minimal test_method direct-minimal testDirectTLSMinimal 120
+run_stage cold-minimal test_method cold-minimal testColdMinimal 120
+run_stage full-matrix test_method full-matrix testMatrix 900
 
-if [[ "$build_status" -eq 0 ]]; then
-  set +e
-  xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
-    -destination "platform=iOS Simulator,id=$device_id" \
-    -derivedDataPath "$out/derived-data" \
-    -resultBundlePath "$out/xcresult/direct-minimal.xcresult" \
-    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
-    -only-testing:WebKitProxyChangeTests/testDirectTLSMinimal \
-    CODE_SIGNING_ALLOWED=NO | tee "$out/direct-minimal.log"
-  direct_status=${PIPESTATUS[0]}
-  set -e
-else
-  direct_status=125
-fi
-
-if [[ "$build_status" -eq 0 && "$direct_status" -eq 0 ]]; then
-  set +e
-  xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
-    -destination "platform=iOS Simulator,id=$device_id" \
-    -derivedDataPath "$out/derived-data" \
-    -resultBundlePath "$out/xcresult/cold-minimal.xcresult" \
-    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
-    -only-testing:WebKitProxyChangeTests/testColdMinimal \
-    CODE_SIGNING_ALLOWED=NO | tee "$out/cold-minimal.log"
-  minimal_status=${PIPESTATUS[0]}
-  set -e
-else
-  minimal_status=$([[ "$build_status" -ne 0 ]] && echo "$build_status" || echo "$direct_status")
-fi
-
-if [[ "$build_status" -eq 0 && "$direct_status" -eq 0 && "$minimal_status" -eq 0 ]]; then
-  set +e
-  xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
-    -destination "platform=iOS Simulator,id=$device_id" \
-    -derivedDataPath "$out/derived-data" \
-    -resultBundlePath "$out/xcresult/full-matrix.xcresult" \
-    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
-    -only-testing:WebKitProxyChangeTests/testMatrix \
-    CODE_SIGNING_ALLOWED=NO | tee "$out/full-matrix.log"
-  test_status=${PIPESTATUS[0]}
-  set -e
-else
-  test_status=$([[ "$build_status" -ne 0 ]] && echo "$build_status" || echo "$minimal_status")
-fi
-
-xcrun simctl spawn "$device_id" log show --style compact --last 30m \
+python3 "$probe_dir/validate-stage.py" timeout 30 xcrun simctl spawn "$device_id" log show --style compact --last 30m \
   --predicate 'process == "com.apple.WebKit.Networking" OR process == "com.apple.WebKit.WebContent"' \
   > "$out/webkit-process.log" 2>&1 || true
-xcrun simctl spawn "$device_id" log show --style compact --last 30m \
+python3 "$probe_dir/validate-stage.py" timeout 30 xcrun simctl spawn "$device_id" log show --style compact --last 30m \
   --predicate 'eventMessage CONTAINS[c] "assert" OR eventMessage CONTAINS[c] "crash"' \
   > "$out/assertion-crash.log" 2>&1 || true
 find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \
   \( -iname '*WebKit*' -o -iname '*Networking*' -o -iname '*WebContent*' \) \
   -newermt "$(date -u -v-2H '+%Y-%m-%d %H:%M:%S')" -print -exec cp {} "$out/derived/" \; 2>/dev/null || true
-BUILD_STATUS="$build_status" DIRECT_STATUS="$direct_status" MINIMAL_STATUS="$minimal_status" python3 - "$out/summary.json" "$test_status" <<'PY'
-import json, os, sys
-p=sys.argv[1]
-data=json.load(open(p)); data.update({"status":"passed" if int(sys.argv[2]) == 0 else "failed", "buildExit":int(os.environ.get("BUILD_STATUS", "0")), "directExit":int(os.environ.get("DIRECT_STATUS", "0")), "minimalExit":int(os.environ.get("MINIMAL_STATUS", "0")), "testExit":int(sys.argv[2])})
-json.dump(data, open(p, "w"), sort_keys=True); print(json.dumps(data, sort_keys=True))
-PY
 exit "$test_status"

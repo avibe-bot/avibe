@@ -208,6 +208,13 @@ private final class Browser: NSObject, WKNavigationDelegate {
 
 final class WebKitProxyChangeTests: XCTestCase {
     @MainActor
+    func testHostLaunch() async throws {
+        let health = try await control("/health")
+        XCTAssertEqual(health["ok"] as? Bool, true)
+        emit(["step":"host_launch", "health":health])
+    }
+
+    @MainActor
     func testDirectTLSMinimal() async throws {
         let bundle = Bundle(for: Self.self)
         let cases = try JSONDecoder().decode([ProbeCase].self, from: Data(contentsOf: XCTUnwrap(bundle.url(forResource: "matrix", withExtension: "json"))))
