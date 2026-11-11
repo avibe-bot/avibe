@@ -30,7 +30,7 @@ WKWebView on the account's data store (runtime, child windows, hidden transports
 | Bridge | `NativeBridge.swift` | `direct.status()` and the `direct.transportChanged` event. | A4 |
 | Web UI | `ui/src/lib/native.ts` and the existing reconnect owners | Rebuilds the SSE stream and terminal WebSockets when the transport changes. | I4 |
 
-**With no transport registered, nothing activates:** no socket is bound, `proxyConfigurations` is never written, the status is always `tunnel`, and no event fires. The first App pull request ships exactly that state and tests it.
+**With no transport registered, the path never activates:** no listener is created, `proxyConfigurations` is never written (not even cleared), the status is always `tunnel`, and no event fires. What does exist from launch: the path controller and its route owner, the store's rotation hook, two observers for background and foreground, and the `direct` capability on the bridge. The first App pull request ships exactly that state and tests it by counting route writes and listeners.
 
 ## 3. Transport state and tags
 
@@ -67,6 +67,7 @@ Rules:
 | The network changes | The transport's to detect (A2): it reports the path lost at once and probes again. The controller needs no network monitor of its own. |
 | Account covers the runtime | Nothing. The runtime and its route stay. |
 | Instance switch, instance picker | The runtime stops: state `tunnel`, transport deselected. The next runtime is a new selection with a new authority. |
+| The runtime's WebView is refused at registration and the App returns to the picker | The selection ends with the browser it was made for. A newer runtime's selection is not touched by an old WebView arriving late. |
 | Sign-in, refresh, sign-out, account switch | `MobileSessionCoordinator` releases the runtime first, as today, so the state is already `tunnel` when anything else happens. |
 | The data store rotates | `rotate()` removes any route from the outgoing store before replacing it. The new store starts with none, and only a later selection, whose tags carry the new identifier, can install one. |
 | The rendezvous generation changes | The old generation is replaced: back to `tunnel`, then `direct` again on the new one. |
@@ -83,7 +84,7 @@ It binds `127.0.0.1` only, on a port the system picks, and exists only while a r
 | Any method but `CONNECT` | `405` |
 | Not HTTP/1.1, a body, a repeated `Host`, a `Host` that disagrees with the target, a malformed head, a head over 4 KiB | `400` |
 | Head not complete within 5 seconds | Closed |
-| More than 64 connections at once | `503`, and the path returns to the tunnel |
+| More than 64 connections at once | The extra connection is closed at once, with no answer, and the path returns to the tunnel |
 
 The subdomain row is the reason the listener checks the authority itself: `matchDomains` would route `x.<instance host>` to it too.
 
@@ -115,7 +116,7 @@ Automated, in `ios-shell` on the simulator:
 - the CONNECT refusal table above, one case per row, against the real listener over real loopback sockets;
 - relay, early data, backpressure, and half-close in both directions against a stand-in stream;
 - the tag rules: late reports, a replaced generation, instance switch, account switch, sign-out, store rotation, background and foreground;
-- that nothing binds a socket or writes `proxyConfigurations` without a transport;
+- that without a transport no listener is created and `proxyConfigurations` is never written, counted at the one place that does each, with a scan of the process's listening sockets as a second line;
 - the bridge: `direct.status()` and the event's payload, in an instance main frame only;
 - one WebKit-level test: a `WKWebView` on a real data store loads through the installed route into a stand-in instance. It proves that the simulator's WebKit sends its CONNECT for the matched host to the listener and that a document loads through the relay. The page is plain HTTP on port 443 of an unqualified host name, which needs no certificate and is outside App Transport Security, so the test proves nothing about TLS, certificates, or a real network. Subdomain refusal and route removal are tested at the listener and the controller, not through WebKit.
 
