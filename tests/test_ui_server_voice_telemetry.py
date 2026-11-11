@@ -394,3 +394,44 @@ def test_voice_telemetry_rejects_a_malformed_fallback():
         response = client.post("/api/asr/telemetry", json=payload, headers=csrf_headers(client))
         assert response.status_code == 400, field
         assert response.get_json() == {"error": "invalid_field", "field": field}
+
+
+def test_microphone_failure_metadata_does_not_log_device_or_origin_identities(caplog):
+    client = app.test_client()
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={
+                "event": "capture_trace",
+                "outcome": "failed",
+                "entry": "hold",
+                "surface": "app_shell",
+                "origin": "loopback",
+                "mic": "NotAllowedError",
+                "audioInputCount": 0,
+                "deviceId": "private-device",
+                "label": "private microphone",
+                "url": "http://private.example/conversation",
+                "errorMessage": "private message",
+            },
+            headers=csrf_headers(client),
+        )
+    assert response.status_code == 200
+    record = next(record for record in caplog.records if record.message.startswith("voice_reliability "))
+    metric = json.loads(record.message.removeprefix("voice_reliability "))
+    assert metric["origin"] == "loopback"
+    assert metric["mic"] == "NotAllowedError"
+    assert metric["audioInputCount"] == 0
+    assert "private" not in record.message
+
+
+def test_microphone_metadata_rejects_origin_identity_and_invalid_counts():
+    client = app.test_client()
+    for key, value in (("origin", "http://private.example"), ("audioInputCount", -1), ("audioInputCount", True)):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={"event": "capture_trace", "outcome": "failed", key: value},
+            headers=csrf_headers(client),
+        )
+        assert response.status_code == 400
+        assert response.get_json() == {"error": "invalid_field", "field": key}

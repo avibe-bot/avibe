@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.datastructures import Headers, QueryParams, URL
 
+from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe.ui_request_context import _request_var, has_request_context
 
 
@@ -113,6 +114,13 @@ class CompatRequest:
     @property
     def is_secure(self) -> bool:
         return self._request.url.scheme == "https"
+
+    @property
+    def direct_ingress(self) -> dict[str, Any] | None:
+        """Direct-ingress metadata, or None when the request used another listener."""
+
+        value = self._request.scope.get(DIRECT_INGRESS_SCOPE_KEY)
+        return value if isinstance(value, dict) else None
 
 
 request = _LocalProxy(lambda: _request_var.get())

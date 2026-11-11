@@ -10,6 +10,7 @@ import {
   listenDesktopNotifications,
   type DesktopNotificationsActions,
 } from '@/lib/desktopShell';
+import { hasNativeCapability } from '@/lib/native';
 import { WebPushControl } from '../workbench/WebPushControl';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel, SettingsRow, ToggleSwitch } from './SettingsPrimitives';
@@ -26,6 +27,7 @@ export const SettingsNotificationsPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const off = !preferences.enabled;
   const desktop = isDesktopShell();
+  const nativePush = hasNativeCapability('push');
   const [desktopActions, setDesktopActions] = useState<DesktopNotificationsActions | null>(null);
   const [desktopEnabled, setDesktopEnabled] = useState<boolean | null>(null);
   const [desktopSaving, setDesktopSaving] = useState(false);
@@ -130,8 +132,16 @@ export const SettingsNotificationsPage: React.FC = () => {
         <SettingsPanel title={t('settings.notifications.deviceTitle')}>
           {capabilities.can_read_instance && !desktop && (
             <SettingsRow
-              title={t('settings.notifications.pushTitle')}
-              description={t('settings.notifications.pushHint')}
+              title={t(
+                nativePush
+                  ? 'settings.notifications.nativePushTitle'
+                  : 'settings.notifications.pushTitle',
+              )}
+              description={t(
+                nativePush
+                  ? 'settings.notifications.nativePushHint'
+                  : 'settings.notifications.pushHint',
+              )}
               control={<WebPushControl />}
             />
           )}

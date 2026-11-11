@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BotsContext, type BotsState } from '@/context/BotsContext';
 import { NotificationPreferencesContext } from '@/context/NotificationPreferencesContext';
 import type { NotificationPreferences } from '@/lib/notificationPreferences';
@@ -10,11 +10,15 @@ import { SettingsNotificationsPage } from './SettingsNotificationsPage';
 const authorization = vi.hoisted(() => ({
   capabilities: { can_read_instance: false },
 }));
+const native = vi.hoisted(() => ({
+  hasNativeCapability: vi.fn(),
+}));
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => authorization,
 }));
+vi.mock('@/lib/native', () => native);
 vi.mock('../workbench/WebPushControl', () => ({
   WebPushControl: () => <div data-testid="web-push-control" />,
 }));
@@ -36,6 +40,11 @@ const switches = () => screen.getAllByRole('switch').map((node) => ({
   checked: node.getAttribute('aria-checked'),
   disabled: (node as HTMLButtonElement).disabled,
 }));
+
+beforeEach(() => {
+  native.hasNativeCapability.mockReset();
+  native.hasNativeCapability.mockReturnValue(false);
+});
 
 afterEach(() => {
   cleanup();
@@ -79,6 +88,20 @@ describe('Settings › Notifications', () => {
     mount({ enabled: true, bots: true, sessions: true }, false);
     expect(screen.getByTestId('web-push-control')).toBeTruthy();
     expect(screen.getByText('settings.notifications.deviceTitle')).toBeTruthy();
+    expect(screen.getByText('settings.notifications.pushTitle')).toBeTruthy();
+    expect(screen.queryByText('settings.notifications.nativePushTitle')).toBeNull();
+    expect(screen.queryByText('settings.notifications.desktopTitle')).toBeNull();
+  });
+
+  it('uses the native push copy in an iPhone app', () => {
+    authorization.capabilities.can_read_instance = true;
+    native.hasNativeCapability.mockImplementation((capability: string) => capability === 'push');
+    mount({ enabled: true, bots: true, sessions: true }, false);
+
+    expect(screen.getByTestId('web-push-control')).toBeTruthy();
+    expect(screen.getByText('settings.notifications.nativePushTitle')).toBeTruthy();
+    expect(screen.getByText('settings.notifications.nativePushHint')).toBeTruthy();
+    expect(screen.queryByText('settings.notifications.pushTitle')).toBeNull();
     expect(screen.queryByText('settings.notifications.desktopTitle')).toBeNull();
   });
 

@@ -371,7 +371,13 @@ test('following the tail, opening something holds it where it was tapped and sto
 async function glideFrames(page: Page, act: () => Promise<void>) {
   await page.evaluate(() => window.__scrollLab.start());
   await act();
-  await page.waitForTimeout(700);
+  // The glide waits for the reader's scroll to settle, including the lost-scrollend fallback. Observe
+  // its landing rather than assuming it starts inside a fixed wall-clock window after the click.
+  // Wait for the recorder's frame, not just scrollTop, so the returned path includes that landing.
+  await expect.poll(() => page.evaluate(() => {
+    const frame = window.__scrollLab.frames.at(-1);
+    return frame ? frame.height - frame.client - frame.top : Infinity;
+  })).toBeLessThan(1);
   await page.evaluate(() => window.__scrollLab.stop());
   return page.evaluate(() => window.__scrollLab.frames.map((frame) => [frame.t, frame.top, frame.height - frame.client] as const));
 }
@@ -388,30 +394,35 @@ const standAt = async (page: Page, screensUp: number) => {
 test('an explicit jump to latest clears an old anchor takeback before a reader scroll', async ({ page }) => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
+  const requestedImages = new Set<string>();
+  page.on('request', (request) => { requestedImages.add(request.url()); });
   await open(page, 'delay=0&count=60', { imagesHeldUntil: held });
   await setTop(page, 0);
   await expect(transcript(page).locator('[data-message-id]')).toHaveCount(60);
+  // Start the lazy image's request before leaving it above the viewport.
+  const image = transcript(page).locator('img').first();
+  const imageSource = await image.evaluate((el: HTMLImageElement) => el.src);
+  await image.scrollIntoViewIfNeeded();
+  await expect.poll(() => requestedImages.has(imageSource)).toBe(true);
   await transcript(page).evaluate((el) => {
     const image = [...el.querySelectorAll('img')].find((img) => !img.complete || img.naturalHeight === 0)!;
     const row = image.closest<HTMLElement>('[data-message-id]')!;
     el.scrollTop += row.getBoundingClientRect().bottom - el.getBoundingClientRect().top + el.clientHeight * 2;
   });
   await page.waitForTimeout(100);
-  await transcript(page).evaluate((el) => {
-    const fling = { stop: false };
-    (window as unknown as { takebackFling: typeof fling }).takebackFling = fling;
-    const step = () => {
-      if (fling.stop || el.scrollTop <= 0) return;
-      el.scrollTop -= 3;
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  });
-  await page.waitForTimeout(150);
+  // Let the image move content above a stationary reader. A continuing fling
+  // would consume the takeback on its next scroll, before the jump could clear it.
+  await record(page);
+  const reference = await page.evaluate(() => window.__scrollLab.refTop());
   release();
-  await page.waitForTimeout(400);
-  await page.evaluate(() => { (window as unknown as { takebackFling: { stop: boolean } }).takebackFling.stop = true; });
+  await expect.poll(() => page.evaluate(() =>
+    window.__scrollLab.writes.some((write) => write.to - write.from >= 2),
+  )).toBe(true);
   await nextFrames(page);
+  const compensation = await stop(page);
+  expect(restoreWrites(compensation.writes).some((write) => write.to - write.from >= 2)).toBe(true);
+  const after = await page.evaluate(() => window.__scrollLab.refTop());
+  expect(Math.abs(after! - reference!)).toBeLessThanOrEqual(1);
 
   await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
@@ -424,6 +435,9 @@ test('an explicit jump to latest clears an old anchor takeback before a reader s
   });
   await toLatest(page).click();
   await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
+  // Reaching a rounded bottom pixel may precede the last glide frame. The
+  // hidden jump control is the observable completion while scroll events are held.
+  await expect(toLatest(page)).toBeHidden();
   await page.evaluate(() => window.__scrollLab.start());
   await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>('[data-testid="chat-transcript"]')!;
@@ -440,37 +454,45 @@ test('an explicit jump to latest clears an old anchor takeback before a reader s
   expect(restoreWrites(writes)).toEqual([]);
 });
 
-test('the way back to the latest message is a quick glide that slows as it lands, then follows the tail', async ({ page }) => {
-  // All 50 rows are in the first window: nothing older to load.
-  await open(page, 'delay=0&images=0&count=50');
-  await standAt(page, 2);
-  const frames = await glideFrames(page, () => toLatest(page).click());
-  const startTop = frames[0][1];
-  const bottom = frames.at(-1)![2];
-  expect(frames.at(-1)![1]).toBeGreaterThanOrEqual(bottom - 1);
-  const between = frames.filter(([, top]) => top > startTop + 1 && top < bottom - 1);
-  expect(between.length).toBeGreaterThanOrEqual(5);
-  const firstMove = frames.find(([, top]) => top > startTop + 1)![0];
-  const landed = frames.find(([, top]) => top >= bottom - 1)![0];
-  expect(landed - firstMove).toBeGreaterThan(150);
-  expect(landed - firstMove).toBeLessThan(500);
-  // It slows as it lands: the last third of the way takes longer than the first.
-  const at = (fraction: number) => frames.find(([, top]) => top >= startTop + (bottom - startTop) * fraction)![0];
-  expect(landed - at(2 / 3)).toBeGreaterThan(at(1 / 3) - firstMove);
-  // At the bottom it follows the tail again.
-  await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
-  await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
+for (const scrollend of ['delivered', 'lost'] as const) {
+  test(`the way back to the latest message is a quick glide that slows as it lands, then follows the tail (${scrollend} scrollend)`, async ({ page }) => {
+    if (scrollend === 'lost') {
+      // The browser can omit scrollend. Exercise the real rest fallback, not a synthetic product hook.
+      await page.addInitScript(() => {
+        document.addEventListener('scrollend', (event) => event.stopImmediatePropagation(), true);
+      });
+    }
+    // All 50 rows are in the first window: nothing older to load.
+    await open(page, 'delay=0&images=0&count=50');
+    await standAt(page, 2);
+    const frames = await glideFrames(page, () => toLatest(page).click());
+    const startTop = frames[0][1];
+    const bottom = frames.at(-1)![2];
+    expect(frames.at(-1)![1]).toBeGreaterThanOrEqual(bottom - 1);
+    const between = frames.filter(([, top]) => top > startTop + 1 && top < bottom - 1);
+    expect(between.length).toBeGreaterThanOrEqual(5);
+    const firstMove = frames.find(([, top]) => top > startTop + 1)![0];
+    const landed = frames.find(([, top]) => top >= bottom - 1)![0];
+    expect(landed - firstMove).toBeGreaterThan(150);
+    expect(landed - firstMove).toBeLessThan(500);
+    // It slows as it lands: the last third of the way takes longer than the first.
+    const at = (fraction: number) => frames.find(([, top]) => top >= startTop + (bottom - startTop) * fraction)![0];
+    expect(landed - at(2 / 3)).toBeGreaterThan(at(1 / 3) - firstMove);
+    // At the bottom it follows the tail again.
+    await page.evaluate(() => window.__scrollLab.push('A row streaming in.'));
+    await expect.poll(() => gapToBottom(page)).toBeLessThan(1);
 
-  // From far up it cuts to a screen above the bottom first, then glides.
-  await standAt(page, 8);
-  const far = await glideFrames(page, () => toLatest(page).click());
-  const farStart = far[0][1];
-  const moved = far.filter(([, top]) => top > farStart + 1);
-  const client = await transcript(page).evaluate((el) => el.clientHeight);
-  expect(moved[0][1]).toBeGreaterThanOrEqual(far.at(-1)![2] - client - 2);
-  expect(moved.filter(([, top, end]) => top < end - 1).length).toBeGreaterThanOrEqual(5);
-  expect(await gapToBottom(page)).toBeLessThan(1);
-});
+    // From far up it cuts to a screen above the bottom first, then glides.
+    await standAt(page, 8);
+    const far = await glideFrames(page, () => toLatest(page).click());
+    const farStart = far[0][1];
+    const moved = far.filter(([, top]) => top > farStart + 1);
+    const client = await transcript(page).evaluate((el) => el.clientHeight);
+    expect(moved[0][1]).toBeGreaterThanOrEqual(far.at(-1)![2] - client - 2);
+    expect(moved.filter(([, top, end]) => top < end - 1).length).toBeGreaterThanOrEqual(5);
+    expect(await gapToBottom(page)).toBeLessThan(1);
+  });
+}
 
 test('the glide to the latest message gives way to the reader, and is a cut under reduced motion', async ({ page }) => {
   await open(page, 'delay=0&images=0&count=50');

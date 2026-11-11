@@ -19,6 +19,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
     let pushOpenedAck: (String, WebOrigin) -> Bool
+    let setBadgeCount: (Int, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let didCreateController: (WebViewController) -> Void
@@ -33,6 +34,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         pushCoordinator: NativePushCoordinator? = nil,
         showAccount: @escaping () -> Void,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
+        setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         didCreateController: @escaping (WebViewController) -> Void,
@@ -46,6 +48,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
         self.pushOpenedAck = pushOpenedAck
+        self.setBadgeCount = setBadgeCount
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
@@ -67,6 +70,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             pushCoordinator: pushCoordinator,
             showAccount: showAccount,
             pushOpenedAck: pushOpenedAck,
+            setBadgeCount: setBadgeCount,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,

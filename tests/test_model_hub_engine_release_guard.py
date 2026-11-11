@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,10 @@ def _run_workflow_go_pin_step(tmp_path: Path, build: dict | None) -> tuple[subpr
     (staged / "vibe/model_hub_runtime").mkdir(parents=True)
     for name in ("model_hub_engine_release_guard.py", "release_asset_download.py"):
         shutil.copy2(guard.REPO_ROOT / "scripts" / name, staged / "scripts" / name)
+    # The guard's manifest schema lives in the packaged tree; the step runs on a bare checkout.
+    (staged / "core").mkdir()
+    for name in ("__init__.py", "model_hub_engine_manifest.py"):
+        shutil.copy2(guard.REPO_ROOT / "core" / name, staged / "core" / name)
     manifest = staged / "vibe/model_hub_runtime/cliproxyapi_manifest.json"
     payload = {"build": build} if build is not None else {}
     manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
@@ -432,29 +437,269 @@ def test_draft_publication_repairs_exact_asset_set_before_becoming_public(
             assert "delete-asset" not in calls and "upload" not in calls
 
 
-def test_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:
-    workflow = (
-        guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml"
-    ).read_text(encoding="utf-8")
+class _FakeGitHub:
+    """One engine release, its stored backups, and the GitHub CLI calls made against them."""
 
-    assert "schedule:" in workflow
-    assert "continue-on-error: true" in workflow
-    assert 'actions/artifacts"' in workflow
-    assert "MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}" in workflow
-    assert "model-hub-engine-release-backup-${{ steps.manifest.outputs.sha256 }}" in workflow
-    assert "retention-days: 90" in workflow
-    assert "--latest=false" in workflow
-    assert "missing_assets" in workflow
-    assert "--clobber" not in workflow
-    assert "--json isDraft" in workflow
-    assert workflow.count("model_hub_engine_release_guard.py publish-draft") == 2
-    assert "model_hub_engine_release_guard.py verify" in workflow
-    assert "publish-patched-source:" in workflow
-    assert "needs: build-patched-source" in workflow
-    assert "needs: [publish-patched-source]" in workflow
-    assert "needs.publish-patched-source.result == 'success'" in workflow
-    assert '--target "$GITHUB_SHA"' in workflow
-    assert "actions/download-artifact@" in workflow
-    assert "python3 scripts/model_hub_engine_release_guard.py verify" in workflow
-    assert 'gh release create "$release_tag"' in workflow
-    assert 'python3 scripts/model_hub_engine_release_guard.py fetch' in workflow
+    REPOSITORY = "fixture/engine"
+
+    def __init__(self, expected: dict[str, bytes]) -> None:
+        self.release: dict[str, bytes] | None = dict(expected)
+        self.is_draft = False
+        self.backups: list[dict] = []
+        self.calls: list[list[str]] = []
+
+    def add_backup(self, identifier: int, files: dict[str, bytes], *, expired: bool = False) -> None:
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as bundle:
+            for name, data in files.items():
+                bundle.writestr(name, data)
+        self.backups.append(
+            {"id": identifier, "created_at": f"2026-11-{identifier:02d}T00:00:00Z", "expired": expired,
+             "zip": output.getvalue()}
+        )
+
+    def download(self, url: str, destination: Path, **_kwargs) -> None:
+        name = url.rsplit("/", 1)[-1]
+        if self.release is None or self.is_draft or name not in self.release:
+            raise guard.ReleaseGuardError(f"release asset download failed (404): {url}")
+        destination.write_bytes(self.release[name])
+
+    def run(self, command, **kwargs):
+        self.calls.append(list(command))
+        if command[:2] == ["gh", "api"]:
+            return self._api(command, kwargs)
+        assert command[:2] == ["gh", "release"] and command[-2:] == ["--repo", self.REPOSITORY], command
+        action, arguments = command[2], command[4:-2]
+        stdout = ""
+        if action == "view":
+            if self.release is None:
+                raise subprocess.CalledProcessError(1, command, stderr="release not found")
+            stdout = json.dumps({"isDraft": self.is_draft, "assets": [{"name": name} for name in self.release]})
+        elif action == "create":
+            assert self.release is None and "--latest=false" in arguments
+            self.release = {Path(item).name: Path(item).read_bytes() for item in arguments if Path(item).is_file()}
+        elif action == "upload":
+            for item in arguments:
+                assert Path(item).name not in self.release, "an existing asset must never be replaced"
+                self.release[Path(item).name] = Path(item).read_bytes()
+        elif action == "download":
+            destination = Path(arguments[arguments.index("--dir") + 1])
+            for name, data in self.release.items():
+                (destination / name).write_bytes(data)
+        elif action == "edit":
+            self.is_draft = False
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    def _api(self, command, kwargs):
+        target = next(item for item in command[2:] if item.startswith("repos/"))
+        if target.endswith("/actions/artifacts"):
+            (name,) = [item.removeprefix("name=") for item in command if item.startswith("name=")]
+            listing = {
+                "artifacts": [
+                    {"id": backup["id"], "name": name, "created_at": backup["created_at"], "expired": backup["expired"]}
+                    for backup in self.backups
+                ]
+            }
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(listing))
+        identifier = int(target.split("/")[-2])
+        (backup,) = [item for item in self.backups if item["id"] == identifier]
+        kwargs["stdout"].write(backup["zip"])
+        return subprocess.CompletedProcess(command, 0)
+
+    def actions(self) -> list[str]:
+        return [command[2] for command in self.calls if command[:2] == ["gh", "release"]]
+
+
+@pytest.fixture
+def engine_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manifest, owned, _built = _manifest(tmp_path)
+    monkeypatch.setattr(guard, "_download", _fake_download(owned))
+    verified = tmp_path / "verified"
+    guard.fetch_release_assets(manifest, verified)
+    expected = {path.name: path.read_bytes() for path in verified.iterdir()}
+    github = _FakeGitHub(expected)
+    monkeypatch.setattr(guard, "_download", github.download)
+    monkeypatch.setattr(guard.subprocess, "run", github.run)
+    return manifest, expected, github
+
+
+def _guard(tmp_path: Path, manifest: Path):
+    return guard.guard_release(
+        manifest, tmp_path / "out", repository=_FakeGitHub.REPOSITORY, target="a" * 40, work_dir=tmp_path / "work",
+    )
+
+
+def _archive_name(expected: dict[str, bytes]) -> str:
+    return sorted(name for name in expected if name.endswith(".tar.gz"))[0]
+
+
+def test_a_release_that_verifies_is_left_alone(tmp_path: Path, engine_release) -> None:
+    manifest, expected, github = engine_release
+
+    spec, recovered = _guard(tmp_path, manifest)
+
+    assert recovered is False and spec.asset_release_tag == "model-hub-engine-v7.2.149-1"
+    assert github.calls == []
+    assert {path.name: path.read_bytes() for path in (tmp_path / "out").iterdir()} == expected
+
+
+@pytest.mark.parametrize("lost", ["archive", "sidecar", "manifest", "several"])
+def test_assets_a_published_release_lost_are_restored_from_a_verified_backup_without_touching_the_rest(
+    tmp_path: Path, engine_release, lost: str,
+) -> None:
+    """MH-ENGINE-CHANNEL-011: lost assets come back from a backup that still verifies; the rest is untouched."""
+
+    manifest, expected, github = engine_release
+    archive = _archive_name(expected)
+    names = {
+        "archive": [archive],
+        "sidecar": [f"{archive}.sha256"],
+        "manifest": ["model-hub-engine-manifest.json"],
+        "several": [archive, f"{archive}.sha256", "model-hub-engine-manifest.json"],
+    }[lost]
+    for name in names:
+        del github.release[name]
+    github.add_backup(1, expected)
+
+    _spec, recovered = _guard(tmp_path, manifest)
+
+    assert recovered is True and github.release == expected
+    (upload,) = [command for command in github.calls if command[2] == "upload"]
+    assert sorted(Path(item).name for item in upload[4:-2]) == sorted(names)
+    assert set(github.actions()) == {"view", "upload"}
+
+
+def test_published_bytes_that_changed_under_their_names_are_never_overwritten(tmp_path: Path, engine_release) -> None:
+    """MH-ENGINE-CHANNEL-011: recovery never replaces an asset that exists under its name."""
+
+    manifest, expected, github = engine_release
+    archive = _archive_name(expected)
+    github.release[archive] = b"replaced upstream"
+    github.add_backup(1, expected)
+
+    with pytest.raises(guard.ReleaseGuardError, match="refusing to overwrite pinned bytes"):
+        _guard(tmp_path, manifest)
+
+    assert github.release[archive] == b"replaced upstream"
+    assert github.actions() == ["view"]
+
+
+def test_a_release_that_is_gone_is_created_again_from_the_backup_as_a_non_latest_release(
+    tmp_path: Path, engine_release,
+) -> None:
+    manifest, expected, github = engine_release
+    github.release = None
+    github.add_backup(1, expected)
+
+    _spec, recovered = _guard(tmp_path, manifest)
+
+    assert recovered is True and github.release == expected and github.is_draft is False
+    (create,) = [command for command in github.calls if command[2] == "create"]
+    assert create[create.index("--target") + 1] == "a" * 40 and "--latest=false" in create
+
+
+def test_an_interrupted_draft_is_completed_verified_and_published(tmp_path: Path, engine_release) -> None:
+    manifest, expected, github = engine_release
+    github.is_draft = True
+    del github.release[_archive_name(expected)]
+    github.add_backup(1, expected)
+
+    _spec, recovered = _guard(tmp_path, manifest)
+
+    assert recovered is True and github.release == expected and github.is_draft is False
+    assert github.actions()[-2:] == ["download", "edit"]
+
+
+def test_only_a_backup_whose_bytes_still_verify_is_used_newest_first(tmp_path: Path, engine_release) -> None:
+    manifest, expected, github = engine_release
+    archive = _archive_name(expected)
+    del github.release[archive]
+    github.add_backup(9, {**expected, archive: b"corrupt backup"})
+    github.add_backup(8, {**expected, "unexpected.txt": b"not a release asset"})
+    github.add_backup(7, {name: data for name, data in expected.items() if name != archive})
+    github.add_backup(6, expected, expired=True)
+    github.add_backup(5, expected)
+    github.add_backup(4, {**expected, archive: b"older and wrong"})
+
+    _spec, recovered = _guard(tmp_path, manifest)
+
+    assert recovered is True and github.release == expected
+    downloaded = [command[2].split("/")[-2] for command in github.calls if command[2].endswith("/zip")]
+    assert downloaded == ["9", "8", "7", "5"]
+
+
+def test_without_a_verified_backup_nothing_is_uploaded(tmp_path: Path, engine_release) -> None:
+    manifest, expected, github = engine_release
+    archive = _archive_name(expected)
+    del github.release[archive]
+    github.add_backup(1, {**expected, archive: b"corrupt backup"})
+
+    with pytest.raises(guard.ReleaseGuardError, match="no verified backup"):
+        _guard(tmp_path, manifest)
+
+    assert archive not in github.release and github.actions() == []
+
+
+def test_the_guard_covers_the_packaged_engine_and_every_release_the_channel_lists(tmp_path: Path) -> None:
+    """MH-ENGINE-CHANNEL-011: the guard's list is the packaged engine plus every channel-listed release."""
+
+    (tmp_path / "packaged").mkdir()
+    packaged, _owned, _built = _manifest(tmp_path / "packaged")
+    listed = tmp_path / "listed"
+    listed.mkdir()
+    # The packaged release listed again with the same bytes, and two others.
+    (listed / "model-hub-engine-v7.2.149-1.json").write_bytes(packaged.read_bytes())
+    for build in (2, 3):
+        other = json.loads(packaged.read_text(encoding="utf-8"))
+        tag = f"model-hub-engine-v7.2.149-{build}"
+        other["asset_release_tag"] = tag
+        for asset in other["assets"]:
+            asset["url"] = asset["url"].replace("model-hub-engine-v7.2.149-1", tag)
+        (listed / f"{tag}.json").write_text(json.dumps(other), encoding="utf-8")
+
+    releases = guard.plan_guarded_releases(packaged, listed, tmp_path / "plan")
+
+    assert releases == [f"model-hub-engine-v7.2.149-{build}" for build in (1, 2, 3)]
+    assert (tmp_path / "plan" / "model-hub-engine-v7.2.149-1.json").read_bytes() == packaged.read_bytes()
+    assert guard.plan_guarded_releases(packaged, None, tmp_path / "alone") == ["model-hub-engine-v7.2.149-1"]
+    # One release has one manifest.
+    changed = json.loads(packaged.read_text(encoding="utf-8"))
+    changed["assets"][0]["sha256"] = "0" * 64
+    (listed / "model-hub-engine-v7.2.149-1.json").write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(guard.ReleaseGuardError, match="two different manifests"):
+        guard.plan_guarded_releases(packaged, listed, tmp_path / "conflict")
+
+
+def test_the_guard_workflow_plans_every_guarded_release_and_recovers_each_through_the_script() -> None:
+    import yaml
+
+    text = (guard.REPO_ROOT / ".github/workflows/model-hub-engine-release-guard.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load(text)
+    plan, job = workflow["jobs"]["plan"], workflow["jobs"]["guard"]
+    plan_run = "\n".join(step.get("run", "") for step in plan["steps"])
+    guard_run = "\n".join(step.get("run", "") for step in job["steps"])
+
+    assert "schedule" in workflow[True] and len(workflow[True]["schedule"]) == 2
+    # The publication path is unchanged, and the guard still follows it on a dispatch.
+    assert plan["needs"] == ["publish-patched-source"]
+    assert "needs.publish-patched-source.result == 'success'" in plan["if"]
+    assert text.count("model_hub_engine_release_guard.py publish-draft") == 1
+    assert '--target "$GITHUB_SHA"' in text and "--latest=false" in text and "--clobber" not in text
+    # The plan reads the channel through the shipped keys and keeps the packaged engine in the list.
+    assert plan["permissions"] == {"contents": "read"}
+    assert "model_hub_engine_channel.py commissioned" in plan_run
+    assert "model_hub_engine_channel.py listed" in plan_run
+    assert "model_hub_engine_release_guard.py plan" in plan_run
+    # Each release is verified and recovered by the tested script, then backed up under its manifest digest.
+    assert job["needs"] == ["plan"] and job["if"] == "always() && needs.plan.result == 'success'"
+    assert job["strategy"] == {"fail-fast": False, "matrix": {"release": "${{ fromJSON(needs.plan.outputs.releases) }}"}}
+    assert "guard \\\n" in guard_run and '--manifest "$RUNNER_TEMP/guarded-manifests/$RELEASE.json"' in guard_run
+    backup = job["steps"][-1]
+    assert backup["with"]["name"] == guard.BACKUP_ARTIFACT_PREFIX + "${{ steps.guard.outputs.sha256 }}"
+    assert backup["with"]["retention-days"] == 90
+    assert "github.event.schedule == '53 4 * * 0'" in backup["if"] and "steps.guard.outputs.recovered == 'true'" in backup["if"]
+    # It restores pinned bytes only: no signing key, no bucket credential, no protected environment.
+    for forbidden in ("secrets.", "environment:", "model_hub_engine_channel.py sign", "model_hub_engine_channel.py publish", "s3api"):
+        assert forbidden not in text

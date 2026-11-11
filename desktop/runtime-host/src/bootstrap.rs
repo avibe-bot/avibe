@@ -102,9 +102,10 @@ fn parse_timeout(raw: &str) -> Option<Duration> {
 /// What started a bootstrap run.
 ///
 /// Only the app's own launch, including the relaunch after an update, and the
-/// user's Try again may stop a predecessor Runtime to hand over. A shell
-/// recovering by itself never does: if two shells ever ran at once, each would
-/// otherwise keep stopping the other's Runtime.
+/// user's Try again may stop a Runtime to hand over: a predecessor, or this
+/// app's own left in another login session. A shell recovering by itself never
+/// does: if two shells ever ran at once, each would otherwise keep stopping the
+/// other's Runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapTrigger {
     Launch,
@@ -142,8 +143,9 @@ pub enum RemovalOutcome {
 /// A host may run `bootstrap` many times — once at startup and once per retry or
 /// recovery. It never overlaps launch commands. A Runtime is this shell's only
 /// while its Controller carries the shell's Runtime identity, and only such a
-/// Runtime is stopped by Stop, Quit, or uninstall. The one other Runtime the
-/// shell ever stops is a desktop predecessor with another identity, on handover.
+/// Runtime is stopped by Stop, Quit, or uninstall. On handover, this app's
+/// start also stops a desktop predecessor with another identity, and this
+/// app's own Runtime when its CLI found it in another login session.
 /// After a completed successful launch still fails the full readiness budget, a
 /// later retry may re-run the idempotent start command to repair missing
 /// components.
@@ -409,15 +411,25 @@ impl RuntimeHost {
         let identified = resolved_launcher
             .as_ref()
             .is_some_and(|launcher| launcher.expected_runtime_id().is_some());
+        // This app's CLI found its own Runtime in a login session other than
+        // the one this shell runs in, where the Keychain, and after an ended
+        // login the network, are out of reach. A run that may hand over lets
+        // its start replace that Runtime instead of adopting it.
+        let replaces_own = trigger.allows_handover()
+            && resolved_launcher
+                .as_ref()
+                .is_some_and(|launcher| launcher.wants_runtime_replaced());
 
         let mut attempt = 1;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
 
         // This app's Runtime and any Runtime that is not a desktop predecessor
-        // are adopted. A predecessor with another desktop identity is replaced
-        // only by this app's `vibe start`, and only when this run may hand over.
+        // are adopted. A predecessor with another desktop identity, and this
+        // app's own Runtime left in another login session, are replaced only by
+        // this app's `vibe start`, and only when this run may hand over.
         let presence = self.observe_presence(run, &origin, resolved_launcher.as_ref()).await;
         match presence {
+            Presence::Mine { ready: true } if replaces_own => {}
             Presence::Mine { ready: true } | Presence::Unmanaged => {
                 return self
                     .adopt(
@@ -526,6 +538,10 @@ impl RuntimeHost {
             let settled = !self.launched_runtime().launch_pending();
             let presence = self.observe_presence(run, &origin, Some(&launcher)).await;
             match presence {
+                // While the helper runs, this app's Runtime may be the one it
+                // is replacing. Once it has exited, the one serving is the
+                // one its start left.
+                Presence::Mine { ready: true } if replaces_own && !settled => {}
                 Presence::Mine { ready: true } => {
                     return self
                         .adopt(

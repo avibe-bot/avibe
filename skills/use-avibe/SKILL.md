@@ -2,7 +2,7 @@
 name: use-avibe
 slug: use-avibe
 description: Safely inspect and modify local Avibe configuration, routing, runtime settings, watches, scheduled tasks, Avibe Cloud remote access, and operational state. Also use it to report an Avibe bug, send product feedback, or file a feature request from the current conversation.
-version: 0.9.5
+version: 0.9.6
 ---
 
 # Use Avibe
@@ -24,6 +24,7 @@ Typical requests include:
 - inspect or cancel concrete Agent Run records with `vibe runs`
 - check or apply Avibe updates (`vibe check-update`, `vibe upgrade`)
 - inspect logs, run doctor, check service status, or explain where Avibe stores state
+- explain why a macOS service lost the Keychain (it runs outside the desktop session or outlived it) and what repairs it, or turn launch at login on or off (`vibe autostart`)
 - decide whether a requested change belongs in Avibe config or in the host backend's own config
 - report an Avibe bug, send product feedback, or file a feature request from the current conversation ("report this to Avibe", "submit a bug", "request a feature")
 
@@ -81,7 +82,7 @@ Paths below are relative to this Skill directory; scripts remain under
 | Pair, inspect, repair, or control the Avibe Cloud tunnel | [Remote access](references/remote-access.md) |
 | Run or delegate Agent work, schedule tasks, manage watches or Session queues | Load the `use-avibe-harness` Skill |
 | Choose backend/subagent settings or change native OpenCode, Claude, or Codex config | [Backends](references/backends.md) |
-| Inspect runtime paths, logs, or health; restart or upgrade the service | [Operations and troubleshooting](references/operations.md) |
+| Inspect runtime paths, logs, or health; restart or upgrade the service; macOS login session and launch at login | [Operations and troubleshooting](references/operations.md) |
 | Turn a problem or a wish in this conversation into a bug report, feedback, or feature request | [Feedback and feature requests](references/feedback.md) |
 
 For multi-step API work, use the bundled `scripts/vibe_api.py` helper.

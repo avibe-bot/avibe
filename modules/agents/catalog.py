@@ -24,6 +24,8 @@ class AgentBackendDescriptor:
     display_name: str
     config_key: str
     default_cli: str | None
+    # Switched on in a new install's first config (``V2Config.default``). A saved config that
+    # does not spell ``enabled`` keeps the backend config's own default instead.
     default_enabled: bool
     latest_probe: tuple[str, str] | None
     capabilities: AgentBackendCapabilities
@@ -68,7 +70,7 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         display_name="OpenCode",
         config_key="opencode",
         default_cli="opencode",
-        default_enabled=True,
+        default_enabled=False,
         latest_probe=("github", "sst/opencode"),
         capabilities=AgentBackendCapabilities(),
     ),
@@ -77,7 +79,7 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         display_name="Claude Code",
         config_key="claude",
         default_cli="claude",
-        default_enabled=True,
+        default_enabled=False,
         latest_probe=("npm", "@anthropic-ai/claude-code"),
         capabilities=AgentBackendCapabilities(),
     ),

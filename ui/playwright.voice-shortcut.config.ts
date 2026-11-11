@@ -56,11 +56,11 @@ export default defineConfig<VoiceWorkletOptions>({
   projects: [
     // The microphone projects keep the composer's real voice worklet: they capture through it
     // (support/browserTest stubs it everywhere else).
-    { name: 'chromium', testIgnore: /meter\.spec\.ts/, use: { ...devices['Desktop Chrome'], voiceWorklet: 'real' } },
+    { name: 'chromium', testIgnore: /(?:meter|permission)\.spec\.ts/, use: { ...devices['Desktop Chrome'], voiceWorklet: 'real' } },
     // The meter, on a microphone that is never quiet.
     {
       name: 'meter',
-      testMatch: /meter\.spec\.ts/,
+      testMatch: /(?:meter|permission)\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
         voiceWorklet: 'real',

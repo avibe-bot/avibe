@@ -96,6 +96,7 @@
   "POST /api/asr/transcribe": "editor",
   "POST /api/config": "editor",
   "POST /api/desktop-mini/session": "editor",
+  "POST /api/direct/rendezvous": "viewer",
   "POST /api/dock/pins": "editor",
   "POST /api/files/copy": "editor",
   "POST /api/files/delete": "editor",

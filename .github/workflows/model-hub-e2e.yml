@@ -4,6 +4,11 @@ name: Model Hub release E2E
 # pinned engine and real agent CLIs against a loopback mock upstream. It is too
 # slow for pull requests, so it runs nightly and on demand; a release needs a
 # green run at its SHA (docs/release.md).
+#
+# Two shard jobs share the selection out, each on its own runner with its own
+# report, and `model-hub-e2e` joins them into the one verdict. Their pytest
+# commands stay literal: the evidence gate reads what each selects from this
+# file, so a matrix or shell variable in a selection would hide it.
 
 on:
   schedule:
@@ -21,8 +26,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  model-hub-e2e:
-    name: model-hub-e2e
+  # The two slowest files: the engine wire cases and the mock upstream cases.
+  model-hub-e2e-wire-mock:
+    name: model-hub-e2e-wire-mock
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -80,25 +86,55 @@ jobs:
           EOF
           echo "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=$RUNNER_TEMP/model-hub-engine/offline-manifest.json" >> "$GITHUB_ENV"
 
+      # What this shard runs against, for the join: this commit, run and attempt,
+      # the agent CLIs just installed, and the engine archive the scenarios install.
+      - name: Record this shard's provenance
+        run: |
+          mkdir -p "$RUNNER_TEMP/model-hub-e2e-evidence"
+          python - <<'EOF'
+          import hashlib, importlib.metadata, json, os, pathlib, subprocess, urllib.parse, urllib.request
+
+          def output(*command):
+              return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()
+
+          manifest = json.loads(pathlib.Path(os.environ["VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"]).read_text())
+          (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
+          archive = pathlib.Path(urllib.request.url2pathname(urllib.parse.urlparse(asset["url"]).path))
+          provenance = {
+              "sha": output("git", "rev-parse", "HEAD"),
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "versions": {
+                  "codex": output("codex", "--version"),
+                  "opencode": output("opencode", "--version"),
+                  "claude-agent-sdk": importlib.metadata.version("claude-agent-sdk"),
+                  "model-hub-engine": f"{manifest['asset_release_tag']} sha256:{hashlib.sha256(archive.read_bytes()).hexdigest()}",
+              },
+          }
+          out = pathlib.Path(os.environ["RUNNER_TEMP"]) / "model-hub-e2e-evidence" / "provenance.json"
+          out.write_text(json.dumps(provenance, indent=2) + "\n")
+          print(out.read_text())
+          EOF
+
       # Every scenario is hermetic, so it runs where only loopback answers: an
       # engine or CLI that ignores its loopback upstream fails at once instead
       # of reaching a real provider. The downloads above stay outside.
-      - name: Prepare Model Hub E2E junit directory
-        run: mkdir -p "$RUNNER_TEMP/model-hub-e2e-junit"
-
+      #
       # Every release E2E case selected below must be present and passing in this
-      # run's own report; collection or a green process is not enough. `shell: bash`
+      # shard's own report; collection or a green process is not enough. `shell: bash`
       # runs with pipefail: without it the `| tee` pipeline reports tee's status and a
       # failing pytest reads as green.
-      - name: Run the Model Hub E2E and release evidence gate
+      - name: Run the wire and mock-upstream shard and its release evidence gate
         shell: bash
         run: |
-          bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
+          bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub \
+            tests/e2e/test_model_hub_engine_wire.py tests/e2e/test_model_hub_mock_upstream.py \
+            -p no:cacheprovider -ra \
             --basetemp="$RUNNER_TEMP/e2e" \
-            --junitxml="$RUNNER_TEMP/model-hub-e2e-junit/model-hub-e2e.xml" 2>&1 | tee model-hub-e2e.log || pytest_status=${PIPESTATUS[0]}
+            --junitxml="$RUNNER_TEMP/model-hub-e2e-evidence/junit.xml" 2>&1 | tee "$RUNNER_TEMP/model-hub-e2e-evidence/pytest.log" || pytest_status=${PIPESTATUS[0]}
           pytest_status=${pytest_status:-0}
           python scripts/ci_scenario_evidence.py --release \
-            "$RUNNER_TEMP/model-hub-e2e-junit" \
+            "$RUNNER_TEMP/model-hub-e2e-evidence" \
             --workflow .github/workflows/model-hub-e2e.yml \
             --pytest-root . \
             --pytest-command-index 0 || evidence_status=$?
@@ -106,11 +142,186 @@ jobs:
           if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
           exit "$evidence_status"
 
-      - name: Upload the run log
+      # Named for the job, so the join finds each shard's evidence under its job id.
+      - name: Upload this shard's evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-e2e-${{ github.run_id }}-${{ github.run_attempt }}
-          path: model-hub-e2e.log
+          name: ${{ github.job }}
+          path: ${{ runner.temp }}/model-hub-e2e-evidence
           if-no-files-found: ignore
           retention-days: 14
+
+  # Everything else in the selection, so a new E2E file runs here without an edit.
+  model-hub-e2e-remaining:
+    name: model-hub-e2e-remaining
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Prepare hermetic UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+
+      - name: Install package and test dependencies
+        run: uv pip install --system -e . --group dev
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+
+      # The agent CLIs users install: the latest release of each, as Avibe installs them.
+      - name: Install agent CLIs
+        run: |
+          npm install -g @openai/codex opencode-ai
+          codex --version
+          opencode --version
+
+      # The packaged engine manifest, with this runner's asset downloaded and
+      # verified, so every scenario installs the pinned engine offline.
+      - name: Prepare the pinned engine offline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'EOF'
+          import hashlib, json, os, pathlib
+          from scripts.release_asset_download import download_to_path
+
+          manifest = json.loads(pathlib.Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text())
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "model-hub-engine"
+          root.mkdir(parents=True, exist_ok=True)
+          (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
+          archive = root / asset["url"].rsplit("/", 1)[1]
+          download_to_path(asset["url"], archive, max_bytes=asset["size_bytes"])
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          if digest != asset["sha256"] or archive.stat().st_size != asset["size_bytes"]:
+              raise SystemExit(f"engine archive does not match the manifest: {digest}")
+          asset["url"] = archive.as_uri()
+          (root / "offline-manifest.json").write_text(json.dumps(manifest))
+          print(f"{manifest['asset_release_tag']} {asset['platform']} verified")
+          EOF
+          echo "VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=$RUNNER_TEMP/model-hub-engine/offline-manifest.json" >> "$GITHUB_ENV"
+
+      # What this shard runs against, for the join: this commit, run and attempt,
+      # the agent CLIs just installed, and the engine archive the scenarios install.
+      - name: Record this shard's provenance
+        run: |
+          mkdir -p "$RUNNER_TEMP/model-hub-e2e-evidence"
+          python - <<'EOF'
+          import hashlib, importlib.metadata, json, os, pathlib, subprocess, urllib.parse, urllib.request
+
+          def output(*command):
+              return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()
+
+          manifest = json.loads(pathlib.Path(os.environ["VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"]).read_text())
+          (asset,) = [item for item in manifest["assets"] if item["platform"] == "linux-amd64"]
+          archive = pathlib.Path(urllib.request.url2pathname(urllib.parse.urlparse(asset["url"]).path))
+          provenance = {
+              "sha": output("git", "rev-parse", "HEAD"),
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "versions": {
+                  "codex": output("codex", "--version"),
+                  "opencode": output("opencode", "--version"),
+                  "claude-agent-sdk": importlib.metadata.version("claude-agent-sdk"),
+                  "model-hub-engine": f"{manifest['asset_release_tag']} sha256:{hashlib.sha256(archive.read_bytes()).hexdigest()}",
+              },
+          }
+          out = pathlib.Path(os.environ["RUNNER_TEMP"]) / "model-hub-e2e-evidence" / "provenance.json"
+          out.write_text(json.dumps(provenance, indent=2) + "\n")
+          print(out.read_text())
+          EOF
+
+      # Every scenario is hermetic, so it runs where only loopback answers: an
+      # engine or CLI that ignores its loopback upstream fails at once instead
+      # of reaching a real provider. The downloads above stay outside.
+      #
+      # Every release E2E case selected below must be present and passing in this
+      # shard's own report; collection or a green process is not enough. `shell: bash`
+      # runs with pipefail: without it the `| tee` pipeline reports tee's status and a
+      # failing pytest reads as green.
+      - name: Run the remaining shard and its release evidence gate
+        shell: bash
+        run: |
+          bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub tests/e2e \
+            --ignore=tests/e2e/test_model_hub_engine_wire.py --ignore=tests/e2e/test_model_hub_mock_upstream.py \
+            -p no:cacheprovider -ra \
+            --basetemp="$RUNNER_TEMP/e2e" \
+            --junitxml="$RUNNER_TEMP/model-hub-e2e-evidence/junit.xml" 2>&1 | tee "$RUNNER_TEMP/model-hub-e2e-evidence/pytest.log" || pytest_status=${PIPESTATUS[0]}
+          pytest_status=${pytest_status:-0}
+          python scripts/ci_scenario_evidence.py --release \
+            "$RUNNER_TEMP/model-hub-e2e-evidence" \
+            --workflow .github/workflows/model-hub-e2e.yml \
+            --pytest-root . \
+            --pytest-command-index 1 || evidence_status=$?
+          evidence_status=${evidence_status:-0}
+          if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
+          exit "$evidence_status"
+
+      # Named for the job, so the join finds each shard's evidence under its job id.
+      - name: Upload this shard's evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ${{ github.job }}
+          path: ${{ runner.temp }}/model-hub-e2e-evidence
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The release verdict. It passes only when both shards succeeded in this run
+  # attempt, at this commit, against the same agent CLI versions and the engine
+  # this checkout pins; when between them they ran every case of the whole
+  # selection (`-m e2e_model_hub tests/e2e`, fixed in the checker) exactly once;
+  # and when every covered scenario case passed. Shards from different attempts
+  # do not join: after a failure, re-run all jobs, not only the failed one.
+  model-hub-e2e:
+    name: model-hub-e2e
+    needs: [model-hub-e2e-wire-mock, model-hub-e2e-remaining]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Prepare hermetic UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.13.7
+
+      - name: Install package and test dependencies
+        run: uv pip install --system -e . --group dev
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          pattern: model-hub-e2e-*
+          path: ${{ runner.temp }}/model-hub-e2e-evidence
+
+      - name: Join the shards into the release verdict
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          engine=$(jq -er '"\(.asset_release_tag) sha256:\(.assets[] | select(.platform == "linux-amd64") | .sha256)"' \
+            vibe/model_hub_runtime/cliproxyapi_manifest.json)
+          python scripts/ci_scenario_evidence.py --release-join "$RUNNER_TEMP/model-hub-e2e-evidence" \
+            --workflow .github/workflows/model-hub-e2e.yml \
+            --pytest-root . \
+            --expect-version "model-hub-engine=$engine"

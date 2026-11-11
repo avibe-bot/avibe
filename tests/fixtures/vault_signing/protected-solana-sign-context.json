@@ -1,0 +1,40 @@
+{
+  "daemonSeedHex": "1111111111111111111111111111111111111111111111111111111111111111",
+  "daemonPublicKey": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc=",
+  "daemonKeyId": "fixture-daemon-key",
+  "signingSeedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "expectedSignature": "3043d93ed931bdaa0585ca033e3301ee8f2e8f21cd992d895ae1394afc49b8d93156e703d8dcb741693a7511b38c7bcb7e17a37af5a14842c2c0f4c431c13408",
+  "signedContext": {
+    "v": 2,
+    "purpose": "sign",
+    "requestId": "vrq_fixture_solana_sign_binding",
+    "display": {
+      "secrets": [
+        {
+          "name": "SOLANA_TEST_KEY",
+          "kind": "keypair"
+        }
+      ],
+      "command": "sign fixture Solana message",
+      "egress": "signature"
+    },
+    "release": {
+      "name": "SOLANA_TEST_KEY",
+      "scheme": "ed25519",
+      "messageHex": "01000103d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c00000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2001020200010c0200000040420f0000000000",
+      "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "signingContext": {
+        "kind": "solana-transaction-v1",
+        "messageHex": "01000103d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c00000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2001020200010c0200000040420f0000000000"
+      }
+    },
+    "expiresAt": "2030-01-01T00:00:00Z",
+    "signature": {
+      "alg": "ed25519",
+      "keyId": "fixture-daemon-key",
+      "value": "wL/Xr+UdNt2RNOH/yvU9bmCvew3DSJb0nMOEZpJyJoeLhsrZtqGUb8RagjQNpt2LnJpaFTokiCkT2Fgvhi+5BQ=="
+    }
+  },
+  "canonicalUnsignedContext": "{\"display\":{\"command\":\"sign fixture Solana message\",\"egress\":\"signature\",\"secrets\":[{\"kind\":\"keypair\",\"name\":\"SOLANA_TEST_KEY\"}]},\"expiresAt\":\"2030-01-01T00:00:00Z\",\"purpose\":\"sign\",\"release\":{\"messageHex\":\"01000103d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c00000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2001020200010c0200000040420f0000000000\",\"name\":\"SOLANA_TEST_KEY\",\"publicKey\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"scheme\":\"ed25519\",\"signingContext\":{\"kind\":\"solana-transaction-v1\",\"messageHex\":\"01000103d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c00000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2001020200010c0200000040420f0000000000\"}},\"requestId\":\"vrq_fixture_solana_sign_binding\",\"v\":2}"
+}

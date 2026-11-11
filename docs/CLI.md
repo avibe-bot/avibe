@@ -54,8 +54,8 @@ and one output rule.
   the raw driver payload), `vibe vault run` passes through the output of the
   command it runs, and `vibe debug prompt export` prints its export document.
 - **Operator commands** for a person at a terminal print text. `version`,
-  `check-update`, `doctor`, `runtime`, `remote` subcommands, `screenshot`, and
-  `data retention` print the JSON envelope with `--json`. The service lifecycle
+  `check-update`, `doctor`, `runtime`, `remote` and `autostart` subcommands,
+  `screenshot`, and `data retention` print the JSON envelope with `--json`. The service lifecycle
   commands `start`, `stop`, `restart`, `upgrade`, and the guided `vibe remote`
   setup only print progress text and take no `--json`.
 - **Language.** CLI help, errors, hints, and notices are English, whatever the
@@ -85,7 +85,8 @@ workspace to edit), and `updated_at`. An Agent row is its `name`, `backend`,
 `enabled: false`. A Vault row, the same from `vibe vault list` and
 `vibe vault find`, is the secret's `name`, `kind`, `protection`, `fields` (a
 multi-field secret adds `default_field`, the field `NAME` alone selects),
-`tags`, `description`, `policy`, a keypair's `signing_addresses`, and
+`tags`, `description`, `policy`, a keypair's `signing_curve` and
+`signing_addresses`, and
 `per_use_sign: true` when `vibe vault sign` can use the key; it never holds a
 value. `vibe task show`, `vibe watch show`, `vibe runs show`,
 `vibe session get`, `vibe agent show`, and `vibe show status` print the full
@@ -188,6 +189,7 @@ vibe start --allow-downgrade
 - With `--no-open-browser`, keeps the service/UI lifecycle the same but does not launch a system browser window
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
 - Refuses to run an install older than the last activated one, for example an old `vibe` earlier on `PATH`. The error names both versions and the launcher to run instead; `--allow-downgrade` runs the older build on purpose. The desktop app only warns.
+- On macOS and Linux, `vibe start` and `vibe restart` give Avibe, and so every Agent Session, the `PATH` of your login shell when the caller's `PATH` lacks any of its entries, as it does over non-interactive SSH or from cron. A caller that already has every entry, such as a terminal, keeps its own `PATH` unchanged, and entries the caller put ahead of the system ones, such as a service unit's virtualenv, stay first. The login shell runs once per start as `$SHELL -l -i -c`, only `PATH` is read, and when it does not answer within 10 seconds Avibe starts with the caller's `PATH` and says so.
 - Started by the desktop app, reuses or replaces only a service and Web UI of that app's own Runtime. If another Avibe is running here, it exits with status 3, says so, and leaves that Avibe running.
 
 ### `vibe stop`
@@ -220,6 +222,8 @@ vibe restart --allow-downgrade
 - With `--delay-seconds N`, schedules the restart `N` seconds in the future so an active conversation can receive its reply before the restart lands. Prefer this form when an agent is triggering the restart from inside Slack, Discord, Telegram, Lark/Feishu, or WeChat.
 - Refuses, like `vibe start`, to restart onto an install older than the last activated one unless you pass `--allow-downgrade`
 - Run from inside a desktop app's Runtime, restarts only that Runtime; otherwise it stops nothing, explains why, and exits with status 3. A restart from the Web UI shows the same refusal instead of restarting.
+- On macOS, Avibe runs in the login session of whatever started it, and only your desktop session reaches the Keychain. A restart requested from outside that session, for example over SSH, is therefore carried out by the running Avibe when it is inside the desktop session: the command prints the job ID and says that the running Avibe performs the restart, and Avibe comes back in the desktop session with the environment it already had. The running Avibe restarts with its own launcher: the caller names no path, and its environment is not applied; to change either, restart from a terminal on the Mac's desktop.
+- When no Avibe inside the desktop session can do that (none is running, the running one is itself outside the desktop session, it predates this behavior, or the caller's `vibe` is not the install it restarts with, such as a virtualenv or a source checkout), the restart still runs from the caller, and a warning says that Avibe will run outside the desktop session: credentials kept in the Keychain (GitHub CLI, Vault) are unavailable until you run `vibe restart` from a terminal on the Mac's desktop. `vibe start` prints the same warning when it starts Avibe from outside the desktop session. A Runtime managed by the desktop app is not affected.
 
 ### `vibe status`
 
@@ -246,6 +250,33 @@ also contains a `generation_downgrade` object with the running `version` and
 `generation`, the `activated_version` and `activated_generation`, and the
 `launcher` that selects the newer install. Restart through that launcher to run
 the new version.
+
+### `vibe autostart`
+
+Start Avibe at each desktop login on macOS. Off by default; for CLI installs.
+
+```bash
+vibe autostart on
+vibe autostart status
+vibe autostart off
+```
+
+**Behavior:**
+- `on` writes one per-user LaunchAgent, `~/Library/LaunchAgents/bot.avibe.autostart.plist`, and loads it into your desktop session. Loading runs it once, as a login does. Run over SSH, it still loads into your desktop session when you have one; with no desktop session open, it takes effect at the next desktop login. The file is the setting: there is no config key.
+- At each desktop login the agent runs once and exits:
+  - no Avibe is running: it starts Avibe as `vibe start --no-open-browser` does;
+  - Avibe already runs in this desktop session: it does nothing;
+  - Avibe outlived its login session or runs in another one (after a log-out and log-in, or a start over SSH): it restarts Avibe, which then runs in the desktop session and reaches the Keychain again;
+  - it cannot tell which session Avibe runs in, or the running Avibe belongs to the desktop app: it does nothing and writes the reason to `~/.avibe/logs/autostart.log`.
+- Nothing runs between logins. An Avibe you stopped with `vibe stop` stays stopped until the next desktop login, and nothing restarts an Avibe that exits.
+- launchd starts the agent with a minimal environment. Avibe still gets the `PATH` of your login shell, as described under `vibe start`; other variables your shell profile exports are not applied.
+- The agent runs the `vibe` launcher that upgrades keep on the current install, so `vibe upgrade` does not change it.
+- `off` unloads and removes that LaunchAgent and nothing else. A running Avibe keeps running. Uninstalling Avibe with the installer removes it too.
+- `status` reports whether launch at login is on, whether the agent is loaded in your desktop session, the launcher it runs, and the interpreter macOS attributes it to.
+- **Privacy permissions.** An Avibe started at login is not started by your terminal, so it has none of the permissions you granted the terminal, such as Full Disk Access. macOS attributes it to the Python interpreter that runs `vibe`. When workspaces are in protected folders (Desktop, Documents, Downloads) or on external volumes, add the interpreter that `vibe autostart status` names under System Settings > Privacy & Security > Full Disk Access. An upgrade that moves Avibe to another Python version changes that path; check `status` again afterwards.
+- Refused, with nothing changed: on Linux and Windows; inside a Runtime the desktop app manages, which has its own launch-at-login setting; when `AVIBE_HOME` names another home, because the agent starts the default home; and when `vibe` runs from inside an install generation or a virtual environment, which an upgrade replaces.
+
+Use `--json` on these subcommands for the JSON envelope.
 
 ### `vibe skill`
 
@@ -798,6 +829,13 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--shell` / trailing `-- <argv>` for a scheduled command with no Agent turn,
   with `--on-failure {none,agent}`, a per-run `--timeout` (default 21600
   seconds, 0 = none), and `--cwd` for the directory the command runs in
+
+One-shot `--at` Tasks tolerate up to five minutes of scheduler lateness, including
+service restarts. An older missed fire is retired without executing its message
+or command and records a failed Run with a durable notice through the normal
+failure-delivery route to its creator (with the workspace inbox as fallback).
+Inspect the Task before manually running time-sensitive work. This grace does
+not change recurring `--cron` schedules.
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from

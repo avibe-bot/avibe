@@ -1,299 +1,249 @@
-# Solana support in Avibe Vault
+# Solana Vault and protected-signing parity
 
-**Status:** Proposed for 3.2.6; design-first review requested.
-**Date:** 2026-11-10
-**Owners:** Vaults workstream
+**Decision: 2026-11-11.** Standard Solana **and** protected Solana/EVM raw signing
+must ship in **3.2.6**; stable 3.2.6 waits for both. This replaces the earlier
+protected-transfer policy in this plan. Implementation is authorized; every
+sandbox/signing PR still requires exact-head owner approval before merge.
 **Related:** `avault/docs/DESIGN.md`, `docs/plans/avault-custody-core.md`,
-`docs/plans/vault-protected-bitcoin.md`, `docs/plans/vault-taproot-signing.md`.
+`docs/plans/vault-protected-bitcoin.md`.
 
-## 1. Decision in one paragraph
+## 1. Standard Solana contract (unchanged)
 
-Add Solana as a new local signing-key family backed by Ed25519. Standard-tier
-keys are generated, imported, encrypted, and signed inside `avault`; Avibe and
-the browser see only the sealed envelope plus public metadata. Solana addresses
-are the base58 encoding of the 32-byte Ed25519 public key. `vibe vault sign`
-uses an explicit `--message-hex` input for Solana's exact serialized message
-bytes; `--digest` is rejected for `ed25519` with a hint, so the existing digest
-contract cannot be accidentally overloaded. Protected Solana key creation and
-signing are out for v1: without a verifiable transaction context the approval
-surface must say “not supported yet” rather than authorize blind bytes.
+Standard keys are generated, imported, encrypted and signed inside avault.
+Avibe receives ciphertext, public metadata and signatures, never the seed.
+The existing browser-to-avault blind-box boundary remains: Python relays the
+opaque import box, whose context binds operation, name and curve.
 
-## 2. Scope and invariants
-
-### In scope for v1
-
-- Ed25519 key generation and import in `avault`.
-- Standard-tier, non-exportable Solana signing keys.
-- Public Solana address derivation and display.
-- `ed25519` exact-byte signing through the existing Vault signing path.
-- UI chain-family selection, standard/protected gating, and address lists.
-- Test vectors and negative tests at the Rust, Python, and UI boundaries.
-
-### Invariants
-
-- `avault` is the only component that handles the Ed25519 seed and performs
-  Ed25519 signing. It returns a sealed envelope, public metadata, or a
-  signature; it never returns a seed/private key or a decrypt verb.
-- Standard creation/import uses the existing browser-to-avault blind-box
-  boundary. Python relays the opaque blind box and stores only the resulting
-  ciphertext envelope and value-free metadata.
-- Signing verifies the returned signature against the pinned public key before
-  marking a request successful or writing a success audit event.
-- No test key is funded. Tests use published vectors or deterministic,
-  publicly-known devnet-only material and never broadcast a transaction.
-
-## 3. Key material and import contract
-
-### 3.1 Canonical stored metadata
-
-The existing `public_meta.signing_public_key` object becomes curve-aware:
-
-```json
-{
-  "curve": "ed25519",
-  "chain": "solana",
-  "public_key": "<64 lowercase hex characters>"
-}
-```
-
-The 32-byte public key remains canonical hex in metadata, matching the existing
-secp256k1 metadata convention. The public address is derived from those bytes and
-is surfaced separately as:
-
-```json
-{"solana": "<base58 public key>"}
-```
-
-Existing secp256k1 rows remain unchanged. Their chain-agnostic EVM/Bitcoin
-addresses and schemes continue to work as they do today.
-
-### 3.2 Generation
-
-Add an `avault` keypair operation equivalent to:
-
-```text
-avault keypair generate --name NAME --curve ed25519
-```
-
-The command creates a fresh 32-byte Ed25519 seed, derives the 32-byte public key,
-seals the seed under the standard machine-rooted envelope bound to `NAME`, and
-returns only:
-
-```json
-{
-  "envelope": {"ciphertext": "...", "nonce": "...", "wrap_meta": "..."},
-  "curve": "ed25519",
-  "public_key": "<64 lowercase hex characters>"
-}
-```
-
-Avibe adds `chain: solana` and the derived address to `public_meta`; the seed
-never crosses the avault process boundary.
-
-### 3.3 Import
-
-Add a stdin-only operation equivalent to:
-
-```text
-avault keypair import --name NAME --curve ed25519 \
-  --format solana-cli-json|base58-secret --blind-box
-```
-
-The browser seals the user input to avault's public key with a distinct
-operation-bound blind-box context. Avibe relays that box; avault opens and
-validates it, derives the public key, seals the seed, and returns the same
-value-free result as generation.
-
-V1 accepts these wallet export shapes:
-
-1. **Solana CLI keypair JSON:** exactly 64 integers in the range `0..255`. The
-   first 32 bytes are the seed and the final 32 bytes must equal the derived
-   public key.
-2. **Base58 secret key:** a base58 string decoding to exactly 64 bytes with the
-   same seed/public-key consistency check. This covers wallet exports that use
-   the Solana secret-key byte array encoded as base58.
-
-V1 does **not** accept mnemonics, derivation paths, JSON objects with extra
-fields, arbitrary 32-byte seeds in the product import form, PEM/PKCS#8, or
-private-key export files from other curves. The Rust tests may use a raw
-32-byte seed fixture internally, but that is not a user-facing import format.
-Malformed encodings, wrong lengths, and a mismatched trailing public key fail
-before an envelope is written.
-
-There is no export operation for a Solana key. Losing a keypair secret is
-intentionally irreversible, as with other non-exportable Vault signing keys.
-
-## 4. Address display
-
-A Solana address is exactly the base58 encoding of the 32-byte Ed25519 public
-key. It has no mainnet/devnet/testnet prefix and no checksum variant. The UI
-labels it **Solana** and provides the existing copy affordance. Address display
-is public-only and may be performed by Avibe after avault returns the public key;
-it does not weaken custody.
-
-The address list becomes curve-aware:
-
-- secp256k1: existing ETH, BTC SegWit, Taproot, and legacy rows.
-- Ed25519/Solana: one Solana row only.
-
-Signing approval cards show only addresses truthful for the requested scheme.
-For `ed25519`, that is the Solana address; an Ed25519 key is never presented as
-an EVM or Bitcoin identity.
-
-## 5. Signing contract
-
-### 5.1 Scheme and exact bytes
-
-Add the scheme identifier:
-
-```text
-ed25519
-```
-
-For existing secp256k1 schemes, `--digest` remains exactly 32 bytes of hex and
-is passed to the selected prehash/signing primitive as today. For `ed25519`,
-`--message-hex` is required and contains the exact serialized Solana message
-bytes encoded as lowercase hex. avault signs those bytes directly with pure
-Ed25519; it does not hash, truncate, pad, or reinterpret them. Passing
-`--digest` with `ed25519` is rejected with a hint to use `--message-hex`. The
-accepted message size is bounded (v1: 1 MiB at the CLI/core boundary) to prevent
-accidental unbounded memory use. Solana transaction callers pass the serialized
-Solana message, not a transaction signature, wire packet, or a hash of the
-message.
-
-The CLI help and the public plan must call this out prominently:
+- Metadata: `signing_public_key = {curve: "ed25519", chain: "solana",
+  public_key: "<32-byte lowercase hex>"}`. Public address: base58 of those bytes,
+  exposed as `{solana: "<address>"}`. No network prefix. Existing secp256k1
+  records, ETH/BTC addresses and schemes remain unchanged.
+- Generation creates a fresh 32-byte seed inside avault and returns its sealed
+  envelope, curve and public key. No private-key export/decrypt operation.
+- Import accepts only a Solana CLI JSON array of exactly 64 integers in
+  `0..255`, or base58 decoding to exactly 64 bytes. Bytes 32–63 must equal the
+  public key derived from the first 32 seed bytes. No mnemonics, derivation
+  paths, arbitrary 32-byte seed input, PEM or cross-curve imports.
+- `ed25519` signs exact supplied message bytes using pure Ed25519, not
+  Ed25519ph/ctx or a digest. The CLI/core bound is 1 MiB; empty-message
+  Ed25519 remains valid at this standard cryptographic boundary. Solana
+  transaction callers supply the serialized unsigned message, not a signed
+  wire packet or hash.
+- API/request `message_hex` and CLI `--message-hex` are distinct from `digest`
+  / `--digest`. Ed25519 rejects digest input; digest schemes reject message
+  input and retain their 32-byte digest requirement.
+- Result: 64-byte lowercase-hex signature, without a recovery id. Avibe verifies
+  it against the stored public key and exact message before settlement/audit.
+  Curve/scheme mismatch, malformed input or a bad signature fails closed.
+- Headless and `always_ask` standard flows remain available. An always-ask card
+  shows the Solana address and exact message, not supposedly decoded effects.
 
 ```text
 vibe vault sign NAME --scheme ed25519 --message-hex MESSAGE_HEX
-# For ed25519, --message-hex is the exact message bytes; it is not a digest.
+# MESSAGE_HEX is the exact message, not a digest.
 ```
 
-The existing Python/API `digest` field remains reserved for 32-byte digest
-schemes. The Solana request shape adds a `message_hex` field and persists the
-exact message bytes only as request data needed to settle the same operation;
-it never changes the meaning of existing schemes.
+avault v0.1.10 is published and verified. Its managed pin has a separate owner;
+Avibe's standard integration proceeds against that release. Standard UI adds
+the chain picker, generation/import, truthful address/approval/list/detail/search
+surfaces and EN/ZH strings. Switching chains clears stale import material.
+Protected controls remain unavailable until their compatible sandbox pin and
+acceptance are delivered; no silent standard fallback. Standard work proceeds
+in its own lane, not behind protected implementation.
 
-### 5.2 Result and verification
+## 2. Protected contract
 
-The result is a 64-byte Ed25519 signature encoded as lowercase hex and contains
-no recovery id. Avibe verifies it against the stored Ed25519 public key before
-returning it or settling a request. Invalid public-key curve/scheme pairings,
-wrong message encoding, malformed signatures, or a key envelope that does not
-contain 32 seed bytes fail closed.
+**Decode only plain transfers; otherwise show raw and allow approval.** The
+sandbox independently binds and signs the exact content. On Solana, decode
+native System Transfer and SPL Transfer/TransferChecked to the addresses and
+raw integer quantities actually present. TransferChecked adds its mint and
+encoded decimals; its destination is a **token account**, not a proven wallet
+owner. Plain Transfer has no mint/decimals: do not invent them. Keep existing
+EVM/typed-data decoders and add a raw path for unrecognized calldata.
 
-Standard approval (`always_ask`) may still show the exact message hex and the
-Solana address. That is a byte-level approval, not a claim that Avibe decoded a
-transaction.
+Everything else, including swaps, unknown programs, Token-2022 extensions,
+compute-budget/memo instructions and unresolved lookups, remains raw and
+approvable. **No token names/symbols/list, swap-specific display, outside RPC,
+attestor, lookup resolution, simulation or network token metadata.** Never
+promote caller labels or resolved addresses into verified facts. Decoding does
+not prove deployed behavior, chain state, execution success or receipt of funds.
 
-## 6. Trust tiers and protected signing
+One notice whenever any content is undecoded/unresolved, in the selected locale:
 
-### Standard
+- **EN:** Some content is not decoded; approving it is blind signing.
+- **ZH:** 部分内容未解析，批准即为盲签。
 
-Supported in v1. The machine-rooted key is usable headlessly, and avault signs
-inside its short-lived CLI process or resident-agent signing path. This is the
-right tier for automation and devnet-only agents. The machine-compromise limits
-are the existing standard-tier limits: it protects at rest and keeps seeds out
-of Python/LLM state, but it does not protect a running compromised same-user
-machine.
+No extra mode, toggle, second confirmation or second passkey ceremony. Removed:
+forced create-then-transfer, receiving-token-account ownership proof, fee/memo
+policy, one-signer/fee-payer restriction and blanket unknown/Token-2022/ALT/DeFi
+refusals. Unknown semantics are not malformed serialization.
 
-### Protected
+### Structural and custody invariants
 
-Protected Solana key creation and signing are **not supported in v1**. The
-protected browser protocol must not accept a raw Ed25519 message/digest and
-render an approval card that cannot honestly identify fee payer, recipients,
-lamports, programs, and other transaction effects. Until a trusted Solana
-message decoder and signed operation context exist, the API rejects protected
-Solana signing before creating a request or prompting for a passkey, with a
-localized “protected Solana signing is not supported yet” error.
+- Canonical bounded parsing, full input consumption, valid counts/header/indices,
+  no silent field dropping, and exactly the original bytes signed. Invalid
+  encoding and unsupported outer formats fail before approval; valid outer
+  messages with undecodable instruction data use raw fallback.
+- Solana: **legacy and v0**, including ALT-bearing messages. Enforce the
+  1,232-byte transaction bound including required signature slots. Validate
+  compact-u16, lengths, indices and account ordering without resolving tables.
+  The Vault key must be a required static signer; other signers and a different
+  fee payer are allowed. Return only this key's signature. Fields that need
+  unavailable lookup addresses stay unresolved/raw, not fabricated or refused.
+- v1/unknown versions: **Unsupported transaction version / 不支持的交易版本**.
+  Current Jupiter APIs default to v0; Kit/web3.js require explicit version
+  choice, and Phantom supports caller-selected v1 but its in-wallet default is
+  undocumented. Legacy+v0 is the first-slice scope, not a claim v1 doesn't exist.
+- EVM: keep supported legacy/EIP-1559 envelopes, existing EIP-712 support and
+  independent hash/chain checks. Unsupported envelope fields/types still fail;
+  this does not add `personal_sign`, access/blob/authorization lists or new ABIs.
+- Protected Ed25519 generation, sealing and signing stay inside the existing
+  cross-origin sandbox; protected import is out. Only new Ed25519 records add
+  curve metadata. Existing protected secp256k1 AAD remains byte-identical.
+- Kind/scheme/record curve/public key/signer membership agree. No Ed25519
+  through generic agent-operation contexts, digest aliases or raw-context bypass.
+- Authenticate the whole immutable operation: name/key, scheme, exact payload,
+  complete signing context, request identity, expiry and surrounding details.
+  Preserve replay protection, fresh R3 passkey and sign-time revalidation after
+  asynchronous approval. A message hash alone is not this binding. Request
+  expiry is not a claim about blockhash freshness or durable-nonce validity.
 
-The UI therefore disables the Protected tier when Solana is selected and explains
-why. Existing protected secp256k1 flows are unchanged. There is no fallback from
-protected Solana to standard signing and no blind-digest protected path.
+### Exact-message wire
 
-## 7. UI shape
+```json
+{"kind":"solana-transaction-v1","messageHex":"<exact unsigned message hex>"}
+```
 
-- Add a **Chain** picker to the keypair builder:
-  - **EVM / Bitcoin** — existing secp256k1 path and address list.
-  - **Solana** — Ed25519 path, Solana address list, standard tier only.
-- Keep the selected chain/curve in the non-secret public metadata so editing a
-  key cannot silently change its interpretation.
-- Solana standard generation/import calls the Avibe endpoint backed by avault;
-  the browser receives only the envelope and public metadata. The existing
-  secp256k1 compatibility path is not redesigned in this increment.
-- The Vault list, detail view, search terms, approval card, and signing-address
-  component render the Solana row and chain label without exposing raw public
-  keys or private material.
-- The signing form and CLI surface use `ed25519` as the scheme. Protected Solana
-  controls are visibly unavailable rather than failing after submission.
+The context has exactly those fields. `v1` versions the Avibe contract, **not**
+the Solana message. Protected `messageHex` is nonempty, bounded, lowercase and
+even-length. CLI/API uses `message_hex`; sandbox RPC and daemon-signed release
+use `messageHex`. The authenticated release is
+`{name, scheme:"ed25519", messageHex, publicKey, signingContext}`, with a 32-byte
+lowercase-hex public key and no digest/digestAlgorithm placeholder. Outer message
+and context bytes must match. Existing secp release bytes stay unchanged; the
+passkey challenge still binds the complete signed-operation context. The sandbox
+parses, displays and signs the same message without reserialization.
 
-## 8. Tests and acceptance
+## 3. Approval: short summary, one Details section
 
-### avault Rust PR
+Summary: transaction kind, signing address, decoded destination/amount where
+available, and the notice whenever anything remains raw. Preserve the requesting
+Session as one small line under the title when the authenticated display has it;
+the current protected popup already shows it upfront. The command and complete
+request fields remain in **Details / 详情**, inside the same trusted popup, complete
+and copyable. The notice is never hidden there. The parent card cannot substitute
+for this trusted view. All labels have EN/ZH strings; addresses, hex and program
+names stay unchanged. No first-version ALT UI beyond the original raw bytes.
 
-- RFC 8032 Ed25519 known-answer vectors, including exact message bytes and the
-  empty-message case.
-- Generated keypair round-trip: public key and signature verify; private bytes
-  never occur in JSON output or stdout.
-- Solana CLI JSON import and base58 64-byte import, including trailing-public-key
-  mismatch, malformed JSON, invalid byte values, invalid base58, and length cases.
-- Blind-box import context is name/curve bound and cannot be replayed as a static
-  secret or another keypair.
-- CLI accepts messages longer than 32 bytes for `ed25519` and proves the exact
-  bytes are signed; secp256k1 schemes retain the 32-byte digest limit.
-- `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features`.
+Native units get an exact readable amount beside the original integer:
+`1.5 SOL (1500000000 lamports)` and, for Ethereum chain ID 1,
+`0.01 ETH (10000000000000000 wei)`. Format using integer/decimal-string arithmetic,
+never floating-point rounding. Do not label arbitrary EVM chains' native value
+ETH or add a network/token list; other chains retain the raw value. Token amounts
+remain raw base units with encoded decimals where present, without a symbol.
+The EVM signing address is derived from the record's public key inside the
+sandbox; keep the complete compressed key in Details. A Solana public key's
+base58 address already serves as the signing identity.
 
-### Avibe integration PR
+Common summary labels: **Signing key / 签名密钥**, **To / 收款地址**,
+**Amount / 数量**, **Mint / Mint 地址**, **Token account / 代币账户**,
+**Contract / 合约**, **Value / 转账金额** (with the readable native unit where
+known and the complete raw integer beside it).
+Details retain the authenticated operation's existing surrounding fields, full
+key/public key, version, and **Exact message (hex) / 完整消息（十六进制）** for
+Solana; for EVM, the accepted envelope, all existing decoded fields, **Selector /
+函数选择器**, **Calldata (hex) / 调用数据（十六进制）**, **Exact unsigned transaction
+(hex) / 完整未签名交易（十六进制）**, and **Signing digest / 签名摘要**. The original
+raw content remains available even when transfer fields are decoded.
 
-- Public metadata validation accepts only the expected curve/key encoding and
-  derives the expected base58 Solana address.
-- `ed25519` scheme is accepted only for `curve: ed25519`; secp256k1 schemes are
-  rejected for Solana keys and `ed25519` is rejected for secp256k1 keys.
-- Exact-message hex validation through `--message-hex`, signature verification,
-  request settlement, and value-free audit are covered at API/CLI boundaries.
-- `--digest` with `ed25519` is rejected before request creation and returns a
-  hint to use `--message-hex`.
-- Protected Solana requests fail before request creation, notification, or
-  passkey/sandbox work.
-- Standard generation/import relay tests prove Python handles only blind boxes,
-  ciphertext envelopes, and public metadata.
+The following are line-by-line content examples; `<…>` means a complete value,
+not production truncation. The notice is rendered once in the chosen locale.
 
-### UI PR
+| Scenario | Summary lines, in order | Details additions |
+| --- | --- | --- |
+| SOL transfer | `Solana transfer / Solana 转账` → `Signing key / 签名密钥: <key>` → `To / 收款地址: <destination>` → `Amount / 数量: 1 SOL (1000000000 lamports)` | `From / 转出地址: <source>`; complete message. No notice if all content is decoded. |
+| USDC TransferChecked (scenario name only) | `Token transfer / 代币转账: TransferChecked` → signing key → `Mint / Mint 地址: <encoded mint>` → `Destination token account / 收款代币账户: <address>` → `Amount (base units) / 数量（基础单位）: 1000000` | `Source token account / 转出代币账户: <address>`; `Authority / 授权地址: <address>`; `Encoded decimals / 编码精度: 6`; full message. No “USDC” label or wallet-owner claim. |
+| Jupiter swap with ALT | `Solana transaction / Solana 交易` → signing key → `Not decoded / 未解析` → blind-signing notice | Full original message, including all instruction and ALT bytes. No Jupiter/route/output interpretation or resolved address. |
+| ETH transfer | `EVM transfer / EVM 转账` → signing key → `To / 收款地址: <address>` → `Value / 转账金额: 1 ETH (1000000000000000000 wei)` | Chain ID 1, type, nonce, all gas/fee fields, empty calldata, full unsigned payload and digest. No notice for this empty-calldata example. |
+| ERC-20 transfer | `Decoded calldata / 已解析调用数据: transfer(address,uint256)` → signing key → `Contract / 合约: <address>` → `Recipient argument / 收款地址参数: <address>` → `Amount argument / 数量参数: 1000000` | Existing envelope, selector `0xa9059cbb`, full calldata/payload/digest. No symbol, decimals lookup or verified-execution claim. |
+| Uniswap swap | `EVM contract call / EVM 合约调用` → signing key → `Contract / 合约: <transaction destination>` → `Value (wei) / 转账金额（wei）: <integer>` → blind-signing notice | Complete envelope, selector, raw calldata, unsigned payload and digest; no swap-specific presentation. |
 
-- Chain picker selects the correct curve path and clears stale key material when
-  switching chains.
-- Solana generation/import shows only the Solana address; EVM/Bitcoin rows remain
-  unchanged.
-- Protected Solana is unavailable with an explanatory localized message.
-- Approval cards show the truthful address for `ed25519`, and list/detail/search
-  surfaces render the chain label and base58 address.
-- `npm run build` and focused Vault component tests pass.
+For SPL Transfer, omit mint/decimals because they aren't present. If required
+addresses are lookup-backed, show only facts that are actually known and mark
+remaining content raw/unresolved with the notice. A known program's unsupported
+instruction shape is raw, not silently reduced to a recognized prefix. EVM
+noncanonical ABI arguments/trailing data likewise remain visible raw rather
+than being dropped by a decoder.
 
-## 9. Explicit non-goals for v1
+## 4. Delivery and estimate
 
-- Protected Solana signing or protected Solana transaction approvals.
-- Solana message/transaction parsing in the browser or Python.
-- SPL token/account parsing beyond future display-only metadata.
-- Durable nonces, address lookup tables, versioned transactions, lookup-table
-  fetching, priority fees, compute-budget interpretation, or program-specific
-  decoding.
-- Transaction construction, fee estimation, broadcast, confirmation, or wallet
-  connectivity.
-- Mnemonic/derivation-path import, hardware-wallet/WalletConnect signing, or
-  export/recovery flows.
-- A second Ed25519 variant such as Ed25519ph or Ed25519ctx; v1 is pure Ed25519
-  over caller-supplied bytes.
+All lanes are active. Independent PRs start from current default branches;
+merge shared contracts before starting consuming PRs, never stack them. Any
+foundation route stays unavailable until a real structural verifier, trusted
+view, whole-operation binding and compatible release pin are all wired in.
 
-## 10. Resolved product decisions (2026-11-10)
+| Lane / independent PR | Model | Dependency / follow-on |
+| --- | --- | --- |
+| Sandbox Ed25519 custody, exact-message primitive, wire/binding foundation | GPT-6.1 Sol, xhigh | Current sandbox; production Solana gated until integration |
+| Avibe standard generation/import/sign/verify + shared CLI/message/binding | Claude Fable 5.2, high | Published avault v0.1.10; separate managed-pin writer |
+| Solana canonical parser + minimal transfer facts | Claude Fable 5.2, xhigh | Independent parser contract, no custody/UI imports |
+| EVM unknown-calldata raw path | Claude Opus 5.5, high | Existing verifier and existing ABI only |
+| Trusted bilingual summary/Details + frames | Claude Fable 5.2, high | Frames reviewed first; integrate verified facts after contracts land |
+| Independent fixture corpus and acceptance | GPT-6.1 Sol, xhigh | SDK/primary-source fixtures now; real consumer tests after integration |
+| Standard Avibe UI | Claude Fable 5.2, high | Standard backend on default; not blocked by protected work |
 
-1. Protected Solana is entirely out of v1, including protected key creation.
-   The UI disables that tier with a short reason; there is no protected
-   blind-digest fallback.
-2. The two user-facing import formats are sufficient for 3.2.6: Solana CLI
-   64-byte JSON array and base58-encoded 64-byte secret key. Mnemonics and
-   derivation paths remain out.
-3. Solana signing uses an explicit `--message-hex` flag. `--digest` is refused
-   with `ed25519` so exact message bytes cannot be confused with a digest.
+Then deliver independently based integration PRs: assembled sandbox verifier/
+signer/view and immutable release, followed by the exact Avibe sandbox pin and
+protected request/completion/UI path. Do not enable one without its dependencies.
 
-Implementation follows in separate avault, Avibe integration, and UI PRs. Each
-PR is security-sensitive and waits for owner approval before merge; nothing
-merges before stable 3.2.5 is published.
+**Planning estimate:** 9–13 engineer-days across parallel lanes; **3–4 calendar
+days from November 11 to RC-ready**, targeting November 14 with November 15 as
+review/acceptance buffer. November 11: first foundation/parser/raw/frame heads
+and vectors; November 12: approved contracts and integration; November 13:
+release/pin and isolated acceptance; November 14: fixes and full RC gates.
+This is a working estimate, not a guarantee or permission to skip a check.
+The critical path is sandbox contracts → integrated immutable release →
+owner-approved deployment/pin → end-to-end acceptance. Refresh it from actual
+review results; standard progresses in parallel.
+
+### Acceptance and owner checkpoints
+
+- Use independent public/unfunded fixtures with exact serialized messages,
+  known signatures and provenance, not only self-generated roundtrips. Cover
+  native/SPL transfers, ALT raw fallback, multi-signer/different-fee-payer,
+  unknown programs and EVM calldata; canonical bounds, unsupported versions,
+  all accepted fields and complete raw copy; EN/ZH and notice placement.
+- Verify actual consumer boundaries: unchanged secp AAD; message/key/curve/
+  context mutation; fresh passkey, replay/expiry and sign-time revalidation;
+  returned signature verification and no downgrade/external lookup. Preserve
+  standard import/blind-box/CLI/headless/always-ask regression coverage.
+- Hermetic tests and local Incus for user-facing acceptance; no funded keys,
+  live user Vault operations, broadcasts or remote regression. Keep real
+  passkey/manual gaps explicit; mocks are not proof of a real ceremony.
+- Owner sees frames first, then **each sandbox/signing PR's exact Merge-ready
+  head** via the product owner. Each sandbox main merge auto-deploys Production:
+  approval must include that consequence. Local append-only snapshot staging is
+  not permission to deploy; retained published bytes are never overwritten.
+- Owner separately approves the immutable sandbox release and exact Avibe pin.
+  List every commit added after an approved head, including tests; distinguish
+  mechanical rebases from content changes. RC readiness alone does not authorize
+  a stable tag, rollout, install or restart.
+
+No open product-scope choice remains: transfers at the minimal depth above,
+no token names, raw fallback for everything else, legacy/v0, and 3.2.6 are fixed.
+Owner checkpoints are frame and exact-head security/release approvals.
+
+Later work may add deeper instruction/contract decoding, token identity labels
+or v1 format support. None is a prerequisite for this first protected release.
+
+## 5. Primary references
+
+- Solana [versioned transactions](https://solana.com/docs/core/transactions/versioned-transactions),
+  [transaction structure](https://solana.com/docs/core/transactions/transaction-structure),
+  [token transfers](https://solana.com/docs/tokens/basics/transfer-tokens).
+- Jupiter [transaction versions](https://developers.jup.ag/docs/swap/advanced/transaction-versions)
+  and Phantom [v1 signing recipe](https://docs.phantom.com/recipes/transactions/send-solana-v1-transaction)
+  (format/default documentation checked 2026-11-11).
+- `vault-sandbox/src/signingContext.ts`, `src/signRequest.ts`,
+  `src/operationContext.ts`, `src/vaultCrypto.ts`, `docs/integrity.md`;
+  `avault/docs/DESIGN.md` owns standard Ed25519/blind-box semantics.

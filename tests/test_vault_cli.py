@@ -2088,31 +2088,38 @@ def test_run_releases_standard_always_ask_grant_when_avault_fails_before_handoff
 
 
 @pytest.mark.parametrize(
-    ("command", "error", "grant_status"),
+    ("command", "error", "code", "grant_status"),
     [
         # One-shot deliver run cannot prove its child never ran: the grant stays fail-closed.
-        ("run", "AvaultAuthorizationRequiredError", "expired"),
-        ("inject", "AvaultAuthorizationRequiredBeforeHandoffError", "active"),
+        ("run", "AvaultAuthorizationRequiredError", "avault_authorization_required", "expired"),
+        ("inject", "AvaultAuthorizationRequiredBeforeHandoffError", "avault_authorization_required", "active"),
+        # Outside the desktop session the same Keychain refusal needs a restart, not an authorization.
+        ("run", "AvaultOutsideGuiSessionError", "outside_gui_session", "expired"),
+        ("inject", "AvaultOutsideGuiSessionBeforeHandoffError", "outside_gui_session", "active"),
     ],
 )
-def test_delivery_hands_avault_authorization_to_the_user(tmp_path, capfd, monkeypatch, command, error, grant_status):
+def test_delivery_hands_a_keychain_refusal_to_the_user(tmp_path, capfd, monkeypatch, command, error, code, grant_status):
     from vibe import api
 
     grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli", purpose=command)
     deliver = Mock(side_effect=getattr(api, error)("run `avault key authorize` in a logged-in session"))
     if command == "run":
         monkeypatch.setattr(api, "avault_deliver_run", deliver)
-        code = cli.cmd_vault_run(_ns(env=["ASK_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+        exit_code = cli.cmd_vault_run(_ns(env=["ASK_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
     else:
         monkeypatch.setattr(api, "avault_deliver_inject", deliver)
-        code = cli.cmd_vault_inject(_ns(keys="ASK_KEY", out=str(tmp_path / "out.env"), format="dotenv", session_id="ses_cli"))
+        exit_code = cli.cmd_vault_inject(_ns(keys="ASK_KEY", out=str(tmp_path / "out.env"), format="dotenv", session_id="ses_cli"))
     error = json.loads(capfd.readouterr().err)
 
-    assert code == 1
-    assert error["code"] == "avault_authorization_required"
+    assert exit_code == 1
+    assert error["code"] == code
     # The Agent is told to hand the step to the user, not to retry or run avault itself.
-    assert "Do not retry and do not run avault yourself" in error["hint"]
-    assert "Authorize avault" in error["hint"]
+    if code == "outside_gui_session":
+        assert error["hint"].startswith("Do not retry, and do not ask for an avault authorization.")
+        assert "vibe restart" in error["hint"]
+    else:
+        assert "Do not retry and do not run avault yourself" in error["hint"]
+        assert "Authorize avault" in error["hint"]
     assert "avault key authorize" not in error["error"]
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]

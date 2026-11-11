@@ -69,6 +69,14 @@ only the releases that `vibe/ripgrep_runtime_manifest.json` and
 - Other top-level prefixes are reserved and never touched by the release
   mirror (for example a future `thirdparty/` for install-script dependencies).
   A new mirrored repository takes a new root.
+- `https://dl.avibe.bot/index/model-hub-engine.json` is the signed Model Hub
+  engine channel index (`docs/plans/model-hub-engine-channel.md`). It shares
+  the bucket and the 60-second cache policy but not this job: its only writer
+  is the channel workflow, and the release mirror refuses to write, copy over,
+  or delete that key. Unlike the release index below, clients authenticate it
+  against a key shipped in Avibe, so the mirror gains no say over which engine
+  is adopted. The engine releases it lists are full releases, which the mirror
+  already keeps.
 
 ### Release index, schema 1
 

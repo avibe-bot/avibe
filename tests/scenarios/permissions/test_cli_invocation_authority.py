@@ -560,6 +560,7 @@ def test_permissions_026_a_below_floor_command_is_refused_while_a_remote_owner_i
         ("__restart-supervisor", ["--help"], "_dispatch_restart_supervisor"),
         ("__activate-upgrade", ["--help"], "_dispatch_deferred_upgrade_activation"),
         ("__activate-install", ["--protocol-version"], "_dispatch_installer_activation"),
+        ("__login-start", [], "_dispatch_login_start"),
     ],
 )
 def test_permissions_026_internal_activation_entry_points_stay_owner_work(

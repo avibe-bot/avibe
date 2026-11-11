@@ -1123,9 +1123,38 @@ jobs:
           path: dist
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        id: python
         with:
           python-version: "3.12"
           architecture: x64
+
+      # On windows-11-arm this step has ended as successful without installing
+      # anything: no interpreter reported and PATH unchanged. The job then ran
+      # the image's own `python`, a native arm64 build of another version. One
+      # more attempt, and after it the job runs only the interpreter that
+      # setup-python reported, checked to be the build that was asked for.
+      - name: Set up Python again if the first attempt installed nothing
+        if: steps.python.outputs.python-path == ''
+        id: python_retry
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Require the requested Python
+        shell: pwsh
+        env:
+          SETUP_PYTHON: ${{ steps.python.outputs.python-path || steps.python_retry.outputs.python-path }}
+        run: |
+          if (-not $env:SETUP_PYTHON) {
+            throw "setup-python reported no interpreter in two attempts"
+          }
+          $build = & $env:SETUP_PYTHON -c "import sys, sysconfig; print('%d.%d %s' % (sys.version_info[0], sys.version_info[1], sysconfig.get_platform()))"
+          if ($LASTEXITCODE -ne 0 -or $build -ne "3.12 win-amd64") {
+            throw "This job needs Python 3.12 win-amd64; $env:SETUP_PYTHON is '$build'"
+          }
+          Write-Host "Python $build at $env:SETUP_PYTHON"
+          "AVIBE_CI_PYTHON=$env:SETUP_PYTHON" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install package and test dependency
         shell: pwsh
@@ -1134,14 +1163,14 @@ jobs:
           if (-not $wheel) {
             throw "Missing wheel artifact"
           }
-          python -m pip install $wheel pytest
+          & $env:AVIBE_CI_PYTHON -m pip install $wheel pytest
 
       - name: Verify Model Hub through the installed service
         shell: pwsh
         env:
           AVIBE_EXPECT_ENGINE_PLATFORM: ${{ matrix.engine_platform }}
         run: |
-          python -m pytest -m e2e_service tests/e2e/test_model_hub_service_acceptance.py -v -ra *>&1 |
+          & $env:AVIBE_CI_PYTHON -m pytest -m e2e_service tests/e2e/test_model_hub_service_acceptance.py -v -ra *>&1 |
             Tee-Object -FilePath acceptance.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # A skip would pass silently; this job exists to run the case.

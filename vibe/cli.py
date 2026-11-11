@@ -385,23 +385,34 @@ def _retyped_placement_refusal(
 
 
 STALE_LOGIN_SESSION_CODE = "stale_login_session"
+OUTSIDE_GUI_SESSION_CODE = "outside_gui_session"
 AVAULT_AUTHORIZATION_REQUIRED_CODE = "avault_authorization_required"
 
-
-def _is_stale_login_session(exc: Exception) -> bool:
-    return getattr(exc, "code", None) == STALE_LOGIN_SESSION_CODE
-
-
-def _stale_login_session_cli_error(help_command: str | None) -> TaskCliError:
-    return TaskCliError(
+# (message, hint) for a failure whose cause is the macOS session Avibe runs in.
+# A restart from inside Avibe keeps that session, so the step goes to the user.
+_LOGIN_SESSION_CLI_ERRORS = {
+    STALE_LOGIN_SESSION_CODE: (
         "Avibe is still running in a macOS login session that has ended",
-        code=STALE_LOGIN_SESSION_CODE,
-        hint=(
-            "Do not retry. Ask the user to open Terminal on the Mac's current desktop, run `vibe restart`, "
-            "then try again from Avibe."
-        ),
-        help_command=help_command,
-    )
+        "Do not retry. Ask the user to open Terminal on the Mac's current desktop, run `vibe restart`, "
+        "then try again from Avibe.",
+    ),
+    OUTSIDE_GUI_SESSION_CODE: (
+        "Avibe is running outside the user's desktop session, so credentials kept in the macOS Keychain "
+        "are unavailable",
+        "Do not retry, and do not ask for an avault authorization. Ask the user to open Terminal on the "
+        "Mac's desktop, run `vibe restart`, then try again from Avibe.",
+    ),
+}
+
+
+def _login_session_code(exc: Exception) -> str | None:
+    code = getattr(exc, "code", None)
+    return code if code in _LOGIN_SESSION_CLI_ERRORS else None
+
+
+def _login_session_cli_error(code: str, help_command: str | None) -> TaskCliError:
+    message, hint = _LOGIN_SESSION_CLI_ERRORS[code]
+    return TaskCliError(message, code=code, hint=hint, help_command=help_command)
 
 
 def _is_avault_authorization_required(exc: Exception) -> bool:
@@ -429,8 +440,9 @@ def _avault_authorization_required_cli_error(help_command: str | None) -> TaskCl
 
 
 def _avault_cli_error(exc: Exception, message: str, *, code: str = "avault_failed", help_command: str | None = None) -> TaskCliError:
-    if _is_stale_login_session(exc):
-        code = STALE_LOGIN_SESSION_CODE
+    session_code = _login_session_code(exc)
+    if session_code:
+        code = session_code
     elif _is_avault_authorization_required(exc):
         code = AVAULT_AUTHORIZATION_REQUIRED_CODE
     return TaskCliError(message, code=code, help_command=help_command)
@@ -453,8 +465,9 @@ def _task_error_payload(exc: Exception, *, help_command: str | None = None) -> d
 
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
-    if _is_stale_login_session(exc):
-        exc = _stale_login_session_cli_error(getattr(exc, "help_command", None) or help_command)
+    session_code = _login_session_code(exc)
+    if session_code:
+        exc = _login_session_cli_error(session_code, getattr(exc, "help_command", None) or help_command)
     elif _is_avault_authorization_required(exc):
         exc = _avault_authorization_required_cli_error(getattr(exc, "help_command", None) or help_command)
     from storage.resource_access_service import (
@@ -9498,7 +9511,7 @@ def _vault_cli_delivery(args, **fields) -> dict:
     return delivery
 
 
-def _vault_cli_signing_context(args, *, digest: str, help_command: str) -> dict | None:
+def _vault_cli_signing_context(args, *, digest: str | None, message_hex: str | None, help_command: str) -> dict | None:
     from vibe import api
 
     raw = getattr(args, "signing_context_json", None)
@@ -9509,7 +9522,9 @@ def _vault_cli_signing_context(args, *, digest: str, help_command: str) -> dict 
     except json.JSONDecodeError as exc:
         raise TaskCliError("signing context must be valid JSON", code="invalid_signing_context", help_command=help_command) from exc
     try:
-        return api._verifiable_signing_context_from_payload({"signing_context": context}, digest=digest, required=True)
+        return api._verifiable_signing_context_from_payload(
+            {"signing_context": context}, digest=digest, message_hex=message_hex, required=True,
+        )
     except api.VaultApiError as exc:
         raise TaskCliError(str(exc), code=exc.code, help_command=help_command) from exc
 
@@ -9810,9 +9825,19 @@ def _vault_secret_row(secret: dict) -> dict:
             "tags": secret.get("tags"),
             "description": secret.get("description"),
             "policy": secret.get("policy"),
+            "signing_curve": secret.get("signing_curve"),
             "signing_addresses": secret.get("signing_addresses"),
+            "solana_signing_note": (
+                None
+                if secret.get("signing_curve") != "ed25519"
+                else "Protected Solana signing is not supported yet."
+                if secret.get("protection") == "protected"
+                else "Sign with --scheme ed25519 --message-hex <exact serialized message bytes>; --digest is refused."
+            ),
             "bitcoin_signing_warning": (
-                "Protected Bitcoin signing is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported, and network labels are requester-selected metadata."
+                None
+                if secret.get("signing_curve") == "ed25519"
+                else "Protected Bitcoin signing is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported, and network labels are requester-selected metadata."
                 if secret.get("kind") == "keypair" and secret.get("protection") == "protected"
                 else "Taproot requires schnorr-secp256k1-bip341-keypath and a supporting avault build; raw BIP340 cannot spend these Taproot addresses."
                 if secret.get("kind") == "keypair" and (secret.get("signing_addresses") or {}).get("btc_taproot")
@@ -11683,9 +11708,16 @@ def cmd_vault_sign(args):
     try:
         if not vault_crypto.is_valid_secret_name(name):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
-        digest = api._sign_digest_from_payload(getattr(args, "digest", None))
-        scheme = getattr(args, "scheme", None) or "ecdsa-secp256k1-recoverable"
-        signing_context = _vault_cli_signing_context(args, digest=digest, help_command=help_command)
+        scheme, digest, message_hex = api._sign_input_from_payload(
+            {
+                "scheme": getattr(args, "scheme", None),
+                "digest": getattr(args, "digest", None),
+                "message_hex": getattr(args, "message_hex", None),
+            }
+        )
+        signing_context = _vault_cli_signing_context(
+            args, digest=digest, message_hex=message_hex, help_command=help_command,
+        )
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
@@ -11698,7 +11730,8 @@ def cmd_vault_sign(args):
                     help_command=help_command,
                 )
             needs_approval = vault_service.sign_needs_approval(conn, name)
-            if meta.get("protection") == "protected" and signing_context is None:
+            # A protected Solana key is refused by the service with its own reason.
+            if meta.get("protection") == "protected" and signing_context is None and message_hex is None:
                 raise TaskCliError(
                     "protected signing requires --signing-context-json",
                     code="missing_signing_context",
@@ -11709,16 +11742,18 @@ def cmd_vault_sign(args):
                     conn,
                     name,
                     digest=digest,
+                    message_hex=message_hex,
                     scheme=scheme,
                     signing_context=signing_context,
                     requester=_vault_cli_requester(args),
                     delivery=_vault_cli_delivery(args, mode="sign"),
                 )
         if not needs_approval:
+            sign_input = {"digest": digest} if message_hex is None else {"message_hex": message_hex}
             result = api.vault_sign(
                 {
                     "name": name,
-                    "digest": digest,
+                    **sign_input,
                     "scheme": scheme,
                     "signing_context": signing_context,
                     "requester": _vault_cli_requester(args),
@@ -11728,7 +11763,7 @@ def cmd_vault_sign(args):
                 "vault_signature",
                 name=name,
                 scheme=scheme,
-                digest=digest,
+                **sign_input,
                 signature=result.get("signature"),
             )
             return 0
@@ -11749,6 +11784,9 @@ def cmd_vault_sign(args):
         return 1
     except api.VaultApiError as exc:
         _print_task_error(TaskCliError(str(exc), code=exc.code, help_command=help_command))
+        return 1
+    except vault_service.ProtectedSolanaUnsupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_solana_unsupported", help_command=help_command))
         return 1
     except vault_service.InvalidSigningKeyError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_signing_key", help_command=help_command))
@@ -13842,6 +13880,13 @@ def _macos_login_session_doctor_items(*, language: str = "en") -> list[dict]:
             "code": "no_gui_session",
             "message": i18n_t("doctor.item.noGuiSession", language),
         }]
+    if state == "outside_gui_session":
+        return [{
+            "status": "warn",
+            "code": "outside_gui_session",
+            "message": i18n_t("doctor.item.outsideGuiSession", language),
+            "action": i18n_t("doctor.action.outsideGuiSession", language),
+        }]
     if state == "unknown":
         return [{
             "status": "warn",
@@ -15421,11 +15466,48 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
-    """Replace a different desktop-managed Controller before service reuse.
+def _own_desktop_runtime_outside_session(controller_identity: Mapping[str, Any] | None = None) -> str | None:
+    """Why the desktop host replaces its own running Runtime instead of adopting it, or None to keep it.
 
-    Returns 0 to go on starting, 3 when this start does not take the home over,
-    and 2 when the superseded Runtime may be left partly running.
+    ``controller_identity`` is the running Controller's health answer, asked
+    for here when the caller has none. Only a Controller carrying this caller's
+    Runtime id is judged: another desktop Runtime is a handover, and a
+    user-managed Avibe is never this caller's to stop. The desktop host runs in
+    the user's desktop session, and so does this command; the answer is the one
+    the launch-at-login entry acts on for a CLI install
+    (``login_autostart.service_outside_desktop_session``). A probe that fails
+    keeps the Runtime. A caller that is not a desktop host on macOS asks
+    nothing.
+    """
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    runtime_id = desktop_runtime_id()
+    if sys.platform != "darwin" or runtime_id is None:
+        return None
+    try:
+        from vibe import internal_client, login_autostart, runtime
+
+        if controller_identity is None:
+            controller_identity = internal_client.health_identity_sync()
+        if controller_identity is None or controller_identity.get("desktop_runtime_id") != runtime_id:
+            return None
+        service_pid = runtime.resolve_service_owner_pid(include_starting=False)
+        if service_pid is None:
+            return None
+        replace, reason = login_autostart.service_outside_desktop_session(service_pid, controller_identity)
+    except Exception:  # noqa: BLE001 - a failed session probe must not fail a start or discovery
+        logger.warning("Could not compare the desktop Runtime's login session with this one", exc_info=True)
+        return None
+    return reason if replace else None
+
+
+def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
+    """Replace a desktop-managed Controller this start must not reuse, before service reuse.
+
+    That is another desktop Runtime, or this caller's own left in a login
+    session other than the user's desktop session. Returns 0 to go on starting,
+    3 when this start does not take the home over, and 2 when the superseded
+    Runtime may be left partly running.
     """
     from vibe import runtime
 
@@ -15439,22 +15521,33 @@ def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
     if controller_identity is None:
         return 0
     actual_runtime_id = controller_identity.get("desktop_runtime_id")
-    if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
+    if actual_runtime_id is None:
         return 0
-
-    # Only the desktop host asks for a handover, when a user launches or
-    # retries its app; any other start leaves another desktop Runtime alone.
-    if not allowed:
+    if actual_runtime_id == expected_runtime_id:
+        # This caller's own Runtime is reused, as every start does, unless the
+        # desktop host launches from a desktop session the Runtime is not in.
+        # There the Keychain is out of reach, and after an ended login name
+        # resolution too; only a start from the current session repairs that.
+        reason = _own_desktop_runtime_outside_session(controller_identity) if allowed else None
+        if reason is None:
+            return 0
+        superseded = f"desktop-managed Avibe Runtime that {reason}"
+        print(f"Replacing this app's {superseded}.", file=sys.stderr)
+    elif not allowed:
+        # Only the desktop host asks for a handover, when a user launches or
+        # retries its app; any other start leaves another desktop Runtime alone.
         print("Another desktop-managed Avibe Runtime is running here; this start does not replace it.", file=sys.stderr)
         return 3
+    else:
+        superseded = "superseded desktop-managed Avibe Runtime"
     # Health names the Runtime that answered; the stop signals only processes
     # that carry its id.
     result = runtime.stop_desktop_runtime(actual_runtime_id)
     if result.refusal is not None:
-        print(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}", file=sys.stderr)
+        print(f"Refused to stop the {superseded}: {result.refusal}", file=sys.stderr)
         return 3
     if result.failure is not None:
-        print(f"Failed to stop the superseded desktop-managed Avibe Runtime: {result.failure}", file=sys.stderr)
+        print(f"Failed to stop the {superseded}: {result.failure}", file=sys.stderr)
         return 2
     # Anything still running is not the superseded Runtime's; the start claims
     # only what carries this Runtime's id.
@@ -15559,6 +15652,13 @@ def cmd_start(
             )
         service_pid = runtime.start_service(**service_kwargs)
         service_reused = service_start.reused
+        if not service_reused:
+            from vibe.restart_supervisor import OUTSIDE_DESKTOP_SESSION_WARNING, outside_desktop_session
+
+            # The service joins this command's login session; nothing running
+            # could start it from inside the desktop session instead.
+            if outside_desktop_session():
+                print(OUTSIDE_DESKTOP_SESSION_WARNING, file=sys.stderr)
         bind_host = receipt_bind_host if receipt_bind_host is not None else runtime.effective_ui_bind_host(config)
         ui_kwargs = {"start_info": ui_start}
         if desktop_receipt:
@@ -15719,7 +15819,12 @@ def cmd_start(
 
 
 def cmd_desktop_endpoint() -> int:
-    """Print the desktop shell's loopback endpoint descriptor."""
+    """Print the desktop shell's loopback endpoint descriptor.
+
+    The shell adopts its own Runtime when it is ready, without starting
+    anything. The descriptor therefore also tells the shell when that Runtime
+    is one its start would replace, so it starts instead of adopting.
+    """
     from vibe import runtime
 
     from vibe.desktop_runtime import desktop_endpoint_payload
@@ -15727,7 +15832,11 @@ def cmd_desktop_endpoint() -> int:
     _guard_cli_default_state_migration()
     config = _ensure_config()
     bind_host = runtime.effective_ui_bind_host(config)
-    payload = desktop_endpoint_payload(bind_host, config.ui.setup_port)
+    replaced = _own_desktop_runtime_outside_session()
+    if replaced is not None:
+        # The shell keeps this command's stderr in its bootstrap log.
+        print(f"This app's Runtime {replaced}; its start replaces it.", file=sys.stderr)
+    payload = desktop_endpoint_payload(bind_host, config.ui.setup_port, replace_runtime=replaced is not None)
     print(json.dumps(payload, separators=(",", ":")))
     return 0
 
@@ -17765,7 +17874,7 @@ def cmd_upgrade():
                 return 2
             if restart is not None:
                 print("Restart scheduled to use the new version.")
-                print(f"Job ID: {restart['job_id']}")
+                _print_restart_job(restart)
                 print("Run `vibe status` to inspect the restart result and database migration progress.")
             else:
                 print("Avibe was not running; the new version will be used next time you start it.")
@@ -18467,13 +18576,19 @@ def _format_restart_delay(delay_seconds: float) -> str:
     return f"{delay_seconds:g} seconds"
 
 
+def _print_restart_job(restart: dict) -> None:
+    print(f"Job ID: {restart['job_id']}")
+    if restart.get("handed_over"):
+        print("The running Avibe, which is in this Mac's desktop session, performs the restart.")
+
+
 def _schedule_delayed_restart(delay_seconds: float) -> int:
     from vibe.restart_supervisor import schedule_restart
 
     current_vibe_path = cache_running_vibe_path()
     result = schedule_restart(delay_seconds=delay_seconds, vibe_path=current_vibe_path, trigger="cli")
     print(f"Restart scheduled in {_format_restart_delay(delay_seconds)}.")
-    print(f"Job ID: {result['job_id']}")
+    _print_restart_job(result)
     print("This command exits immediately; the restart supervisor will run in the background.")
     print("Run `vibe status` to inspect the restart result and database migration progress.")
     return 0
@@ -18525,7 +18640,7 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 
     result = schedule_restart(delay_seconds=0.0, vibe_path=cache_running_vibe_path(), trigger="cli")
     print("Restart scheduled.")
-    print(f"Job ID: {result['job_id']}")
+    _print_restart_job(result)
     print("Run `vibe status` to inspect the restart result and database migration progress.")
     return 0
 
@@ -18545,7 +18660,8 @@ def build_parser():
         metavar="RUNTIME_ID",
         help="Stop only the processes the desktop Runtime with this id started.",
     )
-    start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    # Kept to one line: `vibe --help` has a byte budget (tests/test_vibe_cli.py).
+    start_parser = subparsers.add_parser("start", help="Start services if needed; running processes are kept")
     start_parser.add_argument(
         "--no-open-browser",
         dest="open_browser",
@@ -18984,6 +19100,31 @@ def build_parser():
         error_help_command="vibe remote stop --help",
     )
     _add_json_flag(remote_stop_parser)
+
+    autostart_parser = subparsers.add_parser(
+        "autostart",
+        help="Start Avibe at login (macOS)",
+        description=(
+            "Turn launch at login on or off for this CLI install on macOS, or report it. At each desktop login "
+            "Avibe starts, or replaces a service left over from another login session."
+        ),
+        error_help_command="vibe autostart --help",
+    )
+    autostart_subparsers = autostart_parser.add_subparsers(dest="autostart_command", metavar="{on,off,status}")
+    autostart_subparsers.required = True
+    for autostart_action, autostart_summary in (
+        ("on", "Install the per-user LaunchAgent and load it into the desktop session."),
+        ("off", "Unload and remove the LaunchAgent. A running Avibe keeps running."),
+        ("status", "Show whether launch at login is on, whether it is loaded, and what it runs."),
+    ):
+        _add_json_flag(
+            autostart_subparsers.add_parser(
+                autostart_action,
+                help=autostart_summary,
+                description=autostart_summary,
+                error_help_command=f"vibe autostart {autostart_action} --help",
+            )
+        )
 
     screenshot_parser = subparsers.add_parser(
         "screenshot",
@@ -19741,18 +19882,28 @@ def build_parser():
 
     vault_sign_parser = vault_subparsers.add_parser(
         "sign",
-        help="Sign a digest with a keypair secret (standard signs inline; protected needs approval)",
+        help="Sign a digest or a Solana message with a keypair secret (standard signs inline; protected needs approval)",
         description=(
-            "Sign a 32-byte digest with a local keypair. Standard keys sign immediately via "
-            "avault and return the public signature inline. Protected keys — and standard keys "
-            "marked always-ask — instead create a pending per-use request you approve in the "
-            "browser; then 'vibe vault await <request-id>' returns the public signature."
+            "Sign with a local keypair. secp256k1 schemes sign a 32-byte --digest. A Solana key signs "
+            "with --scheme ed25519 --message-hex: the exact serialized message bytes, not a digest, so "
+            "do not hash them first. Standard keys sign immediately via avault and return the public "
+            "signature inline. Protected keys — and standard keys marked always-ask — instead create a "
+            "pending per-use request you approve in the browser; then 'vibe vault await <request-id>' "
+            "returns the public signature. Protected Solana keys cannot sign yet."
+        ),
+        epilog=(
+            "Example ($MESSAGE_HEX: the complete serialized transaction message, without signatures):\n"
+            '  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault sign --help",
     )
     vault_sign_parser.add_argument("name", help="Keypair secret name")
-    vault_sign_parser.add_argument("--digest", required=True, help="32-byte digest as hex")
+    vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
+    vault_sign_parser.add_argument(
+        "--message-hex",
+        help="Exact message bytes as hex, up to 1 MiB (ed25519 only)",
+    )
     vault_sign_parser.add_argument(
         "--scheme",
         default="ecdsa-secp256k1-recoverable",
@@ -19761,8 +19912,9 @@ def build_parser():
             "ecdsa-secp256k1-der",
             "schnorr-secp256k1-bip340",
             "schnorr-secp256k1-bip341-keypath",
+            "ed25519",
         ],
-        help="Signature scheme",
+        help="Signature scheme; a Solana key uses ed25519",
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
@@ -20613,6 +20765,48 @@ def _dispatch_restart_supervisor(argv: list[str]) -> int:
     return restart_supervisor_main(argv)
 
 
+def _dispatch_login_start(argv: list[str]) -> int:
+    """Run the login entry the `vibe autostart on` LaunchAgent starts at each desktop login.
+
+    Not a command a person types. Its name is written into users' LaunchAgents,
+    so it stays accepted for as long as one of those files can exist.
+    """
+
+    from vibe import login_autostart
+
+    def start() -> int:
+        # Like bare `vibe`, a start launchd asked for is never refused, only
+        # told which newer install it is behind.
+        _generation_downgrade_blocks(None)
+        return cmd_start(open_browser=False)
+
+    return login_autostart.run_login_entry(start=start)
+
+
+def cmd_autostart(args) -> int:
+    """Turn launch at login on or off for a macOS CLI install, or report it."""
+
+    from vibe import login_autostart
+
+    action = args.autostart_command
+    run = {"on": login_autostart.enable, "off": login_autostart.disable, "status": login_autostart.status}[action]
+    try:
+        state = run()
+    except (login_autostart.AutostartError, OSError) as exc:
+        explained = isinstance(exc, login_autostart.AutostartError)
+        message = str(exc) if explained else f"Launch at login could not be changed: {exc}"
+        if args.json:
+            _print_task_error(TaskCliError(message, code=exc.code if explained else "autostart_failed"))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+    if args.json:
+        _print_cli_payload(f"autostart_{action}", **state)
+    else:
+        print("\n".join(login_autostart.render(action, state)))
+    return 0
+
+
 def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     """Activate a Windows CLI upgrade after the parent launcher exits."""
     from vibe import runtime
@@ -20856,6 +21050,10 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    # Launch at login writes a login item on this machine, outside the instance.
+    ("autostart", "on"): "owner",
+    ("autostart", "off"): "owner",
+    ("autostart", "status"): "owner",
     # Projects mirror the Web surface: catalog reads are Viewer work, while
     # creating and editing the instance's Projects are Member work.
     ("project", "list"): "viewer",
@@ -20968,10 +21166,11 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("mcp-discover",): "owner",
 }
 
-#: Argv-level entry points the supervisor and the installer use. They are not
-#: parser leaves, and they are Owner work: an invocation that declares a remote
-#: caller must not reach them as an alternate entry.
-_INTERNAL_ACTIVATION_COMMANDS = ("__restart-supervisor", "__activate-upgrade", "__activate-install")
+#: Argv-level entry points the supervisor, the installer and the launch-at-login
+#: LaunchAgent use. They are not parser leaves, and they are Owner work: an
+#: invocation that declares a remote caller must not reach them as an alternate
+#: entry.
+_INTERNAL_ACTIVATION_COMMANDS = ("__restart-supervisor", "__activate-upgrade", "__activate-install", "__login-start")
 
 
 def _cli_invocation_authority(env: Optional[Mapping[str, str]] = None):
@@ -21127,6 +21326,8 @@ def main():
             sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
         if argv and argv[0] == "__activate-install":
             sys.exit(_dispatch_installer_activation(argv[1:]))
+        if argv and argv[0] == "__login-start":
+            sys.exit(_dispatch_login_start(argv[1:]))
         if argv and argv[0] == "mcp":
             from vibe import mcp_cli
 
@@ -21215,6 +21416,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if args.remote_command == "stop":
             sys.exit(cmd_remote_stop(args))
         parser.error("remote command is invalid")
+    if args.command == "autostart":
+        sys.exit(cmd_autostart(args))
     if args.command == "project":
         commands = {
             "list": cmd_project_list,

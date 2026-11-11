@@ -77,6 +77,7 @@ private struct BrowserScreen: View {
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
                         pushOpenedAck: appModel.acknowledgePushOpened,
+                        setBadgeCount: appModel.setBadgeCount,
                         accountFallbackVisibilityChanged: {
                             showsAccountFallback = $0
                         },

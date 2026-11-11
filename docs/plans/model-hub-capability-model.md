@@ -100,8 +100,8 @@ no marker, and a pending one's marker becomes its generation.
     field on an untranslated path → effort `<v>`;
   - `Unsupported tool type: <type>` for a type the request declared, matched to a catalog tool through the
     overlay's declaration for that Source and model → hosted tool `call`;
-  - `Invalid encrypted_content in search_result block` while the request replays a web-search result → hosted
-    tool `web_search` `replay`;
+  - `Invalid encrypted_content in search_result block`, with or without the backticks Anthropic puts around both
+    names, while the request replays a web-search result → hosted tool `web_search` `replay`;
   - xAI's plain-text `Could not decrypt the provided encrypted_content` (no code) while the request replays an xAI
     payload: its status waits for the Vibey lane's xAI A/B (stale ciphertext versus unsupported). Until then it
     writes no evidence and only turns replay off for that Source for the rest of the turn.

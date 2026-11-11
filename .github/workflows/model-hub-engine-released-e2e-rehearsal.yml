@@ -1,0 +1,163 @@
+name: Rehearse the released-wheel Model Hub E2E
+
+# A rehearsal of the harness that engine qualification uses to drive the Model
+# Hub E2E through a released Avibe wheel (docs/release.md). It runs the same
+# shared action against one published release candidate, pinned below by tag,
+# commit and wheel digest. No secret is used.
+#
+# It qualifies nothing. It does not call the stable-only release resolver, its
+# record has a class no receipt reads, and qualification still requires the
+# stable tag's own tests and wheel.
+#
+# Two legs, kept apart on purpose:
+#   tag tests   the candidate's own tagged tests. A tag cannot be fixed, so this
+#               leg reports what fails and fails only if the harness itself did
+#               not run the wheel.
+#   head tests  this commit's tests against the same wheel. This leg must pass:
+#               it is where a fix to a checkout-only assumption is proven before
+#               the stable tag freezes the tests.
+#
+# The pin is one release candidate. Once stable 3.2.6 exists, repoint or remove it.
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/model-hub-released-e2e/**"
+      - ".github/workflows/model-hub-engine-released-e2e-rehearsal.yml"
+      - "scripts/model_hub_engine_qualification.py"
+      - "scripts/model_hub_engine_qualification_origins.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-hub-engine-released-e2e-rehearsal-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RC_TAG: gh-v3.2.6rc3
+  RC_TAG_COMMIT: c826a90c0c904e9ee7aaae75fd8f7c8782499aa0
+  RC_VERSION: 3.2.6rc3
+  RC_WHEEL: avibe_os-3.2.6rc3-py3-none-any.whl
+  RC_WHEEL_SHA256: f7b439906cb344df46edc794caeaac667b7a6bd2ee6e88a9b34b27d6eebc33db
+
+jobs:
+  rehearsal:
+    name: rehearsal (${{ matrix.tests }} tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        tests: [tag, head]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Download the pinned release candidate wheel
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rehearsal"
+          python3 - <<'EOF'
+          import hashlib, os, pathlib
+          from scripts.release_asset_download import download_to_path
+
+          wheel = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rehearsal" / os.environ["RC_WHEEL"]
+          url = f"https://github.com/avibe-bot/avibe/releases/download/{os.environ['RC_TAG']}/{os.environ['RC_WHEEL']}"
+          download_to_path(url, wheel, max_bytes=64 * 1024 * 1024)
+          if hashlib.sha256(wheel.read_bytes()).hexdigest() != os.environ["RC_WHEEL_SHA256"]:
+              raise SystemExit(f"{wheel.name} does not match the pinned digest")
+          EOF
+
+      - name: Check out the release candidate's tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.RC_TAG }}
+          path: released-src
+          persist-credentials: false
+
+      # The engine that wheel packages, from its published release, as a local file.
+      - name: Fetch the engine the wheel packages
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C released-src rev-parse HEAD)" = "$RC_TAG_COMMIT"
+          work="$RUNNER_TEMP/rehearsal"
+          python3 scripts/model_hub_engine_qualification.py bundled-manifest \
+            --wheel "$work/$RC_WHEEL" --output "$work/bundled-manifest.json"
+          python3 scripts/model_hub_engine_release_guard.py --manifest "$work/bundled-manifest.json" \
+            fetch --output-dir "$work/engine-assets"
+          python3 scripts/model_hub_engine_qualification.py local-manifest \
+            --manifest "$work/bundled-manifest.json" --asset-dir "$work/engine-assets" \
+            --output "$work/local-manifest.json"
+
+      - name: Run the Model Hub E2E through the released wheel
+        id: e2e
+        uses: ./.github/actions/model-hub-released-e2e
+        with:
+          wheel: ${{ runner.temp }}/rehearsal/${{ env.RC_WHEEL }}
+          tests-source: ${{ matrix.tests == 'tag' && 'released-src' || '.' }}
+          engine-manifest: ${{ runner.temp }}/rehearsal/local-manifest.json
+          work-dir: ${{ runner.temp }}/rehearsal/run
+
+      # Always fails when the run did not provably use the wheel. Failing tests
+      # fail the head leg; the tag leg only reports them.
+      - name: Record the rehearsal
+        shell: bash
+        env:
+          TESTS: ${{ matrix.tests }}
+          PYTEST_OUTCOME: ${{ steps.e2e.outputs.pytest-outcome }}
+          SCENARIO_OUTCOME: ${{ steps.e2e.outputs.scenario-outcome }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/rehearsal"
+          args=()
+          if [ "$TESTS" = "head" ]; then
+            args+=(--require-pass)
+          fi
+          status=0
+          python3 scripts/model_hub_engine_qualification.py rehearsal-record \
+            --tag "$RC_TAG" --tag-commit "$RC_TAG_COMMIT" --version "$RC_VERSION" \
+            --wheel "$work/$RC_WHEEL" --wheel-sha256 "$RC_WHEEL_SHA256" \
+            --environment "$work/run/venv" --harness "$work/run/harness" --origins-dir "$work/run/origins" \
+            --junit "$work/run/junit/junit.xml" --provenance "$work/run/provenance.json" \
+            --output "$work/record/rehearsal-$TESTS.json" "${args[@]}" || status=$?
+          {
+            echo "### Released-wheel rehearsal: $TESTS tests against $RC_TAG"
+            echo
+            echo "E2E run: $PYTEST_OUTCOME. Scenario evidence: $SCENARIO_OUTCOME."
+            if [ -f "$work/record/rehearsal-$TESTS.json" ]; then
+              jq -r '"Cases: \(.junit.tests), failed: \(.junit.failed), skipped: \(.junit.skipped). Processes observed: \(.origins.processes), services: \(.origins.services), product modules: \(.origins.product_modules).",
+                     "", "Harness problems:", (.harness_problems[] | "- \(.)"), "", "Failing cases:", (.failing[] | "- \(.)")' \
+                "$work/record/rehearsal-$TESTS.json"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$TESTS" = "head" ] && [ "$SCENARIO_OUTCOME" != "success" ]; then
+            echo "::error::the scenario evidence of this commit's tests did not pass"
+            status=1
+          fi
+          exit "$status"
+
+      - name: Upload the rehearsal record and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: released-e2e-rehearsal-${{ matrix.tests }}
+          path: |
+            ${{ runner.temp }}/rehearsal/record
+            ${{ runner.temp }}/rehearsal/run/pytest.log
+            ${{ runner.temp }}/rehearsal/run/junit
+            ${{ runner.temp }}/rehearsal/run/provenance.json
+            ${{ runner.temp }}/rehearsal/run/origins
+          if-no-files-found: warn
+          retention-days: 14

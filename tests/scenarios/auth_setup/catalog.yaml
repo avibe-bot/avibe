@@ -820,11 +820,22 @@ scenarios:
     backend: vibey
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_default
     # The scenario owns the server boundary: the first Agent read records the built-in Vibey
-    # Agent as the default with the native backends enabled, its route becomes runnable, and
-    # completion keeps it. The browser's rule of keeping a recorded default that can run, even
-    # when a CLI assistant can run too, is the supporting test below.
+    # Agent as the default, its route becomes runnable, and completion keeps it. Vibey's rank
+    # over enabled native backends is test_ui_api's first-default table. The browser's rule of
+    # keeping a recorded default that can run, even when a CLI assistant can run too, is the
+    # supporting test below.
     supporting_tests:
       - ui/src/components/onboarding/entryGate.test.ts
+  - id: AUTH-SETUP-160
+    name: A new install starts with every CLI assistant off, and ticking one enables only it
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_a_new_install_starts_with_cli_assistants_off_and_a_tick_enables_one
+    # The first-run seed owns the switches; the setup screen draws what the config read says.
+    # An installed config keeps its saved or unspelled switches: test_core_services_settings'
+    # upgrade table.
   - id: AUTH-SETUP-130
     name: "Occupied vendor callback port: OAuth start succeeds and the pasted callback completes the login"
     status: partial

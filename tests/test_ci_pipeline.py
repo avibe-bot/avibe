@@ -612,17 +612,22 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
     ) in project
 
 
-def test_ios_app_builds_carry_the_avibe_bot_webcredentials_domain() -> None:
-    """Native passkeys for avibe.bot need this entitlement on every app build.
+def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
+    """Passkeys need these entitlements on every app build.
 
-    Simulator CI builds without signing, so a configuration that loses it still
-    passes there while passkeys fail on a device. avibe-backend's
-    apple-app-site-association lists this app under the same domain.
+    avibe.bot is the account passkey's relying party, used natively.
+    sandbox.avibe.bot is the Protected Vault passkey's, used by the sandbox in
+    the web view. Simulator CI builds without signing, so a configuration that
+    loses one still passes there while that passkey fails on a device. Each
+    host's apple-app-site-association lists this app.
     """
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
     assert entitlements == {
         "aps-environment": "development",
-        "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+        "com.apple.developer.associated-domains": [
+            "webcredentials:avibe.bot",
+            "webcredentials:sandbox.avibe.bot",
+        ],
         "com.apple.security.application-groups": ["group.bot.avibe.ios"],
         "keychain-access-groups": [
             "$(AppIdentifierPrefix)bot.avibe.ios",
@@ -989,23 +994,27 @@ def test_steps_that_tee_a_command_keep_its_exit_status() -> None:
     assert unguarded == []
 
 
+RELEASE_E2E_SHARDS = ("model-hub-e2e-wire-mock", "model-hub-e2e-remaining")
+
+
+@pytest.mark.parametrize("shard", RELEASE_E2E_SHARDS)
 @pytest.mark.parametrize(
     ("pytest_exit", "evidence_exit", "expected"),
     [(0, 0, 0), (1, 0, 1), (0, 1, 1), (2, 1, 2)],
     ids=["green", "pytest-failed", "evidence-failed", "both-failed"],
 )
 def test_release_e2e_gate_fails_when_its_tests_or_evidence_fail(
-    tmp_path: Path, pytest_exit: int, evidence_exit: int, expected: int,
+    tmp_path: Path, shard: str, pytest_exit: int, evidence_exit: int, expected: int,
 ) -> None:
-    """The release E2E step, run as GitHub runs it, exits with pytest's failure, else the gate's.
+    """Each release E2E shard step, run as GitHub runs it, exits with pytest's failure, else the gate's.
 
     Its pytest output goes through `| tee`; before the step ran with pipefail every
     failing release E2E run (three cases from 2026-10-27) still concluded success.
     """
 
     release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())
-    step, = [step for job in release["jobs"].values() for step in job["steps"]
-             if "e2e_model_hub" in step.get("run", "")]
+    step, = [step for step in release["jobs"][shard]["steps"] if "e2e_model_hub" in step.get("run", "")]
+    (tmp_path / "model-hub-e2e-evidence").mkdir()
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "ci_loopback_only.sh").write_text(
         f'echo "pytest ran: $*"\nexit {pytest_exit}\n', encoding="utf-8",
@@ -1027,7 +1036,86 @@ def test_release_e2e_gate_fails_when_its_tests_or_evidence_fail(
     )
 
     assert result.returncode == expected, result.stdout + result.stderr
-    assert "pytest ran: python -m pytest -m e2e_model_hub" in (tmp_path / "model-hub-e2e.log").read_text()
+    assert "pytest ran: python -m pytest -m e2e_model_hub" in (tmp_path / "model-hub-e2e-evidence" / "pytest.log").read_text()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the join step reads the engine manifest with jq")
+def test_release_e2e_shards_record_what_they_ran_against_and_the_join_pins_the_engine(tmp_path: Path) -> None:
+    """Each shard records its own commit, run, attempt, CLIs and engine archive; the join names its checkout's engine.
+
+    The join tells a mixed run from a whole one only by these records. A shard
+    that recorded the manifest's digest instead of its archive's, or a join that
+    compared the engine in another form, would let a different engine through or
+    fail every run.
+    """
+
+    import hashlib
+    import importlib.metadata
+
+    release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())["jobs"]
+    sha = "c" * 40
+    archive = tmp_path / "engine archive.tar.gz"
+    archive.write_bytes(b"the engine this run installs")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    # The checkout's manifest pins another digest than the archive a shard was handed.
+    pinned = {"asset_release_tag": "model-hub-engine-v1", "assets": [
+        {"platform": "darwin-arm64", "sha256": "0" * 64, "url": "https://example.invalid/darwin"},
+        {"platform": "linux-amd64", "sha256": "1" * 64, "url": "https://example.invalid/linux"},
+    ]}
+    (tmp_path / "vibe" / "model_hub_runtime").mkdir(parents=True)
+    (tmp_path / "vibe" / "model_hub_runtime" / "cliproxyapi_manifest.json").write_text(json.dumps(pinned))
+    offline = json.loads(json.dumps(pinned))
+    offline["assets"][1]["url"] = archive.as_uri()
+    (tmp_path / "offline-manifest.json").write_text(json.dumps(offline))
+
+    def tools(name: str, python: str) -> Path:
+        bin_dir = tmp_path / name
+        bin_dir.mkdir()
+        for tool, script in {
+            "python": python, "git": f'echo "{sha}"', "codex": 'echo "codex-cli 9.9.9"', "opencode": 'echo "8.8.8"',
+        }.items():
+            (bin_dir / tool).write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+            (bin_dir / tool).chmod(0o755)
+        return bin_dir
+
+    def run_step(step: dict, bin_dir: Path, runner_temp: Path, **env: str) -> subprocess.CompletedProcess:
+        runner_temp.mkdir(exist_ok=True)
+        return subprocess.run(
+            [*_GITHUB_LINUX_SHELLS[step.get("shell")], "-c", step["run"]], cwd=tmp_path,
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(runner_temp),
+                 "GITHUB_RUN_ID": "77", "GITHUB_RUN_ATTEMPT": "3", "GITHUB_SHA": sha, **env},
+            capture_output=True, text=True, check=False,
+        )
+
+    real_python = tools("shard-bin", f'exec "{sys.executable}" "$@"')
+    for shard in RELEASE_E2E_SHARDS:
+        step, = [step for step in release[shard]["steps"] if "provenance.json" in step.get("run", "")]
+        result = run_step(step, real_python, tmp_path / shard,
+                          VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH=str(tmp_path / "offline-manifest.json"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads((tmp_path / shard / "model-hub-e2e-evidence" / "provenance.json").read_text()) == {
+            "sha": sha, "run_id": "77", "run_attempt": "3",
+            "versions": {
+                "codex": "codex-cli 9.9.9", "opencode": "8.8.8",
+                "claude-agent-sdk": importlib.metadata.version("claude-agent-sdk"),
+                "model-hub-engine": f"model-hub-engine-v1 sha256:{digest}",
+            },
+        }
+
+    # The join hands the checker its own checkout's pin, in the form the shards record.
+    step, = [step for step in release["model-hub-e2e"]["steps"] if "--release-join" in step.get("run", "")]
+    recording = tools("join-bin", f'printf "%s\\n" "$@" > "{tmp_path}/join-args"')
+    result = run_step(step, recording, tmp_path / "join")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "join-args").read_text().splitlines() == [
+        "scripts/ci_scenario_evidence.py", "--release-join", f"{tmp_path}/join/model-hub-e2e-evidence",
+        "--workflow", ".github/workflows/model-hub-e2e.yml", "--pytest-root", ".",
+        "--expect-version", f"model-hub-engine=model-hub-engine-v1 sha256:{'1' * 64}",
+    ]
+    # A join checkout that is not the run's commit stops before it judges anything.
+    (tmp_path / "join-args").unlink()
+    assert run_step(step, recording, tmp_path / "join", GITHUB_SHA="d" * 40).returncode != 0
+    assert not (tmp_path / "join-args").exists()
 
 
 WEB_FETCH_TESTS = (

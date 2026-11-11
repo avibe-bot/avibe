@@ -330,6 +330,7 @@ final class WebViewFactory {
     private let showAccount: () -> Void
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
+    private let setBadgeCount: (Int, WebOrigin) -> Bool
     private var outerScrollLockControllers: [
         ObjectIdentifier: OuterScrollLockController
     ] = [:]
@@ -375,6 +376,9 @@ final class WebViewFactory {
         },
         pushOpenedAck: { [weak self] id, origin in
             self?.pushOpenedAck(id, origin) ?? false
+        },
+        setBadgeCount: { [weak self] count, origin in
+            self?.setBadgeCount(count, origin) ?? false
         }
     )
 
@@ -386,6 +390,7 @@ final class WebViewFactory {
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
+        setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         pushCoordinator: NativePushCoordinator? = nil
     ) {
         self.instanceOrigin = instanceOrigin
@@ -395,6 +400,7 @@ final class WebViewFactory {
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
         self.pushOpenedAck = pushOpenedAck
+        self.setBadgeCount = setBadgeCount
         self.pushCoordinator = pushCoordinator
     }
 
@@ -548,6 +554,7 @@ final class WebViewController: UIViewController {
     private let showAccount: () -> Void
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
+    private let setBadgeCount: (Int, WebOrigin) -> Bool
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
     private var activeDownloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadContexts: [ObjectIdentifier: DownloadContext] = [:]
@@ -596,6 +603,9 @@ final class WebViewController: UIViewController {
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },
+            setBadgeCount: { [weak self] count, origin in
+                self?.setBadgeCount(count, origin) ?? false
+            },
             pushCoordinator: pushCoordinator
         )
         retainedWebViewFactory = factory
@@ -619,6 +629,7 @@ final class WebViewController: UIViewController {
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
+        setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         didStartLoading: @escaping () -> Void,
@@ -635,6 +646,7 @@ final class WebViewController: UIViewController {
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
         self.pushOpenedAck = pushOpenedAck
+        self.setBadgeCount = setBadgeCount
         self.didStartLoading = didStartLoading
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading

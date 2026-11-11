@@ -7,6 +7,7 @@ get_instance`` divergence stays gone.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -125,6 +126,54 @@ def test_load_config_seeds_default_when_factory_given(isolated_state, tmp_path):
     # Reload returns the persisted file, not a fresh factory invocation.
     again = settings_service.load_config(target)
     assert again.version == "v2"
+
+
+def _installed(agents: object) -> str:
+    """An installed config as a released version wrote it, with only its ``agents`` varied."""
+    return json.dumps({
+        "mode": "self_host",
+        "version": "v2",
+        "runtime": {"default_cwd": "/srv/work"},
+        "agents": agents,
+        "setup_completed": True,
+    })
+
+
+_ALL_ON = {"opencode": True, "claude": True, "codex": True}
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        # Vibey is built in, so a new install starts every CLI backend off.
+        pytest.param(None, {"opencode": False, "claude": False, "codex": False}, id="first-run"),
+        pytest.param(
+            _installed({name: {"enabled": True, "cli_path": name} for name in _ALL_ON}), _ALL_ON, id="saved-on",
+        ),
+        pytest.param(
+            _installed({"opencode": {"enabled": False}, "claude": {"enabled": True}, "codex": {"enabled": False}}),
+            {"opencode": False, "claude": True, "codex": False},
+            id="saved-mixed",
+        ),
+        pytest.param(_installed({name: {"cli_path": name} for name in _ALL_ON}), _ALL_ON, id="enabled-unspelled"),
+        pytest.param(_installed({}), _ALL_ON, id="backends-unspelled"),
+        # Recovery serves an installation that already ran, so it keeps the switches it has always
+        # used; an unreadable ``agents`` alone is test_model_hub_config's canonical-defaults case.
+        pytest.param("{not json", {"opencode": True, "claude": True, "codex": False}, id="file-recovered"),
+    ],
+)
+def test_only_a_new_install_starts_cli_backends_off(isolated_state, tmp_path, document, expected):
+    """The first-run seed leaves the CLI backends for the person to switch on; an upgrade keeps
+    every installed config's switches as it resolves them today, spelled, unspelled or recovered."""
+    target = tmp_path / "config.json"
+    if document is not None:
+        target.write_text(document, encoding="utf-8")
+
+    config = settings_service.load_config(target, default_factory=settings_service.default_config)
+
+    assert {name: getattr(config.agents, name).enabled for name in expected} == expected
+    if document is not None:
+        assert target.read_text(encoding="utf-8") == document
 
 
 def test_get_settings_store_returns_singleton(isolated_state):

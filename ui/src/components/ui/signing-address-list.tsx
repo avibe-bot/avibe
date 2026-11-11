@@ -13,9 +13,11 @@ const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: TranslationKe
   { key: 'btc_segwit', labelKey: 'vaults.addresses.btcSegwit' },
   { key: 'btc_taproot', labelKey: 'vaults.addresses.btcTaproot' },
   { key: 'btc_legacy', labelKey: 'vaults.addresses.btcLegacy' },
+  { key: 'solana', labelKey: 'vaults.addresses.solana' },
 ];
 
-const AddressRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {
+/** One labeled address, truncated, with its copy button. */
+export const SigningAddressRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   return (
@@ -60,7 +62,7 @@ export const SigningAddressList: React.FC<{ addresses?: SigningAddresses | null;
   return (
     <div className={cn('flex min-w-0 flex-col gap-1', className)}>
       {rows.map((row) => (
-        <AddressRow key={row.key} label={t(row.labelKey)} value={addresses[row.key] as string} />
+        <SigningAddressRow key={row.key} label={t(row.labelKey)} value={addresses[row.key] as string} />
       ))}
     </div>
   );

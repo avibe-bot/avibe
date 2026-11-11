@@ -136,6 +136,7 @@ interface AvibeNative {
 | --- | --- | --- |
 | `accountPresentation` | `app.showAccount()`, `app.setAccountActionAvailable({available})` | - |
 | `app` | `app.info()`, `app.openExternal({url})` | `app.foreground`, `app.background` |
+| `badge` | `badge.set({count})`: the App icon badge shows `count`, the Inbox total the Web UI shows; `0` clears it. Fire-and-forget. | - |
 | `haptics` | `haptics.impact({style})`, `haptics.notify({type})`, `haptics.selection()` | - |
 | `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
@@ -161,6 +162,17 @@ Phase 0a PR 2 implements this v1 subset:
 - `haptics.impact({style})` accepts `light`, `medium`, `heavy`, `soft`, or
   `rigid`; `haptics.notify({type})` accepts `success`, `warning`, or `error`;
   and `haptics.selection()` has no parameters;
+- `badge: 1` admits `badge.set({count})` from the selected-instance main frame
+  (the rule `push.*` uses), which returns `null` at once and sets the App icon
+  badge with `UNUserNotificationCenter.setBadgeCount`. `count` is a number:
+  a negative one clears the badge, a fraction is rounded down, and anything
+  above 2147483647 shows that. Any other value, or another parameter, is
+  `invalid_argument`. The shell sets nothing while the user does not allow the
+  App's badges. The Web UI calls it with the same total it mirrors to a PWA's
+  `setAppBadge`, `0` included, and again after a read when the App returns to
+  the foreground; a push in the background has the notification service
+  extension set the instance's total meanwhile (section 8). Signing out or
+  switching accounts clears the badge;
 - `voice.permission()` returns `{state: 'granted' | 'denied' | 'prompt'}`. It
   does not itself display a permission prompt; the user-initiated Web media
   request remains the single prompt path;
@@ -504,15 +516,23 @@ microphone trust are still limited to the selected instance origin; account
 management trust is never promoted to instance, child, Show Page, or iframe
 content.
 
-### Known risk: Protected Vault passkeys
+### Protected Vault passkeys
 
-Protected Vault setup and unlock run WebAuthn with PRF inside the cross-origin
-`https://sandbox.avibe.bot` iframe (`docs/plans/vault-crypto-sandbox.md`). Apple
-ties passkey use in third-party apps to the relying party's `webcredentials`
-associated domain. Whether a WebAuthn ceremony in a cross-origin iframe works
-inside the shell, even with `webcredentials:sandbox.avibe.bot` and a matching
-`apple-app-site-association` on that host, is unverified. Phase 0 must test it;
-the fallback is to open Vault approvals in Safari.
+Protected Vault runs WebAuthn with PRF on `https://sandbox.avibe.bot`
+(`docs/plans/vault-crypto-sandbox.md`): unlock and the second step of setup in
+the cross-origin iframe, passkey creation and every approval in the sandbox's
+top-level window. Apple ties passkey use in third-party apps to the relying
+party's `webcredentials` associated domain, so the app lists
+`webcredentials:sandbox.avibe.bot` and that host serves a matching
+`apple-app-site-association`
+(`docs/plans/2026-11-10-ios-protected-vault-passkey.md`, owner decision
+2026-11-11). The shell adds no Vault code; Protected Vault stays an ordinary
+cross-origin browsing context, and the protected tier needs iOS 18 for PRF.
+
+Still unverified on a device: whether the system accepts a PRF assertion from
+the cross-origin iframe in a non-browser app. If it does not, unlock and
+setup's second step move into the sandbox's top-level window. If passkeys fail
+in the shell outright, the fallback is to open Vault approvals in Safari.
 
 ## 8. Push
 

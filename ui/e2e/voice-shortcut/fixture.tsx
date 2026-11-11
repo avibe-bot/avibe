@@ -21,6 +21,7 @@ void i18n.changeLanguage('en');
 
 declare global {
   interface Window {
+    voiceCaptureEvents: Record<string, unknown>[];
     voiceShortcutTest: {
       sent: string[];
       /** Messages spoken by holding the composer, with what they were sent with. */
@@ -38,6 +39,7 @@ declare global {
 }
 
 window.voiceShortcutTest = { sent: [], spoken: [], opened: 0, posted: [], transcribed: [], contextReads: [] };
+window.voiceCaptureEvents = [];
 // The Bots' shown names, as BotsProvider publishes them: every dictation is to hear them exactly.
 setVoiceVocabulary(['Vibey', 'Product']);
 
@@ -56,6 +58,10 @@ window.fetch = async (input, init) => {
     return new Response(JSON.stringify({ available: true, max_file_bytes: 25_000_000 }), {
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+  if (url.pathname === '/api/asr/telemetry') {
+    window.voiceCaptureEvents.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+    return new Response('{}', { headers: { 'Content-Type': 'application/json' } });
   }
   if (url.pathname === '/api/cloud/token') {
     return new Response(JSON.stringify({ error: 'fixture local ASR only' }), { status: 503 });

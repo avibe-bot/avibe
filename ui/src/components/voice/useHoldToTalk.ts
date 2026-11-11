@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Mous
 
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
+import { isDesktopShell } from '../../lib/desktopShell';
 import {
   nativeHapticImpact,
   nativeHapticNotify,
@@ -11,6 +12,7 @@ import {
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import type { VoiceContextSource } from '../../lib/voiceContext';
+import { micErrorName, VoiceCaptureTrace } from '../../lib/voiceCaptureTrace';
 import type { VoiceTakeKeep } from '../../lib/voiceTakeKeeper';
 import { createVoiceLevel } from '../../lib/voiceLevel';
 import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
@@ -41,7 +43,7 @@ export type HoldInterruptReason = 'dropped' | 'failed' | 'system' | 'send-failed
  *  were finalized, and its recording kept on the device for the pending voice items. `too-short`:
  *  nothing said (a slip, or silence). `no-sound`: the microphone delivered no sound at all.
  *  `mic-busy`: the system, or another app, held the microphone. */
-export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'no-sound' | 'mic-busy' | 'asking' | 'denied' | 'unavailable';
+export type HoldOutcome = 'sent' | 'cancelled' | 'kept' | 'too-short' | 'no-sound' | 'mic-busy' | 'no-device' | 'mic-failed' | 'asking' | 'denied' | 'unavailable';
 
 export type HoldGesture = {
   /** How long a press is held before the microphone opens. */
@@ -147,6 +149,8 @@ const TELEMETRY_OUTCOME: Record<HoldOutcome, VoiceTelemetryOutcome> = {
   'too-short': 'too_short',
   'no-sound': 'no_frames',
   'mic-busy': 'muted',
+  'no-device': 'unavailable',
+  'mic-failed': 'failed',
   asking: 'asking',
   denied: 'denied',
   unavailable: 'unavailable',
@@ -217,11 +221,28 @@ let allowedOnAsk = false;
 const permissionState = async (): Promise<PermissionState | null> => {
   const native = await nativeVoicePermission();
   if (native) return native;
+  // Desktop's website permission is not a fresh macOS TCC answer. An explicit
+  // hold must reach getUserMedia, including after System Settings changed.
+  if (isDesktopShell()) return null;
   try {
     const status = await navigator.permissions?.query({ name: 'microphone' as PermissionName });
     return status?.state ?? null;
   } catch {
     return null;
+  }
+};
+
+const microphoneFailure = (error: unknown): HoldOutcome => {
+  switch (micErrorName(error)) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'denied';
+    case 'NotFoundError':
+      return 'no-device';
+    case 'NotReadableError':
+      return 'mic-busy';
+    default:
+      return 'mic-failed';
   }
 };
 
@@ -269,6 +290,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   // press while a take is pending).
   const handled = useRef(false);
   const mounted = useRef(true);
+  // A permission answer may arrive after another press, dismissal, or unmount.
+  // Its stream is always stopped, but its error belongs only to the original ask.
+  const permissionAsk = useRef<symbol | null>(null);
 
   const toPhase = useCallback((next: HoldPhase) => {
     phaseRef.current = next;
@@ -345,6 +369,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   /** The press is over with nothing to keep: back to rest, saying how it ended. */
   const end = useCallback((how: HoldOutcome | null) => {
+    if (how !== 'asking') permissionAsk.current = null;
     if (how) reportHold(TELEMETRY_OUTCOME[how], take.current);
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
@@ -419,7 +444,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (error instanceof VoiceTranscriptionError && error.code === 'cancelled') return;
     if (!current.started) {
       // The microphone never opened while the press was still on: refused, or no microphone.
-      end('denied');
+      allowedOnAsk = false;
+      end(microphoneFailure(error));
       return;
     }
     // Nothing recognized in a take the microphone heard as silence: nothing to keep. One that
@@ -435,6 +461,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, [end, interrupt]);
 
   const startTake = useCallback((granted: boolean) => {
+    const startupAsk = isDesktopShell() ? Symbol('capture-start') : null;
+    if (startupAsk) permissionAsk.current = startupAsk;
     const keep = latest.current.keep?.();
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
@@ -484,6 +512,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // A release (or the system) may come before the microphone is ready.
       if (current.ending === 'send' || current.ending === 'system') dictation.finish();
     }, (error: unknown) => {
+      // A macOS alert can take the press before its answer arrives. Keep that
+      // answer visible only while the original asking note still owns feedback.
+      if (startupAsk && permissionAsk.current === startupAsk && take.current !== current
+        && mounted.current && !(error instanceof VoiceTranscriptionError && error.code === 'cancelled')) {
+        permissionAsk.current = null;
+        allowedOnAsk = false;
+        const outcome = microphoneFailure(error);
+        reportHold(TELEMETRY_OUTCOME[outcome], null);
+        setOutcome(outcome);
+      }
       fail(current, error);
       dictation.abort();
     });
@@ -519,12 +557,29 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // The system's question takes this press; the next one records. The answer can come
       // long after the press ended: the stream it brings is only proof, and is closed at once.
       end('asking');
-      void navigator.mediaDevices?.getUserMedia({ audio: true }).then(
+      const ask = Symbol('permission-ask');
+      permissionAsk.current = ask;
+      const trace = new VoiceCaptureTrace('hold');
+      const requestedAt = trace.mark();
+      const request = navigator.mediaDevices?.getUserMedia
+        ? navigator.mediaDevices.getUserMedia({ audio: true })
+        : Promise.reject(new TypeError('Microphone capture unavailable'));
+      void request.then(
         (stream) => {
           allowedOnAsk = true;
+          trace.micSettled(requestedAt);
           stream.getTracks().forEach((track) => track.stop());
+          // A permission probe records no audio; `mic: ok` is only a stream grant.
+          void trace.finishWithInputDevices('asking');
         },
-        () => undefined,
+        (error: unknown) => {
+          trace.micSettled(requestedAt, error);
+          void trace.finishWithInputDevices('failed');
+          reportHold(TELEMETRY_OUTCOME[microphoneFailure(error)], null);
+          if (mounted.current && permissionAsk.current === ask) {
+            setOutcome(microphoneFailure(error));
+          }
+        },
       );
       return;
     }
@@ -700,6 +755,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (latest.current.canHold && !latest.current.canHold(event.pointerType)) return;
     // A tap dictation (or another hold) has the microphone: this press is the system's.
     if (isVoiceCaptureActive()) return;
+    permissionAsk.current = null;
     handled.current = true;
     const element = event.currentTarget;
     let unfollow: (() => void) | null = null;
@@ -810,7 +866,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     end(null);
   }, [end]);
 
-  const dismiss = useCallback(() => setOutcome(null), []);
+  const dismiss = useCallback(() => {
+    permissionAsk.current = null;
+    setOutcome(null);
+  }, []);
 
   return {
     phase,

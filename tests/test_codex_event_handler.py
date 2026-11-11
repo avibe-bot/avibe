@@ -10,7 +10,11 @@ from unittest.mock import ANY, AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-_EVENT_HANDLER_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/event_handler.py"
+# Beside the installed ``modules`` package, which is the repository in a source
+# checkout and site-packages when the tests run against a released wheel.
+_MODULES_SPEC = importlib.util.find_spec("modules")
+assert _MODULES_SPEC is not None and _MODULES_SPEC.submodule_search_locations
+_EVENT_HANDLER_PATH = Path(_MODULES_SPEC.submodule_search_locations[0]) / "agents/codex/event_handler.py"
 _SPEC = importlib.util.spec_from_file_location("test_codex_event_handler_module", _EVENT_HANDLER_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)

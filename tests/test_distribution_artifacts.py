@@ -72,6 +72,9 @@ def _assert_members_and_metadata(members, metadata):
         "vibe/computer_sdk/package.json",
         "vibe/computer_sdk/runner.mjs",
         "vibe/computer_sdk/runtime.mjs",
+        # The Model Hub engine channel's shipped keys: without this document an
+        # installed Avibe has no channel, however the release was commissioned.
+        "vibe/model_hub_runtime/engine_channel_roots.json",
     ):
         assert required in members, required
 

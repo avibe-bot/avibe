@@ -3956,6 +3956,9 @@ def test_vibe_agent_api_localizes_reserved_create_and_rename_names(tmp_path, mon
 
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    config = V2Config.default()
+    config.agents.opencode.enabled = config.agents.claude.enabled = True
+    config.save()
 
     listed = api.get_vibe_agents()
     names = {agent["name"] for agent in listed["agents"]}

@@ -2477,6 +2477,8 @@ class VaultApiError(ValueError):
             "protected_signing_unsupported": "vault.signing.protectedUnsupported",
             "missing_signing_context": "vault.signing.missingContext",
             "invalid_digest": "vault.signing.invalidDigest",
+            "invalid_sign_input": "vault.signing.invalidInput",
+            "protected_solana_unsupported": "vault.signing.protectedSolanaUnsupported",
         }.get(code)
 
 
@@ -3543,7 +3545,7 @@ def _attach_signed_sign_operation_context(
     *,
     audience: str | None = None,
 ) -> dict:
-    from storage import vault_service
+    from storage import vault_service, vault_solana
 
     response_audience = audience or vault_service.REQUEST_AUDIENCE_AGENT
     engine = _vault_engine()
@@ -3557,19 +3559,30 @@ def _attach_signed_sign_operation_context(
             persisted_name = str(request_payload.get("secret_name") or "")
             persisted_scheme = delivery.get("scheme")
             persisted_digest = delivery.get("digest")
-            if not persisted_name or not isinstance(persisted_scheme, str) or not isinstance(persisted_digest, str):
+            persisted_message = delivery.get("message_hex")
+            exact_message = persisted_scheme == vault_solana.SCHEME
+            if (
+                not persisted_name
+                or not isinstance(persisted_scheme, str)
+                or not isinstance(persisted_message if exact_message else persisted_digest, str)
+            ):
                 raise vault_service.InvalidRequestError("sign request is missing its persisted signing payload")
-            release: dict[str, Any] = {
-                "name": persisted_name,
-                "scheme": persisted_scheme,
-                "digest": persisted_digest.lower(),
-            }
+            # The release binds the whole signing input: an Ed25519 request carries its
+            # exact message as ``messageHex``, never a digest of it.
+            release: dict[str, Any] = {"name": persisted_name, "scheme": persisted_scheme}
+            if exact_message:
+                release["messageHex"] = vault_solana.normalize_message_hex(persisted_message)
+            else:
+                release["digest"] = persisted_digest.lower()
             signing_context = delivery.get("signing_context")
             if isinstance(signing_context, dict):
                 release["signingContext"] = signing_context
             if meta.get("protection") == "protected":
                 signing_key = vault_service.get_signing_public_key(conn, persisted_name)
-                public_key = vault_service.require_compressed_signing_public_key(signing_key)
+                if exact_message:
+                    public_key = vault_solana.require_public_key(signing_key)
+                else:
+                    public_key = vault_service.require_compressed_signing_public_key(signing_key)
                 if not isinstance(signing_context, dict):
                     raise VaultApiError(
                         "protected signing request is missing a verifiable signing_context",
@@ -3597,7 +3610,7 @@ def _attach_signed_sign_operation_context(
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
-    except vault_service.InvalidSigningKeyError as exc:
+    except (vault_service.InvalidSigningKeyError, vault_solana.SolanaSigningError) as exc:
         raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
@@ -3720,6 +3733,54 @@ def _sealed_from_payload(payload: dict):
     return Sealed(ciphertext=ciphertext, nonce=nonce, wrap_meta=wrap_meta)
 
 
+def _vault_solana_keypair_spec(payload: dict, *, kind: str, protection: str, public_meta: dict | None) -> dict | None:
+    """Validate a request for an avault-created Solana key; ``None`` for every other create.
+
+    avault generates or imports the Ed25519 seed and reports the public key, so the
+    caller supplies neither. Protected Solana keys are refused until the sandbox
+    can show what such a key signs.
+    """
+    from storage import vault_solana
+
+    spec = payload.get("keypair")
+    client_key = (public_meta or {}).get("signing_public_key")
+    if spec is None and not vault_solana.is_ed25519_key(client_key):
+        return None
+    if protection != "standard":
+        raise VaultApiError(
+            "protected Solana keys are not supported yet", code="protected_solana_unsupported", status=409,
+        )
+
+    def invalid(message: str) -> VaultApiError:
+        return VaultApiError(message, code="invalid_keypair")
+
+    if not isinstance(spec, dict) or client_key is not None:
+        raise invalid(
+            "a Solana key is created by avault: send keypair {curve: 'ed25519', source: 'generate' | 'import'} "
+            "and no signing_public_key"
+        )
+    if kind != "keypair":
+        raise invalid("keypair options require kind 'keypair'")
+    extra = set(spec) - {"curve", "chain", "source", "format"}
+    if extra:
+        raise invalid(f"unsupported keypair options: {', '.join(sorted(str(key) for key in extra))}")
+    if spec.get("curve") != vault_solana.CURVE or spec.get("chain", vault_solana.CHAIN) != vault_solana.CHAIN:
+        raise invalid("keypair options support only curve 'ed25519' on chain 'solana'")
+    source = spec.get("source")
+    blind_box = payload.get("blind_box")
+    if source == "generate":
+        if "format" in spec or blind_box is not None:
+            raise invalid("a generated Solana key takes no format or blind_box")
+        return {"source": "generate"}
+    if source != "import":
+        raise invalid("keypair source must be 'generate' or 'import'")
+    if spec.get("format") not in vault_solana.IMPORT_FORMATS:
+        raise invalid("a Solana key import requires format 'solana-cli-json' or 'base58-secret'")
+    if not isinstance(blind_box, dict):
+        raise VaultApiError("a Solana key import requires a browser blind_box", code="blind_box_required")
+    return {"source": "import", "format": spec["format"], "blind_box": blind_box}
+
+
 def create_vault_secret(
     payload: dict,
     *,
@@ -3770,6 +3831,7 @@ def create_vault_secret(
         kind=kind,
         default_field=default_field,
     )
+    solana_keypair = _vault_solana_keypair_spec(payload, kind=kind, protection=protection, public_meta=public_meta)
     atomic_protected_establishment = establishing_vmk and protection == "protected"
     try:
         user_context = vault_service.require_secret_create_access(user_context=user_context)
@@ -3815,7 +3877,17 @@ def create_vault_secret(
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
 
-    if protection == "standard":
+    if solana_keypair is not None:
+        try:
+            if solana_keypair["source"] == "generate":
+                created = avault_keypair_generate(name)
+            else:
+                created = avault_keypair_import(name, solana_keypair["format"], solana_keypair["blind_box"])
+        except AvaultError as exc:
+            raise _vault_api_error_from_avault(exc, prefix="avault keypair failed") from exc
+        sealed = created["sealed"]
+        public_meta = {**(public_meta or {}), "signing_public_key": created["signing_public_key"]}
+    elif protection == "standard":
         blind_box = payload.get("blind_box")
         if isinstance(blind_box, dict):
             try:
@@ -4424,7 +4496,7 @@ def request_vault_access(payload: dict, *, user_context: Any = None) -> dict:
 def _validate_sign_parameters(payload: dict) -> None:
     """Do not silently drop signing options (in particular unsupported trees)."""
     allowed = {
-        "name", "digest", "scheme", "request_id", "signature", "requester", "delivery",
+        "name", "digest", "message_hex", "scheme", "request_id", "signature", "requester", "delivery",
         "signing_context", "signingContext", "session_id", "run_id", "skill", "command",
         "egress", "mode", "request_ttl_seconds",
     }
@@ -4450,10 +4522,7 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError("payload must be an object", code="invalid_payload")
     _validate_sign_parameters(payload)
     name = str(payload.get("name") or "").strip()
-    digest = _sign_digest_from_payload(payload.get("digest"))
-    scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
-    if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
-        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409, message_key="vault.signing.invalidParameters")
+    scheme, digest, message_hex = _sign_input_from_payload(payload)
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
@@ -4471,12 +4540,15 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
             signing_context = _verifiable_signing_context_from_payload(
                 payload,
                 digest=digest,
-                required=meta.get("protection") == "protected",
+                message_hex=message_hex,
+                # Protected Solana signing is refused below with its own reason, context or not.
+                required=meta.get("protection") == "protected" and message_hex is None,
             )
             request = vault_service.create_sign_request(
                 conn,
                 name,
                 digest=digest,
+                message_hex=message_hex,
                 scheme=scheme,
                 signing_context=signing_context,
                 requester=_vault_ui_requester_payload(payload),
@@ -4488,6 +4560,8 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.ProtectedSolanaUnsupportedError as exc:
+        raise _protected_solana_unsupported(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidSigningContextError as exc:
@@ -5196,6 +5270,42 @@ def _sign_digest_from_payload(value: object) -> str:
     return digest.lower()
 
 
+def _sign_input_from_payload(payload: dict) -> tuple[str, str | None, str | None]:
+    """Return ``(scheme, digest, message_hex)``; exactly one of the two inputs is set.
+
+    secp256k1 schemes sign a 32-byte ``digest``. ``ed25519`` signs the exact bytes
+    in ``message_hex`` and refuses a digest, so neither can stand in for the other.
+    """
+    from storage import vault_service, vault_solana
+
+    scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+    if scheme != vault_solana.SCHEME and payload.get("message_hex") is None:
+        digest = _sign_digest_from_payload(payload.get("digest"))
+        if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
+            raise _unsupported_signature_scheme(scheme)
+        return scheme, digest, None
+    try:
+        digest, message_hex = vault_service.normalize_sign_input(
+            scheme, digest=payload.get("digest"), message_hex=payload.get("message_hex"),
+        )
+    except vault_service.InvalidSignInputError as exc:
+        raise VaultApiError(str(exc), code="invalid_sign_input") from exc
+    except vault_service.InvalidRequestError as exc:
+        raise _unsupported_signature_scheme(scheme) from exc
+    return scheme, digest, message_hex
+
+
+def _unsupported_signature_scheme(scheme: str) -> VaultApiError:
+    return VaultApiError(
+        f"unsupported signature scheme: {scheme}",
+        code="invalid_request", status=409, message_key="vault.signing.invalidParameters",
+    )
+
+
+def _protected_solana_unsupported(exc: Exception) -> VaultApiError:
+    return VaultApiError(str(exc), code="protected_solana_unsupported", status=409)
+
+
 def _signing_context_invalid(message: str) -> VaultApiError:
     return VaultApiError(message, code="invalid_request", status=409, message_key="vault.signing.invalidContext")
 
@@ -5233,7 +5343,9 @@ def _validate_signing_context_json(value: Any, *, path: str = "signing_context")
     raise _signing_context_invalid(f"{path} contains an unsupported JSON value")
 
 
-def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, required: bool = False) -> dict[str, Any] | None:
+def _verifiable_signing_context_from_payload(
+    payload: dict, *, digest: str | None, required: bool = False, message_hex: str | None = None,
+) -> dict[str, Any] | None:
     context = payload.get("signing_context")
     if context is None:
         context = payload.get("signingContext")
@@ -5247,6 +5359,18 @@ def _verifiable_signing_context_from_payload(payload: dict, *, digest: str, requ
         return None
     if not isinstance(context, dict):
         raise _signing_context_invalid("signing_context must be an object")
+    if message_hex is not None or context.get("kind") == "solana-transaction-v1":
+        # An exact-message request is bound by its message, and only by the Solana
+        # kind. Its check is bounded, so it runs instead of the generic pass below:
+        # an oversized context is refused before any value is walked or encoded.
+        from storage import vault_solana
+
+        if message_hex is None:
+            raise _signing_context_invalid("a solana-transaction-v1 signing_context requires scheme ed25519 with message_hex")
+        try:
+            return vault_solana.validate_context(context, message_hex=message_hex)
+        except vault_solana.SolanaSigningError as exc:
+            raise _signing_context_invalid(str(exc)) from exc
     _validate_signing_context_json(context)
     kind = context.get("kind")
     if not isinstance(kind, str):
@@ -5593,16 +5717,26 @@ def _verify_protected_browser_signature(meta: dict, *, digest: str, scheme: str,
 def _verify_standard_signature(
     *,
     signing_public_key: dict[str, Any] | None,
-    digest: str,
+    digest: str | None,
     scheme: str,
     signature: dict[str, Any],
+    message_hex: str | None = None,
 ) -> None:
-    from storage import vault_service
+    from storage import vault_service, vault_solana
 
     try:
         vault_service._validate_signature_payload(scheme, signature)
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409, message_key="vault.signing.invalidSignature") from exc
+    if scheme == vault_solana.SCHEME:
+        # Ed25519 has no unpinned legacy records: every result is checked against the pinned key.
+        try:
+            vault_solana.verify_signature(
+                vault_solana.require_public_key(signing_public_key), message_hex or "", signature.get("signature"),
+            )
+        except vault_solana.SolanaSigningError as exc:
+            raise _protected_sign_invalid(str(exc)) from exc
+        return
     if scheme == "schnorr-secp256k1-bip341-keypath":
         try:
             vault_service.require_compressed_signing_public_key(signing_public_key)
@@ -5660,13 +5794,18 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError("payload must be an object", code="invalid_payload")
     _validate_sign_parameters(payload)
     name = str(payload.get("name") or "").strip()
-    digest = _sign_digest_from_payload(payload.get("digest"))
-    scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
-    if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
-        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409, message_key="vault.signing.invalidParameters")
+    scheme, digest, message_hex = _sign_input_from_payload(payload)
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
-    signing_context = _verifiable_signing_context_from_payload(payload, digest=digest)
+    signing_context = _verifiable_signing_context_from_payload(payload, digest=digest, message_hex=message_hex)
+    ed25519_unavailable: AvaultError | None = None
+    if message_hex is not None:
+        # Probed outside the transaction and raised below, before a request is
+        # created or claimed: an avault without Ed25519 leaves an approval pending.
+        try:
+            _require_avault_ed25519_surface("ed25519 signing")
+        except AvaultError as exc:
+            ed25519_unavailable = exc
     engine = _vault_engine()
     protected_response: dict | None = None
     protected_event: dict | None = None
@@ -5684,6 +5823,10 @@ def vault_sign(payload: dict) -> dict:
                     code="unsupported_signer_kind",
                     status=409,
                 )
+            vault_service.validate_signing_pairing(
+                signing_context, scheme=scheme, message_hex=message_hex, signing_key=signing_public_key,
+                protected=meta.get("protection") == "protected",
+            )
             vault_service.validate_bitcoin_signing_context(
                 signing_context, digest=digest, scheme=scheme, signing_key=signing_public_key,
             )
@@ -5744,15 +5887,20 @@ def vault_sign(payload: dict) -> dict:
                     }
                     protected_response = {"ok": True, "signature": signature, "request": request}
             else:
+                if ed25519_unavailable is not None:
+                    raise _vault_api_error_from_avault(ed25519_unavailable, prefix="avault sign failed")
                 request_id = str(payload.get("request_id") or "")
                 if request_id:
-                    vault_service.claim_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                    vault_service.claim_sign_request(
+                        conn, request_id, name=name, digest=digest, scheme=scheme, message_hex=message_hex,
+                    )
                     key_envelope = vault_service.get_key_envelope(conn, name)
                 elif vault_service.sign_needs_approval(conn, name):
                     request = vault_service.create_sign_request(
                         conn,
                         name,
                         digest=digest,
+                        message_hex=message_hex,
                         scheme=scheme,
                         signing_context=signing_context,
                         requester=_vault_requester_payload(payload),
@@ -5775,6 +5923,8 @@ def vault_sign(payload: dict) -> dict:
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.ProtectedSolanaUnsupportedError as exc:
+        raise _protected_solana_unsupported(exc) from exc
     except vault_service.InvalidSigningKeyError as exc:
         raise VaultApiError(str(exc), code="invalid_signing_key", status=409) from exc
     except vault_service.InvalidSigningContextError as exc:
@@ -5820,7 +5970,10 @@ def vault_sign(payload: dict) -> dict:
         _settle_claimed_request(lambda conn, request_id: vault_service.fail_sign_request(conn, request_id, reason=reason))
 
     try:
-        signature = avault_sign(key_envelope, digest, scheme, name=name)
+        if message_hex is None:
+            signature = avault_sign(key_envelope, digest, scheme, name=name)
+        else:
+            signature = avault_sign_message(key_envelope, message_hex, name=name)
     except AvaultAuthorizationRequiredBeforeHandoffError as exc:
         # Nothing was signed, so the approval stays pending: the user authorizes
         # avault and approves the same request again instead of the Agent re-asking.
@@ -5835,6 +5988,7 @@ def vault_sign(payload: dict) -> dict:
             digest=digest,
             scheme=scheme,
             signature=signature,
+            message_hex=message_hex,
         )
     except VaultApiError:
         _fail_claimed_request("signature_rejected")
@@ -5848,6 +6002,7 @@ def vault_sign(payload: dict) -> dict:
                     request_id,
                     name=name,
                     digest=digest,
+                    message_hex=message_hex,
                     scheme=scheme,
                     signature=signature,
                     requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
@@ -5870,7 +6025,7 @@ def vault_sign(payload: dict) -> dict:
                 conn,
                 name,
                 requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
-                delivery={"scheme": scheme, "digest": digest},
+                delivery=vault_service.sign_audit_delivery(scheme, digest=digest, message_hex=message_hex),
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("vault_sign: signature produced but usage audit failed for %s: %s", name, exc)
@@ -9088,16 +9243,16 @@ AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION = "0.1.8"
 # Developer ID signed release (identifier bot.avibe.avault, Team 68B2SQ6YK3): a
 # master key an ad-hoc release created needs one "Authorize avault" after the
 # upgrade, and later signed releases read it without asking again.
-AVAULT_VERSION = "0.1.8"
-# (sha256, size) of each AVAULT_VERSION archive by target, copied from that
-# release's manifest.json so the download is verified whichever source served it.
+AVAULT_VERSION = "0.1.10"
+# (sha256, size) of each AVAULT_VERSION archive by target: digests verified against
+# the published manifest.json, sizes checked against the downloaded release assets.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("b22d237b97ab2ed3143f498bebce4affbe6a2617c2d50abcb48c1c668351799f", 3273950),
-    "linux-x64": ("6f64d8e089fa859889db53472616a065c9bb3e500b4ad04267bd1b2dd29366e1", 3596395),
-    "macos-arm64": ("2dc4b81c4ab3995e519e86854011ee1c38ae9696310d94d1eeaa8d0fe25725bd", 1480823),
-    "macos-x64": ("f3c46c612c2bee449d29f9480552437349ba97f9a89f523f2d4d368a4e5a3959", 1643862),
-    "windows-arm64": ("0cc42e23e63218f4301b89c527a9109ed02adf6c0e226d1332046e6af0eb4c8f", 1324833),
-    "windows-x64": ("5432be1d9e07b3069a1a010f71f885481b72f694175f2b7e46d92162ea6adee3", 1406676),
+    "linux-arm64": ("ffed26317b9557c76913c07cb2dd640b088c1abe21364cb54ad43603c601d17a", 3321093),
+    "linux-x64": ("3812bfc870210a65b6b1712a913f6db305366223e94b96f99491da756a760f51", 3652699),
+    "macos-arm64": ("a3424c5cbe3abcad3198305603ac8dfa94d96e8a68378fcd2621376e88186e3a", 1569937),
+    "macos-x64": ("1db282933bfa2ed61476d21bdbc6ec2503a4aed1f65c9ee9c803d19ef5694700", 1699588),
+    "windows-arm64": ("4991460026ea9e18bbf0c9f0117706cdb1fb9f5a2dbf31e3889bb00514da4622", 1376774),
+    "windows-x64": ("e4e44f48bdfe3aa6c760b64d4b0fe351e47cf30687ea0823e98f36809dd6e331", 1463132),
 }
 
 
@@ -9836,6 +9991,24 @@ class AvaultAuthorizationRequiredBeforeHandoffError(AvaultAuthorizationRequiredE
     """avault could not load the master key, so nothing was decrypted, delivered, or signed."""
 
 
+class AvaultOutsideGuiSessionError(AvaultAuthorizationRequiredError):
+    """The Keychain refused avault because Avibe runs outside the user's desktop session.
+
+    avault reports this as the same refusal as a missing authorization, so it is
+    one for delivery accounting. Authorizing cannot help from that session,
+    though: the fix is a restart inside the desktop session, so it carries its
+    own code and is never recorded as an authorization the user owes.
+    """
+
+    code = "outside_gui_session"
+
+
+class AvaultOutsideGuiSessionBeforeHandoffError(
+    AvaultOutsideGuiSessionError, AvaultAuthorizationRequiredBeforeHandoffError
+):
+    """The Keychain was unreachable, so nothing was decrypted, delivered, or signed."""
+
+
 # One-shot exit status for keychain_authorization_required (avault 0.1.8+, EX_NOPERM).
 _AVAULT_EXIT_AUTHORIZATION_REQUIRED = 77
 # ``avault key authorize`` waits for a person to reach the Mac and answer the dialog.
@@ -9847,7 +10020,12 @@ def _avault_authorization_required(
     detail: str | None = None,
     *,
     before_handoff: bool = True,
+    session_state: str | None = None,
 ) -> AvaultAuthorizationRequiredError:
+    """The error for avault's ``keychain_authorization_required``, by this process's session."""
+    if (session_state or macos_login_session_state()) == "outside_gui_session":
+        error = AvaultOutsideGuiSessionBeforeHandoffError if before_handoff else AvaultOutsideGuiSessionError
+        return error(backend_t("errors.outsideGuiSession"))
     avault_authorization.record_authorization_required()
     error = AvaultAuthorizationRequiredBeforeHandoffError if before_handoff else AvaultAuthorizationRequiredError
     return error(detail or "avault needs a one-time macOS Keychain authorization on the Mac running Avibe")
@@ -9924,7 +10102,11 @@ def _run_avault(
         raise AvaultPreHandoffError("avault binary not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
-    if proc.returncode != 0 and macos_login_session_state() == "stale_login_session":
+    if proc.returncode == 0:
+        avault_authorization.clear_authorization_required()
+        return proc
+    session_state = macos_login_session_state()
+    if session_state == "stale_login_session":
         error = (
             AvaultStaleLoginSessionBeforeHandoffError
             if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED
@@ -9932,9 +10114,7 @@ def _run_avault(
         )
         raise error(backend_t("errors.staleLoginSession"))
     if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED:
-        raise _avault_authorization_required(_avault_detail(proc))
-    if proc.returncode == 0:
-        avault_authorization.clear_authorization_required()
+        raise _avault_authorization_required(_avault_detail(proc), session_state=session_state)
     return proc
 
 
@@ -9944,7 +10124,8 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
 
     if isinstance(exc, AvaultStaleLoginSessionError):
         raise
-    if macos_login_session_state() == "stale_login_session":
+    session_state = macos_login_session_state()
+    if session_state == "stale_login_session":
         error = (
             AvaultStaleLoginSessionBeforeHandoffError
             if isinstance(exc, AvaultAgentAuthorizationRequiredError) or _avault_agent_error_is_absent(str(exc))
@@ -9952,7 +10133,7 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
         )
         raise error(backend_t("errors.staleLoginSession")) from exc
     if isinstance(exc, AvaultAgentAuthorizationRequiredError):
-        raise _avault_authorization_required(str(exc)) from exc
+        raise _avault_authorization_required(str(exc), session_state=session_state) from exc
 
 
 def _avault_supports_keychain_authorization(path: str | None) -> bool:
@@ -10071,6 +10252,62 @@ def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
         raise AvaultError("avault blind-box seal returned malformed output") from exc
 
 
+# avault 0.1.10 adds Ed25519: ``keypair generate`` / ``keypair import`` for Solana
+# keys and exact-message ``sign`` through ``message_hex``.
+AVAULT_ED25519_MIN_VERSION = "0.1.10"
+
+
+def _require_avault_ed25519_surface(feature: str) -> None:
+    _require_avault_min_version(
+        feature,
+        AVAULT_ED25519_MIN_VERSION,
+        managed_available=_version_at_least(AVAULT_VERSION, AVAULT_ED25519_MIN_VERSION),
+    )
+
+
+def _avault_keypair_result(proc: "subprocess.CompletedProcess", *, action: str) -> dict:
+    """Read ``avault keypair`` output: a sealed envelope plus public metadata, never the seed."""
+    from storage import vault_solana
+    from storage.vault_crypto import Sealed
+
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or f"avault keypair {action} failed")
+    malformed = AvaultError(f"avault keypair {action} returned malformed output")
+    try:
+        payload = json.loads(proc.stdout)
+        envelope = payload["envelope"]
+        sealed = Sealed(ciphertext=envelope["ciphertext"], nonce=envelope["nonce"], wrap_meta=envelope["wrap_meta"])
+        signing_key = {"curve": payload["curve"], "chain": payload["chain"], "public_key": payload["public_key"]}
+        # The address is recomputed from the public key rather than trusted as given.
+        if vault_solana.address(vault_solana.require_public_key(signing_key)) != payload["address"]:
+            raise malformed
+    except (ValueError, KeyError, TypeError) as exc:
+        raise malformed from exc
+    if not all(isinstance(value, str) and value for value in (sealed.ciphertext, sealed.nonce, sealed.wrap_meta)):
+        raise malformed
+    return {"sealed": sealed, "signing_public_key": signing_key}
+
+
+def avault_keypair_generate(name: str) -> dict:
+    """Have avault create a standard Solana key and return only its envelope and public key."""
+    _require_avault_ed25519_surface("Solana key generation")
+    proc = _run_avault(["keypair", "generate", "--name", name, "--curve", "ed25519"])
+    return _avault_keypair_result(proc, action="generate")
+
+
+def avault_keypair_import(name: str, import_format: str, blind_box: dict) -> dict:
+    """Relay a browser blind box holding a Solana secret key to ``avault keypair import``.
+
+    The box is sealed to avault for this name, curve and format; Python never opens it.
+    """
+    _require_avault_ed25519_surface("Solana key import")
+    proc = _run_avault(
+        ["keypair", "import", "--name", name, "--curve", "ed25519", "--format", import_format, "--blind-box"],
+        stdin=json.dumps(blind_box).encode("utf-8"),
+    )
+    return _avault_keypair_result(proc, action="import")
+
+
 def avault_sign(
     key_envelope,
     digest: str,
@@ -10079,17 +10316,20 @@ def avault_sign(
     name: str | None = None,
 ) -> dict:
     """Ask avault to sign a caller-computed 32-byte digest with a local key envelope."""
+    return _avault_sign({"digest": digest, "scheme": scheme}, key_envelope, name)
+
+
+def avault_sign_message(key_envelope, message_hex: str, *, name: str | None = None) -> dict:
+    """Ask avault for a pure Ed25519 signature over the exact bytes in ``message_hex``."""
+    _require_avault_ed25519_surface("ed25519 signing")
+    return _avault_sign({"message_hex": message_hex, "scheme": "ed25519"}, key_envelope, name)
+
+
+def _avault_sign(sign_input: dict[str, str], key_envelope, name: str | None) -> dict:
     if not name:
         raise AvaultError("secret name is required for avault sign")
     _require_avault_p2_surface("vault signing")
-    body = json.dumps(
-        {
-            "name": name,
-            "key_envelope": _envelope_payload(key_envelope),
-            "digest": digest,
-            "scheme": scheme,
-        }
-    ).encode("utf-8")
+    body = json.dumps({"name": name, "key_envelope": _envelope_payload(key_envelope), **sign_input}).encode("utf-8")
     proc = _run_avault(["sign"], stdin=body)
     if proc.returncode != 0:
         raise AvaultError(_avault_detail(proc) or "avault sign failed")
@@ -10528,7 +10768,13 @@ def macos_login_session_state(*, service_pid: int | None = None) -> str:
                 from vibe.internal_client import health_identity_sync
 
                 service_state = (health_identity_sync() or {}).get("macos_login_session_state")
-                if service_state in {"healthy", "stale_login_session", "no_gui_session", "unknown"}:
+                if service_state in {
+                    "healthy",
+                    "stale_login_session",
+                    "no_gui_session",
+                    "outside_gui_session",
+                    "unknown",
+                }:
                     return service_state
             except Exception:  # noqa: BLE001 - diagnostics must never block a Vault call
                 pass
@@ -10554,7 +10800,7 @@ def _process_cannot_show_macos_dialogs() -> bool:
     SSH-launched process so the user receives the only recovery that can work.
     """
     state = macos_login_session_state()
-    return state in {"stale_login_session", "no_gui_session"}
+    return state in {"stale_login_session", "no_gui_session", "outside_gui_session"}
 
 
 def get_avault_authorization_status() -> dict:

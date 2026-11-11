@@ -105,6 +105,10 @@ def create_app(
     """
     from core.inbox_events import mark_controller_process
 
+    # Loaded with the service, not at the first hand-over: one that follows an
+    # in-place upgrade would otherwise import the new release's module here.
+    from vibe import restart_supervisor
+
     mark_controller_process()
     app = FastAPI(
         title="avibe internal dispatch",
@@ -807,6 +811,28 @@ def create_app(
         if runtime_id is not None:
             payload["desktop_runtime_id"] = runtime_id
         return payload
+
+    @app.post("/internal/restart")
+    async def _restart(request: Request) -> Any:
+        """Schedule this service's restart for a caller outside the desktop session.
+
+        The restart job joins the login session of the process that seeds it,
+        so seeding it here keeps the successor where this service is. The job
+        runs this service's own launcher: the request names no path, and one
+        for another install generation is refused. The seed writes a status
+        file and spawns the job, so it runs off the loop.
+        """
+        payload = await _safe_json(request)
+        try:
+            result = await asyncio.to_thread(restart_supervisor.schedule_handed_over_restart, payload)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        except restart_supervisor.HandOverRefused as exc:
+            return JSONResponse(status_code=409, content={"ok": False, "error": str(exc)})
+        except Exception as exc:
+            logger.exception("internal restart hand-over failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+        return JSONResponse(status_code=200, content=result)
 
     @app.get("/internal/desktop/capabilities")
     async def _desktop_capabilities() -> dict[str, Any]:

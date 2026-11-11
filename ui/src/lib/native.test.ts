@@ -15,6 +15,7 @@ import {
   onNativePushOpened,
   openNativeExternal,
   setNativeAccountActionAvailable,
+  setNativeBadge,
   setNativeOuterScrollLocked,
 } from './native';
 
@@ -128,6 +129,39 @@ describe('native shell bridge', () => {
     await expect(openNativeExternal('https://avibe.bot')).resolves.toBe(false);
     await expect(nativeShowAccount()).resolves.toBe(false);
     await expect(setNativeAccountActionAvailable(true)).resolves.toBe(false);
+  });
+
+  it('sets the App badge to the count it is given, 0 included, and only where the shell has the badge capability', async () => {
+    const call = installBridge({ capabilities: { app: 1, badge: 1 } });
+
+    expect(setNativeBadge(3)).toBe(true);
+    expect(setNativeBadge(0)).toBe(true);
+    // A count the bridge would refuse is sent as the count it stands for.
+    expect(setNativeBadge(2.7)).toBe(true);
+    expect(setNativeBadge(-1)).toBe(true);
+    expect(call.mock.calls).toEqual([
+      ['badge.set', { count: 3 }],
+      ['badge.set', { count: 0 }],
+      ['badge.set', { count: 2 }],
+      ['badge.set', { count: 0 }],
+    ]);
+
+    // A failing call is the shell's business, never the page's.
+    installBridge({
+      capabilities: { badge: 1 },
+      call: vi.fn(async () => {
+        throw { code: 'forbidden', message: 'not the selected instance' };
+      }),
+    });
+    expect(setNativeBadge(1)).toBe(true);
+    await Promise.resolve();
+
+    // An older shell, and a plain browser, have no native badge.
+    const older = installBridge({ capabilities: { app: 1, push: 1 } });
+    expect(setNativeBadge(3)).toBe(false);
+    expect(older).not.toHaveBeenCalled();
+    Reflect.deleteProperty(window, 'avibeNative');
+    expect(setNativeBadge(3)).toBe(false);
   });
 
   it.each([

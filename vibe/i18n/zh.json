@@ -11,6 +11,7 @@
   "errors": {
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
     "staleLoginSession": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
+    "outsideGuiSession": "Avibe 运行在桌面会话之外，钥匙串里的凭据（GitHub CLI、Vault）不可用。请在这台 Mac 桌面的终端里重启 Avibe。",
     "modelHubDisabled": "本实例已停用模型网关，{backend} 没有可用的模型。",
     "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请前往「模型」页点击「重试」，然后选择模型。",
     "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
@@ -153,6 +154,7 @@
     },
     "task": {
       "resultNotRecorded": "无法记录本次运行的结果：任务在运行期间被回收、改绑或删除，其存储状态未发生变化。",
+      "scheduleMissed": "原定于 {run_at} 执行的一次性任务未运行：调度器恢复时已超过五分钟宽限期。任务已结束；如需手动运行，请先确认任务内容仍适用。",
       "schedulerCallbackFailed": "计划触发在入队前失败：{detail}",
       "scheduleReplaced": "本次计划触发属于任务的旧调度版本，因此未执行。"
     },
@@ -291,14 +293,16 @@
   },
   "vault": {
     "signing": {
-      "invalidKey": "签名需要已固定的有效 secp256k1 压缩公钥。未交付签名。请保留现有密钥及其保护档位，修复公钥元数据后再试。",
+      "invalidKey": "签名需要与签名方案匹配的已固定有效公钥：secp256k1 方案需要 secp256k1 压缩公钥，ed25519 需要 Solana Ed25519 公钥。未交付签名。请保留现有密钥及其保护档位，修复公钥元数据后再试。",
       "protectedUnsupported": "保护档 Bitcoin Taproot 签名需要类型化交易审批流程和兼容的沙箱；旧式地址及 SegWit-v0 输入仍不支持。",
       "missingContext": "保护档签名需要可验证的签名上下文。请补齐操作详情后重新创建请求。",
       "invalidDigest": "签名摘要必须是十六进制编码的 32 字节数据。",
       "invalidParameters": "签名请求包含不支持的参数。目前仅支持空脚本树的 BIP86 密钥路径签名，不支持脚本树或 Merkle 根。",
       "invalidContext": "签名上下文无效或与请求不一致。请检查类型、摘要、字段和规范编码后重新创建请求。Agent 操作必须以 avault-agent-operation:v1 域开头，后接真实换行符和非空操作文本。",
-      "contextSchemeMismatch": "Bitcoin Taproot 上下文必须使用 schnorr-secp256k1-bip341-keypath；EVM 和 EIP-712 上下文必须使用 ECDSA。请用兼容的配对重新创建请求。",
-      "invalidSignature": "返回的签名编码无效，或无法通过已固定公钥和请求摘要的验证。该签名未作为成功结果交付。"
+      "contextSchemeMismatch": "Bitcoin Taproot 上下文必须使用 schnorr-secp256k1-bip341-keypath；EVM 和 EIP-712 上下文必须使用 ECDSA；Solana 交易上下文必须使用 ed25519。请用兼容的配对重新创建请求。",
+      "invalidSignature": "返回的签名编码无效，或无法通过已固定公钥和请求摘要（或消息）的验证。该签名未作为成功结果交付。",
+      "invalidInput": "签名输入与签名方案不匹配。ed25519 对原始消息字节签名：请提供 message_hex（十六进制，最大 1 MiB），不要提供 digest。secp256k1 方案对 32 字节摘要签名，不接受 message_hex。",
+      "protectedSolanaUnsupported": "暂不支持保护档 Solana 密钥和保护档 Solana 签名。未创建、请求或签署任何内容。请保留现有密钥及其保护档位不变，待 Avibe 更新支持保护档 Solana 后再试。"
     },
     "requestNotification": {
       "title": "有一个密钥请求需要你处理",
@@ -1436,6 +1440,7 @@
       "loginSessionLocalFallback": "未发现正在运行的 Avibe 服务；未将 macOS 登录会话状态作为服务健康状态",
       "loginSessionUnknown": "无法验证 macOS 登录会话",
       "noGuiSession": "没有可用的桌面 GUI 会话；无头或 SSH 使用属于正常情况",
+      "outsideGuiSession": "Avibe 运行在桌面会话之外，钥匙串里的凭据（GitHub CLI、Vault）不可用",
       "staleLoginSession": "Avibe 仍运行在一个已经结束的 macOS 登录会话中",
       "serviceGenerationBehind": "运行中的服务是 Avibe {version}（{generation}），比最近激活的安装 {activatedVersion}（{activatedGeneration}）旧",
       "cliNotUvTool": "当前 vibe 可执行文件不是 uv tool 安装",
@@ -1525,6 +1530,7 @@
       "splitLaunchers": "运行 `{repairCommand}`，让所有启动器都指向 Avibe {version}。",
       "splitLaunchersTied": "这些安装同为最后激活，修复无法从中选择：{launchers}。请重新运行 Avibe 安装程序，它的新安装会让所有启动器一起切换过去。",
       "staleLoginSession": "请在 Mac 当前桌面的终端运行 `vibe restart`，然后从 Avibe 重试。请不要重复重试失败的操作。",
+      "outsideGuiSession": "请在 Mac 桌面的终端运行 `vibe restart`。",
       "serviceGenerationBehind": "运行 `{restartCommand}`，改为运行最近激活的安装。",
       "cliNotUvTool": "此可执行文件将跳过 uv tool 包完整性检查。",
       "cliEditable": "从普通 wheel 重新安装 Avibe。运行中的本地 CLI 不要使用 'uv tool install --editable .'。",
