@@ -329,6 +329,36 @@ describe('VaultsPage list discovery', () => {
     expect(names()).toEqual(['alpha', 'beta', 'zeta']);
   });
 
+  // A Solana key is one identity. Its row must not borrow the EVM/Bitcoin rows or their notes, and
+  // the list finds it by chain and by address, which the existing discovery tests never searched.
+  it('lists a Solana key by its one address and finds it by chain or by address', async () => {
+    const solana = 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z';
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [
+        makeSecret('devnet', { kind: 'keypair', signer_kind: 'local', signing_curve: 'ed25519', signing_addresses: { solana } }),
+        makeSecret('hot', {
+          kind: 'keypair', signer_kind: 'local', signing_curve: 'secp256k1',
+          signing_addresses: { eth: '0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf', btc_taproot: 'bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9' },
+        }),
+      ],
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('devnet');
+    const row = rows()[0];
+    expect(within(row).getByText(solana)).toBeTruthy();
+    expect(within(row).getAllByRole('button', { name: /^Copy .* address$/ })).toHaveLength(1);
+    expect(within(row).queryByRole('note')).toBeNull();
+    expect(within(rows()[1]).getByRole('note').textContent).toBe(en.vaults.addresses.standardBitcoinTaprootWarning);
+
+    const search = screen.getByRole('textbox', { name: 'Search secrets' });
+    await user.type(search, 'solana');
+    expect(names()).toEqual(['devnet']);
+    await user.clear(search);
+    await user.type(search, 'fven3x669xlzsi6n2v91');
+    expect(names()).toEqual(['devnet']);
+  });
+
   it('pluralizes the unfiltered singular count in English', async () => {
     api.listVaultSecrets.mockResolvedValue({ secrets: [inventory[0]] });
     renderPage();
