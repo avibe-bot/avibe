@@ -31,6 +31,26 @@ def google_api_base_url(base_url: str | None) -> str:
     return normalized.removesuffix("/v1beta")
 
 
+def anthropic_api_root(base_url: str) -> str:
+    """The root an Anthropic interface's ``/v1/...`` paths are appended to.
+
+    CLIProxyAPI's Claude executor always appends ``/v1/messages`` to its base
+    URL, as the Anthropic SDKs do, while relays and OpenCode/models.dev
+    publish the same root with or without that ``/v1``
+    (``…/anthropic`` and ``…/anthropic/v1``). One trailing ``/v1`` is
+    therefore the version, and is removed once, so the engine and every probe
+    reach ``…/anthropic/v1/messages`` from either spelling.
+    """
+    normalized = normalize_model_hub_base_url(base_url)
+    if normalized is None:
+        raise ValueError("Anthropic source requires a base URL")
+    parts = urlsplit(normalized)
+    path = parts.path.rstrip("/")
+    if not path.endswith("/v1"):
+        return normalized
+    return parts._replace(path=path.removesuffix("/v1")).geturl()
+
+
 def _validated_cpa_anthropic_origin(base_url: str | None) -> bool:
     """Share CPA's authority gate, rejecting ambiguous HTTP URL spellings."""
     if not isinstance(base_url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in base_url):

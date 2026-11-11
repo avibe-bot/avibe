@@ -3087,6 +3087,53 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
 
 
 @pytest.mark.parametrize(
+    ("base_url", "engine_root"),
+    [
+        # The Anthropic SDK spelling, and the OpenCode/models.dev spelling of the same root.
+        ("https://relay.example.test/anthropic", "https://relay.example.test/anthropic"),
+        ("https://relay.example.test/anthropic/v1", "https://relay.example.test/anthropic"),
+        ("https://relay.example.test/anthropic/v1/", "https://relay.example.test/anthropic"),
+        ("https://relay.example.test", "https://relay.example.test"),
+        ("https://relay.example.test/v1", "https://relay.example.test"),
+        # The version is removed once, never twice.
+        ("https://relay.example.test/v1/v1", "https://relay.example.test/v1"),
+    ],
+)
+def test_anthropic_engine_and_probes_reach_the_same_messages_url(
+    tmp_path: Path,
+    base_url: str,
+    engine_root: str,
+) -> None:
+    """The engine appends ``/v1/messages`` to its base URL; a saved ``…/v1`` root reached ``…/v1/v1/messages``.
+
+    Probes and model discovery must reach the URL every engine call does, so a
+    Source that looks healthy when added is not one that fails on every call.
+    """
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    credential_ref = store.store_api_key(
+        "secret", vendor="custom", protocol="anthropic", base_url=base_url,
+    )
+    store.sync_sources(
+        [_binding(credential_ref, source_id="src_anthro12", vendor="custom", protocol="anthropic", base_url=base_url)]
+    )
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets, sources=store.list_sources(), state_store=store,
+    )
+
+    (entry,) = yaml.safe_load(config_path.read_text(encoding="utf-8"))["claude-api-key"]
+    assert entry["base-url"] == engine_root
+    # CLIProxyAPI's Claude executor: fmt.Sprintf("%s/v1/messages?beta=true", baseURL).
+    engine_messages = f"{entry['base-url']}/v1/messages"
+    taxonomy = runtime_adapter_module._PROTOCOL_OBSERVATION_TAXONOMY["anthropic"]
+    assert client_module.upstream_api_url(base_url, taxonomy.request_path, "anthropic") == engine_messages
+    assert client_module.upstream_api_url(base_url, "/v1/models", "anthropic") == f"{engine_root}/v1/models"
+
+
+@pytest.mark.parametrize(
     ("official_base_url", "protocol"),
     [
         pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
@@ -3110,7 +3157,7 @@ def test_catalog_official_base_url_composes_one_probe_endpoint(
     """
 
     taxonomy = runtime_adapter_module._PROTOCOL_OBSERVATION_TAXONOMY[protocol]
-    composed = client_module.upstream_api_url(official_base_url, taxonomy.request_path)
+    composed = client_module.upstream_api_url(official_base_url, taxonomy.request_path, protocol)
 
     # The root is carried verbatim — nothing rewritten, nothing dropped.
     assert composed.startswith(f"{official_base_url}/")
