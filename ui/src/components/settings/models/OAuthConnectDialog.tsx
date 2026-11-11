@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
+import { callbackRedirect } from './oauthCallback';
 import {
   classifyOAuthFailure,
   createFlowAuthority,
@@ -67,6 +68,9 @@ const DEADLINE_MS = 16 * 60 * 1000;
 
 type ConnectPhase = 'choose' | 'flow';
 
+
+/** How long step 2 stays folded after the person returns, before it offers the paste. */
+const CALLBACK_WAIT_MS = 10_000;
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2/40 px-4 py-3 shadow-elevation-0">
@@ -621,6 +625,13 @@ export const OAuthConnectDialog: React.FC<{
     };
   }, [open, phase, startAttempt, vendor, channel, reauthId, t, showToast, isReauth, rowsBehindAreStale, resolvedAfterAttempt, journey, createClientNonce]);
 
+  // Step 2 of a loopback-redirect sign-in starts folded: a browser on this machine hands
+  // the callback to the gateway's local listener and the flow continues by itself.
+  // `used` is how the person last used step 1's link, and `pasteOpen` whether step 2
+  // shows its field. A new flow starts both over.
+  const [linkUse, setLinkUse] = React.useState<{ flowId: string; how: 'open' | 'copy' } | null>(null);
+  const [pasteOpenFor, setPasteOpenFor] = React.useState<string | null>(null);
+
   // 1-second ticker so the paste-flow countdown updates.
   React.useEffect(() => {
     if (!open) return;
@@ -715,6 +726,12 @@ export const OAuthConnectDialog: React.FC<{
   const { flow, errorKey, failureClass } = view;
   const presentation = flow?.presentation;
   const expects = presentation?.expects;
+  const callback = expects === 'paste_callback_url' ? callbackRedirect(presentation?.auth_url) : null;
+  // Folded only where the redirect can arrive by itself: a loopback address the
+  // gateway listens on. Anywhere else the paste is the only way back.
+  const foldable = callback?.loopback === true;
+  const flowId = flow?.flow_id ?? null;
+  const pasteOpen = !foldable || (flowId !== null && pasteOpenFor === flowId);
   const isDevice = expects === 'none';
   const state = flow?.state;
   // A `success` state now means the Source exists: the server materializes it in
@@ -722,6 +739,32 @@ export const OAuthConnectDialog: React.FC<{
   // rendered state comes from the authority's landed view.
   const success = view.settled && flow?.state === 'success';
   const active = !view.settled;
+
+  // Nothing arrived ~10 s after the person came back with the link used: the browser is
+  // elsewhere, or the redirect could not reach this machine, so step 2 opens. The wait
+  // only runs while this page is on screen — opening the sign-in page hides it — so it
+  // measures time since they returned, not the time spent signing in.
+  const awaitingCallback = foldable && !pasteOpen && !!linkUse && linkUse.flowId === flowId
+    && flow?.state === 'awaiting_action' && !view.settled;
+  React.useEffect(() => {
+    if (!awaitingCallback || flowId === null) return;
+    let timer: number | null = null;
+    const arm = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      if (document.visibilityState === 'visible') {
+        timer = window.setTimeout(() => setPasteOpenFor(flowId), CALLBACK_WAIT_MS);
+      }
+    };
+    arm();
+    document.addEventListener('visibilitychange', arm);
+    window.addEventListener('focus', arm);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', arm);
+      window.removeEventListener('focus', arm);
+    };
+  }, [awaitingCallback, flowId]);
 
   const remainingMs = flow?.expires_at ? Math.max(0, new Date(flow.expires_at).getTime() - Date.now()) : null;
   const mmss =
@@ -979,16 +1022,33 @@ export const OAuthConnectDialog: React.FC<{
                   }
                 >
                   {presentation?.auth_url ? (
-                    <OAuthLinkRow url={presentation.auth_url} />
+                    <OAuthLinkRow
+                      url={presentation.auth_url}
+                      onUse={(how) => { if (flowId) setLinkUse({ flowId, how }); }}
+                    />
                   ) : (
                     <p className="text-[12px] text-muted">{t('settings.models.oauth.starting')}</p>
                   )}
                 </Step>
 
-                <Step n={2} label={step2Label}>
+                <Step n={2} label={pasteOpen ? step2Label : (t('settings.models.oauth.callback.auto') as string)}>
                   {isDevice ? (
                     <OAuthDeviceCodeRow code={presentation?.device_code ?? ''} />
+                  ) : !pasteOpen ? (
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="xs"
+                      className="h-auto self-start p-0"
+                      onClick={() => setPasteOpenFor(flowId)}
+                    >
+                      {t('settings.models.oauth.callback.pasteInstead')}
+                    </Button>
                   ) : (
+                    <>
+                    {callback && (
+                      <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.oauth.callback.cantConnect')}</p>
+                    )}
                     <OAuthSubmitRow
                       value={code}
                       onChange={(next) => {
@@ -999,11 +1059,16 @@ export const OAuthConnectDialog: React.FC<{
                       onSubmit={() => void submit()}
                       submitting={submitting || state === 'verifying'}
                       placeholder={
-                        expects === 'paste_callback_url' ? 'http://127.0.0.1:.../callback?code=…' : 'ac_…#st_…'
+                        expects === 'paste_callback_url'
+                          // The address the provider will send the browser to, as the
+                          // sign-in link itself names it.
+                          ? `${callback?.address ?? 'http://localhost:…/callback'}?code=…`
+                          : 'ac_…#st_…'
                       }
                       submitLabel={t('common.submit') as string}
                       submittingLabel={t('common.submitting') as string}
                     />
+                    </>
                   )}
                 </Step>
 

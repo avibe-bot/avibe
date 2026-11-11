@@ -1076,4 +1076,23 @@ scenarios:
     supporting_tests:
       - tests/test_model_hub_vibey_consumer.py::test_vibey_offers_and_starts_on_the_flagship_rather_than_a_listings_first_row
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
+  - id: AUTH-SETUP-165
+    name: A subscription sign-in offers its page as a button and a copyable link, and a loopback callback continues without a paste
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test:
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 offers the sign-in page as a button and a copyable link, never the raw URL as text
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 folds the paste for a loopback redirect, and opens it on request with the real address and what to expect
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 opens the paste once the person is back with the link used and nothing has arrived for 10 s
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 keeps the paste open where nothing can arrive by itself
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 leaves a pasted-code sign-in as it was, apart from the link
+    reason: >-
+      Covered is bounded to the dialog against controlled flow responses. That a
+      loopback redirect reaches the gateway without a paste is the engine's
+      forwarder (started for every Web-UI-originated flow): verified live in a
+      fresh-install Incus environment by sending a simulated redirect with a test
+      code to localhost:1455 inside the instance, which the forwarder handed to the
+      engine and the flow ended on the provider's refusal of that code, no paste.
 next_priority: []
