@@ -814,7 +814,7 @@ scenarios:
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/e2e/onboarding-fidelity/lineup.spec.ts
-  - id: AUTH-SETUP-161
+  - id: AUTH-SETUP-162
     name: A Hub-owned CLI assistant's Default model card picks a model that makes its Agent runnable, and setup completes
     status: covered
     kind: happy_path
