@@ -835,9 +835,9 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
           error: item.type ? t(`mcpHub.errors.${item.type}`, { defaultValue: item.error || '', message: item.error || '', name: item.name }) : (item.error || ''),
         }),
       );
-      const warnings = added.filter((item) => item.warning).map((item) =>
+      const warnings = added.flatMap((item) => item.warning ? [
         t('mcpHub.savedNotConnected', { reason: item.warning.message || item.warning.type || t('mcpHub.failed') }),
-      );
+      ] : []);
       const inline = [
         t('mcpHub.succeededCount', { count: succeeded }),
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
