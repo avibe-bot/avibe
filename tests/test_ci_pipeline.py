@@ -475,26 +475,33 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert jobs["windows-install-smoke-runners"]["needs"] == ["changes", "build-linux-artifacts"]
 
 
-def test_browser_lanes_pin_the_os_and_keep_dependency_install_and_cache_isolation() -> None:
+def test_browser_lanes_use_matching_preinstalled_engines_without_runtime_apt() -> None:
     browsers = _jobs()["ui-browser-checks"]
-    assert browsers["runs-on"] == "ubuntu-24.04"
-    steps = browsers["steps"]
-    install, = [step for step in steps if step.get("name") == "Install browsers"]
-    assert "npx playwright install --with-deps chromium webkit" in install["run"].splitlines()
-    assert not install.get("if") and not install.get("continue-on-error")
-    packages, = [step for step in steps if step.get("id") == "browser-packages"]
-    # Restore keys must not mix Ubuntu releases; exact keys also distinguish
-    # image revisions and Playwright's package requirements.
-    assert 'prefix="playwright-apt-$ImageOS-"' in packages["run"]
-    assert '$ImageVersion-' in packages["run"]
-    assert "require('playwright-core/package.json').version" in packages["run"]
-    cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache@")]
-    assert cache["with"] == {
-        "path": "~/.cache/playwright-apt",
-        "key": "${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.key }}",
-        "restore-keys": "${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.prefix }}",
+    lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
+    version = lock["packages"]["node_modules/@playwright/test"]["version"]
+    assert lock["packages"]["node_modules/playwright-core"]["version"] == version
+    assert browsers["container"] == {
+        "image": f"mcr.microsoft.com/playwright:v{version}-noble",
+        "options": "--init --ipc=host",
     }
-    assert steps.index(packages) < steps.index(cache) < steps.index(install)
+    # Container run steps otherwise default to sh; the suite wrapper uses Bash
+    # and must preserve its existing fail-fast semantics.
+    assert browsers["defaults"]["run"]["shell"] == "bash"
+    assert browsers["timeout-minutes"] == 45
+    steps = browsers["steps"]
+    verify, = [step for step in steps if step.get("name") == "Verify preinstalled browsers"]
+    assert verify["timeout-minutes"] == 10
+    assert not verify.get("if") and not verify.get("continue-on-error")
+    assert "import { chromium, webkit } from 'playwright';" in verify["run"]
+    assert "for (const engine of [chromium, webkit])" in verify["run"]
+    assert "await engine.launch()" in verify["run"]
+    assert "await browser.close()" in verify["run"]
+    commands = "\n".join(step.get("run", "") for step in steps)
+    for forbidden in ("apt-get", "apt install", "playwright install", "playwright-apt"):
+        assert forbidden not in commands
+    assert not any(step.get("uses", "").startswith("actions/cache@") for step in steps)
+    suites, = [step for step in steps if "${{ matrix.suites }}" in step.get("run", "")]
+    assert steps.index(verify) < steps.index(suites)
 
 
 def test_browser_lanes_check_out_exactly_the_paths_the_classifier_treats_as_their_input() -> None:
