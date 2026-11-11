@@ -59,11 +59,12 @@ final class DirectPathAppTests: XCTestCase {
 
         // The transport finds a path: the store gets the route, and the
         // page is told after it has.
-        transport.report(.usable(generation: "g1"), for: target)
+        try await reportUsable(transport, for: target) {
+            firstStore.proxyConfigurations.count == 1
+        }
         try await eventually {
             try await page.changes() == #"[{"sequence":1,"transport":"direct"}]"#
         }
-        XCTAssertEqual(firstStore.proxyConfigurations.count, 1)
         XCTAssertEqual(listeningLoopbackPorts().subtracting(listening).count, 1)
         let after = try await page.directStatus()
         XCTAssertEqual(after, #"{"sequence":1,"transport":"direct"}"#)
@@ -84,8 +85,9 @@ final class DirectPathAppTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
 
-        transport.report(.usable(generation: "g1"), for: secondTarget)
-        try await eventually { firstStore.proxyConfigurations.count == 1 }
+        try await reportUsable(transport, for: secondTarget) {
+            firstStore.proxyConfigurations.count == 1
+        }
 
         // Signing out rotates the store: the route leaves with the old
         // one, and the new one starts with none.
@@ -304,6 +306,25 @@ final class DirectPathAppTests: XCTestCase {
             return false
         }
         return app
+    }
+
+    /// Reports the path usable until the route is installed. The App's own
+    /// push recovery can hold the account coordinator busy for a moment
+    /// after a runtime opens, and a route that is ready then is refused; a
+    /// transport reports again after `pathDidFail`, and so does this.
+    @MainActor
+    private func reportUsable(
+        _ transport: StandInDirectTransport,
+        for target: DirectTarget,
+        until installed: @escaping @MainActor () -> Bool
+    ) async throws {
+        try await eventually {
+            if installed() {
+                return true
+            }
+            transport.report(.usable(generation: "g1"), for: target)
+            return false
+        }
     }
 
     @MainActor
