@@ -9,12 +9,14 @@ work="$RUNNER_TEMP/nat-disabled-experiment"
 mkdir -p "$work/evidence"
 cp -R "$root" "$work/server"
 cd "$work/server"
+host_netns=$(readlink /proc/self/ns/net)
 isolated_run() {
   sudo unshare --net -- bash -c '
     set -euo pipefail
     ip link set lo up
     ip link add avdt-exp type dummy
     ip addr add 192.168.245.1/24 dev avdt-exp
+    ip addr add 192.168.245.2/24 dev avdt-exp
     ip -6 addr add 2001:db8:245::1/64 dev avdt-exp nodad
     ip link set avdt-exp up
     exec "$@"
@@ -80,8 +82,8 @@ grep -q 'test result: ok. 1 passed; 0 failed' "$work/evidence/hostile-reach-out.
 
 # Instrumented client only: expose existing noq APIs in a disposable iroh copy.
 # This is NOT the stock executable used for interoperability above. Its only
-# probe target is a loopback UDP listener it owns, in a route-less namespace.
-python3 - "$vendor" <<'PY'
+# probe targets are fixed UDP listeners it owns, in a route-less namespace.
+python3 - "$vendor" "$root/experiments/known_cids.rs" <<'PY'
 import hashlib,json,pathlib,sys
 root=pathlib.Path(sys.argv[1]); file='src/endpoint/connection.rs'; path=root/file
 path.write_text(path.read_text()+'''
@@ -89,7 +91,7 @@ path.write_text(path.read_text()+'''
 impl Connection {
     #[doc(hidden)]
     pub fn avdt_experiment_request_probe(&self, target: std::net::SocketAddr) -> bool {
-        assert!(target.ip().is_loopback());
+        assert!(target.ip().is_loopback() || target.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::new(192,168,245,2)));
         let Ok(addresses) = self.inner.get_local_nat_traversal_addresses() else { return false; };
         for address in addresses { let _ = self.inner.remove_nat_traversal_address(address); }
         if self.inner.add_nat_traversal_address(target).is_err() { return false; }
@@ -102,7 +104,29 @@ impl Connection {
 }
 ''')
 checksum=root/'.cargo-checksum.json'; data=json.loads(checksum.read_text())
-data['files'][file]=hashlib.sha256(path.read_bytes()).hexdigest(); checksum.write_text(json.dumps(data))
+data['files'][file]=hashlib.sha256(path.read_bytes()).hexdigest()
+# Opt-in state is process-local: only the instrumented client calls enable().
+# All separately spawned servers retain their ordinary CID generator.
+file='src/avdt_experiment_cids.rs'; path=root/file
+path.write_text(pathlib.Path(sys.argv[2]).read_text())
+data['files'][file]=hashlib.sha256(path.read_bytes()).hexdigest()
+file='src/lib.rs'; path=root/file
+path.write_text(path.read_text()+'\n#[doc(hidden)]\npub mod avdt_experiment_cids;\n')
+data['files'][file]=hashlib.sha256(path.read_bytes()).hexdigest()
+file='src/socket.rs'; path=root/file; source=path.read_text()
+anchor='        endpoint_config.grease_quic_bit(false);'
+assert source.count(anchor)==1
+source=source.replace(anchor,anchor+'''
+        if let Some(issued) = crate::avdt_experiment_cids::ISSUED.get() {
+            let issued = issued.clone();
+            endpoint_config.cid_generator(Arc::new(move || {
+                Box::new(crate::avdt_experiment_cids::KnownCidGenerator(issued.clone()))
+            }));
+        }
+''')
+path.write_text(source)
+data['files'][file]=hashlib.sha256(path.read_bytes()).hexdigest()
+checksum.write_text(json.dumps(data))
 PY
 mkdir -p examples
 cp "$root/experiments/security_probe.rs" examples/security_probe.rs
@@ -143,9 +167,12 @@ PY
 cargo build --locked --bin avibe-direct-transport
 cp "$CARGO_TARGET_DIR/debug/avibe-direct-transport" "$work/nat0-delay-server"
 for variant in stock stock-delay nat0 nat0-delay; do
-  for trial in 1 2 3 4 5; do
-    isolated_run env AVDT_ISOLATED_EXPERIMENT=1 "$probe_client" "$work/$variant-server" "$variant" \
-      >> "$work/evidence/pre-admission-probes.jsonl"
+  for destination in loopback namespace; do
+    for trial in 1 2 3 4 5; do
+      isolated_run env GITHUB_ACTIONS=true AVDT_EXPERIMENT_HOST_NETNS="$host_netns" \
+        AVDT_ISOLATED_EXPERIMENT=1 "$probe_client" "$work/$variant-server" "$variant" "$destination" \
+        >> "$work/evidence/pre-admission-probes.jsonl"
+    done
   done
 done
 python3 - "$work/evidence/pre-admission-probes.jsonl" <<'PY'
@@ -154,13 +181,22 @@ rows=[json.loads(line) for line in open(sys.argv[1])]
 for row in rows:
     if row['variant'].startswith('nat0'):
         assert row['probe_packets']==0 and row['received_add_address']==0, row
-control=[row for row in rows if row['variant']=='stock-delay']
-assert any(row['received_add_address']>0 for row in control), 'candidate positive control failed'
-assert any(row['probe_packets']>0 for row in control), 'probe positive control failed'
-for variant in ('stock','stock-delay','nat0','nat0-delay'):
-    group=[r for r in rows if r['variant']==variant]
-    print(variant, 'trials',len(group),'ADD_ADDRESS',sum(r['received_add_address'] for r in group),
-          'probe_packets',sum(r['probe_packets'] for r in group),'probe_bytes',sum(r['probe_udp_bytes'] for r in group))
+assert len(rows)==40, 'missing variant/destination trials'
+for destination in ('loopback','namespace'):
+    control=[row for row in rows if row['variant']=='stock-delay' and row['target_class']==destination]
+    assert any(row['received_add_address']>0 for row in control), 'candidate positive control failed'
+    assert any(row['probe_packets']>0 for row in control), 'probe positive control failed'
+    for variant in ('stock','stock-delay','nat0','nat0-delay'):
+        group=[r for r in rows if r['variant']==variant and r['target_class']==destination]
+        assert len(group)==5
+        for row in group:
+            assert row['issued_cid_length']==20 and row['issued_cids_hex']
+            for packet in row['captured_packets']:
+                assert packet['destination_cid_matches_issued']
+                assert packet['destination_cid_hex'] in row['issued_cids_hex']
+                assert bytes.fromhex(packet['udp_payload_hex'])[1:21].hex()==packet['destination_cid_hex']
+        print(variant, destination, 'trials',len(group),'ADD_ADDRESS',sum(r['received_add_address'] for r in group),
+              'probe_packets',sum(r['probe_packets'] for r in group),'probe_bytes',sum(r['probe_udp_bytes'] for r in group))
 PY
 
 # The same stock client and address-change/capture proof against the NAT0server.

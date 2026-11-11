@@ -1,3 +1,6 @@
+#[path = "support/idle_qualification.rs"]
+mod idle_qualification;
+
 use iroh::{
     Endpoint, EndpointAddr, RelayMode,
     endpoint::{Connection, PortmapperConfig, presets},

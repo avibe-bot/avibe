@@ -22,6 +22,8 @@ const ALPN: &str = "avibe-direct/1";
 const MAX_CONTROL_LINE: usize = 4096;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const NO_STREAM_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const TRANSPORT_IDLE_TIMEOUT_MS: u32 = 6_000;
+const TRANSPORT_KEEP_ALIVE: Duration = Duration::from_millis(1_500);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn close_code() -> VarInt {
@@ -412,6 +414,11 @@ async fn run(control: &Control) -> Result<()> {
         .receive_window(VarInt::from_u32(4 * 1024 * 1024))
         .send_window(4 * 1024 * 1024)
         .datagram_receive_buffer_size(None)
+        // Negotiate the idle timeout with an unmodified client. These are
+        // failure-detection/tolerance settings, not the no-open-stream policy.
+        .max_idle_timeout(Some(VarInt::from_u32(TRANSPORT_IDLE_TIMEOUT_MS).into()))
+        .keep_alive_interval(TRANSPORT_KEEP_ALIVE)
+        .default_path_keep_alive_interval(TRANSPORT_KEEP_ALIVE)
         // Stock iroh ignores values below eight: zero does NOT disable it.
         .max_remote_nat_traversal_addresses(8)
         .build();

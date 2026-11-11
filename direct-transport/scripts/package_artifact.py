@@ -42,10 +42,12 @@ def main():
         "release_build_seconds": int(os.environ["BUILD_SECONDS"]),
         "distribution": "workflow-artifact-only",
         "patched_dependencies": False,
+        "transport_liveness": {"idle_timeout_ms": 6000, "keep_alive_ms": 1500},
         "qualification": {
             "native_contract_tests": "passed",
             "resolved_feature_graph": "passed",
             "linux_static": "passed" if "linux" in target else "not-applicable",
+            "linux_idle_and_outage_tolerance": "passed" if "linux" in target else "not-applicable",
             "linux_traffic_and_address_changes": "passed" if "linux" in target else "not-applicable",
             "private_apple_datapath": "passed-with-positive-control" if "apple" in target else "not-applicable",
         },

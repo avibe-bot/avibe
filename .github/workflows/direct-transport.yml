@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes musl-tools tcpdump
+          sudo apt-get install --yes musl-tools tcpdump iproute2 iptables
           echo 'CC=musl-gcc' >> "$GITHUB_ENV"
           echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
           echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
@@ -79,6 +79,34 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release --target "${{ matrix.target }}" -- --test-threads=1
+
+      - name: Freeze stock client for Linux idle qualification
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          peer_exe=$(cargo test --locked --release --target "${{ matrix.target }}" --test transport --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "transport" and .executable != null) | .executable')
+          cp "$peer_exe" "$RUNNER_TEMP/stock-client-tests"
+          sha256sum "$RUNNER_TEMP/stock-client-tests" > "$RUNNER_TEMP/stock-client.sha256"
+
+      - name: Qualify Linux idle and outage tolerance
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          python3 scripts/idle-qualification/run.py \
+            --sidecar "target/${{ matrix.target }}/release/avibe-direct-transport" \
+            --peer-exe "$RUNNER_TEMP/stock-client-tests" --out "$RUNNER_TEMP/idle-qualification" \
+            --variant stock --idle-ms 6000 --keep-alive-ms 1500 --gate
+          sha256sum --check "$RUNNER_TEMP/stock-client.sha256"
+
+      - name: Upload Linux idle evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: idle-qualification-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/idle-qualification/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Qualify Linux traffic and interface changes
         if: runner.os == 'Linux'

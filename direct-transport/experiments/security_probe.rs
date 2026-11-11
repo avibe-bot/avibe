@@ -1,6 +1,6 @@
 //! Test-only client instrumentation for the isolated security experiment.
 //! The iroh methods used here are added only to a disposable vendored copy.
-//! All sockets/targets must be loopback inside a runner-owned network namespace.
+//! Targets are fixed, test-owned UDP listeners in an isolated CI namespace.
 use iroh::{
     Endpoint, EndpointAddr,
     endpoint::{AfterHandshakeOutcome, Connection, EndpointHooks, presets},
@@ -62,18 +62,34 @@ impl EndpointHooks for ProbeHook {
     }
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     assert_eq!(
         std::env::var("AVDT_ISOLATED_EXPERIMENT").as_deref(),
         Ok("1")
     );
+    assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+    assert_ne!(
+        std::fs::read_link("/proc/self/ns/net")
+            .unwrap()
+            .to_string_lossy(),
+        std::env::var("AVDT_EXPERIMENT_HOST_NETNS").unwrap()
+    );
     let binary = std::env::args().nth(1).expect("server path");
     let label = std::env::args().nth(2).expect("variant label");
+    let target_class = std::env::args().nth(3).expect("loopback or namespace");
+    let target_ip = match target_class.as_str() {
+        "loopback" => "127.0.0.1",
+        "namespace" => "192.168.245.2",
+        _ => panic!("only fixed test-owned destinations are allowed"),
+    };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let probe_listener = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let probe_listener = Arc::new(UdpSocket::bind((target_ip, 0)).await.unwrap());
     let target = probe_listener.local_addr().unwrap();
-    assert!(target.ip().is_loopback());
     let mut child = Command::new(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -111,6 +127,7 @@ async fn main() {
         .unwrap();
     let destination = std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), server_socket.port());
     let observations = Arc::new(Mutex::new(Observation::default()));
+    let issued_cids = iroh::avdt_experiment_cids::enable();
     let client = Endpoint::builder(presets::Minimal)
         .hooks(ProbeHook {
             target,
@@ -121,22 +138,37 @@ async fn main() {
         .unwrap();
     let probe_socket = probe_listener.clone();
     let expected_server_port = server_socket.port();
+    let captured_cids = issued_cids.clone();
     let counter = tokio::spawn(async move {
-        let mut sizes = Vec::new();
+        let mut packets = Vec::new();
         let mut buffer = [0u8; 65536];
         let until = tokio::time::Instant::now() + Duration::from_millis(1600);
         while let Ok(Ok((size, source))) =
             tokio::time::timeout_at(until, probe_socket.recv_from(&mut buffer)).await
         {
-            assert!(source.ip().is_loopback());
+            assert!(
+                source.ip().is_loopback()
+                    || matches!(
+                        source.ip().to_string().as_str(),
+                        "192.168.245.1" | "192.168.245.2"
+                    )
+            );
             assert_eq!(
                 source.port(),
                 expected_server_port,
                 "unexpected sender to test listener"
             );
-            sizes.push(size);
+            assert!(size >= 1 + 20 + 1 + 16, "truncated short-header packet");
+            assert_eq!(buffer[0] & 0x80, 0, "expected a QUIC short header");
+            // The destination CID is outside QUIC header protection. Do not
+            // pretend to decode the protected packet number or ciphertext.
+            let dcid = &buffer[1..21];
+            assert!(captured_cids.lock().unwrap().iter().any(|cid| cid == dcid));
+            packets.push(json!({"size":size,"source":source.to_string(),
+                "udp_payload_hex":hex(&buffer[..size]),"destination_cid_hex":hex(dcid),
+                "destination_cid_matches_issued":true}));
         }
-        sizes
+        packets
     });
     let started = Instant::now();
     let connected = timeout(
@@ -154,7 +186,17 @@ async fn main() {
         let _ = timeout(Duration::from_secs(2), connection.closed()).await;
     }
     let rejected_after_ms = started.elapsed().as_millis();
-    let sizes = counter.await.unwrap();
+    let packets = counter.await.unwrap();
+    let sizes: Vec<usize> = packets
+        .iter()
+        .map(|packet| packet["size"].as_u64().unwrap() as usize)
+        .collect();
+    let issued: Vec<String> = issued_cids
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|cid| hex(cid))
+        .collect();
     sleep(Duration::from_millis(20)).await;
     assert!(
         timeout(Duration::from_millis(100), listener.accept())
@@ -165,7 +207,9 @@ async fn main() {
     let observed = observations.lock().unwrap();
     println!(
         "{}",
-        json!({"variant":label,"connection_returned":connection_returned,
+        json!({"variant":label,"target_class":target_class,"target":target.to_string(),
+        "issued_cid_length":20,"issued_cids_hex":issued,"captured_packets":packets,
+        "connection_returned":connection_returned,
         "client_hook_ran":observed.hook_ran,"extension_available":observed.extension_available,
         "learned_address_count_at_client_hook":observed.learned_addresses,
         "received_add_address":observed.received_add_address,"sent_reach_out":observed.sent_reach_out,
