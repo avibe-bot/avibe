@@ -840,6 +840,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
       ] : []);
       const inline = [
         t('mcpHub.succeededCount', { count: succeeded }),
+        ...warnings,
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
         ...failedLines,
       ].filter(Boolean).join('\n');

@@ -656,6 +656,7 @@ class McpRuntime:
         try:
             definition = await asyncio.to_thread(mcp_scope.add_definition, name.name, item.get("server"), project=repository.is_project(name))
             async with self._lock(name):
+                retry = False
                 if not replace:
                     outcome = await asyncio.to_thread(self._existing_add, name, definition)
                     if outcome == "unchanged":
