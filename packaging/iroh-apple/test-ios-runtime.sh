@@ -86,7 +86,7 @@ set -e
 
 # A linker warning about a newer deployment target invalidates this result even
 # if xcodebuild happened to return zero.
-if grep -Eiq "was built for (a )?newer .*version .*than being linked|deployment target.{0,40}(higher|newer)" "$log_path"; then
+if grep -Eiq "was built for (a )?newer .*version .*than .*being linked|deployment target.{0,40}(higher|newer)" "$log_path"; then
   echo "iOS runtime test failed: newer deployment-target warning appeared in xcodebuild output" >&2
   status=1
 fi
