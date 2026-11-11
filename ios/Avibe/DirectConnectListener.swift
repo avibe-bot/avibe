@@ -274,8 +274,11 @@ actor DirectConnectListener {
                 connection.cancel()
                 return
             }
-            // Started here, inside the listener's own handler, as the
-            // listener expects of a connection it hands over.
+            // Keep this start inside the handler, and keep `acceptLocalOnly`
+            // off the parameters above. With the connection started after
+            // the handler returned and that flag set, the iOS simulator
+            // reset every accepted connection. Which of the two caused it
+            // was not established; macOS showed neither.
             connection.start(queue: queue)
             Task {
                 await self.accept(connection)
