@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -259,7 +260,13 @@ def test_trusted_prepare_rejects_wrong_run_or_digest_context(tmp_path, forge) ->
                                                  harness_sha256=HARNESS, baselines=BASELINES)
 
 
-# ----- released Avibe artifacts ----------------------------------------------
+def test_trusted_prepare_rejects_stale_released_avibe_role_context(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path))
+    result = _result(candidate)
+    result["avibe"]["current_stable"]["version"] = "3.2.6"
+    with pytest.raises(QualificationError, match="Avibe role context"):
+        qualification.verify_untrusted_rehearsal(result, candidate=candidate, api=GitHub(),
+                                                 harness_sha256=HARNESS, baselines=BASELINES)
 
 # ----- released Avibe artifacts ----------------------------------------------
 
@@ -924,6 +931,41 @@ def test_the_two_hosted_wire_modes_do_not_mix(arguments) -> None:
 
 
 
+def test_trusted_context_resolves_current_wheels_and_bundled_manifests_without_execution(tmp_path, monkeypatch) -> None:
+    wheels = {}
+    releases = {}
+    for version, build in (("3.2.6", 1), ("3.2.7", 2)):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr(qualification.PACKAGED_MANIFEST, manifest_bytes(build=build))
+        wheel = stream.getvalue()
+        wheels[version] = wheel
+        released = _released(version)
+        releases[version] = {
+            "tag_name": released.tag, "draft": False, "prerelease": False,
+            "assets": [{"name": released.wheel_name, "size": len(wheel),
+                        "digest": f"sha256:{hashlib.sha256(wheel).hexdigest()}",
+                        "browser_download_url": released.wheel_url}],
+        }
+
+    def api(path: str):
+        if path.endswith("/releases?per_page=100"):
+            return [{"tag_name": f"v{version}", "draft": False, "prerelease": False} for version in releases]
+        return releases[path.rsplit("/v", 1)[1]]
+
+    def download(url, destination, *, max_bytes):
+        version = url.rsplit("/v", 1)[1].split("/", 1)[0]
+        destination.write_bytes(wheels[version])
+        assert destination.stat().st_size <= max_bytes
+
+    monkeypatch.setattr("scripts.release_asset_download.download_to_path", download)
+    candidate = qualification.load_candidate(_record(tmp_path / "records"))
+    resolved = qualification.trusted_released_context(candidate, api=api, output_dir=tmp_path / "trusted")
+    assert {role: item.version for role, item in resolved.items()} == {"minimum": "3.2.6", "current_stable": "3.2.7"}
+    assert (tmp_path / "trusted" / "bundled-manifest-minimum.json").read_bytes() == manifest_bytes(build=1)
+    assert (tmp_path / "trusted" / "bundled-manifest-current_stable.json").read_bytes() == manifest_bytes(build=2)
+
+
 def test_released_context_skips_bundled_manifests_before_deserialization(tmp_path) -> None:
     released = tmp_path / "released"
     _write(released / "minimum.json", AVIBE["minimum"].__dict__)
@@ -932,6 +974,8 @@ def test_released_context_skips_bundled_manifests_before_deserialization(tmp_pat
     loaded = qualification._load_released_directory(released)
     assert set(loaded) == set(AVIBE)
 
+
+def test_untrusted_rehearsal_cli_assembles_the_real_artifact_paths(tmp_path) -> None:
     candidate_dir = _record(tmp_path / "records")
     candidate = qualification.load_candidate(candidate_dir)
     evidence_dir = tmp_path / "evidence"
@@ -1077,6 +1121,9 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     assert "rehearsal_run_id" in workflow[True]["workflow_dispatch"]["inputs"]
     assert workflow["jobs"]["prepare"]["name"] == "trusted prepare"
     assert "verify-untrusted-rehearsal" in text
+    assert "trusted-released-context" in text
+    assert "--released-dir" in text
+    assert "qualification-released-*" not in text
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "model-hub-engine-trusted-assets" in text
     assert "model-hub-engine-untrusted-assets" in text

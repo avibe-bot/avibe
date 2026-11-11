@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -689,6 +690,7 @@ def verify_untrusted_rehearsal(
     api: Callable[[str], Any],
     harness_sha256: str,
     baselines: Mapping[str, str],
+    avibe: Mapping[str, ReleasedAvibe] | None = None,
 ) -> None:
     """Validate trusted context and bytes; never authorize from rehearsal claims."""
 
@@ -703,6 +705,14 @@ def verify_untrusted_rehearsal(
         problems.append("the rehearsal used a different harness than the trusted checkout")
     if result.get("baselines") != dict(sorted(baselines.items())):
         problems.append("the rehearsal baseline context is stale or incomplete")
+    if avibe is None:
+        avibe = {
+            "minimum": resolve_released_avibe(candidate.min_avibe_version, api),
+            "current_stable": resolve_released_avibe(current_stable_avibe(api), api),
+        }
+    expected_avibe = {role: avibe[role].identity() for role in AVIBE_ROLES if role in avibe}
+    if result.get("avibe") != expected_avibe:
+        problems.append("the rehearsal Avibe role context is stale or incomplete")
     evidence = result.get("evidence")
     if not isinstance(evidence, list):
         problems.append("the rehearsal evidence is not a list")
@@ -1034,6 +1044,51 @@ def collect_evidence(directory: Path) -> list[dict[str, Any]]:
     return evidence
 
 
+def trusted_released_context(
+    candidate: Candidate,
+    *,
+    api: Callable[[str], Any],
+    output_dir: Path,
+) -> dict[str, ReleasedAvibe]:
+    """Resolve and inspect current released wheels without executing them.
+
+    This is the trusted prepare boundary's source for role identities and
+    bundled engine manifests. It reads only immutable GitHub release metadata
+    and wheel bytes, verifies the recorded size and SHA-256, and reads the
+    packaged manifest as ZIP data. It never installs, imports or runs a wheel.
+    """
+
+    from scripts.release_asset_download import download_to_path
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    versions = {
+        "minimum": candidate.min_avibe_version,
+        "current_stable": current_stable_avibe(api),
+    }
+    resolved: dict[str, ReleasedAvibe] = {}
+    with tempfile.TemporaryDirectory(dir=output_dir) as temporary:
+        wheel_dir = Path(temporary)
+        for role, version in versions.items():
+            released = resolve_released_avibe(version, api)
+            wheel = wheel_dir / released.wheel_name
+            download_to_path(released.wheel_url, wheel, max_bytes=released.wheel_size)
+            if not wheel.is_file() or wheel.stat().st_size != released.wheel_size:
+                raise QualificationError(f"{wheel.name} changed size after GitHub resolution")
+            if _sha256(wheel) != released.wheel_sha256:
+                raise QualificationError(f"{wheel.name} changed bytes after GitHub resolution")
+            manifest = bundled_engine_manifest(wheel)
+            try:
+                parse_release_manifest(manifest)
+            except EngineManifestError as exc:
+                raise QualificationError(f"{wheel.name} packages an invalid engine manifest") from exc
+            (output_dir / f"{role}.json").write_text(
+                json.dumps(released.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            (output_dir / f"bundled-manifest-{role}.json").write_bytes(manifest)
+            resolved[role] = released
+    return resolved
+
+
 def _load_released_directory(directory: Path) -> dict[str, ReleasedAvibe]:
     if not directory.is_dir():
         return {}
@@ -1145,6 +1200,11 @@ def _build_parser() -> argparse.ArgumentParser:
     rehearsal.add_argument("--require-pass", action="store_true", help="also fail when a test failed")
     rehearsal.add_argument("--output", type=Path, required=True)
 
+    trusted_context = command(
+        "trusted-released-context", "Resolve current released Avibe wheels and inspect their bundled manifests.", candidate=False
+    )
+    trusted_context.add_argument("--output-dir", type=Path, required=True)
+
     available = command("availability", "Require the release and its mirror to serve the candidate.")
     available.add_argument("--work-dir", type=Path, required=True)
 
@@ -1160,6 +1220,7 @@ def _build_parser() -> argparse.ArgumentParser:
     verify = command("verify-untrusted-rehearsal", "Check trusted run identity and bytes without authorizing promotion.")
     verify.add_argument("--baselines", type=Path, required=True, help="JSON object: release tag to manifest SHA-256")
     verify.add_argument("--rehearsal", type=Path, required=True)
+    verify.add_argument("--released-dir", type=Path, required=True)
     return parser
 
 
@@ -1206,6 +1267,13 @@ def main(argv: list[str] | None = None) -> int:
             result = build_evidence(args.candidate_dir, args.asset_dir)
         elif args.command == "availability":
             require_published(args.candidate_dir, args.work_dir)
+        elif args.command == "trusted-released-context":
+            result = {
+                role: released.identity()
+                for role, released in trusted_released_context(
+                    candidate, api=_api(token), output_dir=args.output_dir
+                ).items()
+            }
         elif args.command == "evidence-smoke":
             result = platform_smoke_evidence(args.candidate_dir, args.asset_dir, args.work_dir)
         elif args.command == "released-avibe":
@@ -1243,12 +1311,16 @@ def main(argv: list[str] | None = None) -> int:
                     harness_sha256=harness_digest(),
                 )
             else:
+                trusted_avibe = _load_released_directory(args.released_dir)
+                if set(trusted_avibe) != set(AVIBE_ROLES):
+                    raise QualificationError("trusted released Avibe context is missing a role")
                 verify_untrusted_rehearsal(
                     _read_json(args.rehearsal),
                     candidate=candidate,
                     api=_api(token),
                     harness_sha256=harness_digest(),
                     baselines=baselines,
+                    avibe=trusted_avibe,
                 )
                 result = {"ok": True, "result": RESULT_NAME, **candidate.identity()}
         if getattr(args, "output", None) is not None:

@@ -139,8 +139,6 @@ jobs:
             --name model-hub-engine-untrusted-rehearsal --dir "$RUNNER_TEMP/rehearsal"
           gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name model-hub-engine-untrusted-assets --dir "$RUNNER_TEMP/untrusted-assets"
-          gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'qualification-released-*' --dir "$RUNNER_TEMP/released" || true
           test "$(jq -er .run_id "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json")" = "$REHEARSAL_RUN_ID"
 
       # This job is the trusted read/prepare boundary. It never imports,
@@ -155,16 +153,20 @@ jobs:
         run: |
           set -euo pipefail
           candidate_dir="patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
+          python3 scripts/model_hub_engine_qualification.py trusted-released-context \
+            --candidate-dir "$candidate_dir" \
+            --output-dir "$RUNNER_TEMP/trusted-released"
           avault="$(python3 scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
           args=(--avault "$avault" --output-dir "$RUNNER_TEMP/baselines")
           while IFS= read -r -d '' manifest; do
             args+=(--bundled "$manifest")
-          done < <(find "$RUNNER_TEMP/released" -name 'bundled-manifest-*.json' -print0 2>/dev/null || true)
+          done < <(find "$RUNNER_TEMP/trusted-released" -name 'bundled-manifest-*.json' -print0)
           mkdir -p "$RUNNER_TEMP/baselines"
           python3 scripts/model_hub_engine_channel.py baselines "${args[@]}"
           python3 scripts/model_hub_engine_qualification.py verify-untrusted-rehearsal \
             --candidate-dir "$candidate_dir" \
             --rehearsal "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json" \
+            --released-dir "$RUNNER_TEMP/trusted-released" \
             --baselines "$RUNNER_TEMP/baselines/baselines.json"
           python3 scripts/model_hub_engine_qualification.py evidence-build \
             --candidate-dir "$candidate_dir" \

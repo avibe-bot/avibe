@@ -651,10 +651,13 @@ candidate assertions are not proof against a malicious candidate.
 
 A separate trusted prepare job in the publication workflow checks the exact
 rehearsal run on `master`, the current candidate record, source reference,
-manifest and archive digests, baseline context, and run identity. It uses a
-fixed checkout, bounded JSON parsing and a separate trusted-checked artifact
-namespace. It never executes candidate code, imports uploaded modules, or
-uses uploaded executables as trusted inputs. The owner sees this summary and
+manifest and archive digests, baseline context, and run identity. It independently
+resolves the current minimum and stable Avibe releases, verifies their immutable
+wheel sizes and SHA-256 digests, and reads their packaged manifests as ZIP data;
+it does not trust released-role or bundled-manifest files from the rehearsal
+artifact. It uses a fixed checkout, bounded JSON parsing and a separate
+trusted-checked artifact namespace. It never executes candidate code, imports
+uploaded modules or wheels, or uses uploaded executables as trusted inputs. The owner sees this summary and
 explicitly approves each publication or promotion for that exact run and
 manifest/archive digest through the existing protected environments. Owner
 authorization, not the rehearsal result, is the promotion authority.

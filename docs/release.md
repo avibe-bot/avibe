@@ -289,9 +289,13 @@ Nothing regenerates the index from the list of GitHub releases, and
 The trusted prepare job verifies the workflow run is the intended dispatch on
 `master`, the run attempt and commit, the current reviewed candidate, the
 upstream source reference, exact manifest/archive digests, minimum Avibe and
-the concrete baseline context. It never executes candidate code, imports
-uploaded modules, or accepts an uploaded executable as trusted input. Runtime
-pass/fail assertions remain explicitly untrusted. The job split protects the
+the concrete baseline context. It independently resolves the current minimum
+and stable Avibe releases, verifies immutable wheel sizes and SHA-256 digests,
+and reads their packaged manifests as ZIP data; it does not trust released-role
+or bundled-manifest files from the rehearsal artifact. It never executes
+candidate code, imports uploaded modules or wheels, or accepts an uploaded
+executable as trusted input. Runtime pass/fail assertions remain explicitly
+untrusted. The job split protects the
 trusted workflow and privileged credentials; it does not prove that a
 malicious candidate reported honestly. A future stronger receipt or
 malicious-candidate-resistant provenance requires a new product/owner decision.
