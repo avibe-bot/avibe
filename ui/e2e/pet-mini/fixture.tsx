@@ -50,6 +50,7 @@ declare global {
     petFixtureFinishTurn: (result: Record<string, unknown>) => void;
     petFixtureReleaseExpansion: () => void;
     petFixtureRead: (id: string) => void;
+    petFixtureUpdateMessage: (id: string, update: Record<string, unknown>) => void;
     petFixtureResolveVault: () => void;
   }
 }
@@ -214,6 +215,14 @@ window.petFixtureMessage = (message) => {
   };
   for (const stream of streams) {
     stream.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data }) }));
+  }
+};
+window.petFixtureUpdateMessage = (id, update) => {
+  const row = messages.find((message) => message.id === id);
+  if (!row) throw new Error(`Missing fixture message ${id}`);
+  Object.assign(row, update);
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('message.updated', { data: JSON.stringify({ type: 'message.updated', data: row }) }));
   }
 };
 window.petFixtureRead = (id) => {
