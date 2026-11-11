@@ -17,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from _github_wait_common import (  # noqa: E402
+    AUTHENTICATION_HINT,
     filter_new,
     get_authenticated_login,
     get_token,
@@ -210,8 +211,8 @@ def main() -> int:
         print(
             (
                 "GitHub authentication is required for reliable polling. "
-                "Set GITHUB_TOKEN/GH_TOKEN, run 'gh auth login', or pass "
-                "--allow-unauthenticated for a throttled best-effort run."
+                f"{AUTHENTICATION_HINT} "
+                "Or pass --allow-unauthenticated for a throttled best-effort run."
             ),
             file=sys.stderr,
         )
@@ -363,8 +364,7 @@ def main() -> int:
             if token is None and err.code in {403, 429}:
                 print(
                     (
-                        "GitHub unauthenticated polling hit a rate limit. "
-                        "Authenticate with 'gh auth login' or GITHUB_TOKEN/GH_TOKEN."
+                        f"GitHub unauthenticated polling hit a rate limit. {AUTHENTICATION_HINT}"
                     ),
                     file=sys.stderr,
                 )

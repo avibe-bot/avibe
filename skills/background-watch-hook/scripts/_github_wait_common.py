@@ -45,6 +45,15 @@ LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
 # this to size a request budget: a waiter with 20s left cannot afford a fetch that
 # is allowed to block for 30.
 REQUEST_TIMEOUT_SECONDS = 30
+# How to authenticate, for every waiter's refusal. On macOS the GitHub CLI keeps
+# its token in the Keychain, which an Avibe running outside the user's desktop
+# session cannot read: `gh` then reports the token as invalid and no token is
+# found here, although nothing is wrong with the sign-in. So the session is
+# checked before anyone is told to sign in again.
+AUTHENTICATION_HINT = (
+    "Set GITHUB_TOKEN/GH_TOKEN or run 'gh auth login'. On macOS, run 'vibe doctor' first: "
+    "if it reports a login-session warning, repair that instead, because signing in again does not help."
+)
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 INITIAL_REQUEST_MAX_ATTEMPTS = 3
 INITIAL_REQUEST_BACKOFF_SECONDS = 1.0
@@ -118,8 +127,7 @@ def _classify_github_exception(
         reason = str(err.reason)
         if unauthenticated and code in {403, 429}:
             return GitHubTerminalError(
-                "GitHub unauthenticated polling hit a rate limit; authenticate with "
-                "'gh auth login' or GITHUB_TOKEN/GH_TOKEN",
+                f"GitHub unauthenticated polling hit a rate limit. {AUTHENTICATION_HINT}",
                 status_code=code,
             )
         error_type = GitHubTransientError if code in RETRYABLE_HTTP_STATUS_CODES else GitHubTerminalError
