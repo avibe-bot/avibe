@@ -120,7 +120,7 @@
   {
     "id": "volcengine",
     "label": "Volcengine Ark",
-    "label_zh": "火山方舟（豆包）",
+    "label_zh": "火山方舟·豆包",
     "region": "cn",
     "official_base_url": "https://ark.cn-beijing.volces.com/api/v3",
     "protocol": "openai_chat",
