@@ -642,6 +642,8 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
     project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
     target_phases = project.split("buildPhases = (", 1)[1].split(");", 1)[0]
     assert target_phases.index("Verify Mobile App Bundle") < target_phases.index("Sources")
+    # User script sandboxing lets the phase read only its declared inputs.
+    assert '"$(SRCROOT)/Avibe/Resources/MobileApp/licenses.json",' in project
     assert (
         'shellScript = "AVIBE_MOBILE_BUNDLE_EXISTENCE_ONLY=1 '
         '/bin/sh \\"$SRCROOT/scripts/verify_mobile_bundle.sh\\"'
