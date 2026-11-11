@@ -1,0 +1,247 @@
+diff -ruN a/src/connection/mod.rs b/src/connection/mod.rs
+--- a/src/connection/mod.rs
++++ b/src/connection/mod.rs
+@@ -6950,6 +6950,23 @@
+         }
+     }
+ 
++    /// Queues a REACH_OUT frame for transmission without consulting the NAT traversal state.
++    ///
++    /// A well-behaved endpoint only queues this frame in
++    /// [`Self::initiate_nat_traversal_round`], which refuses unless the extension was
++    /// negotiated. Tests use this to act as a peer that sends the frame regardless.
++    #[cfg(test)]
++    pub(crate) fn queue_reach_out_unchecked(&mut self, round: u32, address: SocketAddr) {
++        self.spaces[SpaceId::Data]
++            .pending
++            .reach_out
++            .push(frame::ReachOut {
++                round: VarInt::from_u32(round),
++                ip: address.ip(),
++                port: address.port(),
++            });
++    }
++
+     /// Simulates a protocol violation error for test purposes.
+     #[cfg(test)]
+     pub fn simulate_protocol_violation(&mut self, now: Instant) {
+diff -ruN a/src/tests/mod.rs b/src/tests/mod.rs
+--- a/src/tests/mod.rs
++++ b/src/tests/mod.rs
+@@ -59,6 +59,7 @@
+ mod proptests;
+ #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+ mod random_interaction;
++mod reach_out_not_negotiated;
+ mod token;
+ 
+ #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+diff -ruN a/src/tests/reach_out_not_negotiated.rs b/src/tests/reach_out_not_negotiated.rs
+--- a/src/tests/reach_out_not_negotiated.rs
++++ b/src/tests/reach_out_not_negotiated.rs
+@@ -0,0 +1,205 @@
++//! A peer sends REACH_OUT to a server that did not negotiate n0's NAT traversal.
++//!
++//! The frame names an address and asks the server to send a UDP probe to it. A server
++//! that left the extension off must treat the frame as a protocol violation and must not
++//! send anything to the named address.
++
++use alloc::vec::Vec;
++use core::net::SocketAddr;
++
++use tracing::info;
++
++use crate::{ConnectionError, Event, Side, TransportErrorCode};
++
++use super::util::{ConnPair, Inbound, subscribe};
++
++/// What one run of [`reach_out_from_client`] left behind.
++struct Outcome {
++    pair: ConnPair,
++    /// The client's address, the only peer address the server has a reason to send to.
++    client_addr: SocketAddr,
++    /// Destination of every datagram the server produced after the frame was queued.
++    server_destinations: Vec<SocketAddr>,
++    /// REACH_OUT frames the client wrote into packets.
++    reach_out_sent: u64,
++    /// REACH_OUT frames the server decrypted and parsed.
++    reach_out_received: u64,
++    /// PATH_CHALLENGE frames the server wrote. Every NAT traversal probe carries one.
++    path_challenges_sent: u64,
++}
++
++/// Runs the pair like `Pair::drive`, but takes the server's datagrams off its outbound queue
++/// by hand, so that the destination of every one of them is seen.
++///
++/// Datagrams addressed to the client are delivered. Any other has no route and is dropped,
++/// which is what `BasicRouting` does too.
++fn drive_recording_server_tx(pair: &mut ConnPair, max_steps: usize) -> Vec<SocketAddr> {
++    let (client_addr, server_addr) = {
++        let routes = pair.routes.as_basic();
++        (routes.client_addr, routes.server_addr)
++    };
++    let mut destinations = Vec::new();
++    for _ in 0..max_steps {
++        pair.drive_client();
++        let now = pair.time;
++        pair.server.drive(now);
++        let outbound: Vec<_> = pair.server.outbound.drain(..).collect();
++        for (transmit, datagram) in outbound {
++            destinations.push(transmit.destination);
++            if transmit.destination == client_addr {
++                pair.client.inbound.push(
++                    now,
++                    Inbound {
++                        ecn: transmit.ecn,
++                        packet: datagram.as_ref().into(),
++                        remote: server_addr,
++                        dst_ip: Some(client_addr.ip()),
++                    },
++                );
++            }
++        }
++        let quiet = pair.client.is_idle()
++            && pair.server.is_idle()
++            && pair.client.inbound.is_empty()
++            && pair.server.inbound.is_empty();
++        if quiet || !pair.advance_time() {
++            break;
++        }
++    }
++    destinations
++}
++
++/// Connects a pair, has the client send one REACH_OUT naming `target`, and drives the pair.
++///
++/// The client always offers multipath and NAT traversal. The server offers multipath, and
++/// NAT traversal only if `server_nat_traversal` is set. The client queues the frame without
++/// asking whether the extension was negotiated, then encrypts and sends it as it would any
++/// other frame, and the server receives the datagram through its endpoint.
++fn reach_out_from_client(
++    server_nat_traversal: bool,
++    target: SocketAddr,
++    max_steps: usize,
++) -> Outcome {
++    let mut builder = ConnPair::builder().enable_multipath();
++    builder
++        .client_transport_cfg
++        .max_remote_nat_traversal_addresses(8);
++    if server_nat_traversal {
++        builder
++            .server_transport_cfg
++            .max_remote_nat_traversal_addresses(8);
++    }
++    builder.client_endpoint_cfg.rng_seed(Some([0xc1; 32]));
++    builder.server_endpoint_cfg.rng_seed(Some([0x5e; 32]));
++    let mut pair = builder.connect();
++
++    assert!(pair.is_multipath_negotiated(Side::Server));
++    assert_eq!(
++        pair.get_local_nat_traversal_addresses(Side::Server).is_ok(),
++        server_nat_traversal,
++        "the server's NAT traversal state must follow its own configuration"
++    );
++    let client_addr = pair.routes.as_basic().client_addr;
++    assert_ne!(target, client_addr);
++
++    let client_before = pair.stats(Side::Client);
++    let server_before = pair.stats(Side::Server);
++
++    pair.conn_mut(Side::Client)
++        .queue_reach_out_unchecked(1, target);
++    let server_destinations = drive_recording_server_tx(&mut pair, max_steps);
++
++    let client_after = pair.stats(Side::Client);
++    let server_after = pair.stats(Side::Server);
++    Outcome {
++        pair,
++        client_addr,
++        server_destinations,
++        reach_out_sent: client_after.frame_tx.reach_out - client_before.frame_tx.reach_out,
++        reach_out_received: server_after.frame_rx.reach_out - server_before.frame_rx.reach_out,
++        path_challenges_sent: server_after.frame_tx.path_challenge
++            - server_before.frame_tx.path_challenge,
++    }
++}
++
++/// Drains the events of one side and returns why its connection was lost, if it was.
++fn connection_lost(pair: &mut ConnPair, side: Side) -> Option<ConnectionError> {
++    let mut lost = None;
++    while let Some(event) = pair.poll(side) {
++        if let Event::ConnectionLost { reason } = event {
++            lost = Some(reason);
++        }
++    }
++    lost
++}
++
++#[test]
++fn hostile_reach_out_is_rejected_without_probe() {
++    let _guard = subscribe();
++    let target: SocketAddr = "[::3:1]:4433".parse().unwrap();
++
++    // Control: a server that negotiated NAT traversal obeys the same frame and probes the
++    // address. This shows that the frame arrives intact and that a probe, when one is sent,
++    // appears in what the assertions below look at.
++    info!("control run: the server negotiated NAT traversal");
++    let control = reach_out_from_client(true, target, 8);
++    assert!(control.reach_out_received >= 1);
++    assert!(
++        control.server_destinations.contains(&target),
++        "control server sent no datagram to the named address: {:?}",
++        control.server_destinations
++    );
++    assert!(control.path_challenges_sent >= 1);
++    assert!(!control.pair.is_closed(Side::Server));
++
++    // The case under test: the server left NAT traversal off.
++    info!("run under test: the server has NAT traversal off");
++    let mut hostile = reach_out_from_client(false, target, 64);
++    assert!(
++        hostile.reach_out_sent >= 1,
++        "the client never put the REACH_OUT frame into a packet"
++    );
++    assert!(
++        hostile.reach_out_received >= 1,
++        "the server never decrypted and parsed the REACH_OUT frame"
++    );
++
++    // The server closed the connection with PROTOCOL_VIOLATION, and for this frame.
++    match connection_lost(&mut hostile.pair, Side::Server) {
++        Some(ConnectionError::TransportError(error)) => {
++            assert_eq!(error.code, TransportErrorCode::PROTOCOL_VIOLATION);
++            assert!(
++                error.reason.contains("REACH_OUT") && error.reason.contains("not negotiated"),
++                "closed for a different reason: {}",
++                error.reason
++            );
++        }
++        other => panic!("server did not close with a transport error: {other:?}"),
++    }
++
++    // The client read the same error code from the CONNECTION_CLOSE frame it received.
++    match connection_lost(&mut hostile.pair, Side::Client) {
++        Some(ConnectionError::ConnectionClosed(close)) => {
++            assert_eq!(close.error_code, TransportErrorCode::PROTOCOL_VIOLATION);
++        }
++        other => panic!("client was not closed by the server: {other:?}"),
++    }
++
++    // No probe: from the moment the frame was queued until the server's connection was
++    // drained, every datagram the server produced went to the client.
++    assert!(
++        hostile.pair.is_drained(Side::Server),
++        "the run ended before the server's connection was drained"
++    );
++    assert!(
++        !hostile.server_destinations.is_empty(),
++        "the server produced no datagram at all, not even the CONNECTION_CLOSE"
++    );
++    for destination in &hostile.server_destinations {
++        assert_eq!(
++            *destination, hostile.client_addr,
++            "the server sent a datagram to an address other than the client"
++        );
++    }
++    assert_eq!(hostile.path_challenges_sent, 0);
++}

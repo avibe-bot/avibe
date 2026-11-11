@@ -29,7 +29,7 @@ The crate is top-level because it is an independently built, managed native runt
 | Unidirectional streams / datagrams | Disabled |
 | Stock remote NAT address cap | 8 per round (not a per-second or per-connection probe cap) |
 
-Over-budget incoming handshakes are silently ignored before application handshake work. Source addresses are accounting keys only; they are not an identity/admission prefilter. The counter does not claim to bound noq's internal incoming queue or frames processed within a handshake.
+Over-budget incoming handshakes are silently ignored before application handshake work. Stateless QUIC Retry validates the source before it can consume a bucket or occupy a pending-handshake slot; normal native tests exercise this path. Source addresses are accounting keys only; they are not an identity/admission prefilter. The counter does not claim to bound noq's internal incoming queue or frames processed within a handshake.
 
 ## Dependencies and network surface
 
@@ -56,11 +56,15 @@ Each platform produces one archive, SHA-256 file, and manifest recording binary 
 
 Native tests exercise exact header identity/token, both half-close orders, refusal without a round trip, expiry, refresh, revoke-then-readd, stream credit, listener errors, wrong ALPN, malformed/oversized input, `stop` with an open stdin, and EOF/socket cleanup. Admission and handshake accounting also have deterministic unit tests.
 
+On both Linux targets, a disposable network namespace captures every interface without a capture filter. A separate empty sink namespace provides default routes so unexpected public-service traffic is observable rather than failing before a send. The checker correlates source ports with process-owned sockets, reassembles the exact loopback header and payload, rejects unrelated UDP/TCP (including DNS), and verifies capture canaries, complete records, and zero kernel drops. It adds/removes synthetic private IPv4/global IPv6 addresses and dials newly added addresses through the still-running endpoint. Offline positive/negative tests exercise the capture policy.
+
 ### Advisory NAT-disabled experiment
 
 The separate, non-gating/non-shipping Linux job first builds a stock-client test executable. It then vendors pinned dependencies in disposable runner storage, applies [`iroh-1.4.1-allow-nat-zero.patch`](experiments/iroh-1.4.1-allow-nat-zero.patch), updates that vendored file's checksum, and builds only a separate experimental server with NAT cap zero. The prebuilt stock client (hash checked unchanged) runs the same admission/stream tests and dead/live address-family candidate tests against it in an isolated network namespace. The job uploads evidence only, never a binary.
 
-The patch only allows zero through iroh's wrapper; noq already interprets zero as extension disabled. It is **not used by any packaged binary**. Owner approval is required before any proposal to carry it in a shipping dependency. Additional hostile-frame, stock pre-admission packet-count, interface-change, and current-path-loss evidence is still being developed; the PR is not yet ready for approval.
+The patch only allows zero through iroh's wrapper; noq already interprets zero as extension disabled. It is **not used by any packaged binary**. Owner approval is required before any proposal to carry it in a shipping dependency.
+
+The advisory job also measures path blackholing through a test-owned loopback proxy; runs a separate encrypted hostile-REACH_OUT test with a NAT-enabled positive control; and compares candidate/probe counts for unadmitted peers under immediate and deliberately delayed rejection. That last probe client uses test-only wrappers around existing noq APIs, names only its own loopback listener, and is explicitly distinct from the unmodified interoperability client. The delayed hook, wrappers, and hostile-frame injection are generated/applied only in disposable CI source copies. None changes the production crate or its dependency lock. Results are evidence, not a release decision; the PR is not ready for approval until the remaining security choice is made.
 
 On a pin bump, recheck wrapper/negotiation semantics, candidate fan-out, hostile unnegotiated frames, native graph/binary checks, admission ordering, address changes, and migration/roaming. Without NAT traversal a new dial can use supplied alternate addresses, but an existing connection cannot assume it will switch to another candidate. Ordinary QUIC source-address validation remains a distinct surface, including a source-read concern about off-path padded responses; this patch is not a claim of zero UDP reflection.
 

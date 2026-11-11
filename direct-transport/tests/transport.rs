@@ -159,13 +159,23 @@ async fn client() -> Endpoint {
 
 async fn connect(sidecar: &mut Sidecar, endpoint: &Endpoint, ttl: u64) -> Connection {
     sidecar.admit(endpoint, ttl).await;
-    // There is intentionally no acknowledgement/barrier in the protocol. Give
-    // the pipe reader a scheduling turn; production clients retry a raced dial.
-    sleep(Duration::from_millis(30)).await;
-    timeout(WAIT, endpoint.connect(dial_address(&sidecar.ready), ALPN))
-        .await
-        .unwrap()
-        .unwrap()
+    // No acknowledgement/barrier exists. Retry a dial that loses the control
+    // pipe race, just as the App does, rather than treating a sleep as a barrier.
+    for _ in 0..3 {
+        if let Ok(connection) = timeout(WAIT, endpoint.connect(dial_address(&sidecar.ready), ALPN))
+            .await
+            .unwrap()
+        {
+            if timeout(Duration::from_millis(50), connection.closed())
+                .await
+                .is_err()
+            {
+                return connection;
+            }
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("admitted peer was repeatedly refused");
 }
 
 async fn listener() -> TcpListener {
@@ -224,7 +234,6 @@ async fn admitted_stream_forwards_bytes_and_half_closes() {
                     .iter()
                     .any(|s| dial_ips.contains(&s.ip()))
                 {
-                    sidecar.ready["addresses"] = message["addresses"].clone();
                     changed_addresses = message;
                     break;
                 }
@@ -527,6 +536,67 @@ async fn eof_exits_and_releases_udp_sockets_and_live_tcp() {
                 .expect("sidecar left UDP socket open");
         }
     }
+    client.close().await;
+}
+
+// Deliberate transport blackhole, confined to loopback. The UDP proxy remains
+// bound after forwarding stops, so ICMP port-unreachable does not short-circuit
+// the actual transport timeout. No process or external network is killed.
+#[tokio::test]
+#[ignore = "run in isolated NAT-disabled experiment"]
+async fn active_path_blackhole_timeout() {
+    let listener = listener().await;
+    let mut sidecar = Sidecar::start(listener.local_addr().unwrap()).await;
+    let client = client().await;
+    sidecar.admit(&client, 300).await;
+    sleep(Duration::from_millis(30)).await;
+    let server = *dial_address(&sidecar.ready).ip_addrs().next().unwrap();
+    let proxy = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let socket = proxy.clone();
+    let forwarding = tokio::spawn(async move {
+        let mut peer = None;
+        let mut buffer = vec![0; 65536];
+        loop {
+            let (size, source) = socket.recv_from(&mut buffer).await.unwrap();
+            if source == server {
+                if let Some(peer) = peer {
+                    socket.send_to(&buffer[..size], peer).await.unwrap();
+                }
+            } else {
+                assert!(source.ip().is_loopback());
+                peer = Some(source);
+                socket.send_to(&buffer[..size], server).await.unwrap();
+            }
+        }
+    });
+    let address = EndpointAddr::new(
+        sidecar.ready["endpoint_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap(),
+    )
+    .with_ip_addr(proxy.local_addr().unwrap());
+    let connection = timeout(WAIT, client.connect(address, ALPN))
+        .await
+        .unwrap()
+        .unwrap();
+    let (mut send, _recv) = open(&connection).await;
+    send.write_all(b"live path").await.unwrap();
+    let _tcp = accept_header(&listener, &client).await;
+    assert_eq!(connection.stats().frame_rx.add_address, 0);
+    forwarding.abort();
+    let _ = forwarding.await;
+    let started = std::time::Instant::now();
+    let error = timeout(Duration::from_secs(45), connection.closed())
+        .await
+        .expect("blackholed connection stayed live past 45 seconds");
+    eprintln!(
+        "path-loss experiment close_ms={} error={error}",
+        started.elapsed().as_millis()
+    );
+    drop(proxy);
+    sidecar.stop().await;
     client.close().await;
 }
 

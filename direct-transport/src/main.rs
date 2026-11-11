@@ -235,7 +235,7 @@ async fn run_control_reader<R: AsyncRead + Unpin>(mut reader: R, control: Contro
                 ttl_seconds,
             })) => {
                 if !valid_endpoint_id(&endpoint_id) {
-                    control.fatal(SidecarError("invalid_endpoint_id")).await;
+                    control.fail(SidecarError("invalid_endpoint_id")).await;
                     return;
                 }
                 control.admissions.update(endpoint_id, ttl_seconds);
@@ -245,11 +245,11 @@ async fn run_control_reader<R: AsyncRead + Unpin>(mut reader: R, control: Contro
                 return;
             }
             Ok(Some(Command::Start { .. })) => {
-                control.fatal(SidecarError("start_must_be_first")).await;
+                control.fail(SidecarError("start_must_be_first")).await;
                 return;
             }
             Err(error) => {
-                control.fatal(error).await;
+                control.fail(error).await;
                 return;
             }
         }
@@ -390,6 +390,9 @@ async fn handle_connection(
             }
         }
     }
+    if reason == "connection_closed" && !control.admissions.allows_connection(&connection) {
+        reason = "admission_ended";
+    }
     connection.close(close_code(), reason.as_bytes());
     stream_tasks.abort_all();
     while stream_tasks.join_next().await.is_some() {}
@@ -451,20 +454,34 @@ async fn run(control: &Control) -> Result<()> {
         tokio::select! {
             biased;
             _ = control.stop.wait() => break,
+            // Drain finished tasks before more arrivals, so an inbound flood
+            // cannot retain an unbounded backlog of completed JoinSet entries.
+            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => {},
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else {
                     control.fail(SidecarError("endpoint_closed")).await;
                     break;
                 };
+                // Stateless Retry verifies the source before it can consume a
+                // source bucket or hold a pending-handshake slot with a spoofed IP.
+                if !incoming.remote_addr_validated() {
+                    let _ = incoming.retry();
+                    continue;
+                }
                 let Ok(permit) = connection_limit.clone().try_acquire_owned() else { incoming.ignore(); continue; };
                 let IncomingAddr::Ip(source) = incoming.remote_addr() else { incoming.ignore(); continue; };
                 let Some(handshake_permit) = handshake_limit.acquire(source.ip()) else { incoming.ignore(); continue; };
                 connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), permit, Arc::clone(&config)));
             }
-            _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => {},
         }
     }
     control.stop.stop();
+    // Let each handler close QUIC before dropping its streams; only unresponsive
+    // handlers are aborted, rather than turning truncated streams into FINs.
+    let _ = time::timeout(IO_TIMEOUT, async {
+        while connection_tasks.join_next().await.is_some() {}
+    })
+    .await;
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;

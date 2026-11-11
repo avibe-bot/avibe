@@ -8,6 +8,7 @@ import platform
 import subprocess
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 
 
@@ -28,6 +29,8 @@ def main():
         "version": "0.1.0",
         "target": target,
         "source_sha": os.environ["GITHUB_SHA"],
+        "pull_request_head_sha": os.environ["SOURCE_HEAD_SHA"],
+        "direct_dependencies": tomllib.loads(Path("Cargo.toml").read_text())["dependencies"],
         "binary": binary.name,
         "binary_sha256": sha(binary),
         "binary_bytes": binary.stat().st_size,
@@ -43,6 +46,7 @@ def main():
             "native_contract_tests": "passed",
             "resolved_feature_graph": "passed",
             "linux_static": "passed" if "linux" in target else "not-applicable",
+            "linux_traffic_and_address_changes": "passed" if "linux" in target else "not-applicable",
             "private_apple_datapath": "passed-with-positive-control" if "apple" in target else "not-applicable",
         },
     }

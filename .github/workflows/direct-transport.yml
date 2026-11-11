@@ -13,6 +13,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.91.0
+  SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   build-test-package:
@@ -52,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes musl-tools
+          sudo apt-get install --yes musl-tools tcpdump
           echo 'CC=musl-gcc' >> "$GITHUB_ENV"
           echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
           echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
@@ -78,6 +79,27 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release --target "${{ matrix.target }}" -- --test-threads=1
+
+      - name: Qualify Linux traffic and interface changes
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          python3 scripts/network-qualification/test_capture_policy.py
+          peer_exe=$(cargo test --locked --release --target "${{ matrix.target }}" --test transport --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "transport" and .executable != null) | .executable')
+          bash scripts/network-qualification/run-network-qualification.sh \
+            --sidecar "target/${{ matrix.target }}/release/avibe-direct-transport" \
+            --peer-exe "$peer_exe" --out "$RUNNER_TEMP/network-qualification" \
+            --app-payload from-app --instance-payload from-instance
+
+      - name: Upload Linux network evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: network-qualification-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/network-qualification/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Check Linux binary is static
         if: runner.os == 'Linux'
@@ -126,6 +148,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Install experiment tools
+        run: sudo apt-get update && sudo apt-get install --yes tcpdump
       - name: Test stock client against separately patched server
         working-directory: direct-transport
         run: bash scripts/experiment-nat-disabled.sh
