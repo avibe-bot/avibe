@@ -861,6 +861,12 @@
   font-size: var(--model-hub-add-key-strip-title-size);
   line-height: 1.5;
 }
+/* Detection's line under the format choice: a hint that may carry its state's icon. */
+.model-hub-add-key-protocol-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .model-hub-add-key-protocol-area {
   display: flex;
   width: 100%;

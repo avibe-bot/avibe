@@ -787,6 +787,16 @@ start the model-output stream.
 | `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
+**Request-private unlisted-model 503 ruling (owner 2026-11-12, Part 3).** A literal
+HTTP 503 classified as `server_error` for the actual upstream model sent after
+Hub admission, when that model is absent from the admitted Hub Source inventory,
+does not write shared Source health or cooldown. The same request carries the
+existing server-error recovery window, backoff, and validated `Retry-After`
+advice in private Source-id state. Inventory membership is frozen at admission.
+Listed-model 503s, other statuses, global blockers, and exact HTTP 200 buffered
+overload retain the shared behavior above and below; no model-keyed or persisted
+state is added.
+
 The engine answers its own failed upstream connection or read, before any upstream
 response, with one of exactly two JSON error bodies, both produced by the pinned
 engine's error writers: the Anthropic form

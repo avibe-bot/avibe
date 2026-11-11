@@ -1,0 +1,26 @@
+{
+  "aud_origin": "https://avibe.bot",
+  "exp": 1795043200,
+  "registration_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "requests": [
+    {
+      "body_utf8": "{\"badge\":0}",
+      "headers": {
+        "authorization": "vapid t=eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2F2aWJlLmJvdCIsImV4cCI6MTc5NTA0MzIwMCwic3ViIjoibWFpbHRvOm5vdGlmaWNhdGlvbnNAYXZpYmUuYm90In0.3CumQMyZ74DkdDHzfhv8it3N10AiAPeD4Bkg92t9XeI4rNRPIi7LyCPyimp5SEYHDOY4hZwo6Cddfw6bsYu6kw,k=BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/api/push/apns/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/badge"
+    },
+    {
+      "body_utf8": "{\"badge\":7}",
+      "headers": {
+        "authorization": "vapid t=eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2F2aWJlLmJvdCIsImV4cCI6MTc5NTA0MzIwMCwic3ViIjoibWFpbHRvOm5vdGlmaWNhdGlvbnNAYXZpYmUuYm90In0.3CumQMyZ74DkdDHzfhv8it3N10AiAPeD4Bkg92t9XeI4rNRPIi7LyCPyimp5SEYHDOY4hZwo6Cddfw6bsYu6kw,k=BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+        "content-type": "application/json"
+      },
+      "method": "POST",
+      "path": "/api/push/apns/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/badge"
+    }
+  ],
+  "test_clock": 1795000000
+}

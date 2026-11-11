@@ -2171,7 +2171,6 @@
         "deletedSource": "deleted"
       },
       "addKey": {
-        "saveFirstHint": "Save your provider and try fetching its models. Testing is optional and can be done afterwards.",
         "title": "Add API key",
         "subtitle": "API key and model interface",
         "field": {
@@ -2225,12 +2224,15 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "Search service",
-          "idleHint": "Identified automatically once Base URL and API key are filled",
-          "detecting": "Identifying the interface…",
+          "idleHint": "Detected automatically once Base URL and API key are filled. Saving doesn't wait for it.",
+          "detecting": "Detecting the API format… You can save without waiting.",
           "manual": "Choose the API format manually",
           "catalogPinned": "Built-in catalog",
           "catalogPinned.hint": "Interface supplied by the built-in catalog; credential verification is separate",
-          "declared": "Manually specified"
+          "declared": "Manually specified",
+          "detected": "Recognised as {{format}}",
+          "unrecognised": "Couldn't recognise the format, so {{format}} is used. Pick another if it's wrong.",
+          "unrecognisedRejected": "The endpoint rejected this key, so the format couldn't be recognised; {{format}} is used."
         },
         "inventory": {
           "title": "The interface is identified — but its model list did not come back this time"
@@ -2312,7 +2314,10 @@
         "callback": {
           "hint": "After signing in, paste the callback URL your browser landed on",
           "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again.",
-          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to."
+          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to.",
+          "cantConnect": "After you sign in, the page may say it can't connect. That's expected: copy the full address from the address bar and paste it here.",
+          "auto": "Signing in on the computer running Avibe? This will continue on its own.",
+          "pasteInstead": "Paste the address instead"
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"
@@ -2334,7 +2339,9 @@
             "show": "Show details",
             "hide": "Hide details"
           }
-        }
+        },
+        "openSignIn": "Open sign-in page",
+        "copyLink": "Copy link"
       },
       "toast": {
         "reorderFailed": "Couldn't save the new order",
@@ -6847,7 +6854,7 @@
       "cardNotAdded": "Not added yet",
       "cardSelected": "Selected",
       "cardUseExistingNamed": "Use existing {{name}} configuration",
-      "cardAddSubscriptionNamed": "Add a {{name}} subscription or API Key",
+      "cardAddSubscriptionNamed": "Add a subscription or API Key for {{name}}",
       "cardChecking": "Checking…",
       "cardConnected_one": "Connected · {{count}} model",
       "cardConnected_other": "Connected · {{count}} models",

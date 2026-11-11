@@ -897,7 +897,7 @@ async def _probe_protocol_response(
     if taxonomy is None:
         raise EngineClientError("unsupported source protocol")
     try:
-        url = upstream_api_url(root, taxonomy.request_path)
+        url = upstream_api_url(root, taxonomy.request_path, protocol)
         credential = anthropic_api_key_header(root, secret) if protocol == "anthropic" else {
             "Authorization": f"Bearer {secret}",
         }

@@ -58,6 +58,7 @@ from core.handlers.model_hub.stream_wire import (
 )
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_key_header,
+    anthropic_api_root,
     google_api_base_url,
     official_api_key_base_urls,
     validate_api_key_auth_scheme,
@@ -234,9 +235,18 @@ def _allowed_claude_rate_limit_headers(
     return tuple(sorted(retained.items()))
 
 
-def upstream_api_url(root: str, path: str) -> str:
-    """Resolve a standard v1 endpoint from either an origin or an API root."""
+def upstream_api_url(root: str, path: str, protocol: str | None = None) -> str:
+    """Resolve a standard v1 endpoint from either an origin or an API root.
 
+    An Anthropic root is the one the engine calls (``anthropic_api_root``):
+    the endpoint keeps its ``/v1``, so a probe reaches the URL every later
+    call through the engine does.
+    """
+
+    if protocol == "anthropic":
+        resolved = normalize_model_hub_base_url(anthropic_api_root(root), append_path=path)
+        assert resolved is not None
+        return resolved
     normalized = normalize_model_hub_base_url(root)
     assert normalized is not None
     root_path = urllib.parse.urlsplit(normalized).path.rstrip("/")
@@ -1211,7 +1221,7 @@ async def probe_models(
             root, secret=secret, timeout=timeout, full_names=normalized_vendor == "gemini",
         )
     try:
-        url = upstream_api_url(root, "/v1/models")
+        url = upstream_api_url(root, "/v1/models", protocol)
         credential = {} if secret is None else (
             anthropic_api_key_header(root, secret) if protocol == "anthropic" else {"Authorization": f"Bearer {secret}"}
         )

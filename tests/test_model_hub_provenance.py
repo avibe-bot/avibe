@@ -28,8 +28,8 @@ from vibe import model_hub_client, ui_server
 @pytest.mark.parametrize('listed', [True, False])
 @pytest.mark.parametrize('status', [400, 503])
 @pytest.mark.parametrize('has_detail', [True, False])
-def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path, language, listed, status, has_detail):
-    """Only an unlisted route gains the hint; 503 still cools/retries, definite refusal does not."""
+def test_failed_passthrough_names_inventory_and_preserves_failure_outcome(tmp_path, language, listed, status, has_detail):
+    """Unlisted 503 keeps the failure copy without cooling the provider; listed 503 still does."""
     source = _source('src_hint0001', (MODEL,) if listed else ())
     config = _loaded_catalog_config('claude', MODEL, source)
     service, store, adapter = _service(tmp_path, config)
@@ -60,7 +60,7 @@ def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path
     else:
         assert (projection.upstream_detail or '') == detail
     assert 'None' not in text
-    assert store.config.sources[0].state.status == ('cooldown' if status == 503 else 'standby')
+    assert store.config.sources[0].state.status == ('cooldown' if status == 503 and listed else 'standby')
     assert projection.outcome == ('exhausted' if status == 503 else 'failed_terminal')
 
 
