@@ -73,6 +73,61 @@ def test_compat_exception_log_preserves_error_and_request_metadata(caplog, dispa
         assert secret not in caplog.text
 
 
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_disconnect_during_body_read_is_not_a_server_error(caplog, native, method):
+    compat_app = CompatApp()
+    compat_app.errorhandler(Exception)(ui_server.handle_exception)
+    called = []
+
+    def endpoint():
+        called.append(True)
+        return {"ok": True}
+
+    if native:
+        async def native_endpoint(starlette_request: FastAPIRequest):
+            return await compat_app.dispatch_native_request(starlette_request, endpoint)
+
+        compat_app.add_api_route("/api/diagnostic", native_endpoint, methods=[method])
+    else:
+        compat_app.route("/api/diagnostic", methods=[method])(endpoint)
+
+    async def exercise():
+        messages = []
+        incoming = iter([
+            {"type": "http.request", "body": b'{"partial":', "more_body": True},
+            {"type": "http.disconnect"},
+        ])
+
+        async def receive():
+            return next(incoming)
+
+        async def send(message):
+            messages.append(message)
+
+        await compat_app(
+            {
+                "type": "http", "http_version": "1.1", "method": method,
+                "scheme": "http", "path": "/api/diagnostic", "query_string": b"token=query-secret",
+                "headers": [(b"content-type", b"application/json")],
+                "server": ("127.0.0.1", 80), "client": ("127.0.0.1", 12345),
+            },
+            receive,
+            send,
+        )
+        return messages
+
+    with caplog.at_level("DEBUG", logger=ui_server.logger.name):
+        messages = asyncio.run(exercise())
+
+    assert not called
+    assert messages[0]["status"] == 499
+    assert messages[1]["body"] == b""
+    assert not [record for record in caplog.records if record.levelno >= 40]
+    assert f"UI client disconnected method={method} path=/api/diagnostic" in caplog.text
+    assert "query-secret" not in caplog.text
+
+
 def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
     request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
     request_headers.update(headers or {})

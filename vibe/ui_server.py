@@ -35,6 +35,7 @@ from fastapi.exception_handlers import http_exception_handler
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 from starlette.routing import Match
 
 from vibe.ui_compat import (
@@ -3508,6 +3509,12 @@ def handle_exception(e):
 
     if isinstance(e, InstanceAuthorizationError):
         return jsonify({"ok": False, "error": e.code, "required_role": e.minimum_role}), 403
+    if isinstance(e, ClientDisconnect):
+        # Navigation/abort can close a request before the dispatcher reads its
+        # body, even for GETs. No endpoint work remains to do and no client is
+        # listening; classify this as client cancellation, not a server fault.
+        logger.debug("UI client disconnected method=%s path=%s", request.method, request.path)
+        return Response(status=499)
     # Preserve HTTP status codes for client errors (4xx)
     status_code = getattr(e, "status_code", None)
     detail = getattr(e, "detail", None)
