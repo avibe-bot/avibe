@@ -1,0 +1,158 @@
+name: desktop-cache-keepalive
+
+# The repository's Actions cache sits at its size cap, and GitHub evicts the
+# entries read longest ago. The desktop warm-up's entries are read only by the
+# warm-up itself and by a release, so they were evicted within hours and a
+# release rebuilt the Cua Driver and every crate from source. Every release
+# commit is first a master landing, so each landing looks the macOS entries up
+# again, which counts as a read.
+#
+# This workflow reads and never writes. It checks out nothing, holds no secret,
+# and has no save step, so it cannot change what a release restores, and it
+# starts no build: an entry that is gone stays gone until desktop-package.yml's
+# warm-up saves it again, and is reported here before a release finds out.
+# Schedules are not used because this repository's run hours late. The Windows
+# entry is left alone: a lookup needs a Windows runner, and a cold Windows build
+# is still shorter than a warm macOS one.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+concurrency:
+  group: desktop-cache-keepalive
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  touch:
+    # Only the default branch's entries are release input.
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A key reaches the lookups below only as an action input, never as shell
+      # text, and only if it is the newest master entry under one target's
+      # exact prefix and is made of plain key characters.
+      - name: Find the newest master entry of each macOS cache
+        id: keys
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          find_entry() {
+            local name="$1" prefix="$2" entry key seen
+            entry="$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/master \
+              --key "$prefix" --sort created_at --order desc --limit 1 \
+              --json key,lastAccessedAt --jq '.[] | [.key, .lastAccessedAt] | @tsv')"
+            key="${entry%%$'\t'*}"
+            seen="${entry#*$'\t'}"
+            if [ -z "$entry" ]; then
+              key="" seen=""
+            elif ! [[ "$key" =~ ^"$prefix"[0-9A-Za-z._-]{1,160}$ && "$seen" =~ ^[0-9TZ:.+-]{1,40}$ ]]; then
+              echo "::warning title=Desktop cache key refused::The newest master entry under $prefix has an unexpected key."
+              key="" seen=""
+            fi
+            printf '%s\n' "$name=$key" "${name}_seen=$seen" >> "$GITHUB_OUTPUT"
+          }
+          find_entry driver_aarch64 cua-driver-aarch64-apple-darwin-
+          find_entry driver_x86_64 cua-driver-x86_64-apple-darwin-
+          find_entry rust_aarch64 macOS-aarch64-apple-darwin-desktop-package-
+          find_entry rust_x86_64 macOS-x86_64-apple-darwin-desktop-package-
+
+      # Each path list must equal the one desktop-package.yml saves with: the
+      # cache service matches a key together with a hash of its paths.
+      - name: Look up the prepared Cua Driver (aarch64-apple-darwin)
+        id: driver_aarch64
+        if: steps.keys.outputs.driver_aarch64 != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          lookup-only: true
+          path: |
+            desktop/src-tauri/binaries/cua-driver-aarch64-apple-darwin
+            desktop/src-tauri/binaries/cua-driver-aarch64-apple-darwin.provenance.json
+          key: ${{ steps.keys.outputs.driver_aarch64 }}
+
+      - name: Look up the prepared Cua Driver (x86_64-apple-darwin)
+        id: driver_x86_64
+        if: steps.keys.outputs.driver_x86_64 != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          lookup-only: true
+          path: |
+            desktop/src-tauri/binaries/cua-driver-x86_64-apple-darwin
+            desktop/src-tauri/binaries/cua-driver-x86_64-apple-darwin.provenance.json
+          key: ${{ steps.keys.outputs.driver_x86_64 }}
+
+      - name: Look up the Rust build cache (aarch64-apple-darwin)
+        id: rust_aarch64
+        if: steps.keys.outputs.rust_aarch64 != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+          key: ${{ steps.keys.outputs.rust_aarch64 }}
+
+      - name: Look up the Rust build cache (x86_64-apple-darwin)
+        id: rust_x86_64
+        if: steps.keys.outputs.rust_x86_64 != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          lookup-only: true
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+          key: ${{ steps.keys.outputs.rust_x86_64 }}
+
+      # Three ways an entry is not protected, each a warning on the run page:
+      # no entry, an entry a lookup cannot restore, and a lookup that did not
+      # move the entry's last access. The last one checks this workflow's own
+      # premise on every run.
+      - name: Report what a release would restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENTRIES: |
+            prepared Cua Driver|aarch64-apple-darwin|${{ steps.keys.outputs.driver_aarch64 }}|${{ steps.keys.outputs.driver_aarch64_seen }}|${{ steps.driver_aarch64.outputs.cache-hit }}
+            prepared Cua Driver|x86_64-apple-darwin|${{ steps.keys.outputs.driver_x86_64 }}|${{ steps.keys.outputs.driver_x86_64_seen }}|${{ steps.driver_x86_64.outputs.cache-hit }}
+            Rust build|aarch64-apple-darwin|${{ steps.keys.outputs.rust_aarch64 }}|${{ steps.keys.outputs.rust_aarch64_seen }}|${{ steps.rust_aarch64.outputs.cache-hit }}
+            Rust build|x86_64-apple-darwin|${{ steps.keys.outputs.rust_x86_64 }}|${{ steps.keys.outputs.rust_x86_64_seen }}|${{ steps.rust_x86_64.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          # The listing can trail a lookup by a moment.
+          sleep 5
+          printf '%s\n' "| Cache | Target | State | Last access before | after |" "| --- | --- | --- | --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          while IFS='|' read -r name target key seen hit; do
+            [ -n "$name" ] || continue
+            state=kept now=""
+            if [ -z "$key" ]; then
+              state=missing
+              echo "::warning title=Desktop cache missing::master has no $name cache for $target; a release rebuilds it from source until the warm-up saves one."
+            elif [ "$hit" != true ]; then
+              state=unreadable
+              echo "::warning title=Desktop cache unreadable::$key is listed on master but a lookup cannot restore it."
+            else
+              now="$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/master \
+                --key "$key" --sort created_at --order desc --limit 1 \
+                --json lastAccessedAt --jq '.[0].lastAccessedAt // ""')"
+              if ! [[ "$now" > "$seen" ]]; then
+                state=not-refreshed
+                echo "::warning title=Desktop cache not refreshed::The lookup did not move the last access of $key ($seen); it is not protected from eviction."
+              fi
+            fi
+            echo "| $name | $target | $state | $seen | $now |" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$ENTRIES"
