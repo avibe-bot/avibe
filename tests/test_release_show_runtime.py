@@ -30,7 +30,11 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
     # Windows must keep its default pwsh environment for the existing bundler.
     for owner in (workflow, job):
         assert "shell" not in owner.get("defaults", {}).get("run", {})
-    assert build["if"] == "steps.canonical.outputs.reused != 'true'"
+    if workflow_name == "publish.yml":
+        assert build["if"] == "steps.canonical.outputs.reused != 'true'"
+    else:
+        assert job["if"] == "needs.resolve-show-runtime-canonical.outputs.reused != 'true'"
+        assert "if" not in build
     assert build["run"].splitlines() == [
         "npm ci",
         "npm run build",
@@ -48,12 +52,21 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
         "show-router-${{ matrix.artifact }}.tsx",
         "show-runtime-identity-${{ matrix.artifact }}.json",
     }
-    reuse = next(step for step in steps if step.get("name") == "Reuse trusted canonical Show Runtime bundle when identity matches")
-    assert reuse["id"] == "canonical"
-    assert "show_runtime_canonical.py verify" in reuse["run"]
-    assert "gh run download" in reuse["run"]
     canonical, = [step for step in steps if step.get("name") == "Upload fresh canonical Show Runtime bundle"]
-    assert canonical["if"] == "steps.canonical.outputs.reused != 'true'"
+    if workflow_name == "publish.yml":
+        reuse = next(step for step in steps if step.get("name") == "Reuse trusted canonical Show Runtime bundle when identity matches")
+        assert reuse["id"] == "canonical"
+        assert "show_runtime_canonical.py verify" in reuse["run"]
+        assert "gh run download" in reuse["run"]
+        assert canonical["if"] == "steps.canonical.outputs.reused != 'true'"
+    else:
+        assert "if" not in canonical
+        lookup = workflow["jobs"]["resolve-show-runtime-canonical"]
+        assert lookup["runs-on"] == "ubuntu-latest"
+        reuse = next(step for step in lookup["steps"] if step.get("id") == "reuse")
+        assert "show_runtime_canonical.py reuse-set" in reuse["run"]
+        assert "--node-version \"v$SHOW_RUNTIME_NODE_VERSION\"" in reuse["run"]
+        assert "$(node" not in reuse["run"] and "$(npm" not in reuse["run"]
     assert canonical["with"]["retention-days"] == 30
     assert {entry["artifact"] for entry in job["strategy"]["matrix"]["include"]} == {
         "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64",

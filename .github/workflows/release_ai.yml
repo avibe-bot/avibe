@@ -23,8 +23,13 @@ on:
         default: "200"
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
+
+env:
+  # Reuse checks native producer pins, not Linux host tools.
+  SHOW_RUNTIME_NODE_VERSION: "22.23.4"
+  SHOW_RUNTIME_NPM_VERSION: "10.9.9"
 
 jobs:
   release-backstop:
@@ -32,6 +37,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.verify.outputs.source_sha }}
       run_id: ${{ steps.verify.outputs.run_id }}
+      run_attempt: ${{ steps.verify.outputs.run_attempt }}
     permissions:
       actions: read
       # An RC is proven from its pull request's check runs.
@@ -88,11 +94,14 @@ jobs:
       workflow_file: ${{ steps.find.outputs.workflow_file }}
       workflow_name: ${{ steps.find.outputs.workflow_name }}
       run_attempt: ${{ steps.find.outputs.run_attempt }}
+      reused: ${{ steps.reuse.outputs.reused }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ needs.release-backstop.outputs.source_sha }}
-          sparse-checkout: scripts/show_runtime_canonical.py
+          sparse-checkout: |
+            scripts/show_runtime_canonical.py
+            scripts/release_workflow_artifacts.py
           sparse-checkout-cone-mode: false
       - name: Find trusted canonical Show Runtime set
         id: find
@@ -113,9 +122,38 @@ jobs:
             --platform win32-x64 \
             --platform win32-arm64 \
             --output "$GITHUB_OUTPUT"
+      - name: Reuse complete Show Runtime set on Linux
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
+          LOCK_SHA: ${{ needs.resolve-show-runtime-ref.outputs.lock_sha }}
+          PRODUCER_RUN_ID: ${{ steps.find.outputs.run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ steps.find.outputs.run_attempt || '0' }}
+          PRODUCER_WORKFLOW_FILE: ${{ steps.find.outputs.workflow_file }}
+          PRODUCER_WORKFLOW_NAME: ${{ steps.find.outputs.workflow_name }}
+        run: |
+          python scripts/show_runtime_canonical.py reuse-set \
+            --repository "$GITHUB_REPOSITORY" --directory reused-runtime \
+            --runtime-ref "$RUNTIME_REF" --lock-sha "$LOCK_SHA" \
+            --producer-run-id "$PRODUCER_RUN_ID" --producer-run-attempt "$PRODUCER_RUN_ATTEMPT" \
+            --producer-workflow-file "$PRODUCER_WORKFLOW_FILE" \
+            --producer-workflow-name "$PRODUCER_WORKFLOW_NAME" \
+            --node-version "v$SHOW_RUNTIME_NODE_VERSION" --npm-version "$SHOW_RUNTIME_NPM_VERSION" \
+            --platform linux-x64 --platform linux-arm64 --platform darwin-x64 \
+            --platform darwin-arm64 --platform win32-x64 --platform win32-arm64 \
+            --output "$GITHUB_OUTPUT"
+      - name: Upload verified Show Runtime set
+        if: steps.reuse.outputs.reused == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: show-runtime-reused-${{ github.run_attempt }}
+          path: reused-runtime/
+          if-no-files-found: error
 
   show-runtime-bundles:
     needs: [release-backstop, resolve-show-runtime-ref, resolve-show-runtime-canonical]
+    if: needs.resolve-show-runtime-canonical.outputs.reused != 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       actions: read
@@ -154,51 +192,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: ${{ env.SHOW_RUNTIME_NODE_VERSION }}
           cache: "npm"
-      - name: Reuse trusted canonical Show Runtime bundle when identity matches
-        id: canonical
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CANONICAL_RUN_ID: ${{ needs.resolve-show-runtime-canonical.outputs.run_id }}
-          CANONICAL_WORKFLOW_FILE: ${{ needs.resolve-show-runtime-canonical.outputs.workflow_file }}
-          CANONICAL_WORKFLOW_NAME: ${{ needs.resolve-show-runtime-canonical.outputs.workflow_name }}
-          RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
-          LOCK_SHA: ${{ needs.resolve-show-runtime-ref.outputs.lock_sha }}
-          SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
-          TARGET: ${{ matrix.artifact }}
+      - name: Verify native Show Runtime toolchain pins
         shell: bash
         run: |
-          set -euo pipefail
-          reused=false
-          canonical_dir="$RUNNER_TEMP/show-runtime-canonical"
-          rm -rf "$canonical_dir"
-          mkdir -p "$canonical_dir"
-          canonical_name="canonical-show-runtime-${RUNTIME_REF}-${TARGET}"
-          if [ -n "$CANONICAL_RUN_ID" ] && gh run download "$CANONICAL_RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" --name "$canonical_name" --dir "$canonical_dir"; then
-            if python avibe-source/scripts/show_runtime_canonical.py verify \
-                --directory "$canonical_dir" --artifact "$TARGET" \
-                --runtime-ref "$RUNTIME_REF" --lock-sha "$LOCK_SHA" \
-                --producer-workflow-name "$CANONICAL_WORKFLOW_NAME" \
-                --producer-workflow-file "$CANONICAL_WORKFLOW_FILE" \
-                --producer-run-id "$CANONICAL_RUN_ID" \
-                --producer-run-attempt "${{ needs.resolve-show-runtime-canonical.outputs.run_attempt }}" \
-                --node-version "$(node --version)" --npm-version "$(npm --version)"; then
-              cp "$canonical_dir"/vibe-show-runtime-node-*.tgz .
-              cp "$canonical_dir/show-runtime-ref-$TARGET.txt" .
-              cp "$canonical_dir/show-router-$TARGET.tsx" .
-              cp "$canonical_dir/show-runtime-identity-$TARGET.json" .
-              reused=true
-            else
-              echo "Canonical artifact identity mismatch; falling back to a fresh build."
-            fi
-          else
-            echo "No trusted canonical artifact set; falling back to a fresh build."
-          fi
-          echo "reused=$reused" >> "$GITHUB_OUTPUT"
+          test "$(node --version)" = "v$SHOW_RUNTIME_NODE_VERSION"
+          test "$(npm --version)" = "$SHOW_RUNTIME_NPM_VERSION"
       - name: Build Show Runtime bundle
-        if: steps.canonical.outputs.reused != 'true'
         # Keep the runner's native shell: Git Bash shadows Windows' tar.
         run: |
           npm ci
@@ -208,7 +209,6 @@ jobs:
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
 
       - name: Export Show Runtime router
-        if: steps.canonical.outputs.reused != 'true'
         shell: bash
         run: |
           node --input-type=module <<'JS'
@@ -225,7 +225,6 @@ jobs:
           }
           JS
       - name: Record Show Runtime identity
-        if: steps.canonical.outputs.reused != 'true'
         shell: bash
         env:
           RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
@@ -247,14 +246,13 @@ jobs:
       - name: Upload Show Runtime bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: show-runtime-${{ matrix.artifact }}
+          name: show-runtime-${{ matrix.artifact }}-${{ github.run_attempt }}
           path: |
             vibe-show-runtime-node-*.tgz
             show-runtime-ref-${{ matrix.artifact }}.txt
             show-router-${{ matrix.artifact }}.tsx
             show-runtime-identity-${{ matrix.artifact }}.json
       - name: Upload fresh canonical Show Runtime bundle
-        if: steps.canonical.outputs.reused != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: canonical-show-runtime-${{ needs.resolve-show-runtime-ref.outputs.ref }}-${{ matrix.artifact }}
@@ -268,8 +266,17 @@ jobs:
   build-assets:
     needs:
       - release-backstop
+      - resolve-show-runtime-canonical
       - show-runtime-bundles
+    if: >-
+      ${{ always() && !cancelled() && needs.release-backstop.result == 'success' &&
+          needs.resolve-show-runtime-canonical.result == 'success' &&
+          ((needs.resolve-show-runtime-canonical.outputs.reused == 'true' && needs.show-runtime-bundles.result == 'skipped') ||
+           (needs.resolve-show-runtime-canonical.outputs.reused == 'false' && needs.show-runtime-bundles.result == 'success')) }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -285,11 +292,26 @@ jobs:
             scripts/show_runtime_manifest_asset.py
             scripts/release_asset_download.py
             scripts/release_package_version.py
+            scripts/release_workflow_artifacts.py
+            scripts/verify_release_distributions.py
             .github/actions/sqlite-predecessor-contract/action.yml
             tests/test_distribution_artifacts.py
           sparse-checkout-cone-mode: false
 
+      - name: Reuse the exact backstop UI artifact
+        id: ui
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKSTOP_RUN_ID: ${{ needs.release-backstop.outputs.run_id }}
+          BACKSTOP_ATTEMPT: ${{ needs.release-backstop.outputs.run_attempt || '0' }}
+          SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
+        run: |
+          python release-automation/scripts/release_workflow_artifacts.py reuse-ui \
+            --repository "$GITHUB_REPOSITORY" --run-id "$BACKSTOP_RUN_ID" \
+            --attempt "$BACKSTOP_ATTEMPT" --sha "$SOURCE_SHA" --destination ui/dist
+
       - name: Setup Node.js
+        if: steps.ui.outputs.reused != 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -297,6 +319,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
 
       - name: Build UI
+        if: steps.ui.outputs.reused != 'true'
         working-directory: ui
         run: |
           npm ci
@@ -305,7 +328,7 @@ jobs:
       - name: Download Show Runtime bundles
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          pattern: show-runtime-*
+          pattern: show-runtime-*-${{ github.run_attempt }}
           path: runtime-artifacts
           merge-multiple: true
 
@@ -369,7 +392,8 @@ jobs:
         run: |
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
           AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
-            pytest release-automation/tests/test_distribution_artifacts.py -v
+            python release-automation/scripts/verify_release_distributions.py \
+              release-automation/tests/test_distribution_artifacts.py
 
       - name: Add Show Runtime release assets
         shell: bash
@@ -385,11 +409,11 @@ jobs:
       - name: Upload release artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: release-dist
+          name: release-dist-${{ github.run_attempt }}
           path: dist/
 
   release:
-    needs: [release-backstop, build-assets]
+    needs: release-backstop
     permissions:
       actions: write
       contents: write
@@ -397,13 +421,12 @@ jobs:
     concurrency:
       group: avibe-gh-release-${{ github.event.inputs.tag || github.ref_name }}
       cancel-in-progress: false
-    # Official assets belong to publish.yml; only previews require this build.
-    if: >-
-      ${{ needs.release-backstop.result == 'success' && !cancelled() &&
-          (needs.build-assets.result == 'success' ||
-           (needs.build-assets.result == 'skipped' &&
-            !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) }}
+    # Prepare notes while the core builds; only the exact-attempt successful
+    # build below can unlock GitHub-only publication. Stable assets still
+    # belong to publish.yml and do not wait for this RC-only build.
+    if: ${{ needs.release-backstop.result == 'success' && !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -747,12 +770,35 @@ jobs:
             printf '\n\n%s\n' "$READY_MARKER" >> release.md
           fi
 
+      - name: Checkout release wait tooling
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-wait
+          sparse-checkout: scripts/release_workflow_artifacts.py
+          sparse-checkout-cone-mode: false
+
       - name: Download release artifacts
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
-        with:
-          name: release-dist
-          path: dist/
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          python release-wait/scripts/release_workflow_artifacts.py wait-build \
+            --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT" --sha "$WORKFLOW_SHA" --destination dist
+
+      - name: Recheck tag after build wait
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git fetch --no-tags origin "refs/tags/${TAG}"
+          if [ "$(git rev-parse 'FETCH_HEAD^{commit}')" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::Release tag changed while waiting for the build." >&2
+            exit 1
+          fi
 
       - name: Create GitHub-only Release
         if: startsWith(steps.tag.outputs.tag, 'gh-v')

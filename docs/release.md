@@ -117,6 +117,33 @@ new canonical set. This applies only to the unsigned Show Runtime archives and
 router; release-versioned wheels, desktop-private wheels, and signed assets are
 never reused.
 
+For GitHub-only RCs, canonical discovery inspects the newest successful runs
+first and stops at the newest complete set. One Linux job downloads and verifies
+all six platforms against the pinned native Node/npm versions; it does not run
+foreign binaries. Any missing or invalid member sends all platforms through the
+native build matrix. Stable `publish.yml` retains its native matrix path.
+
+Core packaging may reuse `ui-dist-linux` only when the gate already supplied a
+successful full master backstop proof for this exact source. The consumer binds
+the artifact to that run/attempt's successful build job and verifies the ZIP's
+GitHub SHA256 digest before extraction. No proof means no artifact-discovery
+request; missing, expired or mismatched bytes use the normal local UI build.
+This optional optimization never makes the full backstop an RC gate again.
+
+The final wheel/sdist are still built with the release version and activated
+predecessor compatibility. All distribution assertions remain: the three fresh
+full-dependency installation checks run concurrently in separate processes,
+temporary homes and virtual environments, not shared installed environments.
+
+The RC publisher prepares notes after the gate while packaging runs, then
+waits for `build-assets` in the **same workflow run and attempt** to succeed.
+It verifies and downloads that attempt's immutable artifact and rechecks the
+remote tag before publication. Failure, cancellation, stale artifacts, or a
+30-minute wait timeout cannot publish. To retry this path, rerun all jobs;
+reusing a previous attempt's successful build is intentionally rejected. Only
+the publisher has write permissions. Preparing it early consumes runner time
+while it waits; desktop signing and Stage 2 are unchanged.
+
 GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They
 must include an installable wheel containing `ui/dist` and
