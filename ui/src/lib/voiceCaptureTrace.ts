@@ -1,4 +1,5 @@
 import { isNativeShell } from './native';
+import { isDesktopShell } from './desktopShell';
 import { isStandalonePwa } from './platform';
 import { createVoiceActivity } from './voiceActivity';
 import { preferredVoiceSampleRate } from './voiceEngine';
@@ -92,11 +93,20 @@ export const contextStateName = (context: { state: string }): string => (
 );
 
 export const voiceCaptureSurface = (): VoiceCaptureSurface => {
-  if (isNativeShell()) return 'app_shell';
+  if (isNativeShell() || isDesktopShell()) return 'app_shell';
   if (isStandalonePwa()) return 'standalone';
   const coarse = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
     && window.matchMedia('(pointer: coarse)').matches;
   return coarse ? 'mobile_browser' : 'desktop_browser';
+};
+
+/** Origin category only: never retain a hostname, port, path, or tenant identity. */
+const captureOrigin = (): 'loopback' | 'https' | 'http' | 'other' => {
+  if (typeof location === 'undefined') return 'other';
+  if (['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) return 'loopback';
+  if (location.protocol === 'https:') return 'https';
+  if (location.protocol === 'http:') return 'http';
+  return 'other';
 };
 
 export const voiceTrackState = (stream: MediaStream | null | undefined): VoiceTrackState => {
@@ -160,6 +170,9 @@ export type VoiceCaptureTraceEvent = {
   dictationId?: string;
   entry: VoiceCaptureEntry;
   surface: VoiceCaptureSurface;
+  origin: ReturnType<typeof captureOrigin>;
+  /** Inputs the browser exposed at failure/probe time, not proof of usable audio. */
+  audioInputCount?: number;
   captureClass: VoiceCaptureClass;
   /** How the capture stopped: released, the page hid, discarded, or a capture failure. */
   stop?: 'finish' | 'hidden' | 'abort' | 'error';
@@ -211,6 +224,8 @@ export class VoiceCaptureTrace {
   dictationId: string | undefined;
   private readonly startedAt = now();
   private readonly surface = voiceCaptureSurface();
+  private readonly origin = captureOrigin();
+  private audioInputCount: number | undefined;
   private readonly hiddenAtStart = hiddenCount;
   private readonly sinceHiddenMs = lastHiddenAt === null ? undefined : ms(now() - lastHiddenAt);
   private readonly audioSessionType: string | undefined;
@@ -370,6 +385,8 @@ export class VoiceCaptureTrace {
       ...(this.dictationId ? { dictationId: this.dictationId } : {}),
       entry: this.entry,
       surface: this.surface,
+      origin: this.origin,
+      ...(this.audioInputCount !== undefined ? { audioInputCount: this.audioInputCount } : {}),
       captureClass: this.captureClass(),
       ...(this.stopKind ? { stop: this.stopKind } : {}),
       ...(this.micMs !== undefined ? { micMs: this.micMs, mic: this.micResult } : {}),
@@ -422,6 +439,25 @@ export class VoiceCaptureTrace {
       emitVoiceTelemetry(this.toEvent(outcome));
     } catch {
       // Instrumentation cannot change what the take did.
+    }
+  }
+
+  /** Diagnose an unopened microphone without delaying its visible error. Enumeration
+   * may be unavailable or never settle; in that case the trace omits the count.
+   * Only the number of audio inputs survives, never device labels or identifiers. */
+  async finishWithInputDevices(outcome: VoiceTelemetryOutcome): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const devices = await Promise.race([
+        navigator.mediaDevices?.enumerateDevices?.(),
+        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 500); }),
+      ]);
+      if (devices) this.audioInputCount = devices.filter((device) => device.kind === 'audioinput').length;
+    } catch {
+      // Failure to enumerate is not evidence of zero input devices.
+    } finally {
+      clearTimeout(timer);
+      this.finish(outcome);
     }
   }
 }

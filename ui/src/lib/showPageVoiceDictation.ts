@@ -302,7 +302,7 @@ export class ShowPageVoiceDictation {
     } catch (error) {
       // Every take is logged once, however its start ended: refused, cancelled (released while
       // its microphone was granted), or failed. A pipeline that started has logged it already.
-      this.trace.finish(error instanceof VoiceTranscriptionError && error.code === 'cancelled' ? 'cancelled' : 'failed');
+      void this.trace.finishWithInputDevices(error instanceof VoiceTranscriptionError && error.code === 'cancelled' ? 'cancelled' : 'failed');
       this.abortController.abort();
       this.realtime?.abort();
       this.stream?.getTracks().forEach((track) => track.stop());

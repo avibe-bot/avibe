@@ -3,6 +3,8 @@ import { CloudOff, Loader2, Mic, MicOff, Paperclip, PenLine, RotateCcw, Send, Tr
 import clsx from 'clsx';
 import { Trans, useTranslation } from 'react-i18next';
 
+import { isDesktopShell } from '@/lib/desktopShell';
+import { isApplePlatform } from '@/lib/platform';
 import type { VoiceLevelSource } from '@/lib/voiceLevel';
 import type { VoiceCaptureState } from '@/lib/voiceRecording';
 import { Button } from '../ui/button';
@@ -185,7 +187,7 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
       {note === 'asking' && <Mic className="mt-0.5 size-4 shrink-0 text-mint-ink" />}
       {(note === 'cancelled' || note === 'kept') && <Undo2 className="mt-0.5 size-4 shrink-0 text-muted" />}
       {note === 'too-short' && <MicOff className="mt-0.5 size-4 shrink-0 text-muted" />}
-      {(note === 'no-sound' || note === 'mic-busy') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
+      {(note === 'no-sound' || note === 'mic-busy' || note === 'no-device' || note === 'mic-failed') && <MicOff className="mt-0.5 size-4 shrink-0 text-gold-ink" />}
       {note === 'denied' && <MicOff className="mt-0.5 size-4 shrink-0 text-destructive-ink" />}
       {note === 'unavailable' && <CloudOff className="mt-0.5 size-4 shrink-0 text-muted" />}
       <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-xs leading-relaxed">
@@ -194,11 +196,15 @@ function HoldNote({ note, pointer, onDismiss }: { note: Exclude<HoldOutcome, 'se
         {note === 'too-short' && <span className="text-foreground">{t('voice.composer.tooShort')}</span>}
         {note === 'no-sound' && <span className="text-foreground">{t('voice.composer.noSound')}</span>}
         {note === 'mic-busy' && <span className="text-foreground">{t('voice.composer.micBusy')}</span>}
+        {note === 'no-device' && <span className="text-foreground">{t('voice.noDevice')}</span>}
+        {note === 'mic-failed' && <span className="text-foreground">{t('voice.micFailed')}</span>}
         {note === 'asking' && <span className="text-foreground">{t('voice.asking')}</span>}
         {note === 'denied' && (
           <>
             <span className="font-semibold text-foreground">{t('voice.deniedTitle')}</span>
-            <span className="text-muted">{t(pointer === 'mouse' ? 'voice.composer.deniedBrowser' : 'voice.composer.deniedSystem')}</span>
+            <span className="text-muted">{t(isDesktopShell()
+              ? isApplePlatform() ? 'voice.deniedDesktop' : 'voice.deniedDesktopOther'
+              : pointer === 'mouse' ? 'voice.composer.deniedBrowser' : 'voice.composer.deniedSystem')}</span>
           </>
         )}
         {note === 'unavailable' && <span className="text-foreground">{t('pet.voice.cloudRequired')}</span>}
