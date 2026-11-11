@@ -54,7 +54,7 @@ class ReleaseTests(unittest.TestCase):
             archive.write(d / "IrohLib.swift", "IrohLib.swift")
             for name in ("LICENSE-APACHE", "LICENSE-MIT"):
                 archive.writestr(f"LICENSES/iroh-ffi/{name}", "fixture license")
-            for name in ("LICENSE-APACHE", "LICENSE-MIT", "COPYRIGHT.html"):
+            for name in ("licenses/Apache-2.0.txt", "licenses/MIT.txt", "COPYRIGHT.html"):
                 archive.writestr(f"LICENSES/rust-1.91.0/{name}", "fixture Rust notice")
             archive.writestr("LICENSES/packages.json", json.dumps([{"name": "iroh-ffi", "version": "1.2.0",
                 "files": ["LICENSES/iroh-ffi/LICENSE-MIT"]}]))
@@ -139,13 +139,17 @@ class ReleaseTests(unittest.TestCase):
         metadata = {"packages": [{"name": "dependency", "version": "1.0.0", "license": "MIT",
                                   "manifest_path": str(package / "Cargo.toml")}]}
         rust_notices = self.directory / "share/doc/rust"
-        rust_notices.mkdir(parents=True)
-        for name in ("LICENSE-APACHE", "LICENSE-MIT", "COPYRIGHT.html"):
+        (rust_notices / "licenses").mkdir(parents=True)
+        for name in ("licenses/Apache-2.0.txt", "licenses/MIT.txt", "licenses/LLVM-exception.txt",
+                     "COPYRIGHT.html", "COPYRIGHT-library.html"):
             (rust_notices / name).write_text("Rust distribution notice fixture")
         with patch.object(release.subprocess, "check_output", side_effect=[json.dumps(metadata), str(self.directory)] * 2):
             release.support_bundle(source, self.directory)
             with zipfile.ZipFile(self.directory / release.SUPPORT_NAME) as archive:
                 self.assertEqual(archive.read("LICENSES/dependency-1.0.0/LICENSE"), b"dependency license fixture")
+                self.assertEqual(archive.read("LICENSES/rust-1.91.0/licenses/LLVM-exception.txt"),
+                                 b"Rust distribution notice fixture")
+                self.assertIn("LICENSES/rust-1.91.0/COPYRIGHT-library.html", archive.namelist())
             (package / "LICENSE").unlink()
             with self.assertRaisesRegex(ValueError, "no redistribution license"):
                 release.support_bundle(source, self.directory)

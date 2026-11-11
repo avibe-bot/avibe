@@ -71,9 +71,18 @@ def support_bundle(source: Path, output: Path) -> None:
         archive.write(output / "IrohLib.swift", "IrohLib.swift")
         for name in ("LICENSE-APACHE", "LICENSE-MIT"):
             archive.write(source / name, f"LICENSES/iroh-ffi/{name}")
-        for name in ("LICENSE-APACHE", "LICENSE-MIT", "COPYRIGHT.html"):
+        # rustup installs SPDX texts under licenses/, referenced by COPYRIGHT.html.
+        # Keep the directory layout and every bundled notice, not just MIT/Apache.
+        rust_prefix = f"LICENSES/rust-{pins()['RUST_VERSION']}"
+        for name in ("COPYRIGHT.html", "licenses/Apache-2.0.txt", "licenses/MIT.txt"):
             require((rust_notices / name).is_file(), f"missing Rust distribution notice: {name}")
-            archive.write(rust_notices / name, f"LICENSES/rust-{pins()['RUST_VERSION']}/{name}")
+        rust_files = [rust_notices / "COPYRIGHT.html", *sorted((rust_notices / "licenses").rglob("*"))]
+        library_copyright = rust_notices / "COPYRIGHT-library.html"
+        if library_copyright.is_file():
+            rust_files.append(library_copyright)
+        for path in rust_files:
+            if path.is_file():
+                archive.write(path, f"{rust_prefix}/{path.relative_to(rust_notices).as_posix()}")
         for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
             root = Path(package["manifest_path"]).parent
             names = set()
@@ -149,8 +158,8 @@ def prepare(directory: Path, tag: str, source_sha: str, run_id: str) -> dict:
     with zipfile.ZipFile(directory / SUPPORT_NAME) as archive:
         require(archive.read("IrohLib.swift") == (directory / "IrohLib.swift").read_bytes(), "bindings mismatch")
         for name in ("LICENSES/iroh-ffi/LICENSE-APACHE", "LICENSES/iroh-ffi/LICENSE-MIT",
-                     f"LICENSES/rust-{config['RUST_VERSION']}/LICENSE-APACHE",
-                     f"LICENSES/rust-{config['RUST_VERSION']}/LICENSE-MIT",
+                     f"LICENSES/rust-{config['RUST_VERSION']}/licenses/Apache-2.0.txt",
+                     f"LICENSES/rust-{config['RUST_VERSION']}/licenses/MIT.txt",
                      f"LICENSES/rust-{config['RUST_VERSION']}/COPYRIGHT.html"):
             require(bool(archive.read(name)), f"missing upstream license: {name}")
         inventory = json.loads(archive.read("LICENSES/packages.json"))
