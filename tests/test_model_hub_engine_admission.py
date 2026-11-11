@@ -76,7 +76,49 @@ async def test_withdrawal_budget_does_not_restart_and_signals_each_work_unit_onc
 
 
 @pytest.mark.asyncio
-async def test_complete_management_lease_carries_identity_beyond_result_persistence():
+async def test_cancelled_routine_selection_reopens_healthy_admission():
+    owner = adapter()
+    owner.lifecycle = SimpleNamespace(
+        recovered=True, _ready=True, withdrawn_current=False,
+        prepare_candidate=lambda _generation: None,
+        activate=lambda _generation, *, reason: None,
+    )
+    work = owner._engine_admission.retain()
+    task = asyncio.create_task(owner._select_staged(object()))
+    try:
+        while owner._engine_admission.reason != "engine_updating":
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert owner._engine_admission.reason is None
+    finally:
+        owner._engine_admission.release(work)
+
+
+@pytest.mark.asyncio
+async def test_routine_drain_upgrades_to_learned_withdrawal_budget(monkeypatch):
+    from vibe.model_hub_runtime import adapter as module
+
+    monkeypatch.setattr(module, "_ENGINE_ROUTINE_DRAIN_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_ENGINE_WITHDRAWAL_DRAIN_SECONDS", 0.2)
+    owner = adapter()
+    owner.lifecycle = SimpleNamespace(recovered=True, _ready=True, withdrawn_current=False)
+    work = owner._engine_admission.retain()
+    drain = asyncio.create_task(owner._drain_engine())
+    try:
+        while owner._engine_admission.reason != "engine_updating":
+            await asyncio.sleep(0)
+        owner.lifecycle.withdrawn_current = True
+        owner._gate_known_withdrawal()
+        await asyncio.sleep(0.03)
+        assert not drain.done()
+        assert owner._engine_admission.reason == "engine_withdrawn"
+    finally:
+        owner._engine_admission.release(work)
+    assert await drain is True
+
+
     started = asyncio.Event()
     finish = asyncio.Event()
 

@@ -38,12 +38,25 @@ def alive(pid):
     ("start_after_spawn", "valid"), ("start_after_spawn", "missing"), ("start_after_spawn", "malformed"),
     ("health_after", "valid"), ("commit_before_save", "valid"), ("commit_after_save", "valid"),
     ("identity_after_publish", "valid"),
+    ("rollback_after_save", "missing"), ("rollback_after_save", "malformed"),
 ])
 def test_native_owner_death_recovers_only_a_durable_authorized_generation(
     tmp_path, monkeypatch, boundary, record_damage,
 ):
+    from tests.test_model_hub_runtime import _write_mock_engine
+
     owner, supervisor, baseline, _observations, processes = real_owner(tmp_path, monkeypatch)
     candidate, signer, _manifest, _envelope = signed_candidate(owner, tmp_path)
+    fixture_engine = tmp_path / "fixture-cpa.py"
+    _write_mock_engine(fixture_engine)
+    if boundary == "rollback_after_save":
+        fixture_engine.write_text(
+            "import os\n"
+            "if os.environ.get('AVIBE_FIXTURE_FAIL_CANDIDATE'):\n"
+            "    raise SystemExit(17)\n"
+            + fixture_engine.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
     bundle = tmp_path / "bundle-manifest.json"
     bundle.write_bytes(owner.manager.bundled_manifest_bytes())
     reached, children = tmp_path / "boundary.json", tmp_path / "children.jsonl"
@@ -51,7 +64,8 @@ def test_native_owner_death_recovers_only_a_durable_authorized_generation(
     spec_path.write_text(json.dumps({
         "runtime": str(owner.manager.runtime_dir), "state": str(supervisor.state_store.root),
         "bundle": str(bundle), "candidate": candidate.document(), "roots": asdict(signer.roots()),
-        "fixture_engine": str(tmp_path / "fixture-cpa.py"), "boundary": boundary,
+        "fixture_engine": str(fixture_engine), "boundary": boundary,
+        "fail_candidate": boundary == "rollback_after_save",
         "reached": str(reached), "children": str(children),
     }))
     source = Path(__file__).resolve().parents[1]

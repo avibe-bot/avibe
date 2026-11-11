@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -273,6 +275,49 @@ def owner_fixture(tmp_path, monkeypatch, *, bundled_version="v8.0.30"):
     return owner, supervisor, staged
 
 
+def test_concurrent_first_start_waits_for_the_owner_transaction(tmp_path, monkeypatch):
+    owner, supervisor, _staged = owner_fixture(tmp_path, monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+    original = supervisor.ensure_running
+
+    def blocked_start():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            first = calls == 1
+        if first:
+            entered.set()
+            assert release.wait(5)
+        return original()
+
+    monkeypatch.setattr(supervisor, "ensure_running", blocked_start)
+    results = []
+    errors = []
+
+    def call():
+        try:
+            results.append(owner.ensure_running())
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    first = threading.Thread(target=call)
+    second = threading.Thread(target=call)
+    first.start()
+    assert entered.wait(5)
+    second.start()
+    time.sleep(0.05)
+    assert second.is_alive()
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert not errors
+    assert len(results) == 2
+    assert supervisor.running == owner.journal.load()["active"]
+
+
 def test_recovery_and_fenced_first_start_publish_health_before_return(tmp_path, monkeypatch):
     owner, supervisor, staged = owner_fixture(tmp_path, monkeypatch)
     assert owner.journal.load()["health"] == "preflight_only"
@@ -373,6 +418,7 @@ def test_failed_real_config_candidate_is_quarantined_before_healthy_rollback(tmp
     value = owner.journal.load()
     assert value["active"] == baseline["generation"] and value["pending"] is None
     assert candidate.asset_release_tag in value["quarantine"]
+    assert value["launch"]["generation"] == baseline["generation"]
     assert owner.running_release == baseline["generation"]["asset_release_tag"]
     assert owner.status()["state"] == "rolled_back"
     assert owner.check(refresh=False).target is None

@@ -45,8 +45,10 @@ def main(spec):
             return native_popen(command, *args, **kwargs)
         config = yaml.safe_load(Path(command[-1]).read_text())
         isolated = Path(config["auth-dir"]).resolve() != state.auth_dir.resolve()
-        # Only the reviewed fake CPA runs here; retain its startup diagnostics
-        # in this test-owned driver log, never output from a packaged engine.
+        environment = dict(kwargs["env"])
+        if spec.get("fail_candidate") and not isolated and binary == Path(candidate.install_dir) / candidate.bin_path:
+            environment["AVIBE_FIXTURE_FAIL_CANDIDATE"] = "1"
+        kwargs["env"] = environment
         kwargs.update(stdout=sys.stderr, stderr=sys.stderr)
         process = native_popen([sys.executable, spec["fixture_engine"], *command[1:]], *args, **kwargs)
         record = {
@@ -79,9 +81,17 @@ def main(spec):
     def save(value):
         pending, launch = value["pending"], value["launch"]
         is_candidate = pending and pending["candidate"] == candidate.document()
+        rollback_commit = (
+            candidate.asset_release_tag in value["quarantine"]
+            and value["active"] != candidate.document()
+            and value["pending"] is None
+            and value["launch"] is not None
+            and value["launch"]["generation"] != candidate.document()
+        )
         phase = (
             "launch" if is_candidate and launch and launch["generation"] == candidate.document()
             else "intent" if is_candidate else "commit" if value["active"] == candidate.document() and pending is None
+            else "rollback" if rollback_commit
             else "preflight_retire" if value["preflight"] is None and owner.journal.load()["preflight"] is not None
             else None
         )

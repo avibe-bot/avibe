@@ -232,19 +232,24 @@ class EngineLifecycle:
         self._start_context = threading.local()
         self._status: dict[str, Any] = {"state": "recovering", "legacy": None}
         self._preflight_passed: set[EngineGeneration] = set()
+        # Owner-local serialization must precede the supervisor lock and the
+        # cross-process mutation fence. It closes the gap between a readiness
+        # check and the activation/start transaction for concurrent callers.
+        self._owner_lock = threading.RLock()
         # Recovery takes this before mutation, never mutation before this lock.
         self._preflight_lock = threading.RLock()
         supervisor.lifecycle = self
 
     @contextmanager
     def mutation(self):
-        lock = self.manager._acquire_mutation_lock()
-        if lock is None:
-            raise JournalError("engine_owner_busy")
-        try:
-            yield
-        finally:
-            self.manager._release_mutation_lock(lock)
+        with self._owner_lock:
+            lock = self.manager._acquire_mutation_lock()
+            if lock is None:
+                raise JournalError("engine_owner_busy")
+            try:
+                yield
+            finally:
+                self.manager._release_mutation_lock(lock)
 
     def _load(self) -> dict[str, Any] | None:
         try:
@@ -390,9 +395,9 @@ class EngineLifecycle:
 
     def recover(self) -> dict[str, Any]:
         """Local only, before admission; a damaged journal is never initialized."""
-        self.recovered = False
-        self.running_release = None
         with self._preflight_lock, self.mutation():
+            self.recovered = False
+            self.running_release = None
             value = self._load() or self.journal.empty()
             self._recover_preflight(value)
             launch = value["launch"]
@@ -479,22 +484,23 @@ class EngineLifecycle:
 
     def ensure_running(self):
         """Fenced first-start confirmation. Never performs recovery/downloads."""
-        if not self.recovered or not self._ready:
-            raise JournalError("engine_recovery_pending")
-        connection = self.supervisor.live_connection() if hasattr(self.supervisor, "live_connection") else None
-        if connection is not None:
-            return connection
-        with self.mutation():
-            value = self._load()
-            if value is None or value["active"] is None or value["blocked"]:
-                raise JournalError("engine_no_authorized_generation")
-            if value["pending"] is not None:
+        with self._owner_lock:
+            if not self.recovered or not self._ready:
                 raise JournalError("engine_recovery_pending")
-            target = EngineGeneration.read(value["active"], self.manager.runtime_dir)
-            self.authorize(target, value=value)
-            if value["health"] == "preflight_only" or self.supervisor.is_running():
-                return self._activate_locked(target, value=value, run_intent=True, reason="confirmation")
-            return self._start(target)
+            connection = self.supervisor.live_connection() if hasattr(self.supervisor, "live_connection") else None
+            if connection is not None:
+                return connection
+            with self.mutation():
+                value = self._load()
+                if value is None or value["active"] is None or value["blocked"]:
+                    raise JournalError("engine_no_authorized_generation")
+                if value["pending"] is not None:
+                    raise JournalError("engine_recovery_pending")
+                target = EngineGeneration.read(value["active"], self.manager.runtime_dir)
+                self.authorize(target, value=value)
+                if value["health"] == "preflight_only" or self.supervisor.is_running():
+                    return self._activate_locked(target, value=value, run_intent=True, reason="confirmation")
+                return self._start(target)
 
     def restart_running(self, *, only_lost: bool = False) -> None:
         """Config/credential repair may restart only the committed generation.
@@ -504,47 +510,48 @@ class EngineLifecycle:
         """
         from vibe.model_hub_runtime.supervisor import EngineConfigLostError
 
-        if not self.recovered or not self._ready:
-            raise JournalError("engine_recovery_pending")
-        with self.mutation():
-            if not self.supervisor.is_running():
-                self.supervisor.with_engine_excluded(lambda _client: None)
-                return
-            if only_lost:
-                try:
-                    if self.supervisor.live_connection() is not None:
-                        return
-                except EngineConfigLostError:
-                    pass
-            value = self._load()
-            if value is None or value["active"] is None or value["blocked"] or value["pending"]:
+        with self._owner_lock:
+            if not self.recovered or not self._ready:
                 raise JournalError("engine_recovery_pending")
-            generation = EngineGeneration.read(value["active"], self.manager.runtime_dir)
-            self.authorize(generation, value=value)
-            if self.supervisor.running_generation() != generation.document():
-                raise JournalError("engine_running_identity_changed")
-            value["pending"] = {
-                "id": uuid.uuid4().hex, "old": generation.document(), "candidate": generation.document(),
-                "run_intent": True, "reason": "restart",
-            }
-            value["authorized_package"] = self.manager.package_identity()
-            self._ready = False
-            self._status.update(state="activating", last_result=None)
-            self._save(value)
-            try:
-                self.supervisor.stop_for_activation()
-                self._start(generation)
+            with self.mutation():
+                if not self.supervisor.is_running():
+                    self.supervisor.with_engine_excluded(lambda _client: None)
+                    return
+                if only_lost:
+                    try:
+                        if self.supervisor.live_connection() is not None:
+                            return
+                    except EngineConfigLostError:
+                        pass
                 value = self._load()
-                value.update(pending=None, health="confirmed")
+                if value is None or value["active"] is None or value["blocked"] or value["pending"]:
+                    raise JournalError("engine_recovery_pending")
+                generation = EngineGeneration.read(value["active"], self.manager.runtime_dir)
+                self.authorize(generation, value=value)
+                if self.supervisor.running_generation() != generation.document():
+                    raise JournalError("engine_running_identity_changed")
+                value["pending"] = {
+                    "id": uuid.uuid4().hex, "old": generation.document(), "candidate": generation.document(),
+                    "run_intent": True, "reason": "restart",
+                }
+                value["authorized_package"] = self.manager.package_identity()
+                self._ready = False
+                self._status.update(state="activating", last_result=None)
                 self._save(value)
-            except Exception:
-                self.recovered = False
-                self.supervisor.stop_for_activation()
-                raise
-            self.running_release = generation.asset_release_tag
-            self._ready = True
-            self._status.update(state="idle", last_result="restarted", reason=None)
-            self.publish_status()
+                try:
+                    self.supervisor.stop_for_activation()
+                    self._start(generation)
+                    value = self._load()
+                    value.update(pending=None, health="confirmed")
+                    self._save(value)
+                except Exception:
+                    self.recovered = False
+                    self.supervisor.stop_for_activation()
+                    raise
+                self.running_release = generation.asset_release_tag
+                self._ready = True
+                self._status.update(state="idle", last_result="restarted", reason=None)
+                self.publish_status()
 
     def _recover_preflight(self, value: dict[str, Any]) -> None:
         from types import SimpleNamespace
@@ -725,6 +732,10 @@ class EngineLifecycle:
                 self._save(value)
                 if run_intent:
                     self._start(previous)
+                    # _start/before_launch persist a fresh witness. Reload it
+                    # before settlement so the stale rollback snapshot cannot
+                    # erase ownership evidence for the survivor.
+                    value = self._load()
                 value.update(active=previous.document(), pending=None, health="confirmed" if run_intent else "preflight_only", blocked=None)
                 self._save(value)
                 self.running_release = previous.asset_release_tag if run_intent else None

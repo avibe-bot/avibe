@@ -1561,6 +1561,20 @@ class CLIProxyEngineAdapter:
         if self._withdrawal_deadline == deadline and self._engine_admission.reason == "engine_withdrawn":
             self._withdrawal_interrupt_task = asyncio.create_task(self._engine_admission.interrupt())
 
+    def _reopen_routine_admission_if_ready(self) -> bool:
+        """Restore routine admission without erasing a learned recall gate."""
+        if (
+            self.lifecycle is None
+            or not self.lifecycle.recovered
+            or not self.lifecycle._ready
+            or self.lifecycle.withdrawn_current
+            or self._withdrawal_deadline is not None
+            or self._engine_admission.reason == "engine_withdrawn"
+        ):
+            return False
+        self._engine_admission.reopen()
+        return True
+
     async def recover_lifecycle(self) -> None:
         if self.lifecycle is not None:
             loop = asyncio.get_running_loop()
@@ -1569,13 +1583,17 @@ class CLIProxyEngineAdapter:
         if self.lifecycle is None or self.lifecycle.recovered:
             return
         async with self._lifecycle_recovery_lock:
-            if not self.lifecycle.recovered:
-                if not await self._drain_engine():
-                    raise EngineUnavailableError("models.engine.install_failed", reason="engine_recovery_waiting_for_idle")
-                await run_owned_in_thread(self.lifecycle.recover)
-                if self.lifecycle._ready:
-                    self._engine_admission.reopen()
-                    self._withdrawal_deadline = None
+            try:
+                if not self.lifecycle.recovered:
+                    if not await self._drain_engine():
+                        raise EngineUnavailableError("models.engine.install_failed", reason="engine_recovery_waiting_for_idle")
+                    await run_owned_in_thread(self.lifecycle.recover)
+                    if self.lifecycle._ready and self._withdrawal_deadline is None:
+                        self._engine_admission.reopen()
+                        self._withdrawal_deadline = None
+            except asyncio.CancelledError:
+                self._reopen_routine_admission_if_ready()
+                raise
 
     def start_lifecycle_scheduler(self) -> None:
         if self.lifecycle is not None and self._lifecycle_task is None:
@@ -1642,14 +1660,23 @@ class CLIProxyEngineAdapter:
         # restart its single budget while admitted workers finish cancelling.
         self._gate_known_withdrawal()
         withdrawal = withdrawal or self._withdrawal_deadline is not None or self._engine_admission.reason == "engine_withdrawn"
-        # Admission is synchronous loop-owned state: do not wait on routing
-        # held by the very operation whose continuation we need to drain.
         self._engine_admission.close("engine_withdrawn" if withdrawal else "engine_updating")
         if withdrawal and self._withdrawal_deadline is None:
             self._withdrawal_deadline = asyncio.get_running_loop().time() + _ENGINE_WITHDRAWAL_DRAIN_SECONDS
         deadline = self._withdrawal_deadline if withdrawal else asyncio.get_running_loop().time() + _ENGINE_ROUTINE_DRAIN_SECONDS
         while not self._engine_admission.idle.is_set():
             self._expire_oauth_flows_locked()
+            # A routine drain can learn a recall while it waits. Upgrade this
+            # operation to the existing one-shot withdrawal deadline and never
+            # let the routine timeout reopen that gate.
+            self._gate_known_withdrawal()
+            if self._withdrawal_deadline is not None or self._engine_admission.reason == "engine_withdrawn":
+                if not withdrawal:
+                    withdrawal = True
+                    if self._withdrawal_deadline is None:
+                        self._withdrawal_deadline = asyncio.get_running_loop().time() + _ENGINE_WITHDRAWAL_DRAIN_SECONDS
+                deadline = self._withdrawal_deadline
+                self._engine_admission.close("engine_withdrawn")
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 if withdrawal:
@@ -1664,21 +1691,31 @@ class CLIProxyEngineAdapter:
         return True
 
     async def _select_staged(self, generation, *, withdrawal: bool = False, reason: str = "required") -> bool:
-        await run_owned_in_thread(self.lifecycle.prepare_candidate, generation)
-        if not await self._drain_engine(withdrawal=withdrawal):
-            if withdrawal:
-                await run_owned_in_thread(self.lifecycle.block, "engine_withdrawn")
-            else:
-                self.lifecycle._status.update(state="deferred", reason="waiting_for_idle")
-            return False
+        activated = False
         try:
+            await run_owned_in_thread(self.lifecycle.prepare_candidate, generation)
+            if not await self._drain_engine(withdrawal=withdrawal):
+                if withdrawal:
+                    await run_owned_in_thread(self.lifecycle.block, "engine_withdrawn")
+                else:
+                    self.lifecycle._status.update(state="deferred", reason="waiting_for_idle")
+                return False
             async with self._routing_lock:
                 await run_owned_in_thread(self.lifecycle.activate, generation, reason=reason)
+            activated = True
             return True
+        except asyncio.CancelledError:
+            # Cancelling a routine swap must not leave a healthy committed
+            # owner behind an engine_updating gate. A recall learned while the
+            # drain was waiting remains terminal and is never reopened here.
+            if not withdrawal:
+                self._reopen_routine_admission_if_ready()
+            raise
         finally:
-            if self.lifecycle.recovered and self.lifecycle._ready:
-                self._engine_admission.reopen()
-                self._withdrawal_deadline = None
+            if activated and self.lifecycle.recovered and self.lifecycle._ready:
+                if not self.lifecycle.withdrawn_current:
+                    self._engine_admission.reopen()
+                    self._withdrawal_deadline = None
 
     async def _ensure_installed_lifecycle(self, *, force=False, offline=False, expected_target=None, on_resolved=None):
         from vibe.model_hub_runtime.lifecycle import EngineGeneration
