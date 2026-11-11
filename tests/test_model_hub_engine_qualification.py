@@ -1060,6 +1060,9 @@ def test_candidate_workflow_is_untrusted_and_has_no_authoritative_receipt() -> N
     assert workflow["jobs"]["untrusted-rehearsal"]["if"] == "always()"
     assert workflow["jobs"]["untrusted-rehearsal"]["needs"] == ["build", "platform-smoke", "released-avibe-e2e", "hosted-wire"]
     hosted_wire_steps = workflow["jobs"]["hosted-wire"]["steps"]
+    assert workflow["jobs"]["hosted-wire"]["if"] == "always()"
+    released_record = next(step for step in workflow["jobs"]["released-avibe-e2e"]["steps"] if step.get("name") == "Upload the released Avibe record")
+    assert released_record["if"] == "always()"
     baseline_upload = next(step for step in hosted_wire_steps if step.get("name") == "Upload the baseline list")
     assert baseline_upload["if"] == "always()"
     assert all(

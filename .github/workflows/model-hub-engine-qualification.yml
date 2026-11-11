@@ -324,6 +324,7 @@ jobs:
             --output "$RUNNER_TEMP/evidence/released-avibe-e2e-$ROLE.json"
 
       - name: Upload the released Avibe record
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: qualification-released-${{ matrix.role }}
@@ -345,6 +346,7 @@ jobs:
   hosted-wire:
     name: hosted-wire
     needs: [build, released-avibe-e2e]
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -372,6 +374,7 @@ jobs:
           path: ${{ runner.temp }}/candidate-assets
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        continue-on-error: true
         with:
           pattern: qualification-released-*
           path: ${{ runner.temp }}/released
@@ -386,11 +389,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/released" "$RUNNER_TEMP/baselines"
           args=(--output-dir "$RUNNER_TEMP/baselines")
           if [ "$(python scripts/model_hub_engine_channel.py commissioned)" = "true" ]; then
             avault="$(python scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
             args+=(--avault "$avault")
           fi
+          shopt -s nullglob
           for manifest in "$RUNNER_TEMP"/released/bundled-manifest-*.json; do
             args+=(--bundled "$manifest")
           done
