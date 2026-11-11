@@ -2566,6 +2566,34 @@ async def test_a_route_model_hub_refuses_mid_run_shows_the_hubs_copy(engine, ses
     assert copy and harness.controller.im_client.sent[-1] == f"❌ {copy}"
 
 
+async def test_a_route_refused_mid_run_whose_fix_is_in_models_says_where(engine, session, tmp_path, published) -> None:
+    """The refusal itself, not only its copy, reaches the notice: its next step comes from it."""
+    from core.handlers.model_hub.provenance import TurnOutcomeProjectionInput, TurnSupplyFacts
+    from core.handlers.model_hub.service import ModelHubError
+    from modules.agents.model_hub import launch_refusal_copy, models_next_step_text
+
+    refused = ModelHubError("no_candidate", turn_outcome=TurnOutcomeProjectionInput(
+        outcome="no_candidate",
+        discriminator="route_unconfigured",
+        supply_facts=TurnSupplyFacts(backend="vibey", model="m", supply_state="interrupted"),
+    ))
+    harness = _Harness(engine, tmp_path, "telegram", _tool_turn())
+    resolve, calls = harness.controller._resolve, []
+
+    async def route(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise refused
+        return await resolve(*args, **kwargs)
+
+    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+
+    await harness.agent.handle_message(harness.request("look"))
+
+    copy = launch_refusal_copy(harness.controller, refused)
+    assert harness.controller.im_client.sent[-1] == f"❌ {copy}\n{models_next_step_text(harness.controller)}"
+
+
 
 async def test_every_model_hub_resolution_names_its_turn(engine, session, tmp_path, published) -> None:
     """MH-VIBEY-008: the loop's later model calls run in their own tasks, where a Turn cannot be found by task."""
