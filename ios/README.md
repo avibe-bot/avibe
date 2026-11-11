@@ -632,7 +632,7 @@ pinned to Xcode 26.6.
 | Web content process termination | The primary WebView reloads the configured instance; a terminated child closes. |
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
-| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. |
+| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. While the App is foregrounded, its notification-center delegate requests banner, Notification Center list, sound, and badge presentation without rewriting the NSE's decrypted or fallback content. It does not currently suppress a notification for the conversation already open. |
 | Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
 | Installation guidance | `InstallHint` and Show Page "Add to Home Screen" guidance are hidden in the native shell. |
 | PWA app launch suppression | Not reused. New-context launches use the shell's recursive child WebViews. |
