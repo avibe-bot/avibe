@@ -1729,6 +1729,8 @@ class CLIProxyEngineAdapter:
         from vibe.model_hub_runtime.lifecycle import EngineGeneration
 
         installer = self.supervisor.installer
+        if force:
+            await run_owned_in_thread(self.lifecycle.retry_required)
         install = await run_owned_in_thread(
             self.lifecycle.stage_required, offline=offline, force=force, expected_target=expected_target, on_resolved=on_resolved,
         )
@@ -1737,7 +1739,7 @@ class CLIProxyEngineAdapter:
         generation = EngineGeneration.read(install["generation"], installer.runtime_dir)
         current = await run_owned_in_thread(self.lifecycle.journal.load)
         changed = current is None or current["active"] != generation.document()
-        if changed:
+        if changed or (current is not None and current["blocked"] is not None):
             changed = await self._select_staged(generation)
         return EngineEnsureResult(status=await self.status(), changed=changed)
 

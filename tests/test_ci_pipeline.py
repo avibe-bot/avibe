@@ -406,6 +406,12 @@ def test_unit_file_runner_rejects_invalid_deadline(tmp_path: Path, timeout: str)
     assert "must be a positive integer" in result.stderr
 
 
+def test_scenario_evidence_waits_for_every_declared_junit_producer() -> None:
+    jobs = _jobs()
+    producers = {name for name, job in jobs.items() if "AVIBE_CI_JUNIT_DIR" in job.get("env", {})}
+    assert set(jobs["scenario-evidence"]["needs"]) == {"changes", *producers}
+
+
 def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     jobs = _jobs()
     checks = jobs["ui-checks"]

@@ -467,6 +467,9 @@ def test_failed_same_release_repair_preserves_the_old_healthy_install(tmp_path, 
     # Ordinary demand and required-file repair still name the settled old owner.
     assert owner.ensure_running() == "test connection"
     assert owner.stage_required()["ok"]
+    owner.retry_required()
+    with pytest.raises(journal.JournalError, match="quarantined"):
+        owner.authorize(replacement, value=owner.journal.load())
 
 
 def test_signed_channel_commit_is_separate_from_running_and_bundled_legacy(tmp_path, monkeypatch):
@@ -762,6 +765,101 @@ def test_package_stale_hint_removal_failure_retention_and_actual_new_bundle(tmp_
     assert owner.journal.load()["active"] == candidate.document()
     assert owner.manager.clean(keep_previous=0)["ok"]
     assert Path(staged_bundle["path"]).is_file() and (Path(candidate.install_dir) / candidate.bin_path).is_file()
+
+
+def test_explicit_required_retry_cannot_clear_current_withdrawal_authority(tmp_path, monkeypatch):
+    from core.model_hub_engine_channel import ResolutionAction
+    from types import SimpleNamespace
+
+    owner, _supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
+    tag = baseline["generation"]["asset_release_tag"]
+    value = owner.journal.load()
+    value["quarantine"][tag] = "startup_failed"
+    owner._save(value)
+    monkeypatch.setattr(owner.channel, "resolve", lambda **_kwargs: SimpleNamespace(
+        action=ResolutionAction.BLOCKED, target=None, reason="withdrawn",
+    ))
+    with pytest.raises(journal.JournalError, match="withdrawn"):
+        owner.retry_required()
+    assert owner.journal.load()["quarantine"] == {tag: "startup_failed"}
+    owner.check(refresh=False, retry=True)
+    assert owner.journal.load()["quarantine"] == {tag: "startup_failed"}
+
+
+@pytest.mark.parametrize("hint", ["canonical", "sibling"])
+def test_retired_bundled_repair_siblings_are_reclaimed_but_one_eligible_hint_survives(tmp_path, monkeypatch, hint):
+    from vibe.model_hub_runtime.lifecycle import EngineGeneration
+
+    owner, _supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
+    generations = [baseline["generation"]]
+    for _ in range(4):
+        result = owner.stage_required(force=True)
+        assert result["ok"], result
+        generation = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
+        owner.activate(generation, reason="required")
+        generations.append(generation.document())
+    chosen = generations[0 if hint == "canonical" else 1]
+    manifest, archive = owner._manifest(EngineGeneration.read(chosen, owner.manager.runtime_dir))
+    owner.manager._write_current_pointer(Path(chosen["install_dir"]), manifest, archive)
+    owner.project_legacy(owner.journal.load())
+    assert owner.status()["legacy"]["install_dir"] == chosen["install_dir"]
+    # Compatibility exposure must not make the non-authoritative hint an
+    # execution/recovery selector, nor rewrite the committed generation.
+    assert owner._existing_bundled().install_dir == generations[0]["install_dir"]
+    assert owner._existing_bundled(compatibility=True).install_dir == chosen["install_dir"]
+    assert owner.journal.load()["active"] == generations[-1]
+    protected = {g["install_dir"] for g in [generations[-1], generations[-2], chosen]}
+    dry = owner.manager.clean(keep_previous=0, dry_run=True)
+    assert dry["ok"], dry
+    assert all(Path(g["install_dir"]).exists() for g in generations)
+    cleaned = owner.manager.clean(keep_previous=0)
+    assert cleaned["ok"], cleaned
+    assert {g["install_dir"] for g in generations if Path(g["install_dir"]).exists()} == protected
+    assert owner._existing_bundled(compatibility=True).install_dir == chosen["install_dir"]
+    assert owner.status()["legacy_hint"]["state"] == "eligible"
+
+
+@pytest.mark.parametrize("role", ["staged", "pending_old", "pending_candidate", "launch", "preflight"])
+def test_each_lifecycle_role_pins_a_bundled_sibling_only_until_retirement(tmp_path, monkeypatch, role):
+    import uuid
+
+    from core.process_isolation import fingerprint_process_marker, new_process_identity_marker
+    from vibe.model_hub_runtime.lifecycle import EngineGeneration
+
+    owner, _supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
+    generations = []
+    for _ in range(4):
+        result = owner.stage_required(force=True)
+        generation = EngineGeneration.read(result["generation"], owner.manager.runtime_dir)
+        owner.activate(generation, reason="required")
+        generations.append(generation.document())
+    pinned = generations[1]
+    value = owner.journal.load()
+    fingerprint = fingerprint_process_marker(new_process_identity_marker())
+    if role == "staged":
+        value["staged"] = [pinned]
+    elif role.startswith("pending_"):
+        value["pending"] = {
+            "id": uuid.uuid4().hex, "old": pinned if role == "pending_old" else value["active"],
+            "candidate": pinned if role == "pending_candidate" else value["active"],
+            "run_intent": False, "reason": "required",
+        }
+    elif role == "launch":
+        value["launch"] = {"fingerprint": fingerprint, "generation": pinned}
+    else:
+        value["preflight"] = {
+            "root": str(owner.manager.runtime_dir / "engine-preflight-owned"),
+            "fingerprint": fingerprint, "generation": pinned,
+        }
+    owner._save(value)
+    assert owner.manager.clean(keep_previous=0)["ok"]
+    assert Path(pinned["install_dir"]).exists()
+    value.update(staged=[], pending=None, launch=None, preflight=None)
+    owner._save(value)
+    assert owner.manager.clean(keep_previous=0)["ok"]
+    assert not Path(pinned["install_dir"]).exists()
+    assert Path(value["active"]["install_dir"]).exists()
+    assert Path(value["previous"]["install_dir"]).exists()
 
 
 def test_settled_and_superseded_stage_roles_retire_and_content_addressed_archives_are_reclaimed(tmp_path, monkeypatch):

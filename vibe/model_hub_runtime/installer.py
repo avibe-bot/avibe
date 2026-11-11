@@ -424,6 +424,25 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             EngineJournal(self.runtime_dir).load()
         return super()._clean_locked(keep_previous=keep_previous, dry_run=dry_run, removed=removed)
 
+    def _existing_bundled_install(self, manifest, archive, *, prefer_hint: bool = False) -> Path | None:
+        """One verified copy; only compatibility/cleanup may prefer its hint."""
+        from vibe.model_hub_runtime.journal import JournalError, read_document
+
+        canonical = self._manifest_install_dir(manifest, archive)
+        candidates = [canonical, *sorted(canonical.parent.glob(f"{canonical.name}-*"))]
+        try:
+            hint = read_document(self.runtime_dir / "current.json") if prefer_hint else None
+        except JournalError:
+            hint = None  # non-authoritative hint; journal roles still fence cleanup
+        if isinstance(hint, dict) and all(hint.get(key) == expected for key, expected in {
+            "runtime_version": manifest.runtime_version, "platform": archive.platform,
+            "manifest_sha256": manifest.digest, "archive_sha256": archive.sha256, "bin_path": archive.bin_path,
+        }.items()):
+            preferred = next((p for p in candidates if str(p) == hint.get("install_dir")), None)
+            if preferred is not None:
+                candidates = [preferred, *(p for p in candidates if p != preferred)]
+        return next((p for p in candidates if self._verified_manifest_binary(p, manifest, archive) is not None), None)
+
     def _install_dir_is_protected(self, install_dir: Path, protected: set[Path]) -> bool:
         if self.lifecycle_enabled:
             from vibe.model_hub_runtime.lifecycle import EngineJournal
@@ -441,8 +460,9 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             bundled = self.bundled_manifest()
             archive = self._manifest_archive_for_platform(bundled) if bundled else None
             if bundled and archive:
-                canonical = self._manifest_install_dir(bundled, archive)
-                protected = protected | {canonical.resolve(), *(p.resolve() for p in canonical.parent.glob(f"{canonical.name}-*"))}
+                retained = self._existing_bundled_install(bundled, archive, prefer_hint=True)
+                if retained is not None:
+                    protected = protected | {retained.resolve()}
         return super()._install_dir_is_protected(install_dir, protected)
 
     def _clean_downloaded_archives(self, *, archive_provenance, protected_sha256s, dry_run):

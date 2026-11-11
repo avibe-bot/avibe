@@ -297,7 +297,11 @@ release tag: the prior healthy installation remains eligible for rollback and
 ordinary required-file repair. This applies to preflight, real-config health and
 interrupted repair recovery; integrity, provenance, minimum and current withdrawal
 checks still apply to the rollback target. Other failed candidate releases remain
-release-quarantined. Durability order is explicit:
+release-quarantined. Terminal OAuth status is an existing local snapshot, not new
+engine work: its failure and retained-material disposition remain readable even
+when withdrawal has released its flow lease and no fallback can run. Mutating or
+active-flow operations keep their admission requirements. Durability order is
+explicit:
 
 1. Stage exact verified manifests/archives into immutable generations, with
    digest-addressed cache names. Stage-only callers execute no version probe.
@@ -355,9 +359,12 @@ Rollback restores binaries/selection, **not** a stale snapshot of live credentia
 An engine requiring irreversible data migration needs an Avibe-coordinated
 change, not this channel. Publication/backward-state rehearsal belongs to the
 owner-selected Job split, not a receipt/missing-producer runtime hard gate.
-Cleanup protects bundled, committed, previous, staged and pending/launch/preflight
-roles and their archives; unreadable lifecycle state fails the whole cleanup
-plan closed. Settled/quarantined/superseded stages retire rather than becoming
+Cleanup protects one verified current-package bundled copy (preferring an eligible
+legacy hint), committed, previous, staged and pending/launch/preflight roles and
+their archives; unreadable lifecycle state fails the whole cleanup plan closed.
+Projection and cleanup share the bundled-copy chooser. Superseded bundled repair
+siblings lose protection with their last role, rather than every matching prefix
+being retained forever. Settled/quarantined/superseded stages retire rather than becoming
 permanent roots. Content-addressed archives retain cleanup ownership even when
 their unused install was removed while the archive was still too young.
 Hosted-tool capability/refusal/result stamps carry the admitted producing engine
@@ -477,7 +484,12 @@ preservation. Turning it off prevents routine automatic adoption, not checking,
 explicit Update now, repair of the already selected/default target, or withdrawal
 of a known-bad build. It must not silently adopt the newest engine under “repair”.
 State that exception beside the switch. An explicit Retry after a failed update
-clears only that candidate's quarantine. Explicit offline mode suppresses network
+clears only that candidate's quarantine. If there is no adoption target, explicit
+Update or a forced owner repair can retry the required committed generation,
+without bypassing provenance, compatibility or current withdrawal checks. A
+blocked same-identity retry re-enters fenced preflight/activation; it is not an
+unchanged-file success and does not silently start a stopped engine. Unrelated
+failed repair siblings remain quarantined. Explicit offline mode suppresses network
 operations; known locally recorded revocations still apply. Local/test manifest
 overrides opt out of the public channel and are visibly identified. Use English/
 Chinese catalog keys; implementation includes dependency-row design frames and Show

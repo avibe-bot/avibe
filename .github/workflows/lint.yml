@@ -742,6 +742,7 @@ jobs:
   scenario-evidence:
     needs:
       - changes
+      - model-hub-lifecycle-native
       - unit-test-shards
       - memory-insight-contract
       - migration-release-guard

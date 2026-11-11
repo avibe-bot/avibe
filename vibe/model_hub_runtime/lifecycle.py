@@ -330,26 +330,23 @@ class EngineLifecycle:
         if verify_installed and self.manager._verified_manifest_binary(Path(generation.install_dir), manifest, archive) is None:
             raise JournalError("engine_installed_integrity_failed")
 
-    def _existing_bundled(self) -> EngineGeneration | None:
+    def _existing_bundled(self, *, compatibility: bool = False) -> EngineGeneration | None:
         raw = self.manager.bundled_manifest_bytes()
         manifest = self.manager._parse_manifest(raw, loaded_from="package:bundled")
         archive = self.manager._manifest_archive_for_platform(manifest) if manifest else None
         if not manifest or not archive:
             return None
-        canonical = self.manager._manifest_install_dir(manifest, archive)
-        candidates = [canonical, *sorted(canonical.parent.glob(f"{canonical.name}-*"))]
-        for directory in candidates:
-            if self.manager._verified_manifest_binary(directory, manifest, archive) is None:
-                continue
-            digest = self.journal.retain_bytes(raw, kind="manifest")
-            return EngineGeneration.read({
-                "asset_release_tag": str(manifest.payload.get("asset_release_tag") or manifest.runtime_version),
-                "runtime_version": manifest.runtime_version, "platform": archive.platform,
-                "archive_sha256": archive.sha256, "binary_sha256": archive.binary_sha256,
-                "manifest_sha256": digest, "install_dir": str(directory), "bin_path": archive.bin_path,
-                "origin": "bundled", "min_avibe_version": None, "envelope_sha256": None,
-            }, self.manager.runtime_dir)
-        return None
+        directory = self.manager._existing_bundled_install(manifest, archive, prefer_hint=compatibility)
+        if directory is None:
+            return None
+        digest = self.journal.retain_bytes(raw, kind="manifest")
+        return EngineGeneration.read({
+            "asset_release_tag": str(manifest.payload.get("asset_release_tag") or manifest.runtime_version),
+            "runtime_version": manifest.runtime_version, "platform": archive.platform,
+            "archive_sha256": archive.sha256, "binary_sha256": archive.binary_sha256,
+            "manifest_sha256": digest, "install_dir": str(directory), "bin_path": archive.bin_path,
+            "origin": "bundled", "min_avibe_version": None, "envelope_sha256": None,
+        }, self.manager.runtime_dir)
 
     def package_transition_required(self, value=None) -> bool:
         """A changed Avibe package can require its own baseline, not a candidate.
@@ -372,7 +369,13 @@ class EngineLifecycle:
         except ValueError:
             pass
         try:
-            self.authorize(generation, value=value, verify_installed=False)
+            # Package convergence inspects compatibility, not the old process's
+            # health verdict. Its quarantine cannot hide a newly required pin.
+            inspected = {**value, "quarantine": {
+                key: reason for key, reason in value["quarantine"].items()
+                if key not in {generation.asset_release_tag, f"install:{generation.install_dir}"}
+            }}
+            self.authorize(generation, value=inspected, verify_installed=False)
         except JournalError as exc:
             return str(exc) == "engine_minimum_not_met"
         except ChannelError as exc:
@@ -836,7 +839,7 @@ class EngineLifecycle:
         bundled = None
         error = None
         try:
-            bundled = self._existing_bundled()
+            bundled = self._existing_bundled(compatibility=True)
             if bundled is not None:
                 self.authorize(bundled, value=value)
         except Exception:
@@ -859,6 +862,23 @@ class EngineLifecycle:
             legacy_hint=hint, legacy_error=error,
             legacy_projection="pending" if error else "settled",
         )
+
+    def retry_required(self) -> None:
+        """Explicit owner retry, never fresh-start or selection authority."""
+        with self.mutation():
+            value = self._load() or self.journal.empty()
+            if value["active"] is None or self.package_transition_required(value):
+                return  # the new package owns its baseline; never retry its stale predecessor
+            generation = EngineGeneration.read(value["active"], self.manager.runtime_dir)
+            for key in (generation.asset_release_tag, f"install:{generation.install_dir}"):
+                value["quarantine"].pop(key, None)
+                value["interrupted"].pop(key, None)
+            # Validate every other authority BEFORE publishing the clearance.
+            # Corrupt bytes are repairable; lost provenance/minimum/withdrawal
+            # authorization is not. A failed sibling's quarantine stays intact.
+            self.authorize(generation, value=value, verify_installed=False)
+            self._save(value)
+            self._preflight_passed.discard(generation)
 
     def check(self, *, refresh: bool = True, allow_adoption: bool = True, retry: bool = False):
         """Metadata-only operation: no engine start or selected-generation write."""
@@ -886,6 +906,8 @@ class EngineLifecycle:
             channel=asdict(channel_status) if channel_status else None,
             last_checked_at=datetime.now(timezone.utc).isoformat(), reason=decision.reason,
         )
+        if retry and decision.target is None and decision.action.value == "keep":
+            self.retry_required()
         if retry or value["staged"]:
             with self.mutation():
                 value = self._load() or self.journal.empty()
@@ -898,6 +920,9 @@ class EngineLifecycle:
                 if retry and decision.target is not None:
                     value["quarantine"].pop(decision.target.asset_release_tag, None)
                     value["interrupted"].pop(decision.target.asset_release_tag, None)
+                    self._preflight_passed = {
+                        g for g in self._preflight_passed if g.asset_release_tag != decision.target.asset_release_tag
+                    }
                     changed = True
                 if changed:
                     self._save(value)

@@ -89,6 +89,127 @@ async def test_oauth_start_cancellation_releases_unregistered_provider(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_terminal_oauth_failure_remains_visible_to_service_while_withdrawal_blocks_engine(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from core.handlers.model_hub.adapter import RetainedMaterialDisposition
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    calls = []
+
+    def management_request(_method, path, **_kwargs):
+        calls.append(path)
+        return {"files": []} if path == "/auth-files" else {"state": "fixture-state", "flow": "device"}
+
+    client = SimpleNamespace(management_request=management_request)
+    owner = CLIProxyEngineAdapter(
+        supervisor=SimpleNamespace(client=lambda: client), state_store=EngineStateStore(tmp_path / "engine"),
+    )
+    service, _store, fake = _service(tmp_path)
+    monkeypatch.setattr(fake, "start_oauth", owner.start_oauth)
+    monkeypatch.setattr(fake, "oauth_status", owner.oauth_status)
+    started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+    flow_id = started["flow"]["flow_id"]
+    flow = owner._oauth_flows[flow_id]
+    owner._engine_admission.close("engine_withdrawn")
+    await owner._engine_admission.interrupt()
+    assert flow.state == "failed" and not flow.lease.active
+    assert flow.retained_material_disposition is RetainedMaterialDisposition.UNKNOWN
+    assert owner._engine_admission.idle.is_set()
+    calls_before = list(calls)
+    owner.lifecycle = SimpleNamespace(recovered=False)
+    owner.recover_lifecycle = AsyncMock(side_effect=AssertionError("terminal inspection attempted recovery"))
+    materialize = service._materialize_completed_oauth
+    settled = []
+
+    async def observe_materialization(*args):
+        settled.append(args[2])
+        return await materialize(*args)
+
+    monkeypatch.setattr(service, "_materialize_completed_oauth", observe_materialization)
+    result = await service.oauth_status(flow_id)
+    assert result["flow"]["state"] == "failed"
+    assert settled[0].retained_material_disposition is RetainedMaterialDisposition.UNKNOWN
+    assert settled[0].error_key == "models.engine.withdrawn"
+    assert calls == calls_before
+    owner.recover_lifecycle.assert_not_awaited()
+    with pytest.raises(EngineUnavailableError):
+        owner._engine_admission.acquire()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["success", "failed", "cancelled"])
+async def test_terminal_oauth_snapshots_never_take_a_new_execution_lease(state):
+    owner = adapter()
+    expected = object()
+    owner._oauth_flows["flow"] = SimpleNamespace(state=state, snapshot=lambda: expected)
+    owner._engine_admission.close("engine_withdrawn")
+    assert await owner.oauth_status("flow") is expected
+    assert owner._engine_admission.idle.is_set()
+    with pytest.raises(EngineUnavailableError):
+        await owner.submit_oauth("flow", "code")
+
+
+@pytest.mark.asyncio
+async def test_oauth_becoming_terminal_during_recovery_is_still_inspectable():
+    from unittest.mock import AsyncMock
+
+    owner = adapter()
+    expected = object()
+    flow = SimpleNamespace(state="awaiting_action", snapshot=lambda: expected)
+    owner._oauth_flows["flow"] = flow
+    owner.lifecycle = SimpleNamespace(withdrawn_current=False)
+
+    async def recover():
+        flow.state = "failed"
+        owner._engine_admission.close("engine_withdrawn")
+
+    owner.recover_lifecycle = AsyncMock(side_effect=recover)
+    assert await owner.oauth_status("flow") is expected
+    assert owner._engine_admission.idle.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_path", ["update", "doctor"])
+async def test_explicit_retry_recovers_a_quarantined_required_baseline_without_an_adoption(tmp_path, monkeypatch, retry_path):
+    from unittest.mock import AsyncMock
+
+    from tests.test_model_hub_engine_lifecycle import owner_fixture
+    from vibe.model_hub_runtime.journal import JournalError
+
+    owner, supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
+    tag = baseline["generation"]["asset_release_tag"]
+    supervisor.fail_tag = tag
+    with pytest.raises(EngineUnavailableError):
+        owner.ensure_running()
+    assert owner.journal.load()["blocked"] == "engine_rollback_failed"
+    assert tag in owner.journal.load()["quarantine"]
+    owner.check(refresh=False)
+    with pytest.raises(JournalError):
+        owner.stage_required()
+    assert tag in owner.journal.load()["quarantine"]
+    supervisor.fail_tag = None
+    supervisor.installer = owner.manager
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=object())
+    transport.recover_lifecycle = AsyncMock()
+    transport.status = AsyncMock(return_value=object())
+    check = owner.check
+    monkeypatch.setattr(owner, "check", lambda **kwargs: check(refresh=False, **kwargs))
+    if retry_path == "update":
+        await transport._reconcile_engine(explicit=True)
+    else:
+        await transport.ensure_installed(force=True)
+    value = owner.journal.load()
+    assert tag not in value["quarantine"]
+    assert value["active"]["asset_release_tag"] == tag
+    assert value["blocked"] is None and owner._ready
+    assert value["health"] == "preflight_only" and supervisor.running is None
+    owner.ensure_running()
+    assert supervisor.running == owner.journal.load()["active"]
+
+
+@pytest.mark.asyncio
 async def test_routine_drain_releases_routing_for_admitted_continuations():
     owner = adapter()
     flow = owner._engine_admission.retain()
@@ -374,7 +495,7 @@ async def test_known_withdrawal_gates_and_expires_while_metadata_publication_is_
     work = adapter_owner._engine_admission.retain()
     signalled = asyncio.Event()
     work.abort = signalled.set
-    adapter_owner._oauth_flows["fixture-flow"] = SimpleNamespace(lease=work)
+    adapter_owner._oauth_flows["fixture-flow"] = SimpleNamespace(lease=work, state="awaiting_action")
     publication_allowed = threading.Event()
     monkeypatch.setattr(owner, "publish_status", lambda: publication_allowed.wait(5))
 

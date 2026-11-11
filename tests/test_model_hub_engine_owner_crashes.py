@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import logging
 from pathlib import Path
 import subprocess
 import sys
@@ -15,7 +16,9 @@ import time
 import psutil
 import pytest
 
-from core.process_isolation import PROCESS_IDENTITY_ENV, fingerprint_process_marker
+from core.process_isolation import (
+    PROCESS_IDENTITY_ENV, fingerprint_process_marker, new_process_identity_marker, reap_marked_processes,
+)
 from tests.model_hub_engine_test_environment import child_environment
 from tests.test_model_hub_engine_lifecycle import signed_candidate
 from tests.test_model_hub_engine_processes import finish, real_owner
@@ -41,7 +44,7 @@ def alive(pid):
     ("rollback_after_save", "missing"), ("rollback_after_save", "malformed"),
 ])
 def test_native_owner_death_recovers_only_a_durable_authorized_generation(
-    tmp_path, monkeypatch, boundary, record_damage,
+    tmp_path, monkeypatch, boundary, record_damage, *, redirector=False,
 ):
     from tests.test_model_hub_runtime import _write_mock_engine
 
@@ -70,13 +73,21 @@ def test_native_owner_death_recovers_only_a_durable_authorized_generation(
     }))
     source = Path(__file__).resolve().parents[1]
     environment = child_environment(tmp_path / "crash-home", source)
+    marker = new_process_identity_marker()
+    environment[PROCESS_IDENTITY_ENV] = marker
+    owner_fingerprint = fingerprint_process_marker(marker)
     driver = Path(__file__).with_name("model_hub_owner_crash_driver.py")
+    command = [sys.executable, str(driver), str(spec_path)]
+    if redirector:
+        # Reproduce the Windows virtualenv launcher shape on any native host:
+        # Popen owns a waiting redirector; the boundary writer is its child.
+        command = [sys.executable, "-c", "import subprocess,sys; sys.exit(subprocess.call(sys.argv[1:]))", *command]
     owner_process = None
     records = []
     try:
         with (tmp_path / "owner-output.log").open("w+") as output:
             owner_process = subprocess.Popen(
-                [sys.executable, str(driver), str(spec_path)], cwd=source, env=environment,
+                command, cwd=source, env=environment,
                 stdout=output, stderr=subprocess.STDOUT,
             )
             deadline = time.monotonic() + 30
@@ -84,11 +95,18 @@ def test_native_owner_death_recovers_only_a_durable_authorized_generation(
                 time.sleep(0.01)
             output.flush()
             assert reached.exists(), (tmp_path / "owner-output.log").read_text()
-            assert json.loads(reached.read_text())["owner_pid"] == owner_process.pid
-            # Kill only this test's recorded owner. No mocked exception or stop
-            # callback stands in for operating-system process death here.
-            owner_process.kill()
+            actual_owner = psutil.Process(json.loads(reached.read_text())["owner_pid"])
+            launcher = psutil.Process(owner_process.pid)
+            assert actual_owner == launcher or actual_owner in launcher.children(recursive=True)
+            actual_marker = actual_owner.environ().get(PROCESS_IDENTITY_ENV)
+            assert actual_marker is not None and fingerprint_process_marker(actual_marker) == owner_fingerprint
+            if redirector:
+                assert actual_owner.pid != owner_process.pid
+            # Kill the positively witnessed executing owner, NOT merely its
+            # Windows venv redirector. Fixture CPA children survive this death.
+            actual_owner.kill()
             owner_process.wait(timeout=10)
+            assert not alive(actual_owner.pid)
         records = [json.loads(line) for line in children.read_text().splitlines()]
         assert records
         journal = owner.journal.load()
@@ -116,6 +134,12 @@ def test_native_owner_death_recovers_only_a_durable_authorized_generation(
         assert owner.running_release == expected["asset_release_tag"]
         assert owner.journal.load()["active"] == expected
     finally:
+        # Failure cleanup also covers redirectors whose actual owner has not
+        # published its boundary yet. The unique owner marker cannot match the
+        # live Avibe service or the independently marked CPA children.
+        owner_cleanup = reap_marked_processes(
+            logging.getLogger(__name__), "native fixture owner", worker_fingerprint=owner_fingerprint,
+        )
         if owner_process is not None and owner_process.poll() is None:
             owner_process.kill()
             owner_process.wait(timeout=10)
@@ -138,3 +162,10 @@ def test_native_owner_death_recovers_only_a_durable_authorized_generation(
                     assert not alive(process.pid)
             except psutil.NoSuchProcess:
                 pass
+        assert owner_cleanup != "unconfirmed"
+
+
+def test_native_owner_death_kills_the_actual_owner_behind_a_redirector(tmp_path, monkeypatch):
+    test_native_owner_death_recovers_only_a_durable_authorized_generation(
+        tmp_path, monkeypatch, "start_after_spawn", "valid", redirector=True,
+    )

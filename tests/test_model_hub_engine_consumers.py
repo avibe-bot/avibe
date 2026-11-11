@@ -100,7 +100,7 @@ async def test_success_persisted_after_swap_carries_admitted_identity_not_new_or
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["newer_missing", "newer_present", "minimum", "no_root", "compatible", "corrupt_c"])
-async def test_package_transition_is_owner_convergence_not_candidate_or_repair_repin(tmp_path, monkeypatch, change):
+async def test_package_transition_is_owner_convergence_not_candidate_or_repair_repin(tmp_path, monkeypatch, change, *, quarantined=False):
     import vibe
 
     from core.model_hub_engine_channel import TrustRoots
@@ -123,7 +123,12 @@ async def test_package_transition_is_owner_convergence_not_candidate_or_repair_r
         owner.channel.roots = TrustRoots(roots=(), sequence_floor=0)
     elif change == "corrupt_c":
         (Path(candidate.install_dir) / candidate.bin_path).write_bytes(b"corrupt test-owned C")
-    # Reauthorization cannot depend on whether the new baseline is cached.
+    # Reauthorization cannot depend on whether the new baseline is cached, or
+    # on a health quarantine hiding the new package's compatibility decision.
+    if quarantined:
+        value = owner.journal.load()
+        value["quarantine"][candidate.asset_release_tag] = "startup_failed"
+        owner._save(value)
     owner.recover()
     package_change = change not in {"compatible", "corrupt_c"}
     if change == "newer_missing":
@@ -152,3 +157,11 @@ async def test_package_transition_is_owner_convergence_not_candidate_or_repair_r
         assert value["active"]["origin"] == "channel"
     assert supervisor.running is None  # no package transition starts stopped CPA
     assert owner.journal.load()["authorized_package"] == owner.manager.package_identity()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["minimum", "no_root"])
+async def test_quarantine_cannot_hide_a_changed_packages_required_baseline(tmp_path, monkeypatch, change):
+    await test_package_transition_is_owner_convergence_not_candidate_or_repair_repin(
+        tmp_path, monkeypatch, change, quarantined=True,
+    )

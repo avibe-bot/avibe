@@ -138,13 +138,20 @@ def engine_operation(function):
     @wraps(function)
     async def leased(self, *args, **kwargs):
         gate = self._engine_admission
-        if self.lifecycle is not None:
-            await self.recover_lifecycle()
-            self._gate_known_withdrawal()
         flow = None
         if function.__name__ in {"oauth_status", "submit_oauth", "cancel_oauth"}:
             flow_id = args[0] if args else kwargs.get("flow_id")
             flow = self._oauth_flows.get(flow_id)
+        if function.__name__ == "oauth_status" and flow is not None and flow.state in {"success", "failed", "cancelled"}:
+            # A terminal loop-owned snapshot is not fresh engine work. In
+            # particular, its failure/material disposition remains observable
+            # while recovery or withdrawal blocks every execution capability.
+            return flow.snapshot()
+        if self.lifecycle is not None:
+            await self.recover_lifecycle()
+            self._gate_known_withdrawal()
+        if function.__name__ == "oauth_status" and flow is not None and flow.state in {"success", "failed", "cancelled"}:
+            return flow.snapshot()  # withdrawal may have settled it during recovery
         lease, owned = gate.acquire(getattr(flow, "lease", None))
         task = asyncio.current_task()
         already_present = task in lease.tasks
