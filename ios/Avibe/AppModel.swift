@@ -89,6 +89,9 @@ final class AppModel: ObservableObject {
             self?.prepareForAccountTransition() ?? []
         },
         onPreparePushLogout: { [weak self] in
+            // Signing out or another account: the badge counted this
+            // account's Inbox. (A session refresh of the same account keeps it.)
+            self?.nativeBadge.clear()
             await self?.nativePushCoordinator.prepareForLogout()
         }
     )
@@ -416,8 +419,6 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         clearPendingPushOpened()
-        // The badge counted the previous account's Inbox.
-        nativeBadge.clear()
         stopRuntime()
         switch route {
         case .browser:

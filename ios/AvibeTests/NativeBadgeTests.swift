@@ -161,7 +161,7 @@ final class NativeBadgeTests: XCTestCase {
     }
 
     @MainActor
-    func testTheSelectedInstanceSetsTheBadgeAndSigningOutClearsIt() async throws {
+    func testTheSelectedInstanceSetsTheBadgeAndOnlySigningOutClearsIt() async throws {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
@@ -242,7 +242,13 @@ final class NativeBadgeTests: XCTestCase {
         try await waitUntil { center.counts.count == 1 }
         XCTAssertEqual(center.counts, [7])
 
-        // Signing out clears the previous account's badge.
+        // Refreshing the same account's session keeps the badge: the account's
+        // Inbox has not changed hands.
+        _ = try await appModel.mobileSessionCoordinator.refresh()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(center.counts, [7])
+
+        // Signing out clears the account's badge.
         _ = try await appModel.mobileSessionCoordinator.logout()
         try await waitUntil { center.counts.count == 2 }
         XCTAssertEqual(center.counts, [7, 0])
