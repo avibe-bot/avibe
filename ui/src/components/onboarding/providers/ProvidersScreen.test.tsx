@@ -587,6 +587,38 @@ describe('ProvidersScreen — the stage', () => {
     expect(summary()?.textContent).toBe('1 provider added: Anthropic');
   });
 
+  it('AUTH-SETUP-139 asks before a replacement key that would leave assistants without a model', async () => {
+    serve({ sources: [savedKey('src_used', 'anthropic')], listing: { src_used: ['claude-opus', 'claude-sonnet'] } });
+    const hop = { backend: 'vibey', menu_model: 'claude-opus', source_id: 'src_used', model_id: 'claude-opus', position: 1 };
+    const gap = { backend: 'vibey', model_id: 'claude-opus', agents: ['main'] };
+    const replace = vi.spyOn(modelsApi, 'replaceCredential').mockImplementation(async (id, body) => {
+      if (!('force' in body)) {
+        throw new ApiCallError('source_in_route_chain', undefined, true, [gap] as never, [], [hop] as never, 409);
+      }
+      const row = server.sources.find((item) => item.id === id)!;
+      Object.assign(row, { credential_generation: 'gen_narrow', models: [modelOf('claude-sonnet')] });
+      return { source: { ...row }, removed_hops: [hop] as never, interrupted: [gap] as never };
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('connected'));
+
+    await user.click(cardFor('anthropic'));
+    const dialog = await screen.findByRole('dialog');
+    await user.type(within(dialog).getByLabelText('New API Key'), 'narrow-key');
+    await user.click(within(dialog).getByRole('button', { name: 'Save and check' }));
+    expect(await within(dialog).findByText(/The new key lists fewer models/)).toBeTruthy();
+    expect(replace).toHaveBeenCalledTimes(1);
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save and check' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(replace).toHaveBeenLastCalledWith('src_used', {
+      key: 'narrow-key', force: true, would_remove_hops: [hop], would_interrupt: [gap],
+    });
+    await waitFor(() => expect(within(cardFor('anthropic')).getByText('Connected · 1 model')).toBeTruthy());
+  });
+
   it('AUTH-SETUP-139 removes a key from its card after a confirmation', async () => {
     serve({
       sources: [savedKey('src_wrong', 'anthropic')],

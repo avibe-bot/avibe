@@ -4541,6 +4541,121 @@ def test_api_key_setup_does_not_schedule_a_model(
     asyncio.run(scenario())
 
 
+def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-139
+
+    The wizard's key, carried through real credential custody and real model
+    listing: saved unverified, checked and refused with the provider's 401,
+    replaced by another refused key without losing the stored one, replaced by
+    the right key, checked again, and removed.
+    """
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    # Engine lifecycle stays simulated; custody, listing and replacement are real.
+    for method in (
+        "provision_credential", "credential_auth_scheme", "revoke_credential",
+        "revoke_api_key_credential", "discover_models",
+    ):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+
+    right_key, wrong_key, other_wrong_key = "right-test-key", "wrong-test-key", "other-wrong-test-key"
+
+    async def scenario():
+        presented = []
+
+        async def models(request):
+            supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            presented.append(supplied)
+            if supplied != right_key:
+                return web.json_response({"error": {"code": "invalid_api_key"}}, status=401)
+            return web.json_response({"data": [{"id": "relay-model-a"}, {"id": "relay-model-b"}]})
+
+        upstream_app = web.Application()
+        upstream_app.router.add_get("/v1/models", models)
+        web_runner = web.AppRunner(upstream_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        harness = SimpleNamespace(source_id=None)
+        runner = ScenarioRunner(harness)
+
+        def stored_key(h):
+            [source] = store.config.sources
+            return state_store.read_api_key(source.credential_ref)
+
+        async def save_wrong_key(h):
+            # What the wizard's key form sends: saved without verification.
+            created = (await service.create_source({
+                "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
+                "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
+            }))["source"]
+            h.source_id = created["id"]
+            assert created["state"]["status"] == "standby"
+            assert created["verification_pending"]
+            assert created["models"] == []
+
+        async def check_names_the_refusal(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.refresh_source(h.source_id)
+            assert refused.value.code == "discovery_failed"
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert refused.value.data == {"upstream_status": 401}
+            assert store.config.sources[0].state.status == "error"
+
+        async def refused_replacement_keeps_the_key(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.replace_credential(h.source_id, {"key": other_wrong_key})
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert refused.value.data == {"upstream_status": 401}
+            assert stored_key(h) == wrong_key
+
+        async def right_replacement_lists_models(h):
+            replaced = (await service.replace_credential(h.source_id, {"key": right_key}))["source"]
+            assert [model["id"] for model in replaced["models"]] == ["relay-model-a", "relay-model-b"]
+            assert replaced["state"]["status"] == "standby"
+            assert stored_key(h) == right_key
+
+        async def check_passes(h):
+            refreshed = (await service.refresh_source(h.source_id))["source"]
+            assert len([model for model in refreshed["models"] if not model.get("retired")]) == 2
+
+        async def remove(h):
+            try:
+                await service.delete_source(h.source_id)
+            except ModelHubError as guarded:
+                await service.delete_source(
+                    h.source_id,
+                    force=True,
+                    confirmed_remove_hops=guarded.data.get("would_remove_hops"),
+                    confirmed_interruptions=guarded.data.get("would_interrupt"),
+                )
+            assert store.config.sources == []
+
+        steps = [
+            ("save_wrong_key", save_wrong_key),
+            ("check_names_the_refusal", check_names_the_refusal),
+            ("refused_replacement_keeps_the_key", refused_replacement_keeps_the_key),
+            ("right_replacement_lists_models", right_replacement_lists_models),
+            ("check_passes", check_passes),
+            ("remove", remove),
+        ]
+        try:
+            await runner.run(*(ScenarioStep(name, action) for name, action in steps))
+            ScenarioExpect.step_history(runner, [name for name, _ in steps])
+            assert set(presented) == {wrong_key, other_wrong_key, right_key}
+        finally:
+            await web_runner.cleanup()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     ("status", "body"),
     [

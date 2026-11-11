@@ -30,6 +30,8 @@ import { checkLine, sourceCheckFailure, suppliedModelCount, type SourceCheck } f
 type Phase =
   | { kind: 'idle' }
   | { kind: 'saving' }
+  /** The guard named models the new key would leave unsupplied. */
+  | { kind: 'confirmReplace'; plan: GuardPlan }
   | { kind: 'confirmRemove' }
   /** The guard named models the removal would leave unsupplied. */
   | { kind: 'confirmImpact'; plan: GuardPlan }
@@ -68,15 +70,23 @@ export const SourceKeyDialog: React.FC<{
   const save = async () => {
     const value = key.trim();
     if (!apiKey || !value || busy || !writable) return;
+    const shown = phase.kind === 'confirmReplace' ? phase.plan : null;
     setPhase({ kind: 'saving' });
     try {
-      const replaced = await sendAgreed(true, null, (plan) => modelsApi.replaceCredential(
+      const replaced = await sendAgreed(true, shown, (plan) => modelsApi.replaceCredential(
         source.id,
         plan ? { key: value, ...confirmGuardPlan(plan) } : { key: value },
       ));
       await onReplaced(replaced.source, { kind: 'connected', models: suppliedModelCount(replaced.source) });
       onClose();
     } catch (error) {
+      // A key that works but lists fewer models would leave some assistants'
+      // models unsupplied. That is asked, here, rather than refused every time.
+      const refusal = unansweredRefusal(error, true, shown);
+      if (refusal) {
+        setPhase({ kind: 'confirmReplace', plan: refusal });
+        return;
+      }
       const failure = apiFailure(error);
       const verdict = sourceCheckFailure(failure, source);
       setPhase({
@@ -189,7 +199,10 @@ export const SourceKeyDialog: React.FC<{
                     label={t('onboarding.providers.editKeyLabel')}
                     onChange={(value) => {
                       setKey(value);
-                      setPhase((current) => (current.kind === 'failed' ? { kind: 'idle' } : current));
+                      // A verdict, or a question, about a key that is no longer in the field.
+                      setPhase((current) => (current.kind === 'failed' || current.kind === 'confirmReplace'
+                        ? { kind: 'idle' }
+                        : current));
                     }}
                     onToggleReveal={() => setRevealed((value) => !value)}
                     onEnter={() => void save()}
@@ -210,6 +223,7 @@ export const SourceKeyDialog: React.FC<{
               )}
               {phase.kind === 'confirmRemove' && t('onboarding.providers.editRemoveConfirm')}
               {phase.kind === 'confirmImpact' && t('onboarding.providers.editRemoveImpact')}
+              {phase.kind === 'confirmReplace' && t('onboarding.providers.editReplaceImpact')}
               {phase.kind === 'failed' && (
                 <>
                   <CircleX className="setup-add-status-icon setup-add-status-icon--error" aria-hidden="true" />

@@ -6837,6 +6837,7 @@
       "editRejectedStatus": "Key 被拒绝（{{status}}），请检查后重试",
       "editRejected": "Key 被拒绝，请检查后重试",
       "editSaveFailed": "无法保存这个 Key，请重试",
+      "editReplaceImpact": "新 Key 提供的模型更少，部分助手将没有可用的模型。仍要保存？",
       "editRecheck": "重新检查",
       "editRemove": "移除",
       "editRemoveConfirm": "从模型网关移除这个 Key？",

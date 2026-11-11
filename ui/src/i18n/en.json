@@ -6837,6 +6837,7 @@
       "editRejectedStatus": "Key rejected ({{status}}). Check it and try again.",
       "editRejected": "Key rejected. Check it and try again.",
       "editSaveFailed": "Could not save the key. Try again.",
+      "editReplaceImpact": "The new key lists fewer models, so some assistants will have no model. Save anyway?",
       "editRecheck": "Check again",
       "editRemove": "Remove",
       "editRemoveConfirm": "Remove this key from Model Hub?",
