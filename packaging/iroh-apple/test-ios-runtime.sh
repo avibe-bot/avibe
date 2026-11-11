@@ -36,18 +36,26 @@ raise SystemExit(
 )
 PY
 
-# Prefer the first available iPhone type. The runtime is the qualification
-# variable; hard-coding a model would make this fail as Apple's device list
-# changes between runner images.
-device_type=$(xcrun simctl list devicetypes available -j | python3 -c '
+# Use only a device type explicitly advertised by the selected runtime. A newer
+# runner image can have iPhone types that cannot boot an older iOS runtime.
+device_type=$(python3 - "$runtime_json" "$IROH_IOS_RUNTIME_ID" <<'PY'
 import json
 import sys
-for device in json.load(sys.stdin).get("devicetypes", []):
-    if device.get("name", "").startswith("iPhone"):
-        print(device["identifier"])
-        raise SystemExit(0)
-raise SystemExit("no available iPhone simulator device type")
-')
+
+path, runtime_id = sys.argv[1:]
+data = json.load(open(path, encoding="utf-8"))
+for runtime in data.get("runtimes", []):
+    if runtime.get("identifier") != runtime_id:
+        continue
+    for device in runtime.get("supportedDeviceTypes", []):
+        identifier = device if isinstance(device, str) else device.get("identifier")
+        if identifier:
+            print(identifier)
+            raise SystemExit(0)
+    raise SystemExit(f"runtime {runtime_id} advertises no supported device types")
+raise SystemExit(f"runtime {runtime_id} is missing from {path}")
+PY
+)
 
 device_name="Iroh iOS ${IROH_IOS_RUNTIME_VERSION} runtime test"
 device_id=$(xcrun simctl create "$device_name" "$device_type" "$IROH_IOS_RUNTIME_ID")
@@ -78,7 +86,7 @@ set -e
 
 # A linker warning about a newer deployment target invalidates this result even
 # if xcodebuild happened to return zero.
-if grep -Eiq 'was built for a newer (iOS|version)|built for newer iOS|deployment target.{0,40}(higher|newer)' "$log_path"; then
+if grep -Eiq "was built for (a )?newer .*version .*than being linked|deployment target.{0,40}(higher|newer)" "$log_path"; then
   echo "iOS runtime test failed: newer deployment-target warning appeared in xcodebuild output" >&2
   status=1
 fi
