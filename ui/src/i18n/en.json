@@ -2308,7 +2308,10 @@
         "callback": {
           "hint": "After signing in, paste the callback URL your browser landed on",
           "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again.",
-          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to."
+          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to.",
+          "cantConnect": "After you sign in, the page may say it can't connect. That's expected: copy the full address from the address bar and paste it here.",
+          "auto": "Signing in on the computer running Avibe? This will continue on its own.",
+          "pasteInstead": "Paste the address instead"
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"
@@ -2330,7 +2333,9 @@
             "show": "Show details",
             "hide": "Hide details"
           }
-        }
+        },
+        "openSignIn": "Open sign-in page",
+        "copyLink": "Copy link"
       },
       "toast": {
         "reorderFailed": "Couldn't save the new order",

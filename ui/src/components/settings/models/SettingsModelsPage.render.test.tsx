@@ -1193,7 +1193,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
 
-    expect((await screen.findByRole('link', { name: authUrl })).getAttribute('href')).toBe(authUrl);
+    expect((await screen.findByRole('link', { name: /^(Open sign-in page|打开登录页面)$/ })).getAttribute('href')).toBe(authUrl);
     expect(open).not.toHaveBeenCalled();
   });
 

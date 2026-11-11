@@ -4869,6 +4869,105 @@ def test_hub_oauth_model_free_observation_closed_loop(
     ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
 
 
+def test_hub_oauth_loopback_callback_signs_in_without_a_paste(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-165
+
+    A browser on the Avibe machine signs in. The provider redirects it to the
+    loopback callback, where the engine's forwarder (started because Avibe asks
+    for every sign-in as a Web-UI one) hands the grant to the engine. Avibe never
+    receives a paste: its status poll alone sees the sign-in and materializes the
+    subscription Source, which is what lets the dialog fold the paste field.
+    """
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    auth_name = "codex-account-loopback.json"
+    engine = SimpleNamespace(files=[], posted=[], fields=[], start_queries=[], signed_in=False)
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": list(engine.files)}
+        if path == "/codex-auth-url":
+            engine.start_queries.append(dict(query or {}))
+            return {
+                "state": "loopback-state",
+                "url": "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=loopback-state",
+            }
+        if path == "/get-auth-status":
+            assert query == {"state": "loopback-state"}
+            return {"status": "ok" if engine.signed_in else "wait"}
+        if path == "/oauth-callback":
+            engine.posted.append(dict(payload))
+            return {"status": "ok"}
+        if (method, path) == ("PATCH", "/auth-files/fields"):
+            engine.fields.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path))
+
+    def forwarder_delivers_the_redirect():
+        # What the engine does once its loopback forwarder receives the browser's
+        # redirect: exchange the code and save the grant as an auth file.
+        state_store._secure_write_json(
+            state_store.auth_dir / auth_name,
+            {"type": "codex", "access_token": "test-access", "refresh_token": "test-refresh"},
+        )
+        engine.files.append({
+            "id": auth_name, "auth_index": "auth-index-loopback", "name": auth_name, "provider": "codex",
+            "account": "user@example.test", "id_token": {"chatgpt_account_id": "account-test"},
+        })
+        engine.signed_in = True
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    for method in ("start_oauth", "oauth_status", "submit_oauth", "cancel_oauth"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+    submitted = Mock(side_effect=AssertionError("a loopback sign-in needs no paste"))
+    monkeypatch.setattr(service, "oauth_submit", submitted)
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        h.source_id = started["flow"]["source_id"]
+        presentation = started["flow"]["presentation"]
+        assert presentation["expects"] == "paste_callback_url"
+        # The redirect the dialog reads to know the callback can come back by itself.
+        assert "redirect_uri=http%3A%2F%2Flocalhost%3A1455" in presentation["auth_url"]
+        assert engine.start_queries == [{"is_webui": "true"}]
+        assert (await service.oauth_status(h.flow_id))["flow"]["state"] == "awaiting_action"
+
+    async def browser_signs_in_on_this_machine(h):
+        forwarder_delivers_the_redirect()
+
+    async def poll_materializes_source(h):
+        terminal = await service.oauth_status(h.flow_id)
+        assert terminal["flow"]["state"] == "success"
+        source = terminal["source"]
+        assert source["id"] == h.source_id
+        assert (source["vendor"], source["kind"], source["supply_channel"]) == ("openai", "subscription", "hub")
+        assert source["credential_ref"] == state_store.oauth_credential_ref(auth_name)
+        assert [listed["id"] for listed in service.list_sources()] == [h.source_id]
+        # Nothing reached the engine through Avibe: no paste, no callback post.
+        assert engine.posted == []
+        submitted.assert_not_called()
+
+    steps = [
+        ("start_login", start_login),
+        ("browser_signs_in_on_this_machine", browser_signs_in_on_this_machine),
+        ("poll_materializes_source", poll_materializes_source),
+    ]
+    asyncio.run(runner.run(*(ScenarioStep(name, action) for name, action in steps)))
+    ScenarioExpect.step_history(runner, [name for name, _ in steps])
+
+
 def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-127
 
