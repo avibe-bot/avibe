@@ -100,7 +100,7 @@ private final class Browser: NSObject, WKNavigationDelegate {
             }
             webView.callAsyncJavaScript(
                 "return JSON.stringify(await (" + expression + "));",
-                arguments: [:], in: nil, contentWorld: .page
+                arguments: [:], in: nil, in: .page
             ) { [weak self] result in
                 do {
                     let value = try result.get()
