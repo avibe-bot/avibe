@@ -1,0 +1,13 @@
+# Model Hub actionable failure context
+
+## Contract
+
+Provider 401/403 errors describe invalid credentials or missing permission, without asserting revocation. Existing persisted reason keys remain compatible. Model-list refresh failures preserve the upstream HTTP status and a bounded, credential-redacted provider message through runtime, service, API and UI. A failed passthrough request explains that the requested model is absent from provider inventories and suggests another model; it does not claim absence proves the cause of the upstream refusal.
+
+No changes to request admission, recovery timing, retries, Source health, or visible waiting notices. Source-wide cooldown isolation is deferred: simply skipping Source settlement makes the existing recovery loop immediately replay an apparently eligible hop; isolating recovery per Source/model requires its own contract.
+
+## Validation
+
+Before implementation, fresh local Incus worktree `--seed none`: wrong key rejected in setup (401); unlisted passthrough chat failed after 3m47s with HTTP503 and made other listed models unavailable; failed list refresh showed only generic copy. Real regression credentials entered solely through product forms.
+
+Protect these boundaries with runtime error transport/redaction tests, bilingual API/UI refresh tests and bilingual terminal projection tests. Capture updated EN/ZH setup, refresh and chat surfaces in the same environment. Product review precedes Merge-ready; Avibe lead owns merge.

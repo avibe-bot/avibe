@@ -322,6 +322,8 @@ class TurnOutcomeProjectionInput:
     local_error_detail: str | None = None
     # The last fallback-class upstream refusal, appended to supply copy.
     last_upstream_failure: TurnUpstreamFailure | None = None
+    # Display-only inventory context; never a verdict about why upstream failed.
+    passthrough_model: str | None = None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -458,6 +460,15 @@ def produce_turn_outcome(
         ),
         last_upstream_failure=(
             last_upstream_failure if rule.upstream_failure_key is not None else None
+        ),
+        passthrough_model=(
+            resolution.requested_model
+            if resolution is not None and resolution.route_origin == "passthrough"
+            and (
+                (last_upstream_failure is not None and not last_upstream_failure.connection_error)
+                or (decision == "turn.request_nonfallback" and upstream_detail)
+            )
+            else None
         ),
     )
     if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
@@ -667,6 +678,10 @@ def render_turn_outcome_copy(
     if params.get("backend"):
         params["backend"] = display_name_for_backend(params["backend"])
     text = i18n_t(copy.key, language, **params)
+    if projection.passthrough_model:
+        text = " ".join((text, i18n_t(
+            "modelHub.launch.passthrough_model_unlisted", language, model=projection.passthrough_model,
+        )))
     failure = projection.last_upstream_failure
     rule = _turn_outcome_rule(projection)
     suffix_key = (

@@ -371,14 +371,6 @@ describe('Source entity landing through the shared authority', () => {
     expect(supplyRetry).not.toMatch(/modelsApi\.listAgents/);
   });
 
-  it('keeps the mutating refresh failure outside stale-read suppression', () => {
-    const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');
-    const refresh = detail.slice(detail.indexOf('const refetch ='), detail.indexOf('const remove ='));
-
-    expect(refresh).toMatch(/modelsApi\.refreshSource/);
-    expect(refresh).toMatch(/catch \(error\)[\s\S]*?setRefetchFailed\(true\)/);
-    expect(detail).toMatch(/refetchFailed[\s\S]*?sourceDetail\.fail\.refetch/);
-  });
 });
 
 describe('createPendingWrites — a write that outlives the drawer that issued it', () => {

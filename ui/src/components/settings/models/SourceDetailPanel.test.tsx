@@ -919,7 +919,23 @@ describe('SourceDetailPanel', () => {
     vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(new Error('lost response'));
     renderPanel();
     await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
-    expect(await screen.findByText(/fetch did not come back|拉取没有回来/i)).toBeTruthy();
+    expect(await screen.findByText(/Could not fetch models|模型拉取失败/i)).toBeTruthy();
+  });
+
+  it.each(['en', 'zh'])('shows the upstream refresh status and message in %s, preserving the list', async (language) => {
+    await i18n.changeLanguage(language);
+    const failure = new ApiCallError('discovery_failed', undefined, true, [], [], [], 502, undefined, {}, 403,
+      'This key cannot list models.');
+    vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(failure);
+    renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+    expect(await screen.findByText('HTTP 403 · This key cannot list models.')).toBeTruthy();
+    expect(screen.getByText(language === 'en'
+      ? 'Could not fetch models. The last model list is shown below.'
+      : '模型拉取失败，下面保留上次的模型列表。')).toBeTruthy();
+    expect(screen.getByText('model-a')).toBeTruthy();
+    expect(screen.queryByText(/HTTP 502/)).toBeNull();
+    await i18n.changeLanguage('en');
   });
 
   it('settles a failed refetch from the authoritative Source inventory', async () => {
@@ -1157,7 +1173,7 @@ describe('SourceDetailPanel', () => {
       path: `/api/models/sources/${source.id}/refresh`,
       error: 'source_in_route_chain',
       guard: /^Refetch models from|^从.*重新拉取模型/,
-      failure: /fetch did not come back|拉取没有回来/,
+      failure: /Could not fetch models|模型拉取失败/,
       start: async () => {
         await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
         await userEvent.click(await screen.findByRole('button', { name: /^Refetch anyway$|^仍要拉取$/i }));

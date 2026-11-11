@@ -7405,12 +7405,14 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         assert body["error"] == error
 
 
-@pytest.mark.parametrize(("rejected_status", "detail"), (
+@pytest.mark.parametrize(("upstream_status", "detail"), (
     (401, "modelHub.errors.authentication_failed"),
+    (403, "modelHub.errors.authentication_failed"),
+    (503, "modelHub.errors.discovery_failed"),
     (None, "modelHub.errors.discovery_failed"),
 ))
-def test_refresh_names_a_rejected_key_and_its_status(monkeypatch, tmp_path, rejected_status, detail):
-    """Setup reports a refused key as such; any other listing failure stays unexplained."""
+def test_refresh_names_a_rejected_key_and_its_status(monkeypatch, tmp_path, upstream_status, detail):
+    """The refresh API preserves upstream status/detail independently of its HTTP 502 envelope."""
 
     service, store, adapter = _service(tmp_path)
     store.config.sources.append(ModelHubSourceConfig(
@@ -7421,7 +7423,10 @@ def test_refresh_names_a_rejected_key_and_its_status(monkeypatch, tmp_path, reje
     ))
 
     async def refuse(*_args, **_kwargs):
-        raise ModelDiscoveryError("refused", rejected_status=rejected_status)
+        raise ModelDiscoveryError(
+            "refused", rejected_status=upstream_status if upstream_status in {401, 403} else None,
+            upstream_status=upstream_status, upstream_detail="Provider declined the model listing.",
+        )
 
     adapter.discover_models = refuse
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
@@ -7437,7 +7442,8 @@ def test_refresh_names_a_rejected_key_and_its_status(monkeypatch, tmp_path, reje
     _assert_envelope(body, ok=False)
     assert body["error"] == "discovery_failed"
     assert body["detail"] == detail
-    assert body.get("upstream_status") == rejected_status
+    assert body.get("upstream_status") == upstream_status
+    assert body.get("upstream_detail") == "Provider declined the model listing."
     assert store.config.sources[0].state.status == "error"
 
 

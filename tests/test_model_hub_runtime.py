@@ -3686,16 +3686,17 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
-@pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (500, None)))
-def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected) -> None:
-    """A listing the provider refused for the key carries that status; nothing else does."""
+@pytest.mark.parametrize("protocol", ["openai_chat", "anthropic", "google"])
+@pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (503, None)))
+def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected, protocol) -> None:
+    """Listings retain status and provider prose, never the credential, across protocols."""
 
     class Refusing(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
-            body = json.dumps({"error": {"message": "refused"}}).encode()
+            body = json.dumps({"error": {"message": "Access denied for wrong-key. Check permissions."}}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -3717,10 +3718,13 @@ def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, statu
             supervisor=Supervisor(store),  # type: ignore[arg-type]
             state_store=store,
         )
-        credential_ref = await adapter.provision_credential("custom", "openai_chat", "wrong-key", base_url)
+        credential_ref = await adapter.provision_credential("custom", protocol, "wrong-key", base_url)
         with pytest.raises(ModelDiscoveryError) as raised:
-            await adapter.discover_models("custom", "openai_chat", base_url, credential_ref)
+            await adapter.discover_models("custom", protocol, base_url, credential_ref)
         assert raised.value.rejected_status == rejected
+        assert raised.value.upstream_status == status
+        assert raised.value.upstream_detail == "Access denied for [redacted]. Check permissions."
+        assert "wrong-key" not in str(raised.value)
 
     try:
         asyncio.run(run())

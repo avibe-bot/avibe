@@ -4,6 +4,20 @@ Status: Approved for implementation on September 9, 2026. Runtime changes are
 not deployed by approval. The defaults below are the implementation target,
 not claims about deployed behavior.
 
+## Owner decision — November 12, 2026
+
+Web chat keeps its existing thinking indicator during recovery: no visible
+“waiting to retry” notice. This overrides the September 9 visible live-wait
+copy and presentation requirements below for Web only. IM behavior is unchanged
+and outside this change.
+
+Do not shorten or cap the existing wait to make failures appear sooner. A
+provider's definite credential or model rejection remains terminal; HTTP 503
+continues retrying under today's policy, including when the provider does not
+list the requested model. The final error may explain that inventory mismatch
+as context, never as proof that it caused a transient refusal. Isolating an
+unlisted model's cooldown must not make that request fail sooner.
+
 ## Start with the reported case
 
 `gpt-6-astra` had one configured supplier, `relay-gpt`, and that relay was

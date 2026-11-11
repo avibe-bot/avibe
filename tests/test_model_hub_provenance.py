@@ -24,6 +24,51 @@ from tests.ui_server_test_helpers import csrf_headers
 from vibe import model_hub_client, ui_server
 
 
+@pytest.mark.parametrize('language', ['en', 'zh'])
+@pytest.mark.parametrize('listed', [True, False])
+@pytest.mark.parametrize('status', [400, 503])
+def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path, language, listed, status):
+    """Only an unlisted route gains the hint; 503 still cools/retries, definite refusal does not."""
+    source = _source('src_hint0001', (MODEL,) if listed else ())
+    config = _loaded_catalog_config('claude', MODEL, source)
+    service, store, adapter = _service(tmp_path, config)
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR, http_status=status,
+        error_code='model_not_found' if status == 400 else None,
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id=source.id,
+        upstream_detail='No available accounts' if status == 503 else 'Model does not exist',
+    ))
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
+    projection = raised.value.turn_outcome
+    text = render_turn_outcome_copy(projection, language)
+    hint = "not in the providers' model lists" if language == 'en' else '供应商的模型列表中没有'
+    assert (hint in text) is not listed
+    if not listed:
+        assert ('Try choosing another model' if language == 'en' else '请尝试选择其他模型') in text
+    assert ('No available accounts' if status == 503 else 'Model does not exist') in text
+    assert store.config.sources[0].state.status == ('cooldown' if status == 503 else 'standby')
+    assert projection.outcome == ('exhausted' if status == 503 else 'failed_terminal')
+
+
+@pytest.mark.parametrize('language, phrase', [
+    ('en', 'credential invalid or lacks permission'), ('zh', '凭据无效或无权限'),
+])
+@pytest.mark.parametrize('status', [401, 403])
+def test_provider_auth_refusal_copy_does_not_assert_revocation(tmp_path, language, phrase, status):
+    source = _source('src_auth0001', (MODEL,))
+    service, _store, adapter = _service(tmp_path, _loaded_catalog_config('claude', MODEL, source))
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR, http_status=status, error_code=None,
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id=source.id,
+    ))
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
+    text = render_turn_outcome_copy(raised.value.turn_outcome, language)
+    assert phrase in text
+    assert 'revoked' not in text and '撤销' not in text and '吊销' not in text
+
+
 def _live_registry(tmp_path, callback=None):
     registry = TurnCorrelationRegistry(
         BoundedProvenanceStore(tmp_path / "records.json"), on_recovery_changed=callback,

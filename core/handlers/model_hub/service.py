@@ -1843,16 +1843,15 @@ class ModelHubService:
         except OriginNotAllowedError:
             raise ModelHubError("mode_switch_blocked", status=409) from None
         except ModelDiscoveryError as exc:
-            if exc.rejected_status is not None:
-                # The provider refused the credential itself: name that, and the
-                # status it answered with, rather than an unexplained failure.
-                raise ModelHubError(
-                    "discovery_failed",
-                    status=502,
-                    detail="modelHub.errors.authentication_failed",
-                    data={"upstream_status": exc.rejected_status},
-                ) from None
-            raise ModelHubError("discovery_failed", status=502) from None
+            raise ModelHubError(
+                "discovery_failed",
+                status=502,
+                detail="modelHub.errors.authentication_failed" if exc.rejected_status is not None else None,
+                data={
+                    **({"upstream_status": exc.upstream_status} if exc.upstream_status is not None else {}),
+                    **({"upstream_detail": exc.upstream_detail} if exc.upstream_detail else {}),
+                },
+            ) from None
         except RuntimePlatformUnsupportedError:
             raise ModelHubError("runtime_platform_unsupported", status=422) from None
         except EngineUnavailableError as exc:
@@ -10618,8 +10617,11 @@ class ModelHubService:
         if category == "served":
             return produce_turn_outcome("turn.served")
         if category == "request_nonfallback":
+            config, resolution = self._inspect_terminal_chain(backend=backend, model_id=model_id)
             return produce_turn_outcome(
                 "turn.request_nonfallback",
+                config=config,
+                resolution=resolution,
                 upstream_detail=outcome.upstream_detail,
             )
         if category == "upstream_protocol":
