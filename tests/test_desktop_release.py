@@ -753,6 +753,10 @@ def test_workflow_signs_every_macos_layer_before_recording():
     triggers = package.get("on", package.get(True))
     assert set(triggers) == {"workflow_dispatch", "workflow_call", "push", "schedule"}
     assert "secrets" not in triggers["workflow_call"]
+    assert package["concurrency"]["cancel-in-progress"] == (
+        "${{ (github.event_name == 'push' || github.event_name == 'schedule' || "
+        "inputs.warmup == true) && github.ref == 'refs/heads/master' && !inputs.release_tag }}"
+    )
     # Only the default branch warms caches; tag pushes reach this build only through desktop-release.yml.
     assert triggers["push"]["branches"] == ["master"] and "tags" not in triggers["push"]
     jobs = workflow("desktop-release.yml")["jobs"]

@@ -113,7 +113,8 @@ jobs:
   certum-windows-sign:
     needs: [release-backstop, resolve-desktop-release, desktop-packages]
     if: >-
-      ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.resolve-desktop-release.outputs.enabled == 'true' &&
+      ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.desktop-packages.result == 'success' &&
+          needs.resolve-desktop-release.outputs.enabled == 'true' &&
           (startsWith(inputs.tag, 'gh-v') ||
            startsWith(inputs.tag, 'v')) }}
     runs-on: windows-latest
