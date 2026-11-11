@@ -50,11 +50,30 @@ def solana_context(message: str) -> dict:
     return {"kind": "solana-transaction-v1", "messageHex": message}
 
 
+def protected_envelope(public_key: str, *, kind: str = "keypair", curve: str | None = None) -> Sealed:
+    record_meta = {"kind": kind, "public_key": public_key}
+    if curve is not None:
+        record_meta["curve"] = curve
+    return Sealed(
+        ciphertext="protected-ciphertext",
+        nonce="protected-nonce",
+        wrap_meta=json.dumps({
+            "v": 1,
+            "scheme": "machine-aesgcm-v1",
+            "copies": [],
+            "record_meta": record_meta,
+        }),
+    )
+
+
 def create_key(signing_key: dict | None, *, protection: str = "standard", always_ask: bool = False) -> None:
+    sealed = Sealed(**ENVELOPE)
+    if protection == "protected" and vault_solana.is_ed25519_key(signing_key):
+        sealed = protected_envelope(signing_key["public_key"], curve="ed25519")
     with api._vault_engine().begin() as conn:
         vault_service.create_secret(
             conn, name="KEY", kind="keypair", protection=protection, signer_kind="local",
-            sealed=Sealed(**ENVELOPE), policy={"always_ask": True} if always_ask else None,
+            sealed=sealed, policy={"always_ask": True} if always_ask else None,
             public_meta={"signing_public_key": signing_key} if signing_key else {},
         )
 
@@ -270,14 +289,18 @@ def test_metadata_reports_the_stored_curve_and_never_guesses_one(signing_key, cu
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+@pytest.mark.parametrize("protection", ["standard", "protected"])
 @pytest.mark.parametrize("case", [
     "agent-operation", "evm-transaction", "eip-712", "bitcoin", "other-message", "upper-case", "empty", "extra-digest",
     "solana-with-secp",
 ])
-def test_only_a_matching_solana_context_binds_an_exact_message(avault, capfd, entrypoint, case):
+def test_only_a_matching_solana_context_binds_an_exact_message(avault, capfd, entrypoint, protection, case):
     """The context kind, the scheme and the key's curve must agree, and the context must carry the same bytes."""
     message = TWO_BYTES["message"]
-    create_key(SECP_KEY if case == "solana-with-secp" else solana_key(TWO_BYTES["public_key"]), always_ask=True)
+    create_key(
+        SECP_KEY if case == "solana-with-secp" else solana_key(TWO_BYTES["public_key"]),
+        always_ask=True, protection=protection,
+    )
     context = {
         "agent-operation": {
             "kind": "avault-agent-operation", "digestAlgorithm": "avault-operation-hash-v1", "digest": DIGEST,
@@ -356,43 +379,266 @@ def test_a_standard_request_may_carry_the_solana_context_and_binds_it(avault):
     assert avault.calls == []
 
 
-@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
-@pytest.mark.parametrize("with_context", [False, True])
-def test_protected_solana_signing_is_refused_before_any_request_or_passkey_work(avault, capfd, entrypoint, with_context):
+def test_protected_solana_signing_creates_bound_pending_and_completes_once(avault, monkeypatch):
+    custody_probe = Mock(side_effect=AssertionError("protected custody must not call avault"))
+    monkeypatch.setattr(api, "_require_avault_ed25519_surface", custody_probe)
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    context = solana_context(TRANSFER["message"])
+    payload = {
+        "name": "KEY",
+        "scheme": "ed25519",
+        "message_hex": TRANSFER["message"],
+        "signing_context": context,
+    }
+    pending = api.vault_sign(payload)
+    assert pending["code"] == "browser_signature_required"
+    request = pending["request"]
+    assert request["status"] == "pending"
+    assert request["delivery"]["message_hex"] == TRANSFER["message"]
+    assert request["delivery"]["signing_context"] == context
+    assert request["delivery"]["operation_context"]["release"] == {
+        "name": "KEY",
+        "scheme": "ed25519",
+        "messageHex": TRANSFER["message"],
+        "publicKey": TRANSFER["public_key"],
+        "signingContext": context,
+    }
+    assert avault.calls == []
+
+    completed = api.vault_sign({
+        **payload,
+        "request_id": request["id"],
+        "signature": {"signature": TRANSFER["signature"], "recovery_id": None},
+    })
+    assert completed["ok"] is True
+    assert completed["signature"] == {"signature": TRANSFER["signature"]}
+    assert completed["request"]["status"] == "approved"
+    assert avault.calls == []
+
+    with pytest.raises(api.VaultApiError, match="not pending"):
+        api.vault_sign({
+            **payload,
+            "request_id": request["id"],
+            "signature": {"signature": TRANSFER["signature"]},
+        })
+
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "KEY")
+    assert meta["per_use_sign"] is True
+    custody_probe.assert_not_called()
+    signed_events = [row for row in audit_rows() if row["event"] == "signed"]
+    assert len(signed_events) == 1
+    assert json.loads(signed_events[0]["delivery"])["message_bytes"] == 150
+
+
+@pytest.mark.parametrize("mutator", [
+    lambda payload: {**payload, "message_hex": "00"},
+    lambda payload: {**payload, "signing_context": solana_context("00")},
+    lambda payload: {**payload, "message_hex": "00", "signing_context": solana_context("00")},
+    lambda payload: {**payload, "signing_context": None},
+    lambda payload: {**payload, "scheme": "ecdsa-secp256k1-recoverable", "digest": "ab" * 32, "message_hex": None},
+])
+def test_protected_completion_cannot_switch_persisted_binding(avault, mutator):
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    payload = {
+        "name": "KEY",
+        "scheme": "ed25519",
+        "message_hex": TRANSFER["message"],
+        "signing_context": solana_context(TRANSFER["message"]),
+    }
+    pending = api.vault_sign(payload)["request"]
+    changed = mutator({**payload, "request_id": pending["id"], "signature": {"signature": TRANSFER["signature"]}})
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign(changed)
+    assert api.get_vault_request(pending["id"])["request"]["status"] == "pending"
+    assert avault.calls == []
+
+
+@pytest.mark.parametrize("signature", [
+    {"signature": "00" + TRANSFER["signature"][2:]},
+    {"signature": TRANSFER["signature"][:-2]},
+    {"signature": TRANSFER["signature"], "recovery_id": 0},
+    {"signature": TRANSFER["signature"], "recovery_id": False},
+    {"signature": TRANSFER["signature"], "scheme": "ed25519"},
+])
+def test_protected_completion_rejects_bad_signature_without_settling(avault, signature):
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    payload = {
+        "name": "KEY",
+        "scheme": "ed25519",
+        "message_hex": TRANSFER["message"],
+        "signing_context": solana_context(TRANSFER["message"]),
+    }
+    pending = api.vault_sign(payload)["request"]
+    with pytest.raises(api.VaultApiError):
+        api.vault_sign({**payload, "request_id": pending["id"], "signature": signature})
+    failed = api.get_vault_request(pending["id"])
+    assert failed["request"]["status"] == "pending"
+    assert not failed.get("result")
+    assert "signed" not in [row["event"] for row in audit_rows()]
+    assert avault.calls == []
+
+
+def test_protected_completion_expiry_and_missing_context_fail_closed(avault):
     create_key(solana_key(TRANSFER["public_key"]), protection="protected")
     payload = {"name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"]}
-    if with_context:
-        payload["signing_context"] = solana_context(TRANSFER["message"])
-    code, message = call_entrypoint(entrypoint, payload, capfd)
-    assert code == ("ProtectedSolanaUnsupportedError" if entrypoint == "service" else "protected_solana_unsupported")
-    assert message == "protected Solana signing is not supported yet"
-    assert_nothing_happened(avault)
-    with api._vault_engine().connect() as conn:
-        assert vault_service.get_secret_meta(conn, "KEY")["per_use_sign"] is False
+    with pytest.raises(api.VaultApiError, match="verifiable signing_context"):
+        api.vault_sign(payload)
+    assert request_rows() == []
+
+    with_context = {**payload, "signing_context": solana_context(TRANSFER["message"])}
+    pending = api.vault_sign(with_context)["request"]
+    with api._vault_engine().begin() as conn:
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == pending["id"])
+            .values(expires_at="2000-01-01T00:00:00+00:00")
+        )
+    with pytest.raises(api.VaultApiError, match="expired"):
+        api.vault_sign({
+            **with_context,
+            "request_id": pending["id"],
+            "signature": {"signature": TRANSFER["signature"]},
+        })
+    assert api.get_vault_request(pending["id"])["request"]["status"] == "expired"
+    assert avault.calls == []
 
 
-@pytest.mark.parametrize("language, expected", [("en", "Protected Solana keys"), ("zh", "暂不支持保护档 Solana")])
-def test_protected_solana_refusal_is_localized_on_the_web(avault, monkeypatch, language, expected):
-    from core.services import settings as settings_service
-    from tests.ui_server_test_helpers import csrf_headers
-    from vibe import ui_server
-
-    config = settings_service.load_config_or_default()
-    config.language = language
-    monkeypatch.setattr(settings_service, "load_config_or_default", lambda: config)
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+@pytest.mark.parametrize("case", ["missing", "outer-oversize", "context-oversize"])
+def test_protected_pending_requires_a_bounded_context(avault, capfd, entrypoint, case):
+    """The owner and callers all refuse before requests, notifications or key use."""
     create_key(solana_key(TRANSFER["public_key"]), protection="protected")
-    client = ui_server.app.test_client()
-    response = client.post(
-        "/api/vault/sign", headers=csrf_headers(client),
-        json={"name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"]},
-    )
-    assert response.status_code == 409
-    body = response.get_json()
-    assert body["code"] == "protected_solana_unsupported"
-    assert body["message"].startswith(expected)
-    # The refusal must not steer the user to a weaker tier for the same funds.
-    assert "standard" not in body["message"].lower()
-    assert "标准" not in body["message"]
+    payload = {"name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"]}
+    if case != "missing":
+        oversized = "00" * (vault_solana.MAX_MESSAGE_BYTES + 1)
+        payload["signing_context"] = solana_context(oversized)
+        if case == "outer-oversize":
+            payload["message_hex"] = oversized
+    call_entrypoint(entrypoint, payload, capfd)
+    assert_nothing_happened(avault)
+
+
+@pytest.mark.parametrize("case", ["context", "message", "scheme", "signature", "key", "record-id", "name"])
+def test_protected_service_completion_is_the_final_binding_owner(avault, case):
+    """API checks alone cannot protect internal completion or a replaced stored record."""
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    payload = {
+        "name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"],
+        "signing_context": solana_context(TRANSFER["message"]),
+    }
+    with api._vault_engine().begin() as conn:
+        pending = vault_service.create_sign_request(
+            conn, **payload,
+            delivery={"signing_key": {"secret_id": "caller", "public_key": ONE_BYTE["public_key"]}},
+        )
+        assert pending["delivery"]["signing_key"]["public_key"] == TRANSFER["public_key"]
+        completion = {**payload, "signature": {"signature": TRANSFER["signature"]}}
+        if case == "context":
+            completion.pop("signing_context")
+        elif case == "message":
+            completion.update(message_hex="00", signing_context=solana_context("00"))
+        elif case == "scheme":
+            completion.update(scheme="ecdsa-secp256k1-der", digest=DIGEST, message_hex=None)
+        elif case == "signature":
+            completion["signature"] = {"signature": "00" + TRANSFER["signature"][2:]}
+        elif case == "name":
+            completion["name"] = "OTHER"
+        elif case == "key":
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == "KEY").values(
+                public_meta=json.dumps({"signing_public_key": solana_key(ONE_BYTE["public_key"])}),
+            ))
+        else:
+            conn.execute(vault_secrets.update().where(vault_secrets.c.name == "KEY").values(id="vlt_replaced"))
+        # Catch inside the transaction so an accidental settlement cannot be hidden by rollback.
+        with pytest.raises(vault_service.InvalidRequestError):
+            vault_service.complete_sign_request(conn, pending["id"], **completion, browser_signed=True)
+        assert vault_service.get_request(conn, pending["id"])["status"] == "pending"
+    assert "signed" not in [row["event"] for row in audit_rows()]
+    assert avault.calls == []
+
+
+@pytest.mark.parametrize("state", ["denied", "approved"])
+def test_protected_completion_rejects_nonpending_state(avault, state):
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    payload = {
+        "name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"],
+        "signing_context": solana_context(TRANSFER["message"]),
+    }
+    pending = api.vault_sign(payload)["request"]
+    with api._vault_engine().begin() as conn:
+        conn.execute(vault_requests.update().where(vault_requests.c.id == pending["id"]).values(status=state))
+    with pytest.raises(api.VaultApiError, match="not pending"):
+        api.vault_sign({**payload, "request_id": pending["id"], "signature": {"signature": TRANSFER["signature"]}})
+    assert "signed" not in [row["event"] for row in audit_rows()]
+
+
+def test_public_signature_can_settle_a_new_identical_request_without_attesting_fresh_uv(avault):
+    """Preserved protocol residual: request replay is blocked, signature reuse is not UV proof."""
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    payload = {
+        "name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"],
+        "signing_context": solana_context(TRANSFER["message"]),
+    }
+    requests = [api.vault_sign(payload)["request"] for _ in range(2)]
+    assert requests[0]["id"] != requests[1]["id"]
+    for request in requests:
+        result = api.vault_sign({
+            **payload, "request_id": request["id"], "signature": {"signature": TRANSFER["signature"]},
+        })
+        assert result["request"]["status"] == "approved"
+    assert avault.calls == []
+
+
+def test_protected_http_create_sign_and_complete_uses_real_storage(avault):
+    """REST adapters preserve the canonical input and return only a verified result."""
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe.ui_server import app
+
+    client = app.test_client()
+    envelope = protected_envelope(TRANSFER["public_key"], curve="ed25519")
+    created = client.post("/api/vault/secrets", headers=csrf_headers(client), json={
+        "name": "KEY", "kind": "keypair", "protection": "protected",
+        "sealed": {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": envelope.wrap_meta},
+        "public_meta": {"signing_public_key": solana_key(TRANSFER["public_key"])},
+    })
+    assert created.status_code == 200
+    payload = {
+        "name": "KEY", "scheme": "ed25519", "message_hex": TRANSFER["message"],
+        "signing_context": solana_context(TRANSFER["message"]),
+    }
+    pending = client.post("/api/vault/sign", headers=csrf_headers(client), json=payload).get_json()
+    assert pending["code"] == "browser_signature_required"
+    completed = client.post("/api/vault/sign", headers=csrf_headers(client), json={
+        **payload, "request_id": pending["request"]["id"], "signature": {"signature": TRANSFER["signature"]},
+    })
+    assert completed.status_code == 200
+    assert completed.get_json()["request"]["status"] == "approved"
+    assert avault.calls == []
+
+
+def test_cli_protected_sign_creates_the_same_bound_pending_request(avault, capfd):
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    args = cli.build_parser().parse_args([
+        "vault", "sign", "KEY", "--scheme", "ed25519", "--message-hex", TRANSFER["message"],
+        "--signing-context-json", json.dumps(solana_context(TRANSFER["message"])),
+    ])
+    assert cli.cmd_vault_sign(args) == 0
+    output = json.loads(capfd.readouterr().out)
+    assert output["kind"] == "vault_sign_request"
+    assert output["request"]["status"] == "pending"
+    assert output["request"]["delivery"]["operation_context"]["release"] == {**RELEASE, "name": "KEY"}
+    assert avault.calls == []
+
+
+def test_protected_solana_refusal_is_removed_without_downgrade_copy(avault):
+    create_key(solana_key(TRANSFER["public_key"]), protection="protected")
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "KEY")
+    assert meta["protection"] == "protected"
+    assert meta["signing_addresses"] == {"solana": vault_solana.address(TRANSFER["public_key"])}
+    assert "standard" not in json.dumps(meta).lower()
+    assert avault.calls == []
 
 
 @pytest.mark.parametrize("approval", [False, True])
@@ -427,21 +673,17 @@ def test_the_protected_binding_is_the_fixture_the_sandbox_verifies():
 
 
 def test_the_producer_binds_key_and_context_for_a_protected_solana_request(avault):
-    """The release the daemon signs for a protected key equals the fixture's, field for field.
-
-    Protected Solana requests cannot be created yet, so the row is created as a
-    standard request and its key is then marked protected: only the binding
-    producer is under test here.
-    """
-    create_key(solana_key(RELEASE["publicKey"]), always_ask=True)
+    """Real protected request → persisted snapshot → the exact fixture release."""
+    create_key(solana_key(RELEASE["publicKey"]), protection="protected")
     request = api.request_vault_sign({
         "name": "KEY", "scheme": "ed25519", "message_hex": RELEASE["messageHex"],
         "signing_context": copy.deepcopy(RELEASE["signingContext"]),
     })["request"]
-    with api._vault_engine().begin() as conn:
-        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "KEY").values(protection="protected"))
-    signed = api._attach_signed_sign_operation_context(request["id"])["delivery"]["operation_context"]
+    signed = request["delivery"]["operation_context"]
     assert signed["release"] == {**RELEASE, "name": "KEY"}
+    with api._vault_engine().connect() as conn:
+        record_id = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == "KEY")).scalar_one()
+    assert request["delivery"]["signing_key"] == {"secret_id": record_id, "public_key": RELEASE["publicKey"]}
 
 
 def keypair_reply(vector: dict, **overrides) -> dict:
@@ -450,6 +692,21 @@ def keypair_reply(vector: dict, **overrides) -> dict:
         "envelope": ENVELOPE, "curve": "ed25519", "chain": "solana", "public_key": vector["public_key"],
         "address": "586Z7H2vpX9qNhN2T4e9Utugie3ogjbxzGaMtM3E6HR5", **overrides,
     }
+
+
+@pytest.mark.parametrize("keypair", [
+    {"curve": "ed25519", "source": "generate"},
+    {"curve": "ed25519", "source": "import", "format": "base58-secret"},
+])
+def test_invalid_protection_rejects_solana_keypair_before_avault_dispatch(avault, keypair):
+    payload = {"name": "SOL", "kind": "keypair", "protection": "bogus", "keypair": keypair}
+    if keypair["source"] == "import":
+        payload["blind_box"] = BLIND_BOX
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(payload)
+    assert error.value.code == "invalid_protection"
+    assert avault.calls == []
+    assert api.get_vault_secrets()["secrets"] == []
 
 
 @pytest.mark.parametrize("source", ["generate", "solana-cli-json", "base58-secret"])
@@ -476,8 +733,94 @@ def test_avault_creates_the_solana_key_and_python_stores_only_public_metadata(av
     assert json.loads(row["public_meta"])["signing_public_key"] == solana_key(ONE_BYTE["public_key"])
 
 
+def test_protected_solana_record_ingestion_is_opaque_and_never_calls_avault(avault):
+    public_key = ONE_BYTE["public_key"]
+    envelope = protected_envelope(public_key, curve="ed25519")
+    secret = api.create_vault_secret({
+        "name": "PROTECTED_SOL",
+        "kind": "keypair",
+        "protection": "protected",
+        "sealed": {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": envelope.wrap_meta},
+        "public_meta": {"signing_public_key": solana_key(public_key)},
+    })["secret"]
+    assert secret["protection"] == "protected"
+    assert secret["signing_addresses"] == {"solana": vault_solana.address(public_key)}
+    assert secret["per_use_sign"] is True
+    assert avault.calls == []
+    with api._vault_engine().connect() as conn:
+        stored = conn.execute(select(vault_secrets).where(vault_secrets.c.name == "PROTECTED_SOL")).mappings().one()
+    assert stored["ciphertext"] == envelope.ciphertext
+    assert stored["nonce"] == envelope.nonce
+    assert stored["wrap_meta"] == envelope.wrap_meta
+
+
+@pytest.mark.parametrize("change", [
+    {"name": "PROTECTED.SOL"},
+    {"kind": "static"},
+    {"public_meta": {}},
+    {"public_meta": {"signing_public_key": "not-an-object"}},
+    {"public_meta": {"signing_public_key": {**solana_key(ONE_BYTE["public_key"]), "extra": True}}},
+    {"blind_box": BLIND_BOX},
+    {"keypair": {"curve": "ed25519", "source": "generate"}},
+    {"keypair": {"curve": "ed25519", "source": "import", "format": "base58-secret"}, "blind_box": BLIND_BOX},
+    {"public_meta": {"signing_public_key": {"curve": "secp256k1", "chain": "solana", "public_key": ONE_BYTE["public_key"]}}},
+    {"public_meta": {"signing_public_key": {"curve": "ed25519", "chain": "ethereum", "public_key": ONE_BYTE["public_key"]}}},
+    {"public_meta": {"signing_public_key": solana_key(ONE_BYTE["public_key"][:-2] + "00")}},
+    {"sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": json.dumps({"v": 1, "scheme": "machine-aesgcm-v1", "copies": [], "record_meta": {"kind": "static", "curve": "ed25519", "public_key": ONE_BYTE["public_key"]}})}},
+    {"sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": json.dumps({"v": 1, "scheme": "machine-aesgcm-v1", "copies": [], "record_meta": {"kind": "keypair", "curve": "ed25519", "public_key": TWO_BYTES["public_key"]}})}},
+])
+def test_protected_solana_record_ingestion_rejects_mismatched_metadata(avault, change):
+    envelope = protected_envelope(ONE_BYTE["public_key"], curve="ed25519")
+    payload = {
+        "name": "PROTECTED_SOL",
+        "kind": "keypair",
+        "protection": "protected",
+        "sealed": {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": envelope.wrap_meta},
+        "public_meta": {"signing_public_key": solana_key(ONE_BYTE["public_key"])},
+    }
+    payload.update(change)
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(payload)
+    assert error.value.code in {"invalid_name", "invalid_keypair", "vault_error"}
+    assert avault.calls == []
+    assert api.get_vault_secrets()["secrets"] == []
+
+
+@pytest.mark.parametrize("record_change", [
+    {"kind": "static"}, {"curve": None}, {"curve": "secp256k1"},
+    {"public_key": "AB" * 32}, {"public_key": "01"}, {"name": "OTHER"},
+])
+def test_protected_record_metadata_has_no_legacy_or_client_fallback(avault, record_change):
+    envelope = protected_envelope(ONE_BYTE["public_key"], curve="ed25519")
+    wrap = json.loads(envelope.wrap_meta)
+    wrap["record_meta"].update(record_change)
+    payload = {
+        "name": "KEY", "kind": "keypair", "protection": "protected",
+        "sealed": {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": json.dumps(wrap)},
+        "public_meta": {"signing_public_key": solana_key(ONE_BYTE["public_key"])},
+    }
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(payload)
+    assert error.value.code == "invalid_keypair"
+    assert api.get_vault_secrets()["secrets"] == []
+    assert avault.calls == []
+
+
+def test_python_does_not_claim_to_authenticate_the_opaque_record_name(avault):
+    """Both outer names are valid metadata; only sandbox decryption can detect an AAD mismatch."""
+    envelope = protected_envelope(ONE_BYTE["public_key"], curve="ed25519")
+    for name in ("SEALED_NAME", "OTHER_NAME"):
+        result = api.create_vault_secret({
+            "name": name, "kind": "keypair", "protection": "protected",
+            "sealed": {"ciphertext": envelope.ciphertext, "nonce": envelope.nonce, "wrap_meta": envelope.wrap_meta},
+            "public_meta": {"signing_public_key": solana_key(ONE_BYTE["public_key"])},
+        })
+        assert result["secret"]["name"] == name
+    assert avault.calls == []
+
+
 @pytest.mark.parametrize("change, code", [
-    ({"protection": "protected"}, "protected_solana_unsupported"),
+    ({"protection": "protected"}, "invalid_keypair"),
     ({"public_meta": {"signing_public_key": solana_key(ONE_BYTE["public_key"])}}, "invalid_keypair"),
     ({"kind": "static"}, "invalid_keypair"),
     ({"blind_box": BLIND_BOX}, "invalid_keypair"),
@@ -509,7 +852,7 @@ def test_a_client_cannot_pin_its_own_solana_public_key(avault, protection):
     }
     with pytest.raises(api.VaultApiError) as error:
         api.create_vault_secret(payload)
-    assert error.value.code == ("invalid_keypair" if protection == "standard" else "protected_solana_unsupported")
+    assert error.value.code == "invalid_keypair"
     assert avault.calls == []
     assert api.get_vault_secrets()["secrets"] == []
 

@@ -11730,8 +11730,7 @@ def cmd_vault_sign(args):
                     help_command=help_command,
                 )
             needs_approval = vault_service.sign_needs_approval(conn, name)
-            # A protected Solana key is refused by the service with its own reason.
-            if meta.get("protection") == "protected" and signing_context is None and message_hex is None:
+            if meta.get("protection") == "protected" and signing_context is None:
                 raise TaskCliError(
                     "protected signing requires --signing-context-json",
                     code="missing_signing_context",
