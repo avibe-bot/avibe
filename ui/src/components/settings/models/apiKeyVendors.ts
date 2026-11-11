@@ -22,6 +22,10 @@ export type ApiKeyVendorPreset = {
   label: string;
   official_base_url: string;
   protocol: SourceProtocol;
+  /** The name mainland users know the vendor by, shown before `label` in Chinese. */
+  label_zh?: string;
+  /** `cn` for a mainland-China vendor, which the Chinese UI lists earlier. */
+  region?: 'cn';
   built_in?: boolean;
   source_id?: string;
 };
@@ -48,3 +52,29 @@ export const apiKeyVendorPreset = (vendor: string): ApiKeyVendorPreset | null =>
 /** Resolve only a model-capable row for the generic API-key form. */
 export const modelApiKeyVendorPreset = (vendor: string): ApiKeyVendorPreset | null =>
   API_KEY_VENDOR_PRESETS.find((preset) => preset.id === vendor) ?? null;
+
+/** First in every language: the two flagships most people arrive to add. */
+const FLAGSHIP_VENDORS: readonly string[] = ['openai', 'anthropic'];
+
+/**
+ * The 供应商 picker's rows for a UI language.
+ *
+ * English reads the catalog's own order. Chinese keeps the flagships first, then
+ * the mainland vendors, then everyone else, each group in catalog order; a
+ * mainland vendor carries its Chinese name beside the English one, which is
+ * also what search matches. The ranking stays in the catalog file: this only
+ * regroups it, and adding a vendor is still one row there.
+ */
+export function localizedApiKeyVendorOptions(language: string): { value: string; label: string }[] {
+  const chinese = language.toLowerCase().startsWith('zh');
+  const group = (preset: ApiKeyVendorPreset) => (
+    !chinese ? 0 : FLAGSHIP_VENDORS.includes(preset.id) ? 0 : preset.region === 'cn' ? 1 : 2
+  );
+  return API_KEY_VENDOR_PRESETS
+    .map((preset, index) => ({ preset, index }))
+    .sort((a, b) => group(a.preset) - group(b.preset) || a.index - b.index)
+    .map(({ preset }) => ({
+      value: preset.id,
+      label: chinese && preset.label_zh ? `${preset.label_zh} ${preset.label}` : preset.label,
+    }));
+}

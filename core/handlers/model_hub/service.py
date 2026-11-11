@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Final, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
+from urllib.parse import urlsplit
 
 from sqlalchemy import func, literal_column, select
 
@@ -279,17 +280,40 @@ from .usage import (
 CONTRACT_VERSION = 23
 
 
-def seeded_source_name(vendor: str) -> str:
+def seeded_source_name(vendor: str, base_url: str | None = None) -> str:
     """The name a newly created Source of ``vendor`` starts life with.
 
     One owner for both create paths. A vendor id is a routing key, not a name,
     so the shipped catalog's label is the seed wherever it lists the vendor —
     otherwise a subscription reads as ``xai`` beside an api-key Source of the
-    same vendor reading ``xAI``. Falls back to the id for a vendor the catalog
-    does not list, which is the only name that channel has. The user owns the
-    field from here on; this is the seed, not the display rule.
+    same vendor reading ``xAI``. A vendor the catalog does not list (``custom``)
+    is named by the host it was given, ``api.example.com``, since two relays
+    both called ``custom`` cannot be told apart; without one, the id is the
+    only name that channel has. The user owns the field from here on; this is
+    the seed, not the display rule.
     """
-    return catalog_api_key_vendor_label(vendor) or vendor
+    label = catalog_api_key_vendor_label(vendor)
+    if label:
+        return label
+    host = _base_url_host(base_url)
+    return host if host and _storable_source_name(host) else vendor
+
+
+def _base_url_host(base_url: str | None) -> str | None:
+    """``host[:port]`` of a validated base URL, without a scheme-default port."""
+    if not base_url:
+        return None
+    try:
+        parts = urlsplit(base_url)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = {"http": 80, "https": 443}.get(parts.scheme.lower())
+    return f"{host}:{port}" if port is not None and port != default_port else host
 
 
 def _storable_backend_model_metadata(
@@ -1226,6 +1250,10 @@ def _validated_base_url(value: object) -> Optional[str]:
         raise ModelHubError("discovery_failed") from None
 
 
+def _storable_source_name(name: str) -> bool:
+    return bool(name) and len(name) <= 64 and not contains_credential_material(name)
+
+
 def _validated_source_name(value: object) -> str:
     """A Source name as the Web UI reads it: trimmed, present, and never a pasted credential.
 
@@ -1233,7 +1261,7 @@ def _validated_source_name(value: object) -> str:
     stored with edge or only whitespace must keep loading.
     """
     name = value.strip() if isinstance(value, str) else ""
-    if not name or len(name) > 64 or contains_credential_material(name):
+    if not _storable_source_name(name):
         raise ModelHubError("discovery_failed")
     return name
 
@@ -4346,7 +4374,8 @@ class ModelHubService:
         display_name_defaulted = not requested_name
         if kind not in {"subscription", "api_key"}:
             raise ModelHubError("discovery_failed")
-        display_name = _validated_source_name(requested_name or seeded_source_name(vendor))
+        base_url = _validated_base_url(payload.get("base_url"))
+        display_name = _validated_source_name(requested_name or seeded_source_name(vendor, base_url))
         channel = payload.get("supply_channel") or ("native_cli" if kind == "subscription" else "hub")
         if channel not in {"native_cli", "hub"} or (kind == "api_key" and channel != "hub"):
             raise ModelHubError("discovery_failed")
@@ -4356,7 +4385,6 @@ class ModelHubService:
         models_payload = payload.get("models", [])
         if not isinstance(models_payload, list):
             raise ModelHubError("discovery_failed")
-        base_url = _validated_base_url(payload.get("base_url"))
         if kind == "subscription" and base_url is not None:
             raise ModelHubError("discovery_failed")
         try:

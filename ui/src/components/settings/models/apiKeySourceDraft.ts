@@ -26,8 +26,11 @@ export type ApiKeySourceDraft = {
   displayName: string;
   baseUrl: string;
   apiKey: string;
-  /** What the person chose; a catalog vendor overrides it (see `draftProtocol`). */
+  /** What the person chose, or what detection recognised; a catalog vendor
+   *  overrides it (see `draftProtocol`). */
   protocol: SourceProtocol;
+  /** The person picked `protocol` themselves, so detection no longer moves it. */
+  protocolChosen: boolean;
 };
 
 /** 自定义 is where the field opens: it is the absence of a vendor, so nothing is
@@ -38,6 +41,7 @@ export const EMPTY_API_KEY_DRAFT: ApiKeySourceDraft = {
   baseUrl: '',
   apiKey: '',
   protocol: 'openai_chat',
+  protocolChosen: false,
 };
 
 /**
@@ -54,8 +58,57 @@ export function selectVendor(draft: ApiKeySourceDraft, vendor: string): ApiKeySo
     ...draft,
     vendor,
     baseUrl: modelApiKeyVendorPreset(vendor)?.official_base_url ?? '',
-    protocol: 'openai_chat',
+    protocol: EMPTY_API_KEY_DRAFT.protocol,
+    protocolChosen: false,
   };
+}
+
+/**
+ * Take what detection recognised, unless the person has already chosen.
+ *
+ * `null` is detection that recognised nothing: the field returns to the default
+ * rather than keeping a format recognised for an endpoint no longer typed. A
+ * catalog vendor publishes its own format, so detection never touches it.
+ */
+export function applyDetectedProtocol(
+  draft: ApiKeySourceDraft,
+  detected: SourceProtocol | null,
+): ApiKeySourceDraft {
+  if (draft.protocolChosen || modelApiKeyVendorPreset(draft.vendor)) return draft;
+  const protocol = detected ?? EMPTY_API_KEY_DRAFT.protocol;
+  return protocol === draft.protocol ? draft : { ...draft, protocol };
+}
+
+/**
+ * The endpoint detection may probe, or `null` while there is not one yet.
+ *
+ * Only an absolute http(s) address with a host counts, so a half-typed scheme is
+ * never sent anywhere. Detection probes this address and nothing else.
+ */
+export function detectableEndpoint(draft: ApiKeySourceDraft): string | null {
+  if (modelApiKeyVendorPreset(draft.vendor) || !draft.apiKey.trim()) return null;
+  const baseUrl = draft.baseUrl.trim();
+  try {
+    const url = new URL(baseUrl);
+    return (url.protocol === 'https:' || url.protocol === 'http:') && url.hostname ? baseUrl : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What an unnamed custom endpoint will be called: its host, as the server seeds
+ * it (`seeded_source_name`). Shown as the name field's placeholder so the
+ * default is visible before saving; the server stays the one that applies it.
+ */
+export function draftDefaultName(draft: ApiKeySourceDraft): string | null {
+  const preset = modelApiKeyVendorPreset(draft.vendor);
+  if (preset) return preset.label;
+  try {
+    return new URL(draft.baseUrl.trim()).host || null;
+  } catch {
+    return null;
+  }
 }
 
 /** The protocol that will actually be sent: a catalog vendor publishes one, so

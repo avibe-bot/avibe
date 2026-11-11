@@ -100,6 +100,7 @@ describe('apiKeySourceCreate', () => {
       baseUrl: '  https://api.example/v1  ',
       apiKey: '  sk-1  ',
       protocol: 'openai_chat',
+      protocolChosen: false,
     }, 'scn_test');
 
     expect(request).toEqual({
