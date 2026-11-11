@@ -41,7 +41,8 @@ SCHEMA_VERSION = 1
 
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_MEMBERS = 20_000
-MAX_MEMBER_BYTES = 8 * 1024 * 1024
+# Rust's COPYRIGHT.html alone is about 13 MB in the qualified archive.
+MAX_MEMBER_BYTES = 48 * 1024 * 1024
 MAX_TOTAL_BYTES = 256 * 1024 * 1024
 RELEASE_URL = re.compile(r"https://github\.com/avibe-bot/avibe/releases/download/iroh-apple-v[0-9.]+-[1-9][0-9]*/[A-Za-z0-9._-]+")
 REGISTRY_URL = re.compile(r"https://static\.crates\.io/crates/([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)-([0-9A-Za-z.+-]+)\.crate")
@@ -73,7 +74,8 @@ def native_state(pin: dict) -> dict:
         return {"state": "pending", "release_tag": pin["release_tag"]}
     asset = pin["assets"].get(SUPPORT_NAME) or {}
     return {"state": "published", "release_tag": pin["release_tag"], "binary_sha256": pin["sha256"],
-            "support_sha256": asset.get("sha256")}
+            "support_sha256": asset.get("sha256"), "license_policy_sha256": pin.get("license_policy_sha256"),
+            "notice_collector_sha256": pin.get("notice_collector_sha256")}
 
 
 def check_published_pin(pin: dict) -> dict:
@@ -287,6 +289,9 @@ def native_notices(pin: dict, members: dict[str, bytes], texts: Texts) -> list[d
         require(required in used, f"missing upstream license: {required}")
     rust = [name for name in used if re.fullmatch(r"LICENSES/rust-[^/]+/COPYRIGHT\.html", name)]
     require(len(rust) == 1, "missing Rust distribution notice")
+    rust_dir = rust[0].removesuffix("COPYRIGHT.html")
+    for text in ("licenses/MIT.txt", "licenses/Apache-2.0.txt"):
+        require(rust_dir + text in used, f"missing Rust distribution license: {rust_dir + text}")
     # The collection-wide statements, source offer and binding note included.
     add(root, "LICENSES/NOTICE.md")
     unknown = sorted(set(members) - used - INDEX_FILES - {"IrohLib.swift"})
@@ -370,6 +375,8 @@ def verify(pin: dict, bundle: Path) -> None:
     require(path.is_file(), f"missing {OUTPUT_NAME}; run ios/scripts/app_licenses.py generate")
     require(web.is_file(), f"missing {WEB_NAME}; run 'npm run build:mobile' first")
     data = json.loads(path.read_text())
+    if pin["release_state"] == "published":
+        check_published_pin(pin)
     require(data.get("schema_version") == SCHEMA_VERSION, f"{OUTPUT_NAME} has an unknown schema")
     require(data.get("native") == native_state(pin), f"{OUTPUT_NAME} was generated for a different iroh pin")
     require((data.get("web") or {}).get("sha256") == sha256(web.read_bytes()),

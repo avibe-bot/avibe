@@ -115,6 +115,14 @@ def published_pin(data: bytes, **asset_changes):
             "assets": {licenses.SUPPORT_NAME: asset}}
 
 
+def test_a_realistically_large_rust_notice_fits_the_bounds(tmp_path):
+    # The qualified archive's COPYRIGHT.html is about 13 MB.
+    members = support_members()
+    members["LICENSES/rust-1.91.0/COPYRIGHT.html"] = b"<p>Rust</p>" + b"<p>notice</p>" * 1_000_000
+    pin, path = rebuilt(tmp_path, members)
+    assert licenses.generate(pin, path, WEB)["groups"]
+
+
 REACT_MIT = "MIT License\n\nCopyright (c) Meta Platforms, Inc. and affiliates.\n\n" + MIT_BODY
 WEB = json.dumps({"schema_version": 1, "local_modules": 3, "virtual_modules": {}, "packages": [
     {"name": "react", "version": "19.3.1", "license": "MIT", "modules": 4, "files": [{"name": "LICENSE", "text": REACT_MIT}]},
@@ -212,7 +220,9 @@ def test_collection_notice_binding_and_rust_texts_are_retained(published):
     assert "Rust is licensed under MIT or Apache-2.0." in rust_copyright["text"]
     assert "p{}" not in rust_copyright["text"] and "- one" in rust_copyright["text"]
     assert result["native"] == {"state": "published", "release_tag": TAG, "binary_sha256": "c" * 64,
-                                "support_sha256": published[0]["assets"][licenses.SUPPORT_NAME]["sha256"]}
+                                "support_sha256": published[0]["assets"][licenses.SUPPORT_NAME]["sha256"],
+                                "license_policy_sha256": digest(licenses.POLICY.read_bytes()),
+                                "notice_collector_sha256": digest(licenses.COLLECTOR.read_bytes())}
     assert result["components"] == 14
 
 
@@ -310,6 +320,11 @@ def drop_rust(members):
     del members["LICENSES/rust-1.91.0/COPYRIGHT.html"]
 
 
+def drop_rust_licenses(members):
+    for name in [n for n in members if n.startswith("LICENSES/rust-1.91.0/licenses/")]:
+        del members[name]
+
+
 def drop_root_license(members):
     del members["LICENSES/iroh-ffi/LICENSE-APACHE"]
 
@@ -337,6 +352,7 @@ def compound_mpl(members):
     (drop_binding, "binding source statement"),
     (binary_notice, "not UTF-8"),
     (drop_rust, "Rust distribution notice"),
+    (drop_rust_licenses, "Rust distribution license"),
     (drop_root_license, "missing upstream license"),
     (skew_inventory, "inventory/provenance mismatch"),
 ])
@@ -372,6 +388,14 @@ def test_verify_binds_bundled_data_to_the_current_pin_and_bundle(tmp_path, publi
     # Data generated before the bundle was rebuilt.
     with pytest.raises(ValueError, match="different bundle"):
         licenses.verify(pin, write(tmp_path, current, web=WEB + b" "))
+    # A pin whose binding changed after generation, or that generation itself would reject.
+    for change in ({"license_policy_sha256": "0" * 64}, {"notice_collector_sha256": "0" * 64}):
+        with pytest.raises(ValueError):
+            licenses.verify({**pin, **change}, write(tmp_path, current))
+    moved = json.loads(json.dumps(pin))
+    moved["assets"][licenses.SUPPORT_NAME].update(url="https://example.com/IrohLib-support.zip", size=0)
+    with pytest.raises(ValueError, match="not the pinned release"):
+        licenses.verify(moved, write(tmp_path, current))
     # Pending data cannot carry native notices or a source offer.
     smuggled = {**pending, "groups": current["groups"]}
     with pytest.raises(ValueError, match="while the iroh pin is pending"):
