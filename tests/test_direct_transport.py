@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import datetime
 import json
+import logging
 import os
 import socket
 import textwrap
@@ -455,6 +456,37 @@ async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar):
         await supervisor.stop()
         os.environ.clear()
         os.environ.update(old_env)
+
+
+@pytest.mark.asyncio
+async def test_missing_executable_warning_is_once_per_start(tmp_path, caplog):
+    """Keep a missing runtime retryable without repeating the warning every backoff."""
+    caplog.set_level(logging.WARNING, logger="vibe.direct_transport")
+    rendezvous = RecordingRendezvous()
+    supervisor = DirectTransportSupervisor(
+        str(tmp_path / "missing-sidecar"),
+        RecordingIngress(),
+        rendezvous,
+        restart_initial_delay_seconds=0.01,
+        restart_max_delay_seconds=0.01,
+    )
+    try:
+        await supervisor.start()
+        await _wait_until(
+            lambda: len([reason for _endpoint, reason in rendezvous.published if reason == "executable_not_found"]) >= 3
+        )
+        messages = [record for record in caplog.records if record.name == "vibe.direct_transport"]
+        assert len(messages) == 1
+        await supervisor.stop()
+
+        await supervisor.start()
+        await _wait_until(
+            lambda: len([reason for _endpoint, reason in rendezvous.published if reason == "executable_not_found"]) >= 6
+        )
+        messages = [record for record in caplog.records if record.name == "vibe.direct_transport"]
+        assert len(messages) == 2
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio

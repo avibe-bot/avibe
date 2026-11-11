@@ -136,6 +136,7 @@ class DirectTransportSupervisor:
         self._admission_notice_tasks: set[asyncio.Task[None]] = set()
         self._admission_listener_generation = 0
         self._active_admission_generation: int | None = None
+        self._missing_executable_logged = False
         self._stream_port: int | None = None
 
         # These are intentionally private: neither token nor a peer address is
@@ -151,7 +152,7 @@ class DirectTransportSupervisor:
 
     @property
     def running(self) -> bool:
-        """Whether a sidecar generation is currently alive."""
+        """Whether a sidecar generation has spawned; ``endpoint_id`` marks publication."""
 
         return self._running
 
@@ -186,6 +187,7 @@ class DirectTransportSupervisor:
         self._reason = "starting"
         self._endpoint_id = None
         self._active_admission_generation = None
+        self._missing_executable_logged = False
         self._rendezvous.set_admission_listener(None)
         self._rendezvous.publish(None, reason="starting")
 
@@ -352,7 +354,9 @@ class DirectTransportSupervisor:
                     reason = exc.reason
                 except FileNotFoundError:
                     reason = "executable_not_found"
-                    logger.warning("direct transport sidecar executable is unavailable: %s", self._executable)
+                    if not self._missing_executable_logged:
+                        logger.warning("direct transport sidecar executable is unavailable: %s", self._executable)
+                        self._missing_executable_logged = True
                 except (BrokenPipeError, ConnectionError, OSError):
                     reason = "control_channel_failed"
                     logger.warning("direct transport sidecar control channel failed", exc_info=True)
