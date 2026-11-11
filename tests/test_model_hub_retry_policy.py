@@ -336,11 +336,12 @@ def test_startup_passes_temporary_hub_supply_without_spending_another_window(tmp
 
 
 @pytest.mark.parametrize("protocol", WIRE)
+@pytest.mark.parametrize("listed", [True, False])
 @pytest.mark.parametrize("streaming,verified,empty", [
     (False, True, False), (True, True, False), (False, False, False),
     (False, True, True), (True, True, True),
 ])
-def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, protocol, streaming, verified, empty):
+def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, protocol, streaming, verified, empty, listed):
     """MH-RETRY-RECOVERY-001 / D8: real loopback evidence, never timer-based recovery."""
 
     async def run():
@@ -382,6 +383,8 @@ def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, pr
         source.credential_ref = state.store_api_key("fixture-key", vendor=source.vendor, protocol=protocol)
         service, clock = clock_service(tmp_path, sources=[source])
         models = _canonicalize_fixed_test_routes(service)
+        if not listed:
+            source.models = []
         state.sync_sources(service._bindings(service.store.load()))
         client = EngineClient(
             EngineConnection(f"http://127.0.0.1:{runner.addresses[0][1]}", "fixture-management", "fixture-gateway"),
@@ -411,8 +414,8 @@ def test_real_gateway_retries_preoutput_then_preserves_one_response(tmp_path, pr
             assert clock.delays == [30, 60]
             assert adapter._active_transports == 0
             assert gateway.correlation.recovery_snapshot("turn_recovered") == []
-            assert (source.id not in service.recovery._sources) is verified
-            assert sum(event["kind"] == "recover" for event in service.events.list()) == int(verified)
+            assert (source.id not in service.recovery._sources) is (verified or not listed)
+            assert sum(event["kind"] == "recover" for event in service.events.list()) == int(verified and listed)
         finally:
             await gateway.close()
             await runner.cleanup()
