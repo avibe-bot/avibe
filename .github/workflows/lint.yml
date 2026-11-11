@@ -300,7 +300,7 @@ jobs:
               npm run test:voice-shortcut
           - lane: 3
             suites: |
-              npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
+              npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts mobile-otp.spec.ts
               npm run test:home-media
               npm run test:pdf-preview
               # Motion of the shared surfaces: sheets, popovers, toasts (Chromium and WebKit).

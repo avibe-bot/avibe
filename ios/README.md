@@ -278,6 +278,10 @@ another operation runs, during a provider cooldown, or inside avibe.bot's
 second-factor throttle window waits for the button. A recovery code is free
 text and always waits for the button.
 
+The email code's real input remains invisible while disabled for verification;
+only the six decorative digits are displayed. An unsuccessful verification
+unlocks the same input for correction or a pasted replacement.
+
 The bundled surface fills the container safe area so its gradient reaches the
 status bar and Home indicator. Its shared `h-dvh` viewport owns vertical
 scrolling inside the mobile document lock, while the content column applies
