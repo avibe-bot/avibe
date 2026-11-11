@@ -55,7 +55,7 @@ import { BACKEND_MODEL_INPUT_MODALITIES, BACKEND_MODEL_OUTPUT_MODALITIES, USAGE_
 /** Add-time Route placement returned by both source-creation paths. */
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
 export type SourceCreated = { source: Source } & Adoption;
-export type SourceRefresh = { source: Source; discovered: number };
+export type SourceRefresh = { source: Source; removed_hops: RouteHopRef[]; interrupted: SupplyGap[] };
 export type CredentialReplacement = {
   source: Source;
   removed_hops: RouteHopRef[];
@@ -256,6 +256,8 @@ export class ApiCallError extends Error {
   responseStatus?: number;
   /** Safe, structured add-time observation returned with a rejected create. */
   observation?: SourceObservation;
+  /** The provider's 401/403 when a listing failed because it refused the key. */
+  upstreamStatus?: number;
   constructor(
     code: string,
     detail?: string,
@@ -266,6 +268,7 @@ export class ApiCallError extends Error {
     responseStatus?: number,
     observation?: SourceObservation,
     changed: Record<string, RouteHop[]> = {},
+    upstreamStatus?: number,
   ) {
     super(detail || code);
     this.name = 'ApiCallError';
@@ -278,6 +281,7 @@ export class ApiCallError extends Error {
     this.changedSuppliers = changed;
     this.responseStatus = responseStatus;
     this.observation = observation;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
@@ -440,6 +444,7 @@ export const apiFailure = (
   changedSuppliers: Record<string, RouteHop[]>;
   responseStatus?: number;
   observation?: SourceObservation;
+  upstreamStatus?: number;
 } | null =>
   err instanceof ApiCallError
     ? {
@@ -452,6 +457,7 @@ export const apiFailure = (
         changedSuppliers: err.changedSuppliers,
         responseStatus: err.responseStatus,
         observation: err.observation,
+        upstreamStatus: err.upstreamStatus,
       }
     : null;
 
@@ -501,6 +507,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
               ? envelope.observation as SourceObservation
               : undefined,
             changedSuppliers(envelope.changed),
+            typeof envelope.upstream_status === 'number' ? envelope.upstream_status : undefined,
           );
         }
         return payload as T;

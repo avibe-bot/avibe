@@ -940,7 +940,7 @@ describe('SourceDetailPanel', () => {
       ...source,
       models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }],
     };
-    const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, discovered: echoed.models.length });
+    const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, removed_hops: [], interrupted: [] });
     const reconcile = vi.fn().mockResolvedValue(undefined);
     renderEchoPanel(reconcile);
 

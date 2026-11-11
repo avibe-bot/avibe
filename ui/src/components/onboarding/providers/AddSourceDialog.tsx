@@ -204,9 +204,11 @@ export const AddSourceDialog: React.FC<{
   // Through `selectVendor`, so a named brand arrives with its published endpoint
   // already filled. Setting the field alone would be worse than not naming one:
   // re-selecting the vendor that is already selected is identity, so the
-  // prefill this brand publishes would be unreachable from inside the form.
+  // prefill this brand publishes would be unreachable from inside the form. A brand
+  // that opens on its sign-in is still the brand the person pressed: switching to
+  // API Key from there is asking for that brand's key, not a custom endpoint's.
   const [draft, setDraft] = React.useState<ApiKeySourceDraft>(
-    () => (vendor && !namedSubscription ? selectVendor(EMPTY_API_KEY_DRAFT, vendor) : EMPTY_API_KEY_DRAFT),
+    () => (vendor ? selectVendor(EMPTY_API_KEY_DRAFT, vendor) : EMPTY_API_KEY_DRAFT),
   );
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<WritePhase>({ kind: 'idle' });

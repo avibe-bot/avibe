@@ -3642,6 +3642,49 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
+@pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (500, None)))
+def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected) -> None:
+    """A listing the provider refused for the key carries that status; nothing else does."""
+
+    class Refusing(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"error": {"message": "refused"}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+    server = HTTPServer(("127.0.0.1", 0), Refusing)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        credential_ref = await adapter.provision_credential("custom", "openai_chat", "wrong-key", base_url)
+        with pytest.raises(ModelDiscoveryError) as raised:
+            await adapter.discover_models("custom", "openai_chat", base_url, credential_ref)
+        assert raised.value.rejected_status == rejected
+
+    try:
+        asyncio.run(run())
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def _served_handle(source, model_id):
     """A real handle for a call the stub engine served: the adapter reads its outcome."""
     return completed_handle(RawCallOutcome(
