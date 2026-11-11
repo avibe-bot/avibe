@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import shlex
+import signal
 import socket
 import ssl
 import stat
@@ -8507,6 +8508,19 @@ def _configured_agent_cli_path(name: str) -> str:
     return configured or name
 
 
+def capture_install_plan(name: str) -> dict:
+    """Capture the configured launcher before an update mutates its install."""
+    configured = _configured_agent_cli_path(name)
+    # An explicit configured path is authoritative even when its launcher has
+    # already disappeared; resolving it by bare name would silently select a
+    # second installation and make restore mutate the wrong prefix.
+    selected = configured if configured != name and not _is_executable_file(Path(configured)) else resolve_cli_path(configured)
+    return {
+        "configured_path": configured,
+        "selected_path": selected or configured,
+    }
+
+
 def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = False) -> str | None:
     """Persist one backend path and return its previous configured value."""
 
@@ -8611,7 +8625,7 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
     }
 
 
-def install_agent(name: str, *, version: str | None = None) -> dict:
+def install_agent(name: str, *, version: str | None = None, install_plan: dict | None = None) -> dict:
     """Install (or upgrade) an agent CLI tool, one install per backend at a time.
 
     Settings runs this in the UI process and backend auto-update in the
@@ -8635,7 +8649,7 @@ def install_agent(name: str, *, version: str | None = None) -> dict:
             "path": None,
         }
     try:
-        return _install_agent(name, version=version)
+        return _install_agent(name, version=version, install_plan=install_plan)
     finally:
         lock.release()
 
@@ -8712,7 +8726,7 @@ def _native_vendor_install_target(name: str) -> str | None:
     return None
 
 
-def _install_agent(name: str, *, version: str | None = None) -> dict:
+def _install_agent(name: str, *, version: str | None = None, install_plan: dict | None = None) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
     Existing installations keep their install method and their selected
@@ -8758,8 +8772,10 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # Upgrade branch: if the binary is already on disk, keep the install
     # source stable. Some CLIs own a reliable self-update command; Codex has
     # multiple install sources, so choose npm/brew/self-update by source.
-    configured_path = _configured_agent_cli_path(name)
+    configured_path = str((install_plan or {}).get("configured_path") or _configured_agent_cli_path(name))
     existing_path = resolve_cli_path(configured_path)
+    if (install_plan or {}).get("selected_path"):
+        existing_path = str(install_plan["selected_path"])
 
     def _owned_path(under_app_root) -> str | None:
         """The app-private path this Runtime owns, configured or discovered.
@@ -8928,6 +8944,7 @@ def _curl_installer_command(url: str, consumer: str) -> list[str]:
 
 
 _AGENT_INSTALL_TIMEOUT_SECONDS = 300
+_AGENT_INSTALL_TERMINATION_GRACE_SECONDS = 15
 
 # Installer failures we can explain, recognized from what the installer printed.
 # Each shape comes from real npm 9/11, curl, and ``opencode upgrade`` output;
@@ -9100,8 +9117,15 @@ def _run_install_command(
             stdout, stderr = process.communicate(timeout=_AGENT_INSTALL_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             logger.error("Agent %s %s timed out", name, mode)
-            signal_process_tree(process, KILL_SIGNAL, logger, f"{name} {mode}")
-            stdout, stderr = process.communicate(timeout=10)
+            # Give npm/arborist and other installers a chance to roll back their
+            # transaction before escalating. SIGKILL can strand a renamed package
+            # and removed launcher, which is unrecoverable without the install plan.
+            signal_process_tree(process, signal.SIGTERM, logger, f"{name} {mode}")
+            try:
+                stdout, stderr = process.communicate(timeout=_AGENT_INSTALL_TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                signal_process_tree(process, KILL_SIGNAL, logger, f"{name} {mode}")
+                stdout, stderr = process.communicate(timeout=10)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
             # A killed installer can leave the CLI half-replaced; the next
             # detection observes it afresh rather than using an old version.

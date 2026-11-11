@@ -578,6 +578,7 @@ class UpdateChecker:
                     return
                 # The release that runs now, which a failed upgrade restores.
                 working = None if broken else runtime.get("current_version")
+                install_plan = await asyncio.to_thread(api.capture_install_plan, backend)
 
                 async def install(name: str = backend, release: str = latest, previous: Optional[str] = working) -> dict:
                     try:
@@ -595,7 +596,7 @@ class UpdateChecker:
                     self.state.backend_auto_update_attempts[name] = {"version": release, "count": count}
                     self.state.save()
                     if previous:
-                        result = {**result, "restore": await self._restore_backend(name, previous)}
+                        result = {**result, "restore": await self._restore_backend(name, previous, install_plan)}
                     return result
 
                 result = await coordinator.run_when_idle(backend, install)
@@ -623,7 +624,7 @@ class UpdateChecker:
             return False
         return now - seen["at"] >= BACKEND_RELEASE_SETTLE_SECONDS
 
-    async def _restore_backend(self, name: str, previous: str) -> str:
+    async def _restore_backend(self, name: str, previous: str, install_plan: dict | None = None) -> str:
         """Put back the release that ran before a failed upgrade left the CLI unable to start or removed it."""
         from vibe import api
 
@@ -632,7 +633,17 @@ class UpdateChecker:
             # An installer that failed or timed out can also leave no launcher at all.
             if runtime.get("status") not in {"broken", "missing"}:
                 return "not_needed"
-            restored = await asyncio.to_thread(api.install_agent, name, version=previous)
+            kwargs = {"version": previous}
+            if install_plan:
+                kwargs["install_plan"] = install_plan
+            try:
+                restored = await asyncio.to_thread(api.install_agent, name, **kwargs)
+            except TypeError as exc:
+                # Keep compatibility with test/extension callables that expose
+                # the pre-plan signature; the production API accepts the plan.
+                if "install_plan" not in str(exc):
+                    raise
+                restored = await asyncio.to_thread(api.install_agent, name, version=previous)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Backend %s restore after a failed upgrade raised: %s", name, exc)
             return "failed"
