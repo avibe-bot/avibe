@@ -25,10 +25,10 @@ jobs:
       matrix:
         variant: [stock, nat0]
         timing:
-          - idle: 8000
-            keepalive: 2500
           - idle: 4000
             keepalive: 1250
+          - idle: 3000
+            keepalive: 750
     env:
       VARIANT: ${{ matrix.variant }}
       IDLE_MS: ${{ matrix.timing.idle }}

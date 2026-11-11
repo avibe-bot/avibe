@@ -28,7 +28,7 @@ python3 - "$IDLE_MS" "$KEEP_ALIVE_MS" <<'PY'
 from pathlib import Path
 import sys
 idle,keep=map(int,sys.argv[1:])
-assert (idle,keep) in ((8000,2500),(4000,1250))
+assert (idle,keep) in ((8000,2500),(4000,1250),(3000,750))
 p=Path('src/main.rs'); s=p.read_text(); old='.datagram_receive_buffer_size(None)'
 assert s.count(old)==1
 s=s.replace(old, old+f'''

@@ -34,9 +34,11 @@ type ConnectionError = iroh::endpoint::ConnectionError;
 const HARD_WAIT: Duration = Duration::from_secs(45);
 const HOOK_WAIT: Duration = Duration::from_secs(10);
 const WINDOW: Duration = Duration::from_secs(60);
-/// Quiet time between the warmup roundtrip and the fault, one per trial, so the
-/// three trials start the fault at different phases of both keep-alive timers.
-const SETTLE_MS: [u64; 3] = [500, 1700, 2900];
+/// Quiet time between warmup and the fault: sweep the phase of keep-alive and
+/// the stock client's independent NAT-traversal round timer.
+const SETTLE_MS: [u64; 15] = [
+    500, 1000, 1700, 2300, 2900, 3500, 4100, 4700, 5300, 5900, 6500, 7100, 7700, 11500, 15500,
+];
 /// The sidecar's no-open-stream policy (`NO_STREAM_TIMEOUT` in `src/main.rs`).
 const NO_STREAM: Duration = Duration::from_secs(300);
 const OUTAGE: Duration = Duration::from_millis(1500);
@@ -470,7 +472,7 @@ async fn quiet(
     None
 }
 
-/// Three fresh trials of one blackhole mode: how long the stock client takes to
+/// Fresh trials across timer phases of one blackhole mode: how long the stock client takes to
 /// notice, and why its connection ended. A measurement; the only gate is the
 /// optional `AVDT_IDLE_MAX_CLOSE_MS`.
 async fn blackhole(mode: &str) {
