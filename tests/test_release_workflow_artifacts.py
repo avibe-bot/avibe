@@ -33,7 +33,8 @@ def job(name="build-linux-artifacts"):
 def producer(monkeypatch):
     data = zip_bytes()
     run = {"id": 42, "run_attempt": 2, "head_sha": SHA, "path": ".github/workflows/lint.yml",
-           "head_branch": "master", "event": "push", "status": "completed", "conclusion": "success"}
+           "head_branch": "master", "event": "push", "status": "completed", "conclusion": "success",
+           "run_started_at": "2026-11-11T00:00:00Z"}
     artifact = {"id": 7, "name": "ui-dist-linux", "expired": False,
                 "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
                 "created_at": "2026-11-11T00:01:50Z", "updated_at": "2026-11-11T00:01:51Z",
@@ -77,7 +78,7 @@ def test_ui_without_a_backstop_proof_makes_no_network_requests(producer, tmp_pat
 
 @pytest.mark.parametrize("change", [
     "sha", "attempt", "workflow", "event", "branch", "run-failed", "certificate",
-    "job-attempt", "job-failed", "expired", "missing", "artifact-sha", "old-attempt", "digest", "zip",
+    "job-attempt", "job-inherited", "certificate-inherited", "missing-start", "job-failed", "expired", "missing", "artifact-sha", "old-attempt", "digest", "zip",
 ])
 def test_ui_rejects_unproven_or_corrupt_artifact_before_promoting(producer, tmp_path, change):
     if change in {"sha", "attempt", "workflow", "event", "branch", "run-failed"}:
@@ -89,6 +90,16 @@ def test_ui_rejects_unproven_or_corrupt_artifact_before_promoting(producer, tmp_
         producer["jobs"].pop()
     elif change == "job-attempt":
         producer["jobs"][0]["run_attempt"] = 1
+    elif change == "job-inherited":
+        # Real GitHub partial-rerun shape: relabelled attempt, old timestamps.
+        producer["run"]["run_started_at"] = "2026-11-11T00:01:10Z"
+        producer["jobs"][1]["started_at"] = "2026-11-11T00:01:10Z"
+        producer["jobs"][0]["created_at"] = "2026-11-11T00:01:11Z"
+    elif change == "certificate-inherited":
+        producer["run"]["run_started_at"] = "2026-11-11T00:01:10Z"
+        producer["jobs"][0]["started_at"] = "2026-11-11T00:01:10Z"
+    elif change == "missing-start":
+        producer["run"].pop("run_started_at")
     elif change == "job-failed":
         producer["jobs"][0]["conclusion"] = "failure"
     elif change == "missing":
@@ -135,11 +146,11 @@ def test_publish_waits_for_successful_current_attempt_before_downloading(produce
 
     monkeypatch.setattr(artifacts.time, "sleep", finish)
     artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist")
-    assert sleeps == [5]
+    assert sleeps == [15]
     assert (tmp_path / "dist/index.html").read_bytes() == b"verified UI"
 
 
-@pytest.mark.parametrize("change", ["failed", "cancelled", "skipped", "new-attempt", "job-old-attempt", "old-artifact", "run-cancelled"])
+@pytest.mark.parametrize("change", ["failed", "cancelled", "skipped", "new-attempt", "job-old-attempt", "job-inherited", "old-artifact", "run-cancelled"])
 def test_publish_fails_closed_for_failure_cancel_and_rerun(producer, tmp_path, change):
     release_producer(producer)
     if change in {"failed", "cancelled", "skipped"}:
@@ -148,12 +159,45 @@ def test_publish_fails_closed_for_failure_cancel_and_rerun(producer, tmp_path, c
         producer["run"]["run_attempt"] = 3
     elif change == "job-old-attempt":
         producer["jobs"][0]["run_attempt"] = 1
+    elif change == "job-inherited":
+        producer["run"]["run_started_at"] = "2026-11-11T00:01:10Z"
     elif change == "old-artifact":
         producer["artifacts"][0]["name"] = "release-dist-1"
     else:
         producer["run"]["conclusion"] = "cancelled"
     with pytest.raises(artifacts.ArtifactError):
         artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist")
+    assert not (tmp_path / "dist").exists()
+
+
+def test_transient_status_failure_retries_but_never_becomes_proof(producer, tmp_path, monkeypatch):
+    release_producer(producer)
+    original = artifacts.gh_json
+    calls = []
+
+    def transient(repository, path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(1, ["gh", "api"])
+        return original(repository, path)
+
+    sleeps = []
+    monkeypatch.setattr(artifacts, "gh_json", transient)
+    monkeypatch.setattr(artifacts.time, "sleep", sleeps.append)
+    artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist")
+    assert sleeps == [15]
+    assert (tmp_path / "dist/index.html").exists()
+
+
+def test_persistent_status_failure_exhausts_the_wait_budget(producer, tmp_path, monkeypatch):
+    release_producer(producer)
+
+    def unavailable(repository, path):
+        raise subprocess.TimeoutExpired(["gh", "api"], 60)
+
+    monkeypatch.setattr(artifacts, "gh_json", unavailable)
+    with pytest.raises(artifacts.ArtifactError, match="Timed out"):
+        artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist", timeout=0)
     assert not (tmp_path / "dist").exists()
 
 

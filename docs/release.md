@@ -118,7 +118,9 @@ router; release-versioned wheels, desktop-private wheels, and signed assets are
 never reused.
 
 For GitHub-only RCs, canonical discovery inspects the newest successful runs
-first and stops at the newest complete set. One Linux job downloads and verifies
+first and stops at the newest complete set. Only same-repository `push` and
+`workflow_dispatch` producers are trusted; a PR/fork run cannot supply release
+bytes even if it uploads matching names and identity records. One Linux job downloads and verifies
 all six platforms against the pinned native Node/npm versions; it does not run
 foreign binaries. Any missing or invalid member sends all platforms through the
 native build matrix. Stable `publish.yml` retains its native matrix path.
@@ -128,6 +130,9 @@ successful full master backstop proof for this exact source. The consumer binds
 the artifact to that run/attempt's successful build job and verifies the ZIP's
 GitHub SHA256 digest before extraction. No proof means no artifact-discovery
 request; missing, expired or mismatched bytes use the normal local UI build.
+A partial CI rerun that inherits an earlier attempt's successful UI build or
+certificate also falls back: the producer job must have actually started in the
+proven attempt, not merely carry its relabelled attempt number.
 This optional optimization never makes the full backstop an RC gate again.
 
 The final wheel/sdist are still built with the release version and activated

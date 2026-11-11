@@ -38,6 +38,19 @@ def gh_json(arguments: list[str]) -> Any:
     return json.loads(result.stdout)
 
 
+def trusted_producer(repository: str, workflow: str, run: dict[str, Any]) -> bool:
+    # Artifact digests authenticate transport, not the code that produced them.
+    # Fork/PR workflows can use the same path and self-write identity JSON.
+    head_repository = run.get("head_repository") or {}
+    return (
+        run.get("event") in {"push", "workflow_dispatch"}
+        and head_repository.get("full_name", "").casefold() == repository.casefold()
+        and run.get("path") == workflow
+        and run.get("status") == "completed"
+        and run.get("conclusion") == "success"
+    )
+
+
 def find_run(repository: str, workflows: list[str], runtime_ref: str, platforms: list[str]) -> tuple[str, str, str, int] | None:
     expected = {f"canonical-show-runtime-{runtime_ref}-{platform}" for platform in platforms}
     # Merge both workflow histories before inspecting artifacts. Scanning each
@@ -49,7 +62,7 @@ def find_run(repository: str, workflows: list[str], runtime_ref: str, platforms:
             f"repos/{repository}/actions/workflows/{Path(workflow).name}/runs?status=success&per_page=100",
         ])
         for run in payload.get("workflow_runs", []):
-            if run.get("id") and run.get("conclusion") == "success" and run.get("path") == workflow:
+            if run.get("id") and trusted_producer(repository, workflow, run):
                 runs.append((str(run.get("created_at", "")), workflow, run))
     for _, workflow, run in sorted(runs, key=lambda item: (item[0], int(item[2]["id"])), reverse=True):
         run_id = str(run["id"])
@@ -166,6 +179,8 @@ def reuse_set(args: argparse.Namespace) -> bool:
     if allowed.get(args.producer_workflow_file) != args.producer_workflow_name:
         raise ArtifactError("Untrusted canonical producer workflow")
     run = gh_json(["api", f"repos/{args.repository}/actions/runs/{args.producer_run_id}"])
+    if not trusted_producer(args.repository, args.producer_workflow_file, run):
+        raise ArtifactError("Untrusted canonical producer event or repository")
     source_sha = run["head_sha"]
     check_run(args.repository, args.producer_run_id, args.producer_run_attempt,
               source_sha, args.producer_workflow_file, completed=True)

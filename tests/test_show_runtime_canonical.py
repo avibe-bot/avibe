@@ -71,7 +71,8 @@ def test_verify_rejects_a_changed_lockfile_identity(tmp_path: Path):
 
 
 @pytest.mark.parametrize("complete", [True, False])
-def test_find_checks_newest_complete_set_across_workflows_and_stops(monkeypatch, complete):
+@pytest.mark.parametrize("untrusted", [None, "pull_request", "fork"])
+def test_find_checks_newest_complete_set_across_workflows_and_stops(monkeypatch, complete, untrusted):
     # Older code queried every run even after finding a valid set (~70s/RC).
     workflows = [".github/workflows/release_ai.yml", ".github/workflows/publish.yml"]
     platforms = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"]
@@ -85,9 +86,12 @@ def test_find_checks_newest_complete_set_across_workflows_and_stops(monkeypatch,
                 ids = [4, 1] if index == 0 else [3, 2]
                 return {"workflow_runs": [{"id": number, "created_at": f"2026-11-0{number}T00:00:00Z",
                                           "path": workflow, "name": f"workflow-{index}", "conclusion": "success",
-                                          "run_attempt": 2} for number in ids]}
+                                          "status": "completed", "run_attempt": 2,
+                                          "event": "pull_request" if number == 4 and untrusted == "pull_request" else "push",
+                                          "head_repository": {"full_name": "fork/repo" if number == 4 and untrusted == "fork" else "fixture/repo"}}
+                                         for number in ids]}
         number = int(path.split("/runs/")[1].split("/")[0])
-        targets = platforms if number == 3 and complete else platforms[:-1]
+        targets = platforms if (number == 3 and complete) or (number == 4 and untrusted) else platforms[:-1]
         return {"artifacts": [{"name": f"canonical-show-runtime-ref-{platform}", "expired": False,
                                "archive_download_url": "https://fixture.invalid/artifact"} for platform in targets]}
 
@@ -95,13 +99,13 @@ def test_find_checks_newest_complete_set_across_workflows_and_stops(monkeypatch,
     result = canonical.find_run("fixture/repo", workflows, "ref", platforms)
     if complete:
         assert result == ("3", workflows[1], "workflow-1", 2)
-        assert len(calls) == 4  # two histories + incomplete newest + selected set
+        assert len(calls) == (3 if untrusted else 4)  # untrusted runs never reach the artifact API
     else:
         assert result is None
-        assert len(calls) == 6  # exhaustive miss still permits native fallback
+        assert len(calls) == (5 if untrusted else 6)  # exhaustive trusted miss permits native fallback
 
 
-@pytest.mark.parametrize("corruption", [None, "missing-platform", "archive", "router", "platform", "attempt", "node", "npm", "workflow"])
+@pytest.mark.parametrize("corruption", [None, "missing-platform", "archive", "router", "platform", "attempt", "node", "npm", "workflow", "producer-event", "producer-repo"])
 def test_linux_reuse_verifies_every_native_identity_before_promoting(tmp_path, monkeypatch, corruption):
     # Exercise real recording, ZIP extraction and identity verification; fake
     # only GitHub transport. A late bad platform must not leave a partial set.
@@ -145,7 +149,9 @@ def test_linux_reuse_verifies_every_native_identity_before_promoting(tmp_path, m
     if corruption == "missing-platform":
         artifacts.pop()
     run = {"id": 42, "run_attempt": 2, "head_sha": "c" * 40, "path": arguments.producer_workflow_file,
-           "status": "completed", "conclusion": "success"}
+           "status": "completed", "conclusion": "success",
+           "event": "pull_request" if corruption == "producer-event" else "push",
+           "head_repository": {"full_name": "fork/avibe" if corruption == "producer-repo" else "fixture/avibe"}}
     monkeypatch.setattr(canonical, "gh_json", lambda args: run)
     monkeypatch.setattr(transport, "gh_json", lambda repo, path: {"artifacts": artifacts} if "/artifacts?" in path else run)
 

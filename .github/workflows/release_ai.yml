@@ -98,7 +98,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.release-backstop.outputs.source_sha }}
+          # Dispatch may release an older source; helpers belong to this workflow.
+          ref: ${{ github.sha }}
           sparse-checkout: |
             scripts/show_runtime_canonical.py
             scripts/release_workflow_artifacts.py
@@ -182,7 +183,7 @@ jobs:
       - name: Checkout Avibe release tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.release-backstop.outputs.source_sha }}
+          ref: ${{ github.sha }}
           path: avibe-source
           sparse-checkout: scripts/show_runtime_canonical.py
           sparse-checkout-cone-mode: false
@@ -426,7 +427,7 @@ jobs:
     # belong to publish.yml and do not wait for this RC-only build.
     if: ${{ needs.release-backstop.result == 'success' && !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

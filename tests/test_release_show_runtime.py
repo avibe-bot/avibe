@@ -63,6 +63,9 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
         assert "if" not in canonical
         lookup = workflow["jobs"]["resolve-show-runtime-canonical"]
         assert lookup["runs-on"] == "ubuntu-latest"
+        assert lookup["steps"][0]["with"]["ref"] == "${{ github.sha }}"
+        tooling = next(step for step in steps if step.get("name") == "Checkout Avibe release tooling")
+        assert tooling["with"]["ref"] == "${{ github.sha }}"
         reuse = next(step for step in lookup["steps"] if step.get("id") == "reuse")
         assert "show_runtime_canonical.py reuse-set" in reuse["run"]
         assert "--node-version \"v$SHOW_RUNTIME_NODE_VERSION\"" in reuse["run"]
@@ -71,6 +74,35 @@ def test_release_bundle_keeps_native_shell_separate_from_router_export(workflow_
     assert {entry["artifact"] for entry in job["strategy"]["matrix"]["include"]} == {
         "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64",
     }
+
+
+@pytest.mark.parametrize(("gate", "canonical", "reused", "native", "cancelled", "allowed"), [
+    ("success", "success", "true", "skipped", False, True),
+    ("success", "success", "false", "success", False, True),
+    ("success", "success", "false", "skipped", False, False),
+    ("success", "success", "false", "failure", False, False),
+    ("success", "success", "true", "success", False, False),
+    ("success", "success", "", "success", False, False),
+    ("success", "failure", "true", "skipped", False, False),
+    ("failure", "success", "true", "skipped", False, False),
+    ("success", "success", "true", "skipped", True, False),
+])
+def test_core_packaging_requires_exactly_one_complete_runtime_path(gate, canonical, reused, native, cancelled, allowed):
+    # Execute the actual DAG condition. An Actions skipped matrix is success
+    # only on the proven reuse path, never a substitute for failed native work.
+    expression = _workflow("release_ai.yml")["jobs"]["build-assets"]["if"]
+    values = {
+        "needs.release-backstop.result": gate,
+        "needs.resolve-show-runtime-canonical.result": canonical,
+        "needs.resolve-show-runtime-canonical.outputs.reused": reused,
+        "needs.show-runtime-bundles.result": native,
+    }
+    expression = expression.strip().removeprefix("${{").removesuffix("}}")
+    for key, value in values.items():
+        expression = expression.replace(key, repr(value))
+    expression = expression.replace("always()", "True").replace("!cancelled()", repr(not cancelled))
+    expression = expression.replace("&&", "and").replace("||", "or")
+    assert eval(" ".join(expression.split()), {"__builtins__": {}}, {}) is allowed
 
 
 #: GitHub-hosted runner labels that build each Show Runtime platform natively, by OS and architecture. Retired

@@ -55,7 +55,19 @@ def check_run(repository: str, run_id: str, attempt: int, sha: str, workflow: st
     return run
 
 
-def successful_job(repository: str, run_id: str, attempt: int, name: str) -> dict | None:
+def timestamp(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ArtifactError("Missing producer timestamp")
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ArtifactError("Invalid producer timestamp") from exc
+    if result.tzinfo is None:
+        raise ArtifactError("Producer timestamp has no timezone")
+    return result
+
+
+def successful_job(repository: str, run_id: str, attempt: int, name: str, *, run_started_at: str) -> dict | None:
     jobs = listed(repository, f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
     matches = [job for job in jobs if job.get("name") == name]
     if not matches:
@@ -69,6 +81,10 @@ def successful_job(repository: str, run_id: str, attempt: int, name: str) -> dic
         return None
     if job.get("conclusion") != "success":
         raise ArtifactError(f"Producer job did not succeed: {name}")
+    # GitHub relabels inherited successful jobs with the new run_attempt on a
+    # partial rerun. Their original timestamps expose that they did not rerun.
+    if timestamp(job.get("started_at")) < timestamp(run_started_at):
+        raise ArtifactError("Producer job was inherited from an earlier attempt")
     return job
 
 
@@ -83,10 +99,8 @@ def artifact_for_job(repository: str, run_id: str, sha: str, name: str, job: dic
         raise ArtifactError("Artifact belongs to another source or run")
     # The artifacts API has no attempt field. Bind its immutable ID/digest to
     # the successful producer job's exact-attempt upload window instead.
-    start, end = (datetime.fromisoformat(job[key].replace("Z", "+00:00"))
-                  for key in ("started_at", "completed_at"))
-    created, updated = (datetime.fromisoformat(artifact[key].replace("Z", "+00:00"))
-                        for key in ("created_at", "updated_at"))
+    start, end = (timestamp(job.get(key)) for key in ("started_at", "completed_at"))
+    created, updated = (timestamp(artifact.get(key)) for key in ("created_at", "updated_at"))
     if not start <= created <= updated <= end:
         raise ArtifactError("Artifact was not uploaded by this attempt's producer job")
     return artifact
@@ -136,9 +150,9 @@ def reuse_ui(repository: str, run_id: str, attempt: int, sha: str, destination: 
     run = check_run(repository, run_id, attempt, sha, ".github/workflows/lint.yml", completed=True)
     if run.get("event") not in {"push", "workflow_dispatch"} or run.get("head_branch") != "master":
         raise ArtifactError("UI producer is not a master backstop")
-    if not successful_job(repository, run_id, attempt, "master-full-backstop"):
+    if not successful_job(repository, run_id, attempt, "master-full-backstop", run_started_at=run.get("run_started_at")):
         raise ArtifactError("Full backstop certificate is missing")
-    job = successful_job(repository, run_id, attempt, "build-linux-artifacts")
+    job = successful_job(repository, run_id, attempt, "build-linux-artifacts", run_started_at=run.get("run_started_at"))
     if not job:
         raise ArtifactError("UI producer did not finish")
     artifact = artifact_for_job(repository, run_id, sha, "ui-dist-linux", job)
@@ -158,8 +172,14 @@ def reuse_ui(repository: str, run_id: str, attempt: int, sha: str, destination: 
 def wait_build(repository: str, run_id: str, attempt: int, sha: str, destination: Path, *, timeout: float = 1800) -> None:
     deadline = time.monotonic() + timeout
     while True:
-        check_run(repository, run_id, attempt, sha, ".github/workflows/release_ai.yml", completed=False)
-        job = successful_job(repository, run_id, attempt, "build-assets")
+        try:
+            run = check_run(repository, run_id, attempt, sha, ".github/workflows/release_ai.yml", completed=False)
+            job = successful_job(repository, run_id, attempt, "build-assets", run_started_at=run.get("run_started_at"))
+        except (subprocess.SubprocessError, json.JSONDecodeError):
+            # Transport failures mean unknown, never success. Retry polling
+            # within the same budget; identity/failure verdicts still fail now.
+            print("Actions status temporarily unavailable; waiting for proof.", flush=True)
+            job = None
         if job:
             artifact = artifact_for_job(repository, run_id, sha, f"release-dist-{attempt}", job)
             download_verified(repository, artifact, destination)
@@ -167,7 +187,7 @@ def wait_build(repository: str, run_id: str, attempt: int, sha: str, destination
             return
         if time.monotonic() >= deadline:
             raise ArtifactError("Timed out waiting for this attempt's build-assets job")
-        time.sleep(5)
+        time.sleep(15)
 
 
 def main() -> int:
