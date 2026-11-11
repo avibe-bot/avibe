@@ -3968,6 +3968,55 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   gap: 6px;
 }
 
+/* Why a group is there, when its rows need a sentence: catalog models no
+ * provider lists are offered as they are, and the note says what happens then. */
+.model-hub-picker-group-note {
+  padding: 0 4px 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* Adding exactly what was typed: the one action left when nothing else matched.
+ * Dashed like a slot to fill; mint when it is the only thing on screen. */
+.model-hub-picker-typed {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px var(--model-hub-picker-row-pad-x);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  text-align: left;
+  color: var(--muted);
+}
+.model-hub-picker-typed > svg { width: 16px; height: 16px; flex: none; }
+.model-hub-picker-typed:hover { background: var(--color-wash-press); }
+.model-hub-picker-typed--prominent {
+  max-width: 520px;
+  border-color: var(--mint);
+  background: var(--mint-soft);
+  color: var(--foreground);
+}
+.model-hub-picker-typed--prominent:hover { background: var(--mint-soft); }
+.model-hub-picker-typed-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--model-hub-picker-name-size);
+  font-weight: 600;
+  color: var(--foreground);
+}
+.model-hub-picker-typed-note {
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
 .model-hub-picker-empty {
   display: flex;
   flex: 1;
