@@ -2165,7 +2165,6 @@
         "deletedSource": "已删除"
       },
       "addKey": {
-        "saveFirstHint": "保存供应商时会尝试拉取模型列表。测试是可选的，可在添加后进行。",
         "title": "添加 API Key",
         "subtitle": "API Key 与模型接口",
         "field": {

@@ -2165,7 +2165,6 @@
         "deletedSource": "deleted"
       },
       "addKey": {
-        "saveFirstHint": "Save your provider and try fetching its models. Testing is optional and can be done afterwards.",
         "title": "Add API key",
         "subtitle": "API key and model interface",
         "field": {
@@ -6844,7 +6843,7 @@
       "cardNotAdded": "Not added yet",
       "cardSelected": "Selected",
       "cardUseExistingNamed": "Use existing {{name}} configuration",
-      "cardAddSubscriptionNamed": "Add a {{name}} subscription or API Key",
+      "cardAddSubscriptionNamed": "Add a subscription or API Key for {{name}}",
       "cardChecking": "Checking…",
       "cardConnected_one": "Connected · {{count}} model",
       "cardConnected_other": "Connected · {{count}} models",
