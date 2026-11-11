@@ -733,6 +733,11 @@ class McpRuntime:
             mcp_scope.publication_matches(name, existing, published) if owned
             else McpRuntime._comparable_definition(published["definition"]) == McpRuntime._comparable_definition(existing)
         )
+        # A saved definition without a publication is a failed-discovery retry:
+        # admit it again so add reruns discovery instead of trapping the user in
+        # an ``exists`` result. Published identical definitions remain unchanged.
+        if same_input and published is None:
+            return None
         return "unchanged" if same_input and same_publication else "exists"
 
     async def _refresh(self, payload: dict[str, Any]) -> bytes:
