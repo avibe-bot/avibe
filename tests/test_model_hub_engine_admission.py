@@ -298,3 +298,40 @@ async def test_synchronous_abort_release_cannot_drop_an_unjoined_async_close():
     allowed.set()
     await asyncio.wait_for(gate.idle.wait(), 1)
     await gate.join_interruptions()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_release_stamp_joins_worker_without_leaking_transport(monkeypatch):
+    import threading
+    from unittest.mock import AsyncMock
+
+    owner = adapter()
+    source = SimpleNamespace(allowed_origins=(), protocol="openai_chat")
+    owner.state_store = SimpleNamespace(get_source=lambda _sid: source)
+    client = SimpleNamespace(invoke=AsyncMock())
+    owner.supervisor.client = lambda: client
+    monkeypatch.setattr(owner, "_locked_engine_call", AsyncMock(return_value=client))
+    entered = asyncio.Event()
+    allowed = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def stamp():
+        loop.call_soon_threadsafe(entered.set)
+        assert allowed.wait(5)
+        return "model-hub-engine-v8.0.63-2"
+
+    monkeypatch.setattr(owner, "engine_release", stamp)
+    invocation = asyncio.create_task(owner.invoke("src_fixture", "model-a", {}, False, "vibey"))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        invocation.cancel()
+        await asyncio.sleep(0)
+        assert not invocation.done()  # cancellation still joins the owned worker
+    finally:
+        allowed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await invocation
+    assert owner._engine_admission.idle.is_set()
+    assert owner._active_transports == 0 and owner._transports_idle.is_set()
+    assert owner._unsent_requests == 0 and owner._requests_sent.is_set()
+    client.invoke.assert_not_awaited()

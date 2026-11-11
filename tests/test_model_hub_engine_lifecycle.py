@@ -700,3 +700,25 @@ def test_released_upstream_named_cache_stages_offline_without_rewriting_it(tmp_p
     assert (legacy.read_bytes(), legacy.stat().st_mtime_ns) == before
     assert not legacy.with_name(f"{asset['sha256']}-{name}").exists()
     assert not (manager.runtime_dir / "current.json").exists()
+
+
+def test_required_reuse_does_not_reopen_a_durable_running_binary_for_writes(tmp_path, monkeypatch):
+    from vibe.model_hub_runtime import journal
+
+    owner, supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
+    owner.ensure_running()
+    generation = baseline["generation"]
+    binary = Path(generation["install_dir"]) / generation["bin_path"]
+    flush = journal.flush_file
+
+    def reject_running_write(path):
+        if Path(path) == binary:
+            raise PermissionError("Windows executable image is already mapped")
+        flush(path)
+
+    monkeypatch.setattr(journal, "flush_file", reject_running_write)
+    result = owner.stage_required()
+    assert result["ok"] and result["generation"] == generation
+    assert supervisor.running == generation
+    value = owner.journal.load()
+    assert value["active"] == generation and value["staged"] == []

@@ -4380,7 +4380,7 @@ def test_api_key_setup_does_not_schedule_a_model(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     state_store = EngineStateStore(tmp_path / "engine-state")
-    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    transport = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
     service, store, adapter = _service(tmp_path)
     # Keep engine lifecycle simulated; exercise real credential custody, HTTP
     # observation, inventory discovery, and Source admission together.
@@ -4555,7 +4555,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     state_store = EngineStateStore(tmp_path / "engine-state")
-    transport = CLIProxyEngineAdapter(supervisor=Mock(), state_store=state_store)
+    transport = CLIProxyEngineAdapter(supervisor=Mock(lifecycle=None, _published_release=None), state_store=state_store)
     service, store, adapter = _service(tmp_path)
     # Engine lifecycle stays simulated; custody, listing and replacement are real.
     for method in (
@@ -4752,7 +4752,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
 
     client = Mock()
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
     service, store, adapter = _service(tmp_path)
@@ -4868,7 +4868,7 @@ def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(mo
 
     client = Mock()
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
     service, store, adapter = _service(tmp_path)
@@ -4944,7 +4944,7 @@ def test_custom_auto_policy_response_cannot_reject_or_exclude_credentials(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     transport = CLIProxyEngineAdapter(
-        supervisor=Mock(), state_store=EngineStateStore(tmp_path / "engine-state"),
+        supervisor=Mock(lifecycle=None, _published_release=None), state_store=EngineStateStore(tmp_path / "engine-state"),
     )
     service, store, adapter = _service(tmp_path)
     for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source"):

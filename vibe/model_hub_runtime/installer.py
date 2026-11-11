@@ -356,6 +356,11 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                     generation.min_avibe_version if generation is not None else None
                 ), "envelope_sha256": envelope_digest,
             }, self.runtime_dir)
+            if staged.document() in value["staged"] or staged.document() in (value["active"], value["previous"]):
+                # These immutable bytes were flushed BEFORE their durable role
+                # was published, and ensure has just reverified their integrity.
+                # Reopening a running Windows image for writes is forbidden.
+                return None
             install_dir = Path(staged.install_dir)
             # Flush both files and namespace entries before publishing the role.
             for item in install_dir.rglob("*"):

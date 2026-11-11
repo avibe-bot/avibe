@@ -1859,7 +1859,7 @@ class ModelHubService:
         except RuntimePlatformUnsupportedError:
             raise ModelHubError("runtime_platform_unsupported", status=422) from None
         except EngineUnavailableError as exc:
-            code = "engine_withdrawn" if exc.reason == "engine_withdrawn" else "engine_down"
+            code = "engine_withdrawn" if getattr(exc, "reason", None) == "engine_withdrawn" else "engine_down"
             raise ModelHubError(code, status=503, local_error_detail=local_error_detail(exc)) from None
         except NativeOAuthUnavailableError:
             raise ModelHubError("engine_down", status=503) from None
@@ -1877,7 +1877,7 @@ class ModelHubService:
                 self.oauth_flows.forget(flow_id)
             raise ModelHubError("flow_not_found", status=404) from None
         except EngineUnavailableError as exc:
-            code = "engine_withdrawn" if exc.reason == "engine_withdrawn" else "engine_down"
+            code = "engine_withdrawn" if getattr(exc, "reason", None) == "engine_withdrawn" else "engine_down"
             raise ModelHubError(code, status=503) from None
         except NativeOAuthUnavailableError:
             raise ModelHubError("engine_down", status=503) from None

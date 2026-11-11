@@ -45,6 +45,9 @@ def main(spec):
             return native_popen(command, *args, **kwargs)
         config = yaml.safe_load(Path(command[-1]).read_text())
         isolated = Path(config["auth-dir"]).resolve() != state.auth_dir.resolve()
+        # Only the reviewed fake CPA runs here; retain its startup diagnostics
+        # in this test-owned driver log, never output from a packaged engine.
+        kwargs.update(stdout=sys.stderr, stderr=sys.stderr)
         process = native_popen([sys.executable, spec["fixture_engine"], *command[1:]], *args, **kwargs)
         record = {
             "pid": process.pid, "isolated": isolated,

@@ -15,6 +15,9 @@ NONCE = "scn_searchcleanup0001"
 
 
 class _NoModelEngine:
+    lifecycle = None
+    _published_release = None
+
     def __getattr__(self, name):
         pytest.fail(f"search custody reached the model engine: {name}")
 

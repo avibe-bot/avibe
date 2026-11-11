@@ -451,11 +451,10 @@ class EngineInvokeHandle:
         """
         self._withdrawn = True
         if not self._outcome.done():
-            self._outcome.set_result(RawCallOutcome(
-                kind=RawOutcomeKind.NETWORK_ERROR, http_status=None, error_code="engine_withdrawn",
-                redacted_message=None, stream_started=bool(self._observed and self._observed.model_output_started),
-                model_id=self._model_id or "unknown", source_id=self._source_id or "unknown",
-                engine_release=self.engine_release,
+            self._outcome.set_result(_outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR, error_code="engine_withdrawn",
+                stream_started=bool(self._observed and self._observed.model_output_started),
+                model_id=self._model_id or "unknown", source=None, source_id=self._source_id,
             ))
         return self.close_stream()
 
@@ -2285,8 +2284,9 @@ def buffered_prelude_handle(
 def _outcome(
     *,
     kind: RawOutcomeKind,
-    source: SourceRecord,
+    source: SourceRecord | None,
     model_id: str,
+    source_id: str | None = None,
     http_status: int | None = None,
     error_code: str | None = None,
     error_type: str | None = None,
@@ -2309,7 +2309,7 @@ def _outcome(
         redacted_message=message,
         stream_started=stream_started,
         model_id=model_id,
-        source_id=source.source_id,
+        source_id=source.source_id if source is not None else source_id or "unknown",
         error_type=error_type,
         error_candidates=error_candidates,
         usage=usage,

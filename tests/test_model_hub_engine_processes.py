@@ -50,7 +50,11 @@ def real_owner(tmp_path, monkeypatch, *, bundled_version="v8.0.30"):
             assert not any(config.get(key) for key in (
                 "claude-api-key", "codex-api-key", "openai-compatibility", "gemini-api-key",
             ))
-        process = native_popen([sys.executable, str(script), *command[1:]], *args, **kwargs)
+        trace = tmp_path / f"fixture-cpa-{len(processes)}.log"
+        with trace.open("wb") as output:
+            kwargs.update(stdout=output, stderr=subprocess.STDOUT)
+            process = native_popen([sys.executable, str(script), *command[1:]], *args, **kwargs)
+        process._fixture_trace = trace
         processes.append((process, isolated))
         observations.append({"binary": binary, "isolated": isolated, "pid": process.pid})
         return process
@@ -65,11 +69,32 @@ def real_owner(tmp_path, monkeypatch, *, bundled_version="v8.0.30"):
 
 
 def finish(supervisor, processes):
+    failed = sys.exc_info()[0] is not None
     supervisor.stop()
     for process, _isolated in processes:
         if process.poll() is None:
             process.kill()  # only this test's recorded PIDs
         process.wait(timeout=10)
+        if failed:
+            trace = process._fixture_trace
+            print(f"Native test fixture {process.pid}: {trace.read_text(encoding='utf-8', errors='replace')[-4000:]}")
+
+
+def test_native_fixture_bootstrap_needs_no_host_reverse_dns(tmp_path, monkeypatch):
+    owner, supervisor, _baseline, _observations, processes = real_owner(tmp_path, monkeypatch)
+    script = tmp_path / "fixture-cpa.py"
+    script.write_text(
+        "import socket\n"
+        "def deny_reverse_dns(*_args):\n"
+        "    raise AssertionError('local-only fixture consulted machine DNS')\n"
+        "socket.getfqdn = deny_reverse_dns\n" + script.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    try:
+        owner.ensure_running()
+        assert supervisor.live_connection() is not None
+    finally:
+        finish(supervisor, processes)
 
 
 def test_native_preflight_swap_identity_fence_and_real_process_death(tmp_path, monkeypatch):

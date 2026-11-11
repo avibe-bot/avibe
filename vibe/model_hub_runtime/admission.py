@@ -162,8 +162,6 @@ def engine_operation(function):
                 result = replace(result, engine_release=result.engine_release or release)
             elif function.__name__ == "discover_models":
                 result = ModelInventory(result, engine_release=release)
-            elif function.__name__ == "subscription_quota" and isinstance(result, dict):
-                result = {**result, "engine_release": release}
             return result
         except asyncio.CancelledError as exc:
             if gate.reason == "engine_withdrawn":

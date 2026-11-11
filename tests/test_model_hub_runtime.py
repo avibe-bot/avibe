@@ -1052,7 +1052,7 @@ def test_foreign_pointer_inspection_cannot_hide_an_unsupported_host(
 
     status = manager.status()
 
-    assert status["reason"] == "model_hub_engine_install_inspection_failed"
+    assert status["reason"] == "model_hub_engine_platform_unsupported"
     assert manager.supports_host_platform() is False
 
 
@@ -3768,6 +3768,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import TCPServer
 
 import psutil
 import yaml
@@ -3973,7 +3974,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {{'id': 'response-1', 'model': payload['model']}})
 
-server = HTTPServer((config['host'], config['port']), Handler)
+class LoopbackHTTPServer(HTTPServer):
+    def server_bind(self):
+        # This fixture serves only the configured loopback address; its
+        # startup must not depend on the host's reverse DNS configuration.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+server = LoopbackHTTPServer((config['host'], config['port']), Handler)
 server.serve_forever()
 server.server_close()
 while True:
@@ -6052,8 +6060,8 @@ def test_direct_ensure_failure_is_durable_across_manager_reload(
     monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", fail_ensure)
     runtime_dir = tmp_path / "runtime"
 
-    result = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).ensure()
-    reloaded = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
+    result = _StandaloneClaimInstaller(runtime_dir=runtime_dir, offline=True).ensure()
+    reloaded = _StandaloneClaimInstaller(runtime_dir=runtime_dir, offline=True)
 
     assert result == {"ok": False, "reason": reason}
     assert reloaded.install_state()["reason"] == reason
@@ -6067,7 +6075,7 @@ def test_direct_ensure_failure_is_durable_across_manager_reload(
     monkeypatch.setattr(managed_runtime.ManagedRuntimeManager, "ensure", succeed_ensure)
 
     assert reloaded.ensure()["ok"] is True
-    assert EngineRuntimeManager(runtime_dir=runtime_dir, offline=True).install_state() is None
+    assert _StandaloneClaimInstaller(runtime_dir=runtime_dir, offline=True).install_state() is None
 
 
 def test_dependency_ensure_settles_an_orphaned_install_claim(
@@ -6107,7 +6115,7 @@ def test_direct_ensure_success_preserves_a_newer_install_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    installer = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    installer = _StandaloneClaimInstaller(runtime_dir=tmp_path / "runtime", offline=True)
     _create_runtime_install_claim(installer)
 
     def succeed_after_claim_moves(_manager, **kwargs):
@@ -10742,7 +10750,7 @@ def test_oauth_rejected_paste_keeps_flow_awaiting_a_corrected_value(tmp_path: Pa
 
 
 _UI_BUNDLES = {
-    language: json.loads((Path(__file__).resolve().parents[1] / "ui/src/i18n" / f"{language}.json").read_text())
+    language: json.loads((Path(__file__).resolve().parents[1] / "ui/src/i18n" / f"{language}.json").read_text(encoding="utf-8"))
     for language in ("en", "zh")
 }
 

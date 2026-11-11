@@ -3646,9 +3646,9 @@ class CLIProxyEngineAdapter:
                         os_errno=local_os_errno(exc),
                     )
                 )
+            admitted_engine_release = await run_owned_in_thread(self.engine_release)
             transport_lease = self._engine_admission.retain()
             release = self._acquire_transport(transport_lease)
-            admitted_engine_release = await run_owned_in_thread(self.engine_release)
             request_sent = self._hold_unsent_request()
             try:
                 if on_admitted is not None:

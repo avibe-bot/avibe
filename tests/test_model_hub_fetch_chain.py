@@ -25,7 +25,7 @@ from core.handlers.model_hub.service import ModelHubError
 
 @pytest.mark.asyncio
 async def test_jina_builtin_fetch_is_admitted_with_reader_headers():
-    adapter = object.__new__(CLIProxyEngineAdapter)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())
     captured = {}
 
     async def search_http(**kwargs):
@@ -139,7 +139,7 @@ async def test_flag_off_rejects_configured_fetch_from_a_previously_frozen_turn(t
             turn=turn,
         )
     assert raised.value.code == "tool_not_enabled"
-    adapter = object.__new__(CLIProxyEngineAdapter)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())
     captured = {}
 
     async def transport(**kwargs):
