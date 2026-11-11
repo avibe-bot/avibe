@@ -174,6 +174,7 @@ export function McpServerDetail({
   onActivateLogin,
 }: McpServerDetailProps) {
   const { t } = useTranslation();
+  const [toolsOpen, setToolsOpen] = useState(false);
   const projectRow = Boolean(current.scope?.startsWith('project:'));
   const owned = projectRow || current.source === 'avibe';
   const state = current.state ?? 'ok';
@@ -219,8 +220,16 @@ export function McpServerDetail({
       {usable ? (
       <>
       <div className="flex flex-col gap-1.5">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('mcpHub.tools')}</span>
-        {(current.tools ?? []).map((tool) => (
+        <button
+          type="button"
+          className="flex items-center gap-1 self-start font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted hover:text-foreground"
+          aria-expanded={toolsOpen}
+          onClick={() => setToolsOpen((open) => !open)}
+        >
+          {toolsOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+          {t('mcpHub.toolsToggle', { count: current.tools?.length ?? 0 })}
+        </button>
+        {toolsOpen ? (current.tools ?? []).map((tool) => (
           <McpToolCard
             key={tool.name}
             name={tool.name}
@@ -228,7 +237,7 @@ export function McpServerDetail({
             expanded={Boolean(expandedTools[tool.name])}
             onToggle={() => onToggleTool(tool.name)}
           />
-        ))}
+        )) : null}
       </div>
       <div className="rounded-[10px] border border-edge bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted shadow-elevation-0">
         {t('mcpHub.callHint', { name: current.name })}
@@ -1006,6 +1015,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
 
         {current ? (
           <McpServerDetail
+            key={current.name}
             server={current}
             project={projectId}
             canManage={canManage && !currentInherited}

@@ -66,6 +66,7 @@ const servers: McpServerSummary[] = [
   row('tokened', 'needs_config', { missingVariables: ['API_TOKEN'], placeholders: ['API_TOKEN', 'REGION'] }),
   row('docs', 'needs_login'),
   row('ready', 'ok', { toolCount: 1, tools: [{ name: 'search' }] }),
+  row('other-ready', 'ok', { toolCount: 1, tools: [{ name: 'fetch' }] }),
   row('stale', 'not_generated'),
   { name: 'echo', source: 'avibe', scope: 'global', state: 'needs_login', auth: 'needs_login', transport: 'stdio', command: 'echo-mcp', toolCount: 1 },
 ];
@@ -123,12 +124,39 @@ describe('McpHubSection project view', () => {
     expect(within(detail()).getByText(en.mcpHub.pendingApprovalHint)).toBeTruthy();
     expect(actions('tokened')).toEqual([en.mcpHub.configure, en.mcpHub.remove]);
     expect(within(detail()).getByText(en.mcpHub.needsConfigHint.replace('{{names}}', 'API_TOKEN'))).toBeTruthy();
-    expect(actions('stale')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
-    expect(actions('ready')).toEqual([en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
+    expect(actions('stale')).toEqual([en.mcpHub.toolsToggle.replace('{{count}}', '0'), en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
+    expect(actions('ready')).toEqual([en.mcpHub.toolsToggle.replace('{{count}}', '1'), en.mcpHub.configure, en.mcpHub.refresh, en.mcpHub.remove]);
     // The inherited global row is view-only here; manage it in the Global tab.
-    expect(actions('echo')).toEqual([]);
+    expect(actions('echo')).toEqual([en.mcpHub.toolsToggle.replace('{{count}}', '0')]);
     expect(within(rowButton('echo')).queryByRole('link')).toBeNull();
     expect(within(detail()).queryByRole('link')).toBeNull();
+  });
+
+  it('collapses tools by default, toggles the list, and resets when another server opens', async () => {
+    renderHub();
+    await screen.findByText('ready');
+    fireEvent.click(rowButton('ready'));
+
+    const panel = detail();
+    const toolsToggle = within(panel).getByRole('button', { name: `${en.mcpHub.toolsToggle.replace('{{count}}', '1')}` });
+    expect(toolsToggle.getAttribute('aria-expanded')).toBe('false');
+    expect(within(panel).queryByText('search')).toBeNull();
+    expect(within(panel).getByText(en.mcpHub.callHint.replace('{{name}}', 'ready'))).toBeTruthy();
+
+    fireEvent.click(toolsToggle);
+    expect(toolsToggle.getAttribute('aria-expanded')).toBe('true');
+    expect(within(panel).getByText('search')).toBeTruthy();
+
+    fireEvent.click(rowButton('other-ready'));
+    const otherPanel = detail();
+    const otherToggle = within(otherPanel).getByRole('button', { name: `${en.mcpHub.toolsToggle.replace('{{count}}', '1')}` });
+    expect(otherToggle.getAttribute('aria-expanded')).toBe('false');
+    expect(within(otherPanel).queryByText('fetch')).toBeNull();
+
+    fireEvent.click(otherToggle);
+    expect(within(otherPanel).getByText('fetch')).toBeTruthy();
+    fireEvent.click(otherToggle);
+    expect(within(otherPanel).queryByText('fetch')).toBeNull();
   });
 
   it.each(['project', 'global'])('configures changed or cleared maps in %s without showing stored values', async (scope) => {
@@ -229,7 +257,13 @@ describe('McpHubSection project view', () => {
     for (const name of ['pending', 'tokened', 'stale', 'ready']) {
       fireEvent.click(rowButton(name));
       const buttons = within(detail()).getAllByRole('button').map((node) => node.textContent);
-      expect(buttons.filter((text) => text)).toEqual([]);
+      expect(buttons.filter((text) => text)).toEqual(
+        name === 'ready'
+          ? [en.mcpHub.toolsToggle.replace('{{count}}', '1')]
+          : name === 'stale'
+            ? [en.mcpHub.toolsToggle.replace('{{count}}', '0')]
+            : [],
+      );
     }
   });
 

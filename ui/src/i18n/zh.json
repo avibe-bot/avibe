@@ -7083,6 +7083,7 @@
     "transportHttp": "http",
     "toolMeta": "{{count}} 个工具 · {{transport}}",
     "tools": "工具",
+    "toolsToggle": "工具 · {{count}}",
     "generatedAt": "最近刷新 {{time}}",
     "generatedAtWithVersion": "最近刷新 {{time}} · 服务端 v{{version}}",
     "serverVersion": "服务端 v{{version}}",
