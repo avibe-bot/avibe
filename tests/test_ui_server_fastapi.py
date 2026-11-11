@@ -4227,6 +4227,92 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
     assert normal_delivery["recent_deliveries"] == []
 
 
+def test_web_push_test_route_recomputes_badge_inside_owner_lock(
+    monkeypatch,
+    tmp_path,
+):
+    from core import web_push_notifications
+    from storage import web_push_service
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    endpoint = f"https://avibe.bot/api/push/apns/{'E' * 43}"
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        web_push_service.upsert_subscription(
+            conn,
+            user_key="local",
+            payload={
+                "endpoint": endpoint,
+                "keys": {"p256dh": "native-key", "auth": "native-auth"},
+            },
+        )
+
+    badge = {"value": 1}
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_badge_count_for_user_key",
+        lambda *_args, **_kwargs: badge["value"],
+    )
+    original_lock = web_push_notifications._owner_delivery_lock
+    lock_attempted = threading.Event()
+
+    class _InstrumentedLock:
+        def __init__(self, user_key):
+            self._lock = original_lock(user_key)
+
+        def __enter__(self):
+            lock_attempted.set()
+            return self._lock.__enter__()
+
+        def __exit__(self, exc_type, exc, traceback):
+            return self._lock.__exit__(exc_type, exc, traceback)
+
+    monkeypatch.setattr(
+        web_push_notifications,
+        "_owner_delivery_lock",
+        _InstrumentedLock,
+    )
+    sends = []
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+    responses = []
+
+    def send_test_notification():
+        client = app.test_client()
+        responses.append(
+            client.post(
+                "/api/web-push/test",
+                json={"endpoint": endpoint},
+                headers=csrf_headers(client),
+            )
+        )
+
+    held_lock = original_lock("local")
+    held_lock.acquire()
+    try:
+        route_thread = threading.Thread(target=send_test_notification)
+        route_thread.start()
+        assert lock_attempted.wait(5)
+        badge["value"] = 0
+    finally:
+        held_lock.release()
+    route_thread.join(5)
+
+    assert not route_thread.is_alive()
+    assert responses[0].status_code == 200
+    assert sends[0][1]["badge_count"] == 0
+    with engine.connect() as conn:
+        assert web_push_service.get_last_successful_badge(
+            conn,
+            endpoint=endpoint,
+        ) == 0
+    engine.dispose()
+
+
 def test_web_push_status_reports_normal_delivery_diagnostics(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
