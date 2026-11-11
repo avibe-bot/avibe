@@ -2961,7 +2961,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   // Vibey's own bubble (its toggle row), not the loading notice that shares the slot.
   const bubbleOpen = () => document.querySelector('.pet-mini-reply-toggle')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
 
-  it.each([false, true])('an old reply is hidden unless it still has actionable quick replies (%s)', async (actionable) => {
+  it.each([false, true])('an old reply stays hidden with or without quick suggestions (%s)', async (actionable) => {
     tails.S = [
       message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
       message('r', 'S', { text: 'Done already', read_at: null, content: actionable ? { quick_replies: ['Yes', 'No'] } : {} }),
@@ -2969,7 +2969,7 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     mainSession('S');
     render(<PetPage />);
     await waitFor(() => expect(document.querySelector('.pet-mini-reply-summary')?.textContent).toBe('Done already'));
-    expect(bubbleOpen()).toBe(actionable);
+    expect(bubbleOpen()).toBe(false);
   });
 
   // A turn that is running, then ends with `text` as its result; returns the

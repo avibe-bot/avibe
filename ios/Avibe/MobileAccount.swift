@@ -289,6 +289,8 @@ struct MobileControlPlaneConfiguration: Equatable {
 struct AccountWebsiteDataStoreOperations {
     let makeDataStore: @MainActor (UUID) -> WKWebsiteDataStore
     let removeIdentifier: @MainActor (UUID) async -> Error?
+    /// The named stores WebKit has on disk.
+    let listIdentifiers: @MainActor () async -> Set<UUID>
 
     static let live = AccountWebsiteDataStoreOperations(
         makeDataStore: { WKWebsiteDataStore(forIdentifier: $0) },
@@ -296,6 +298,13 @@ struct AccountWebsiteDataStoreOperations {
             await withCheckedContinuation { continuation in
                 WKWebsiteDataStore.remove(forIdentifier: identifier) {
                     continuation.resume(returning: $0)
+                }
+            }
+        },
+        listIdentifiers: {
+            await withCheckedContinuation { continuation in
+                WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                    continuation.resume(returning: Set($0))
                 }
             }
         }
@@ -357,7 +366,7 @@ final class AccountWebsiteDataStore {
     private let operations: AccountWebsiteDataStoreOperations
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
-    private var ownedIdentifiers: Set<UUID>
+    private(set) var ownedIdentifiers: Set<UUID>
 
     init(
         defaults: UserDefaults = .standard,
@@ -403,18 +412,31 @@ final class AccountWebsiteDataStore {
         }
     }
 
+    /// Removes every store this ledger owns except the current one. A store
+    /// leaves the ledger only once WebKit no longer lists it, not when its
+    /// removal reports success: a store whose network session is still
+    /// closing (one released at sign-out) gets its directory back right after
+    /// a removal WebKit reported as done. So the sweep that removes a store
+    /// keeps it, and a later sweep (the next launch or account change) removes
+    /// it again if it came back, or forgets it once it is gone.
     func sweepOrphans() async {
         let candidates = ownedIdentifiers.subtracting([identifier])
+        guard !candidates.isEmpty else {
+            return
+        }
+        let listed = await operations.listIdentifiers()
 
         for candidate in candidates.sorted(by: {
             $0.uuidString < $1.uuidString
         }) {
+            guard listed.contains(candidate) else {
+                ownedIdentifiers.remove(candidate)
+                continue
+            }
             if let error = await operations.removeIdentifier(candidate) {
                 Self.logger.error(
                     "Named WebKit store cleanup failed for \(candidate.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
-            } else {
-                ownedIdentifiers.remove(candidate)
             }
         }
 

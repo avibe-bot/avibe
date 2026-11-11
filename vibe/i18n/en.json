@@ -293,6 +293,7 @@
   },
   "vault": {
     "signing": {
+      "invalidProtectedSolanaRecord": "Protected Solana keys require a matching sandbox-generated keypair record and Ed25519 public metadata. Keypair specifications and blind-box imports are not accepted for this path. Keep the protected tier unchanged.",
       "invalidKey": "Signing requires a valid pinned public key that matches the scheme: a compressed secp256k1 key for secp256k1 schemes, or a Solana Ed25519 key for ed25519. No signature was delivered. Keep the existing key and its protection unchanged; repair the public-key metadata before retrying.",
       "protectedUnsupported": "Protected Bitcoin Taproot signing requires the typed transaction approval workflow and a compatible sandbox. Keep legacy and SegWit-v0 inputs unsupported.",
       "missingContext": "Protected signing requires a verifiable signing context. Recreate the request with the complete operation details.",

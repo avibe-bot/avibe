@@ -86,6 +86,19 @@ def test_notes_shell_does_not_mutate_notes_when_remote_tag_cannot_be_bound(tmp_p
     assert _fixture_git(workspace, "rev-parse", f"refs/tags/{tag}^{{commit}}") == source
 
 
+@pytest.mark.parametrize("moved", [False, True])
+def test_publisher_rechecks_remote_tag_after_the_parallel_build_wait(tmp_path, moved):
+    remote, workspace, env, tag, source, _ = _notes_git_fixture(tmp_path, annotation=None, existing_body="")
+    if moved:
+        _fixture_git(remote, "commit", "--allow-empty", "-m", "Different source")
+        _fixture_git(remote, "tag", "-f", tag)
+    command = _step(_job("release_ai.yml", "release"), "Recheck tag after build wait")["run"]
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=workspace,
+                            env=env, capture_output=True, text=True, timeout=15)
+    assert (result.returncode != 0) is moved, result.stdout + result.stderr
+    assert _fixture_git(workspace, "rev-parse", "HEAD") == source
+
+
 def _fixture_git(directory, *arguments):
     return subprocess.run(
         ["git", "-C", str(directory), "-c", "user.name=Release test",
@@ -651,7 +664,17 @@ def test_release_workflows_split_core_publication_from_desktop_stage():
         "release-backstop", "resolve-show-runtime-ref", "resolve-show-runtime-canonical",
         "show-runtime-bundles", "build-assets", "release",
     }
-    assert stage1["release"]["needs"] == ["release-backstop", "build-assets"]
+    assert stage1["release"]["needs"] == "release-backstop"
+    release_steps = stage1["release"]["steps"]
+    download = _step(stage1["release"], "Download release artifacts")
+    assert "wait-build" in download["run"]
+    assert '--attempt "$GITHUB_RUN_ATTEMPT"' in download["run"]
+    assert release_steps.index(download) < release_steps.index(_step(stage1["release"], "Create GitHub-only Release"))
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
+    assert workflow["permissions"]["contents"] == "read"
+    for name, job in stage1.items():
+        permissions = job.get("permissions", workflow["permissions"])
+        assert ("write" in permissions.values()) == (name == "release")
     assert "Dispatch desktop Stage 2" in {
         step.get("name") for step in stage1["release"]["steps"]
     }

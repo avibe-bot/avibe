@@ -1561,23 +1561,18 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             operations: registry.operations
         )
         let unownedIdentifier = UUID()
-        registry.trackForCleanup(unownedIdentifier)
         addTeardownBlock {
             let remaining = await registry.removeCreatedIdentifiers()
             XCTAssertTrue(remaining.isEmpty)
         }
-        var unownedStore: WKWebsiteDataStore? = WKWebsiteDataStore(
-            forIdentifier: unownedIdentifier
+        // Someone else's store, alive and on disk, with no network session.
+        // A session would let WebKit refuse its removal as "in use" and so hide
+        // a sweep that wrongly tried; and a released session keeps writing its
+        // directory back for a while after the cleanup below removes it (#3418).
+        var unownedStore: WKWebsiteDataStore? = registry.makeUnownedStore(
+            unownedIdentifier
         )
-        await setCookie(
-            HTTPCookie(properties: [
-                .domain: "example.test",
-                .path: "/",
-                .name: "test_owned_unrelated",
-                .value: "present",
-            ])!,
-            in: try XCTUnwrap(unownedStore).httpCookieStore
-        )
+        await waitUntilListed([unownedIdentifier])
         let registered = await fetchAllNamedDataStoreIdentifiers()
         XCTAssertTrue(registered.contains(unownedIdentifier))
 
@@ -1592,7 +1587,6 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             registry.createdIdentifiers
         accountStore = nil
         unownedStore = nil
-        await Task.yield()
         let remaining = await registry.removeCreatedIdentifiers()
         XCTAssertTrue(remaining.isEmpty)
 
@@ -1647,6 +1641,22 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             defaults: defaults,
             operations: registry.operations
         )
+    }
+
+    private func waitUntilListed(
+        _ identifiers: Set<UUID>,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(Self.fixtureEventTimeout))
+        while !(await fetchAllNamedDataStoreIdentifiers()).isSuperset(of: identifiers) {
+            guard clock.now < deadline else {
+                XCTFail("WebKit never listed the store", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     private func allCookies(
@@ -1714,13 +1724,21 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
 @MainActor
 private final class RealNamedDataStoreRegistry {
+    private final class WeakStore {
+        weak var store: WKWebsiteDataStore?
+
+        init(_ store: WKWebsiteDataStore) {
+            self.store = store
+        }
+    }
+
     private(set) var createdIdentifiers = Set<UUID>()
+    private var stores: [WeakStore] = []
 
     var operations: AccountWebsiteDataStoreOperations {
         AccountWebsiteDataStoreOperations(
             makeDataStore: { [self] identifier in
-                createdIdentifiers.insert(identifier)
-                return WKWebsiteDataStore(forIdentifier: identifier)
+                makeStore(identifier)
             },
             removeIdentifier: { [self] identifier in
                 let error = await AccountWebsiteDataStoreOperations.live
@@ -1729,15 +1747,34 @@ private final class RealNamedDataStoreRegistry {
                     createdIdentifiers.remove(identifier)
                 }
                 return error
-            }
+            },
+            listIdentifiers: AccountWebsiteDataStoreOperations.live
+                .listIdentifiers
         )
     }
 
-    func trackForCleanup(_ identifier: UUID) {
-        createdIdentifiers.insert(identifier)
+    /// A store for another owner than the ledger under test, removed with the
+    /// ones it makes.
+    func makeUnownedStore(_ identifier: UUID) -> WKWebsiteDataStore {
+        makeStore(identifier)
     }
 
+    private func makeStore(_ identifier: UUID) -> WKWebsiteDataStore {
+        createdIdentifiers.insert(identifier)
+        let store = WKWebsiteDataStore(forIdentifier: identifier)
+        stores.append(WeakStore(store))
+        return store
+    }
+
+    /// Removes every store made here, once WebKit has let go of it: WebKit
+    /// finishes creating a new store's directories after it is returned, and
+    /// a store removed before that has its directories made again afterwards.
     func removeCreatedIdentifiers() async -> Set<UUID> {
+        let clock = ContinuousClock()
+        let released = clock.now.advanced(by: .seconds(5))
+        while stores.contains(where: { $0.store != nil }), clock.now < released {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
         for attempt in 0..<50 {
             for identifier in createdIdentifiers.sorted(by: {
                 $0.uuidString < $1.uuidString
