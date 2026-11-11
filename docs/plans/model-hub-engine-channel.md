@@ -8,6 +8,11 @@ and its producer, is described under "Step 2 as built" at the end. Steps 3 and
 the channel is not commissioned.** This note authorizes no publication, key
 creation, or rollout.
 
+**The index has no expiry and is never renewed** (owner decision, 2026-11-11;
+section 2 says what that means for a machine that misses a withdrawal). The
+earlier seven-day validity, the daily renewal and everything that existed to
+serve them are gone from the design and from the code.
+
 ## Outcome and current gap
 
 Example: publish `model-hub-engine-v8.0.63-2` with minimum Avibe `3.2.6`.
@@ -59,7 +64,6 @@ Decoded payload (the manifest is carried byte-for-byte, not reserialized):
   "channel": "stable",
   "sequence": 42,
   "issued_at": "2026-11-10T06:00:00Z",
-  "expires_at": "2026-11-17T06:00:00Z",
   "releases": [{
     "min_avibe_version": "3.2.6",
     "manifest_sha256": "<64 hex>",
@@ -72,6 +76,10 @@ Decoded payload (the manifest is carried byte-for-byte, not reserialized):
   }]
 }
 ```
+
+`sequence` alone orders one index after another. `issued_at` records when the
+signer allocated the payload; it is checked for format and decides nothing.
+There is no expiry field, and a payload that carries one is rejected.
 
 Each decoded manifest retains the existing `version`, `asset_release_tag`, source
 commit, toolchain/patch identity and six assets (`platform`, canonical owned `url`,
@@ -94,7 +102,7 @@ Selection rules:
   quarantine. Choose the greatest numeric `(upstream major, minor, patch,
   Avibe build revision)`; dates and the upstream version alone are insufficient.
 - Ordinary adoption only moves forward from the effective installed engine and
-  never below the bundled pin. A fresh index with no newer eligible entry keeps
+  never below the bundled pin. An index with no newer eligible entry keeps
   the current engine; disappearance is **not** a rollback instruction.
 - No maximum or engine-contract version in v1. Compatibility is established by
   candidate qualification against actual Avibe artifacts and persisted-state
@@ -141,18 +149,59 @@ Existing managed-runtime archive hashing remains unchanged.
 Ship the public root and an initial sequence floor with Avibe. Persist the highest
 accepted sequence and payload digest; reject older sequences, changed bytes at
 an equal sequence, unknown keys/schema, wrong repository/channel, duplicates,
-oversized payloads, invalid times or signatures. Accept a repeated identical
-payload only while fresh. Seven-day expiry bounds a first-contact freeze; refresh
-the signed snapshot daily without changing release eligibility. Clock anomalies
-or a failed refresh stop new adoption, not a previously verified working engine.
-Local anti-replay state is not a defense against an attacker controlling the OS
-account. A compromised signing authority remains a release compromise.
+oversized payloads and invalid signatures. Local anti-replay state is not a
+defense against an attacker controlling the OS account. A compromised signing
+authority remains a release compromise.
+
+### One current index: no expiry, no renewal
+
+There is one current signed index. A device follows the highest sequence it
+has accepted for as long as that is the highest it has. A repeated identical
+payload is accepted at any time. No clock takes part in acceptance, in
+selection, or in signing: `issued_at` is an audit record.
+
+**What this means, plainly.** A device has only seen sequence 10, which
+permits engine B. Sequence 11 withdraws B, but the device cannot get 11 while
+B's pinned archive is still reachable. With no index expiry, it may newly
+install B even a month later. The signature proves 10 was authorized. The
+sequence rule prevents going backward from something already seen. Neither
+proves that 11 was received. A device that has accepted 11 refuses 10.
+Explicit offline mode still makes no network requests. So the behaviour is
+"continue following the latest accepted list", not merely "keep the already
+installed engine".
+
+This indefinite freeze is intentional and was chosen by the owner. It must
+not be "fixed" with a new time gate, a far-future expiry, an optional expiry
+field, or any other freshness check. What shortens it is the device reaching
+the index again, or a later Avibe release that ships a higher sequence floor.
+
+What is kept, and the result each piece protects:
+
+| Kept | What it protects |
+| --- | --- |
+| A signature over the exact payload, by a key shipped in Avibe | Only an index the channel key signed is acted on. Whoever controls the mirror cannot change a download and its expected hash together. |
+| The recorded highest sequence and payload digest | A device never goes back from an index it accepted, and two different indexes cannot share a sequence. |
+| The shipped sequence floor | A new Avibe release can retire every index below a number. That ends a freeze on the devices that install the release, and only on those. |
+| Permanent tombstones and remembered release identities | A withdrawal a device has seen cannot be dropped later, and a promoted release cannot return with other bytes. |
+| Explicit offline mode | No network request and nothing adopted, while withdrawals the device already recorded still apply. |
+| Regular metadata checks (section 3; arrives with step 3) | A device learns of a withdrawal the first time it can reach the index. |
+| The signer's ledger, allocation before signing, exact resume | One sequence is signed over one payload. A publication that failed is finished with the identical envelope, however much later. |
+| Per-run approval, the protected environment, the runner-group restriction | Only an approved promotion or withdrawal reaches the key. |
+| Separate signer and writer credentials, conditional write, read-back | A stale or racing writer, or the mirror's credential, cannot replace a newer index or drop a withdrawal. |
+| The release-asset guard | Every listed release stays downloadable. It is unrelated to signing and was never a renewal. |
+
+What was removed with the expiry: the `expires_at` field, the seven-day
+bound, the clock-skew allowance and every wall-clock check on the device; the
+renewal operation, its schedule, the open question of standing approval for
+it, and the signer's check that its clock had not gone back. The signer does
+not have to run between approved changes. Its ledger has to survive them.
 
 A trusted release job owns promotion/revocation and sequence allocation; one
 serialized writer uses conditional object replacement so a stale publication
-cannot overwrite a newer revocation. Daily renewal must use the current desired
-state, not regenerate eligibility from GitHub release presence. The signing
-service/environment is separate from the R2 mirror credential. Root rotation
+cannot overwrite a newer revocation. Only a promotion or a withdrawal
+allocates a sequence, always from the signer's own ledger and never from
+GitHub release presence. The signing service/environment is separate from
+the R2 mirror credential. Root rotation
 ships through an Avibe release with an overlap key; no online root delegation in
 v1. Signing-key provisioning and protected publication credentials require a
 separate authorized operational step before channel enablement.
@@ -160,11 +209,10 @@ separate authorized operational step before channel enablement.
 Keep canonical Avibe-owned asset URLs and the existing mirror-first downloader.
 The GitHub fallback is permitted **only for exactly the same hash-pinned asset**;
 never accept a digest discovered from that fallback. Restrict repository/path,
-redirect policy, archive members, sizes and extraction budgets. A mirror miss,
-expired index, or invalid signature cannot authorize unsigned discovery. Keep
-accepted envelopes with retained engine manifests so offline restart/rollback
-can verify provenance; metadata expiry forbids new remote adoption, not restart
-or recovery of a previously verified local generation.
+redirect policy, archive members, sizes and extraction budgets. A mirror miss
+or an invalid signature cannot authorize unsigned discovery. Keep accepted
+envelopes with retained engine manifests so offline restart/rollback can
+verify provenance.
 
 ## 3. One update owner and recoverable activation
 
@@ -289,9 +337,11 @@ before activation, and move an already active revoked engine to the named safe
 fallback at the next check. For withdrawal, block new admissions while draining;
 after at most five minutes cancel remaining work with an explicit withdrawal
 error (no replay), then switch. If fallback is unavailable/incompatible/revoked,
-stop Model Hub rather than restart the known-bad engine. Retain tombstones across
-renewals and restarts. Polling plus drainage is not instant global recall: offline
-machines cannot learn a new revocation until they reconnect.
+stop Model Hub rather than restart the known-bad engine. Retain tombstones in
+every later index and across restarts. Polling plus drainage is not instant
+global recall. A machine that cannot reach the index does not learn a new
+revocation until it can, and until then it follows the index it has, which
+may still let it install the withdrawn release (section 2).
 
 ## 5. Dependencies, API and CLI
 
@@ -345,7 +395,8 @@ After approval, deliver four bounded PRs, in contract order (no stacked branches
 
 1. avault keyless verifier + shared signed-envelope vectors and custody docs.
 2. Avibe channel contract/resolver, pinned verifier integration, gated producer,
-   renewal/withdrawal workflow and release docs; no client adoption until complete.
+   promotion/withdrawal workflow and release docs; no client adoption until
+   complete. A follow-up before step 3 removes the index's expiry and renewal.
 3. Transactional engine lifecycle, shared auto/manual updater, recovery, effective
    evidence identity and all startup/repair/cleanup consumers.
 4. Dependencies/CLI/policy controls, design frames, English/Chinese public docs,
@@ -387,7 +438,9 @@ can detect every provider-side behavioral regression.
 ## Step 2 as built
 
 What the second PR adds, where it lives, and the details it fixes that the
-sections above left open. Release-side procedure is in `docs/release.md`.
+sections above left open. Release-side procedure is in `docs/release.md`. The
+text below is the contract as it stands after the follow-up that removed the
+index's expiry and renewal.
 
 **Code.**
 
@@ -421,8 +474,8 @@ avault. A missing or damaged roots document counts as no root.
 - Every object has exactly its listed fields; a repeated field is an error.
 - Bounds: envelope 2 MiB, payload 1.5 MiB, manifest 16 KiB, 64 releases, 256
   withdrawals, a 512-character reason, sequence below 2^53.
-- `expires_at` is at most seven days after `issued_at`. A payload dated more
-  than ten minutes ahead of the local clock is not yet valid.
+- The payload has no expiry. `issued_at` is a UTC time checked for format
+  only; it is never compared with a clock or with another index.
 - `min_avibe_version` is a plain `X.Y.Z`. Every `rollback_to` must name a
   release the same payload carries.
 - Sequences increase; they need not be consecutive.
@@ -441,9 +494,11 @@ digest of every release ever listed. A release that stops being listed keeps
 its recorded identity, so it cannot come back with other bytes. Acceptance
 runs under a cross-process lock against the file's current contents. A
 rejected index changes nothing. On read the stored envelope is authenticated
-again. One that has expired, or that is older than the sequence floor the
-running Avibe ships, is returned marked not fresh: its withdrawals still
-apply, and it authorizes no adoption.
+again. Nothing in the record ages: it is this machine's index until a higher
+sequence replaces it, and the same index offered again is accepted at any
+time. One that is below the sequence floor the running Avibe ships is
+returned marked as not meeting it: its withdrawals still apply, and it brings
+in nothing new.
 
 Damaged state is never treated as a fresh start. Every refresh is rejected as
 `state_unreadable`, including a newer index that would otherwise be accepted,
@@ -467,11 +522,18 @@ engine in effect is decided first and by itself.
 | `withdraw` | The engine in effect was withdrawn, and the one fallback its tombstone names is listed, not withdrawn, not quarantined, has an asset for this host, and its minimum Avibe is provably met. This may go below the bundled engine. |
 | `blocked` | The engine in effect was withdrawn and that fallback is not usable. Nothing else is substituted: not the fallback's own fallback, and not a newer release. |
 | `adopt` | Otherwise, a listed release is newer than the engine in effect, not below the bundled one, not withdrawn or quarantined, has an asset for this host, and its minimum is met. The newest such release wins. |
-| `keep` | Otherwise. Nothing newer is eligible, the index is stale, routine updates are off, or the build names no released Avibe. |
+| `keep` | Otherwise. Nothing newer is eligible, a hold applies, routine updates are off, or the build names no released Avibe. |
 
-A withdrawal does not depend on the index being fresh, on routine updates
+A **hold** is a reason the machine's index may bring in nothing new. There
+are two, and neither is the index's age: `offline`, the caller's own choice,
+which is the one named when both apply; and `index_below_floor`, a recorded
+index below the sequence floor a later Avibe ships. Under a hold nothing is
+adopted and no download is authorized. Keeping the two apart is what lets the
+lifecycle and the user be told why updates are held.
+
+A withdrawal does not depend on a hold, on routine updates
 being on, on the bundled engine's identity, or on this being a released Avibe
-build. A stale index or offline mode still applies it but authorizes no
+build. Under a hold it still applies but authorizes no
 download, so the fallback must already be on the machine. A build that names
 no published release (a source checkout, a dev or local version) cannot prove
 any fallback compatible, so a withdrawn engine there is `blocked`, never
@@ -499,6 +561,13 @@ is only ever signed over one payload, and a failed run is finished by
 publishing the identical envelope again. The published object, the bucket
 and workflow artifacts are never read as state.
 
+Only `promote` and `revoke` allocate a sequence. `resume` publishes the
+current allocation again, byte for byte, however long ago it was made, with
+no new signature and no new sequence; if that allocation was never signed, it
+signs exactly that payload. No operation re-signs an unchanged list. The
+signer host only has to be up for an approved run, and its ledger has to
+outlast every run.
+
 The ledger is the trust anchor on the publishing side and must not go
 backward. If it is rolled back together with the published index, this scheme
 cannot detect it. The comparisons with the published index that the signer
@@ -524,8 +593,7 @@ candidate are not contained. That is unfinished work, listed below.
 
 **Not in this step.** Adoption, activation, scheduling, recovery, the
 effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
-and public documentation (step 4); and all commissioning, including whether
-renewals run unattended.
+and public documentation (step 4); and all commissioning.
 
 **Obligations this step hands to steps 3 and 4.** The client contract returns
 decisions; these are what a lifecycle that acts on them must hold.
