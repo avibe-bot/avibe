@@ -732,6 +732,10 @@ private final class InMemoryAccountStores {
             },
             removeIdentifier: { _ in
                 nil
+            },
+            // Nothing here is a named store on disk.
+            listIdentifiers: {
+                []
             }
         )
     }

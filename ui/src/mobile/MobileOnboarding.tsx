@@ -747,7 +747,7 @@ function OtpCells({
       <Input
         ref={input}
         id="mobile-login-code"
-        className="absolute inset-0 z-10 h-full w-full cursor-text opacity-0"
+        className="absolute inset-0 z-10 h-full w-full cursor-text opacity-0 disabled:opacity-0"
         type="text"
         inputMode="numeric"
         autoComplete="one-time-code"

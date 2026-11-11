@@ -923,6 +923,17 @@ handed to the system, erase plaintext already held by an in-flight extension,
 or remove an already displayed alert; lifecycle behavior below does not claim
 otherwise.
 
+While the app is in the foreground, only the test notification is shown: the
+instance's `/api/web-push/test` send carries the tag `web-push-test`, which
+step 6 puts in `threadIdentifier`, and the app's notification-center delegate
+shows that one as a banner, in Notification Center, and with its sound. Every
+other notification stays silent in the foreground, as iOS does by default; the
+Inbox and the badge in the app already show it. A fallback alert has no thread
+(the APNs envelope above carries none), so it stays silent too. The delegate
+never applies a push's badge in the foreground: the Web UI sets the live Inbox
+total through `badge.set` there, and a push's `badge_count`, computed when it
+was sent, can only be as recent or older.
+
 ## 8. Tap routing
 
 On tap, native compares the notification's account and instance origin with

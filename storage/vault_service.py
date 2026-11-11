@@ -2312,12 +2312,20 @@ def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
     if row.get("protection") != "protected":
         return True
     signing_public_key = _public_meta(row.get("public_meta")).get("signing_public_key")
-    return (
-        isinstance(signing_public_key, dict)
-        and signing_public_key.get("curve") == "secp256k1"
-        and isinstance(signing_public_key.get("public_key"), str)
-        and bool(signing_public_key.get("public_key"))
-    )
+    if not isinstance(signing_public_key, dict):
+        return False
+    if signing_public_key.get("curve") == "secp256k1":
+        return (
+            isinstance(signing_public_key.get("public_key"), str)
+            and bool(signing_public_key.get("public_key"))
+        )
+    if signing_public_key.get("curve") == vault_solana.CURVE:
+        try:
+            vault_solana.require_public_key(signing_public_key)
+        except vault_solana.SolanaSigningError:
+            return False
+        return True
+    return False
 
 
 def sign_headless_allowed(row: dict[str, Any]) -> bool:
@@ -2415,8 +2423,8 @@ def validate_signing_pairing(
         vault_solana.require_public_key(signing_key)
     except vault_solana.SolanaSigningError as exc:
         raise InvalidSigningKeyError(str(exc)) from exc
-    if protected:
-        raise ProtectedSolanaUnsupportedError("protected Solana signing is not supported yet")
+    if protected and signing_context is None:
+        raise InvalidSigningContextError("protected Solana signing requires a verifiable signing_context")
     if signing_context is not None:
         try:
             vault_solana.validate_context(signing_context, message_hex=message_hex or "")
@@ -2475,6 +2483,16 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
     validate_signing_pairing(
         context, scheme=scheme, message_hex=delivery.get("message_hex"), signing_key=signing_key, protected=protected,
     )
+    if scheme == vault_solana.SCHEME and (protected or "signing_key" in delivery):
+        pinned = delivery.get("signing_key")
+        if (
+            not protected
+            or row.get("kind") != "keypair"
+            or row.get("signer_kind") not in (None, "local")
+            or not isinstance(pinned, dict)
+            or pinned != {"secret_id": row["id"], "public_key": vault_solana.require_public_key(signing_key)}
+        ):
+            raise InvalidRequestError("protected signing record does not match the sign request")
     if scheme != vault_bitcoin.BITCOIN_SCHEME and not (
         isinstance(context, dict) and context.get("kind") == vault_bitcoin.BITCOIN_CONTEXT_KIND
     ):
@@ -2486,6 +2504,7 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
 
 def _require_matching_sign_request(
     delivery: dict[str, Any], *, scheme: str, digest: str | None, message_hex: str | None,
+    signing_context: dict[str, Any] | None = None,
 ) -> None:
     digest, message_hex = normalize_sign_input(scheme, digest=digest, message_hex=message_hex)
     if (
@@ -2493,6 +2512,8 @@ def _require_matching_sign_request(
         or delivery.get("digest") != digest
         or delivery.get("message_hex") != message_hex
     ):
+        raise InvalidRequestError("signature payload does not match the sign request")
+    if (signing_context is not None or "signing_key" in delivery) and delivery.get("signing_context") != signing_context:
         raise InvalidRequestError("signature payload does not match the sign request")
 
 
@@ -3178,6 +3199,17 @@ def create_secret(
     public_meta = dict(public_meta or {})
     if description:
         public_meta["description"] = description
+    signing_metadata = public_meta.get("signing_public_key")
+    if (
+        protection == "protected"
+        and (vault_solana.is_ed25519_key(signing_metadata) or vault_solana.declares_protected_solana_record(sealed))
+    ):
+        if kind != "keypair":
+            raise InvalidSigningKeyError("protected Solana records require kind 'keypair'")
+        try:
+            vault_solana.validate_protected_record_envelope(name, sealed, signing_metadata)
+        except vault_solana.SolanaSigningError as exc:
+            raise InvalidSigningKeyError(str(exc)) from exc
     if kind == "keypair" and (fields or default_field is not None or "default_field" in public_meta):
         raise FieldsNotSupportedError("keypair secrets do not support fields or default_field")
     normalized_default_field = _default_field_name(value=default_field or public_meta.get("default_field"))
@@ -4598,7 +4630,7 @@ def create_sign_request(
         protected=row.get("protection") == "protected",
     )
     _reject_unsignable_keypair(row, name)
-    if row.get("protection") == "protected" or scheme == vault_bitcoin.BITCOIN_SCHEME:
+    if (row.get("protection") == "protected" and scheme != vault_solana.SCHEME) or scheme == vault_bitcoin.BITCOIN_SCHEME:
         require_compressed_signing_public_key(signing_key)
     if signing_context is not None and not isinstance(signing_context, dict):
         raise InvalidSigningContextError("signing_context must be an object")
@@ -4633,7 +4665,14 @@ def create_sign_request(
     # A caller's delivery never supplies the signing input: only the validated one is stored.
     delivery_payload.pop("digest", None)
     delivery_payload.pop("message_hex", None)
+    delivery_payload.pop("signing_key", None)
+    delivery_payload.pop("operation_context", None)
+    delivery_payload.pop("signature", None)
     delivery_payload.update({"scheme": scheme, "card": card})
+    if row.get("protection") == "protected" and scheme == vault_solana.SCHEME:
+        delivery_payload["signing_key"] = {
+            "secret_id": row["id"], "public_key": vault_solana.require_public_key(signing_key),
+        }
     if message_hex is None:
         delivery_payload["digest"] = digest
     else:
@@ -4849,6 +4888,7 @@ def complete_sign_request(
     scheme: str,
     signature: dict[str, Any],
     message_hex: str | None = None,
+    signing_context: dict[str, Any] | None = None,
     requester: Any = None,
     browser_signed: bool = False,
 ) -> dict[str, Any]:
@@ -4865,9 +4905,24 @@ def complete_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
-    _require_matching_sign_request(delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex)
+    _require_matching_sign_request(
+        delivery_payload,
+        scheme=scheme,
+        digest=digest,
+        message_hex=message_hex,
+        signing_context=signing_context,
+    )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     _validate_signature_payload(scheme, signature)
+    if _require_row(conn, name).get("protection") == "protected" and scheme == vault_solana.SCHEME:
+        try:
+            vault_solana.verify_signature(
+                delivery_payload["signing_key"]["public_key"],
+                delivery_payload["message_hex"],
+                signature.get("signature"),
+            )
+        except vault_solana.SolanaSigningError as exc:
+            raise InvalidRequestError(str(exc)) from exc
     completed_delivery = dict(delivery_payload)
     completed_delivery["signature"] = signature
     claim = conn.execute(
@@ -5099,6 +5154,7 @@ def validate_sign_request(
     digest: str | None = None,
     scheme: str,
     message_hex: str | None = None,
+    signing_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,
@@ -5113,7 +5169,9 @@ def validate_sign_request(
         raise InvalidRequestError("signature secret does not match the sign request")
     _, delivery = _request_json_payloads(row_dict)
     delivery_payload = delivery if isinstance(delivery, dict) else {}
-    _require_matching_sign_request(delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex)
+    _require_matching_sign_request(
+        delivery_payload, scheme=scheme, digest=digest, message_hex=message_hex, signing_context=signing_context,
+    )
     _validate_persisted_signing_context(conn, name, delivery_payload)
     return _request_row_payload(row_dict, conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 

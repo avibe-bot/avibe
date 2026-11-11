@@ -9,13 +9,18 @@ Fetch `origin/master` and record the candidate's exact SHA for all release-only
 validation and tag creation; do not switch it silently while checks run. New PRs
 may continue to merge: there is no routine release-time merge freeze.
 
-Require a successful **full master backstop at the exact candidate SHA** for
-every release, stable included. `lint.yml` runs that full pass after master
-pushes, including iOS, desktop, browser, installer, web-fetch and Windows
-checks. A running pass finishes; only the newest pending master pass waits.
-`release_ai.yml`, `publish.yml`, and `desktop-release.yml` enforce the full
-master backstop before their respective build, signing, or publication paths.
-See [CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
+`release_ai.yml`, `publish.yml`, and `desktop-release.yml` each start with the
+release gate, `scripts/ci_release_backstop.py`, before any build, signing, or
+publication path. It resolves the tag to its exact source SHA and requires
+proof about that SHA. The proof depends on the tag.
+
+### Stable and every other tag: the full master backstop
+
+Require a successful **full master backstop at the exact candidate SHA**.
+`lint.yml` runs that full pass after master pushes, including iOS, desktop,
+browser, installer, web-fetch and Windows checks. A running pass finishes; only
+the newest pending master pass waits. See
+[CI scope and routing](plans/ci-affected-routing.md). The PR-only iOS
 NavigationPolicyTests quarantine (#3418) does not relax this release gate:
 iOS must pass in the exact full master run, even while its PR check is advisory.
 
@@ -25,9 +30,52 @@ its existing master backstop. Manual full validation is available on master.
 Historical runs with no explicit full-backstop certificate are not assumed
 equivalent.
 
-Before pushing a tag, fetch master again. If the release is required to include
-newly landed work, select the new tip and repeat candidate-specific gates; otherwise
-retain the recorded, validated candidate. Require the owner's release authorization
+This is the gate for a stable `v*` tag in Stage 1, `Publish to PyPI` and
+Stage 2, and for every tag that is not a canonical `gh-vX.Y.ZrcN`. `Publish to
+PyPI` applies it to any tag it is given.
+
+### GitHub-only RC tags: the merged pull request
+
+A `gh-vX.Y.ZrcN` tag does not wait for the full backstop. Stage 1 and Stage 2
+require instead that:
+
+1. the tag's SHA is on `master` and is the merge commit of a pull request
+   merged into `master`; and
+2. on that pull request's head, every check `master`'s ruleset requires
+   concluded `success` or `skipped`. Where a check ran more than once on the
+   head, its newest run counts, as it did for the merge.
+
+The gate fails closed. It refuses an RC whose SHA resolves to no such pull
+request, such as a direct push or a commit that is not the merge commit; one
+with a required check that failed, was cancelled, is still running or is
+absent; and one it cannot prove because GitHub could not be read or `master`
+has no required checks. Nothing after the gate changes for an RC: the exact
+tag/source binding, the predecessor contract, immutability, signing,
+notarization and the mirror apply as before.
+
+The full backstop still runs on `master`, and a red one still gets its
+fix-forward owner. For an RC the gate only reports the state at the RC's SHA:
+`success`, `pending`, `failed`, or `missing` when no full pass finished there
+because it was coalesced away, cancelled or never started. A `failed` state is
+a warning on the release run, not a refusal.
+
+**The release Session owns the follow-up.** After publishing an RC it follows
+the full pass at the RC's SHA to its conclusion, or the next full pass on
+`master` when that one was coalesced away. If it ends red, the Session reports
+the RC tag, the SHA and the failed jobs to the product Bot (`product`). The RC
+stays published, and no stable is cut from a SHA without its own green
+backstop. To read the state again:
+
+```bash
+GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
+  --repository avibe-bot/avibe --tag <rc-tag> --rc-pull-request-gate
+```
+
+### Before pushing the tag
+
+Fetch master again. If the release is required to include newly landed work,
+select the new tip and repeat candidate-specific gates; otherwise retain the
+recorded, validated candidate. Require the owner's release authorization
 in either case. The stable-release E2E below and asset-complete publication gates
 remain mandatory.
 
@@ -68,6 +116,38 @@ missing or mismatched identity falls back to a native rebuild and publishes a
 new canonical set. This applies only to the unsigned Show Runtime archives and
 router; release-versioned wheels, desktop-private wheels, and signed assets are
 never reused.
+
+For GitHub-only RCs, canonical discovery inspects the newest successful runs
+first and stops at the newest complete set. Only same-repository `push` and
+`workflow_dispatch` producers are trusted; a PR/fork run cannot supply release
+bytes even if it uploads matching names and identity records. One Linux job downloads and verifies
+all six platforms against the pinned native Node/npm versions; it does not run
+foreign binaries. Any missing or invalid member sends all platforms through the
+native build matrix. Stable `publish.yml` retains its native matrix path.
+
+Core packaging may reuse `ui-dist-linux` only when the gate already supplied a
+successful full master backstop proof for this exact source. The consumer binds
+the artifact to that run/attempt's successful build job and verifies the ZIP's
+GitHub SHA256 digest before extraction. No proof means no artifact-discovery
+request; missing, expired or mismatched bytes use the normal local UI build.
+A partial CI rerun that inherits an earlier attempt's successful UI build or
+certificate also falls back: the producer job must have actually started in the
+proven attempt, not merely carry its relabelled attempt number.
+This optional optimization never makes the full backstop an RC gate again.
+
+The final wheel/sdist are still built with the release version and activated
+predecessor compatibility. All distribution assertions remain: the three fresh
+full-dependency installation checks run concurrently in separate processes,
+temporary homes and virtual environments, not shared installed environments.
+
+The RC publisher prepares notes after the gate while packaging runs, then
+waits for `build-assets` in the **same workflow run and attempt** to succeed.
+It verifies and downloads that attempt's immutable artifact and rechecks the
+remote tag before publication. Failure, cancellation, stale artifacts, or a
+30-minute wait timeout cannot publish. To retry this path, rerun all jobs;
+reusing a previous attempt's successful build is intentionally rejected. Only
+the publisher has write permissions. Preparing it early consumes runner time
+while it waits; desktop signing and Stage 2 are unchanged.
 
 GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They
@@ -133,6 +213,10 @@ releases may be adopted and which were withdrawn. It is a signed envelope
 around an exact payload; each release entry carries the minimum Avibe version
 and the exact bytes of that release's manifest. Clients trust it only through
 a key shipped inside Avibe, never because of where it was downloaded.
+
+There is one current index. It has no expiry and is never renewed: a client
+follows the highest sequence it has accepted for as long as that is the
+highest it has, and only a promotion or a withdrawal produces a new one.
 
 What the index should say is recorded in a **ledger on the signer host**: the
 next sequence, the exact payload last allocated, and every release identity
@@ -248,24 +332,34 @@ dispatch on `master` and this run's approval.
 | Operation | What it does |
 | --- | --- |
 | `release` | Publishes a qualified candidate's assets. Does not touch the index. |
-| `promote` | Lists a qualified, published, mirrored release in the index. |
-| `renew` | Re-signs what the ledger holds with the next sequence and new dates. Takes no input and changes nothing else. |
-| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. |
-| `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence. |
+| `promote` | Lists a qualified, published, mirrored release in the index. Allocates the next sequence. |
+| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Allocates the next sequence. |
+| `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence and no new signature, however long ago it was allocated. |
 
-The index is valid for seven days, so it has to be renewed within that time.
-No schedule does this: an unattended renewal and per-run approval cannot both
-hold, and which one applies is an open commissioning decision. An index that
-expires stops new adoption on clients. It does not stop a working engine, and
-withdrawals a client already recorded stay in force.
+Nothing else allocates a sequence, and nothing runs on a schedule. An index
+does not expire, so there is no renewal to perform or to miss, and no
+operation re-signs an unchanged list. The signer host only has to be up for a
+run that was approved; between runs it can be off, as long as its ledger
+survives.
+
+**What a client without the newest index does.** It keeps following the index
+it has. If that index lists a release that a later index withdrew, the client
+may still install it, a month later as well as a minute later, for as long as
+it cannot fetch the later index and the release's pinned archive can still be
+downloaded. A signature shows an index was authorized, and the sequence rule
+stops a client going back from one it has seen; neither shows that a newer
+one was received. A client that has the later index refuses the earlier one.
+This is the chosen behaviour, not a gap to close with a time limit
+(`docs/plans/model-hub-engine-channel.md`, section 2). A withdrawal reaches a
+machine when that machine next reaches the index.
 
 A withdrawal is permanent. Later indexes carry it unchanged, clients refuse
 an index that drops it, and the writer refuses to publish one. The release's
 assets and its index entry stay. The fallback must be a listed release that
 was not withdrawn and that does not need a newer Avibe than the withdrawn
 one. An engine that only a packaged Avibe bundles can be withdrawn too.
-Clients learn of a withdrawal at their next check; a machine that is offline
-learns of it when it reconnects.
+Clients learn of a withdrawal at their next check; a machine that cannot
+reach the index learns of it when it can.
 
 **When a run fails part way.** The signer commits the exact payload to the
 ledger before it asks avault to sign, and commits the envelope before it
@@ -342,7 +436,8 @@ Nothing below exists yet, and this repository creates none of it:
   workflow at `refs/heads/master`. Whether this organization's plan can
   enforce that restriction is **not verified**. Without it, any workflow run
   in the repository could reach the signer host, and the signer must not be
-  commissioned.
+  commissioned. The host is needed only while an approved run signs. It does
+  not have to stay up between runs; the ledger directory has to outlast them.
 - **The ledger.** Created once, by hand on the signer host, with
   `scripts/model_hub_engine_channel.py initialize-ledger`, for a channel whose
   key has never signed an index. An empty directory is not proof of that; the
@@ -354,9 +449,6 @@ Nothing below exists yet, and this repository creates none of it:
   policy of exactly `master`, and the repository variables and Environment
   secrets the workflow names. The writer's bucket credential is separate from
   the release mirror's.
-- **How renewals are approved.** Manual renewal with per-run approval, or a
-  standing authorization limited to `renew`. Until that is decided there is no
-  schedule.
 
 ## Managed-runtime manifests
 

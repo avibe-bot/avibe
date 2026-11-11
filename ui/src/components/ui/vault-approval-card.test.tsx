@@ -484,7 +484,7 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(onResolved).not.toHaveBeenCalled();
   });
 
-  it('shows the whole Solana message and its address, then approves with that message', async () => {
+  it('summarizes a Solana message by size, keeps every byte and the whole address in Details, then approves with that message', async () => {
     api.listVaultSecrets.mockResolvedValue({
       ok: true,
       secrets: [{ name: 'SOLANA_KEY', signing_addresses: { solana: solanaAddress } }],
@@ -497,15 +497,24 @@ describe('VaultApprovalCard protected access approval', () => {
       </I18nextProvider>,
     );
 
-    // The approver sees every byte that will be signed, labelled as a message and not as a hash.
-    expect(screen.getByText(solanaMessage)).toBeTruthy();
+    // The summary names a message and its size, never a hash, and never the bytes themselves.
     expect(screen.getByText(en.vaults.approval.message)).toBeTruthy();
+    expect(screen.getByText('150 bytes')).toBeTruthy();
     expect(screen.queryByText(en.vaults.approval.digest)).toBeNull();
     expect(screen.getByText('ed25519')).toBeTruthy();
+    expect(screen.queryByText(solanaMessage)).toBeNull();
     // The signing identity is the Solana address only, never an EVM or Bitcoin one.
     await vi.waitFor(() => expect(screen.getByText(solanaAddress)).toBeTruthy());
     expect(screen.getByText(en.vaults.addresses.solana)).toBeTruthy();
     expect(screen.queryByText(en.vaults.addresses.eth)).toBeNull();
+
+    // Details holds every byte that will be signed and the address in full, beside its row.
+    const details = screen.getByRole('button', { name: en.vaults.approval.details });
+    expect(details.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(details);
+    expect(details.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText(solanaMessage)).toBeTruthy();
+    expect(screen.getAllByText(solanaAddress)).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
 
@@ -534,6 +543,8 @@ describe('VaultApprovalCard protected access approval', () => {
     );
 
     expect(screen.getByText(en.vaults.approval.emptyMessage)).toBeTruthy();
+    // Nothing to keep in full: no bytes, and no address was listed for this key.
+    expect(screen.queryByRole('button', { name: en.vaults.approval.details })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
 
     await vi.waitFor(() => expect(onResolved).toHaveBeenCalled());

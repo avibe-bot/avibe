@@ -35,6 +35,7 @@ from fastapi.exception_handlers import http_exception_handler
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 from starlette.routing import Match
 
 from vibe.ui_compat import (
@@ -3508,14 +3509,27 @@ def handle_exception(e):
 
     if isinstance(e, InstanceAuthorizationError):
         return jsonify({"ok": False, "error": e.code, "required_role": e.minimum_role}), 403
+    if isinstance(e, ClientDisconnect):
+        # Navigation/abort can close a request before the dispatcher reads its
+        # body, even for GETs. No endpoint work remains to do and no client is
+        # listening; classify this as client cancellation, not a server fault.
+        logger.debug("UI client disconnected method=%s path=%s", request.method, request.path)
+        return Response(status=499)
     # Preserve HTTP status codes for client errors (4xx)
     status_code = getattr(e, "status_code", None)
     detail = getattr(e, "detail", None)
     if isinstance(status_code, int) and 400 <= status_code < 500:
         return jsonify({"error": detail or str(e)}), status_code
 
-    # Log and return 500 for unexpected server errors
-    logger.exception("Unhandled exception in UI server")
+    # The compatibility dispatcher runs this handler in a worker without the
+    # endpoint's active exception context. Preserve the supplied traceback and
+    # log only method/path, not query strings, headers, cookies, or bodies.
+    logger.exception(
+        "Unhandled exception in UI server method=%s path=%s",
+        request.method,
+        request.path,
+        exc_info=(type(e), e, e.__traceback__),
+    )
     return jsonify({"error": str(e)}), 500
 
 
@@ -7382,6 +7396,8 @@ def web_push_test():
         "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
         "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
         "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
+        # The iOS App shows a notification while it is in front only for this
+        # tag (AvibeAppDelegate.testNotificationThread).
         "tag": "web-push-test",
         "badge_count": badge_count,
     }

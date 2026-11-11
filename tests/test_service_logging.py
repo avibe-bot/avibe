@@ -546,7 +546,11 @@ def test_startup_failure_drains_error_and_cleanup_even_when_cleanup_raises(monke
         if release_fails:
             raise RuntimeError("cleanup failure")
 
-    monkeypatch.setattr(main, "_stop_macos_session_diagnostics", lambda _: logging.warning("final service diagnostics cleanup"))
+    monkeypatch.setattr(
+        main,
+        "_stop_macos_session_diagnostics",
+        lambda _monitor, _diagnostics: logging.warning("final service diagnostics cleanup"),
+    )
     monkeypatch.setattr(main, "apply_claude_sdk_patches", fail_startup)
     monkeypatch.setattr(main, "release_service_instance_lock", release)
     import core.managed_skills

@@ -110,6 +110,25 @@ describe('ApiProvider expected error codes', () => {
     expect(consoleError).toHaveBeenCalledTimes(1);
   });
 
+  it('leaves a test send to an unregistered device to the notification control', async () => {
+    const api = await mountApi();
+
+    // `/api/web-push/test` answers a device the instance has no row for with a
+    // bare string error; the control turns it into "still registering".
+    apiFetch.mockResolvedValue(Response.json({ ok: false, error: 'no_subscription' }, { status: 404 }));
+    await expect(api.sendWebPushTest({ endpoint: 'https://avibe.bot/api/push/apns/kid' })).rejects.toMatchObject({
+      status: 404,
+      code: 'no_subscription',
+    });
+    expect(showToast).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+
+    apiFetch.mockResolvedValue(Response.json({ ok: false, error: 'endpoint_required' }, { status: 400 }));
+    await expect(api.sendWebPushTest({})).rejects.toMatchObject({ code: 'endpoint_required' });
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
   it('answers an absent Show Page silently on every read that shares the owner', async () => {
     // The members are DERIVED from the product source rather than restated here, so a read
     // added to `readShowPageJson` later is covered without editing this test — the panel

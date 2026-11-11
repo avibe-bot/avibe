@@ -3,13 +3,16 @@ name: Publish Model Hub engine channel
 # The only writer of https://dl.avibe.bot/index/model-hub-engine.json, the
 # signed index of engine releases installed Avibe may adopt (docs/release.md,
 # docs/plans/model-hub-engine-channel.md). One run makes one change: publish a
-# qualified engine release, promote it, renew the signature, withdraw a
-# release, or publish again the index the signer last allocated.
+# qualified engine release, promote it, withdraw a release, or publish again
+# the index the signer last allocated. Only a promotion or a withdrawal
+# allocates a new index. An index does not expire, so nothing here renews one
+# and nothing runs on a schedule: the signer host only has to be up for a run
+# that was approved, and its ledger has to outlast every run.
 #
 # NOT COMMISSIONED. Avibe ships no channel key, so `authorize` stops every run
 # in its first step. The signer's ledger, the two environments and the signer
-# runner group do not exist, and no schedule is enabled. Commissioning is a
-# separate, owner-held step; nothing here performs or replaces it.
+# runner group do not exist. Commissioning is a separate, owner-held step;
+# nothing here performs or replaces it.
 #
 # Desired state lives in a ledger on the signer host, never in the published
 # object, the bucket or a workflow artifact. The ledger is created once, by
@@ -40,10 +43,10 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "release: publish qualified assets. promote | renew | revoke: change the index. resume: publish the last allocated index again."
+        description: "release: publish qualified assets. promote | revoke: change the index. resume: publish the last allocated index again."
         required: true
         type: choice
-        options: [release, promote, renew, revoke, resume]
+        options: [release, promote, revoke, resume]
       asset_release_tag:
         description: "Engine release to publish, promote or withdraw"
         type: string

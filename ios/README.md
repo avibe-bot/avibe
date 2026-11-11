@@ -358,6 +358,10 @@ another operation runs, during a provider cooldown, or inside avibe.bot's
 second-factor throttle window waits for the button. A recovery code is free
 text and always waits for the button.
 
+The email code's real input remains invisible while disabled for verification;
+only the six decorative digits are displayed. An unsuccessful verification
+unlocks the same input for correction or a pasted replacement.
+
 The bundled surface fills the container safe area so its gradient reaches the
 status bar and Home indicator. Its shared `h-dvh` viewport owns vertical
 scrolling inside the mobile document lock, while the content column applies
@@ -713,7 +717,7 @@ pinned to Xcode 26.6.
 | Web content process termination | The primary WebView reloads the configured instance; a terminated child closes. |
 | `navigator.share` | Available in the Xcode 26.6 simulator secure-context probe: `{"secureContext":true,"navigatorShare":"function"}`. Presentation remains system-owned. |
 | Clipboard | Uses WebKit edit/clipboard behavior. The Web UI feature-detects writes, falls back to `execCommand`, and reports blocked reads. No native clipboard bridge is added. |
-| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. |
+| Notification and Service Worker | Browser Service Worker and `PushManager` delivery remain unsupported in this shell. Native notification controls use the `push` bridge and the instance's existing authorization, preference, and reconciliation paths. While the App is foregrounded, its notification-center delegate shows only the test notification sent from Settings (the instance's tag `web-push-test`, which the NSE carries into `threadIdentifier`) as a banner, in Notification Center, and with its sound. Every other notification, including an undecrypted fallback, stays silent in front, as iOS does by default: the Inbox and the badge in the App already show it. The delegate never applies a push's badge; the Web UI keeps the live Inbox total through `badge.set`. |
 | Fullscreen | Deferred. Phase 0a leaves `isElementFullscreenEnabled` at WebKit's default. |
 | Installation guidance | `InstallHint` and Show Page "Add to Home Screen" guidance are hidden in the native shell. |
 | PWA app launch suppression | Not reused. New-context launches use the shell's recursive child WebViews. |

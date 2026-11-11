@@ -3272,7 +3272,8 @@
     "provider_rerank_response_invalid": "重排序提供商返回了无效响应。",
     "provider_unavailable": "提供商不可用。",
     "provider_error": "提供商拒绝了请求。",
-    "endpoint_not_configured": "尚未配置提供商端点。"
+    "endpoint_not_configured": "尚未配置提供商端点。",
+    "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。"
   },
   "modelHub": {
     "errors": {
@@ -3831,6 +3832,7 @@
         "enable": "开启通知",
         "enabled": "通知已开启",
         "enabledPwa": "PWA 通知已开启",
+        "registering": "正在登记这台设备…",
         "disable": "关闭",
         "disablePending": "通知已关闭，设备清理仍在等待完成。",
         "disableFailed": "通知已关闭，但无法确认清理结果，请稍后重试。",
@@ -3840,6 +3842,7 @@
         "testBody": "通知已经准备好了。",
         "testSent": "测试通知已发送",
         "testFailed": "测试通知发送失败",
+        "testRegistering": "还在登记这台设备，稍等一下再试",
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
       "navUnread": "收件箱，{{count}} 条未读",
@@ -6307,6 +6310,14 @@
       "signingAddressesUnavailable": "无法为该密钥推导地址。",
       "signingAddressesHint": "由密钥推导得到。标准档 Bitcoin Taproot 使用 schnorr-secp256k1-bip341-keypath，需要另行安装支持该方案的 avault；较旧的 avault 会安全失败，绝不会回退到原始 BIP340。保护档 Bitcoin 仅支持兼容沙箱中的类型化、受限 Taproot 密钥路径审批；网络标签只是请求方选择，不是链上证明。",
       "signingNeedsAvault": "签名密钥需要安装 avault {{version}} 或更新版本。",
+      "chainLabel": "链",
+      "chainEvmBitcoin": "EVM / Bitcoin",
+      "chainSolana": "Solana",
+      "solanaGenerateHelp": "Solana 密钥由本机 avault 生成并就地封存，Avibe 和浏览器只会看到它的地址。",
+      "solanaGenerateHint": "保存时生成新密钥，保存后会显示地址。",
+      "solanaImportPlaceholder": "粘贴 Solana CLI 密钥对（64 个数字的 JSON 数组）或 base58 私钥",
+      "solanaImportHelp": "私钥在浏览器中加密后交给 avault 校验，保存后会显示地址。不支持助记词。",
+      "solanaProtectedUnavailable": "Solana 密钥暂不支持保护档。改选标准档即可创建这把密钥。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
       "browserSealingPending": "浏览器侧封箱需要兼容的 avault 发布版。这个 UI 永远不会把明文值发送给 Python。",
@@ -6352,7 +6363,8 @@
         "fileReadFailed": "读取文件失败。",
         "secretExists": "同名密钥已存在。",
         "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。",
-        "updateFailed": "保存失败,请重试。"
+        "updateFailed": "保存失败,请重试。",
+        "solanaImportFailed": "导入失败。请确认粘贴的是 Solana CLI 密钥对或 base58 私钥，然后重试。"
       }
     },
     "requests": {
@@ -6394,6 +6406,11 @@
       "message": "待签名消息",
       "copyMessage": "复制待签名消息",
       "emptyMessage": "空消息（0 字节）",
+      "messageBytes_one": "{{count}} 字节",
+      "messageBytes_other": "{{count}} 字节",
+      "details": "详情",
+      "detailsAddress": "签名地址（Solana）",
+      "detailsMessage": "完整的待签名字节（十六进制）",
       "source": "来源",
       "sourceTag": "标签 · {{name}}",
       "sourceSkill": "技能 · {{name}}",
@@ -7083,6 +7100,7 @@
     "transportHttp": "http",
     "toolMeta": "{{count}} 个工具 · {{transport}}",
     "tools": "工具",
+    "toolsToggle": "工具 · {{count}}",
     "generatedAt": "最近刷新 {{time}}",
     "generatedAtWithVersion": "最近刷新 {{time}} · 服务端 v{{version}}",
     "serverVersion": "服务端 v{{version}}",

@@ -780,6 +780,8 @@ export const VaultsPage: React.FC = () => {
         t(secret.protection === 'protected' ? 'vaults.protected' : 'vaults.standard'),
         t(secret.kind === 'keypair' ? 'vaults.dialog.kindKeypair' : 'vaults.dialog.kindStatic'),
         ...(secret.kind === 'keypair' ? [t('vaults.signing')] : []),
+        // A Solana key is found by its chain as well as by its address.
+        ...(secret.signing_curve === 'ed25519' ? [t('vaults.dialog.chainSolana')] : []),
       ]);
     });
     return matches.sort((a, b) => {

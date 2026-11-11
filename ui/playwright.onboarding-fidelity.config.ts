@@ -18,7 +18,7 @@ export default defineConfig({
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     {
       name: 'webkit-narrow',
-      grep: /narrow identity alignment/,
+      grep: /narrow identity alignment|mobile OTP/,
       use: { ...devices['Desktop Safari'] },
     },
   ],

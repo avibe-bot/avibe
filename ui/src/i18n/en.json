@@ -3272,7 +3272,8 @@
     "provider_rerank_response_invalid": "The reranking provider returned an invalid response.",
     "provider_unavailable": "The provider is unavailable.",
     "provider_error": "The provider rejected the request.",
-    "endpoint_not_configured": "The provider endpoint is not configured."
+    "endpoint_not_configured": "The provider endpoint is not configured.",
+    "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first."
   },
   "modelHub": {
     "errors": {
@@ -3831,6 +3832,7 @@
         "enable": "Enable notifications",
         "enabled": "Notifications on",
         "enabledPwa": "PWA notifications on",
+        "registering": "Registering this device…",
         "disable": "Disable",
         "disablePending": "Notifications are off; device cleanup is still pending.",
         "disableFailed": "Notifications are off, but cleanup could not be confirmed. Try again later.",
@@ -3840,6 +3842,7 @@
         "testBody": "Notifications are ready.",
         "testSent": "Test notification sent",
         "testFailed": "Test notification failed",
+        "testRegistering": "Still registering this device; try again in a moment",
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       },
       "navUnread": "Inbox, {{count}} unread",
@@ -6307,6 +6310,14 @@
       "signingAddressesUnavailable": "Couldn't derive addresses for this key.",
       "signingAddressesHint": "Derived from the key. Standard Bitcoin Taproot key-path signing uses schnorr-secp256k1-bip341-keypath and requires a separately installed supporting avault build; older avault builds fail closed and never fall back to raw BIP340. Protected Bitcoin spending is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; network labels are requester-selected metadata, not chain proof.",
       "signingNeedsAvault": "Signing keys need avault {{version}} or newer installed.",
+      "chainLabel": "Chain",
+      "chainEvmBitcoin": "EVM / Bitcoin",
+      "chainSolana": "Solana",
+      "solanaGenerateHelp": "avault creates the Solana key on this computer and seals it there. Avibe and this browser only see its address.",
+      "solanaGenerateHint": "A new key is created when you save. Its address appears once the key is saved.",
+      "solanaImportPlaceholder": "Paste a Solana CLI keypair (a JSON array of 64 numbers) or a base58 secret key",
+      "solanaImportHelp": "The key is encrypted in this browser for avault, which checks it. Its address appears once the key is saved. Recovery phrases are not supported.",
+      "solanaProtectedUnavailable": "Protected isn't available for Solana keys yet. Choose Standard to create this key.",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
       "browserSealingPending": "Browser-side sealing requires a compatible avault release. This UI never sends plaintext values to Python.",
@@ -6352,7 +6363,8 @@
         "fileReadFailed": "Couldn't read that file.",
         "secretExists": "A secret with this name already exists.",
         "secretNameCaseConflict": "A secret already uses this name with different letter casing.",
-        "updateFailed": "Save failed, please try again."
+        "updateFailed": "Save failed, please try again.",
+        "solanaImportFailed": "The key couldn't be imported. Check that it's a Solana CLI keypair or a base58 secret key, then try again."
       }
     },
     "requests": {
@@ -6391,9 +6403,14 @@
       "signingAs": "Signing as",
       "digest": "Hash to sign",
       "copyDigest": "Copy hash to sign",
-      "message": "Message to sign",
+      "message": "Message",
       "copyMessage": "Copy message to sign",
       "emptyMessage": "Empty message (0 bytes)",
+      "messageBytes_one": "{{count}} byte",
+      "messageBytes_other": "{{count}} bytes",
+      "details": "Details",
+      "detailsAddress": "Signing address (Solana)",
+      "detailsMessage": "Exact bytes to sign (hex)",
       "source": "Source",
       "sourceTag": "Tag · {{name}}",
       "sourceSkill": "Skill · {{name}}",
@@ -7083,6 +7100,7 @@
     "transportHttp": "http",
     "toolMeta": "{{count}} tools · {{transport}}",
     "tools": "Tools",
+    "toolsToggle": "Tools · {{count}}",
     "generatedAt": "last refreshed {{time}}",
     "generatedAtWithVersion": "last refreshed {{time}} · server v{{version}}",
     "serverVersion": "server v{{version}}",

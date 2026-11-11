@@ -35,6 +35,99 @@ def _clear_web_push_delivery_dispositions():
     yield
 
 
+@pytest.mark.parametrize("dispatch", [False, True])
+def test_compat_exception_log_preserves_error_and_request_metadata(caplog, dispatch):
+    error = RuntimeError("diagnostic failure")
+
+    def fail():
+        raise error
+
+    if dispatch:
+        compat_app = CompatApp()
+        compat_app.errorhandler(Exception)(ui_server.handle_exception)
+        compat_app.route("/api/diagnostic", methods=["POST"])(fail)
+        response = compat_app.test_client().post(
+            "/api/diagnostic?token=query-secret",
+            headers={"Authorization": "Bearer header-secret", "Cookie": "session=cookie-secret"},
+            json={"password": "body-secret"},
+        )
+        status_code = response.status_code
+    else:
+        try:
+            fail()
+        except RuntimeError:
+            pass
+        # Deliberately invoke after leaving except: the record must use the
+        # supplied exception, not the handler thread's current exception state.
+        with app.test_request_context("/api/diagnostic?token=query-secret", method="POST"):
+            _, status_code = ui_server.handle_exception(error)
+
+    [record] = [item for item in caplog.records if "Unhandled exception in UI server" in item.getMessage()]
+    assert status_code == 500
+    assert record.getMessage() == "Unhandled exception in UI server method=POST path=/api/diagnostic"
+    assert record.exc_info == (RuntimeError, error, error.__traceback__)
+    assert record.exc_info[2] is not None
+    assert "RuntimeError: diagnostic failure" in caplog.text
+    assert "NoneType: None" not in caplog.text
+    for secret in ("query-secret", "header-secret", "cookie-secret", "body-secret"):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_disconnect_during_body_read_is_not_a_server_error(caplog, native, method):
+    compat_app = CompatApp()
+    compat_app.errorhandler(Exception)(ui_server.handle_exception)
+    called = []
+
+    def endpoint():
+        called.append(True)
+        return {"ok": True}
+
+    if native:
+        async def native_endpoint(starlette_request: FastAPIRequest):
+            return await compat_app.dispatch_native_request(starlette_request, endpoint)
+
+        compat_app.add_api_route("/api/diagnostic", native_endpoint, methods=[method])
+    else:
+        compat_app.route("/api/diagnostic", methods=[method])(endpoint)
+
+    async def exercise():
+        messages = []
+        incoming = iter([
+            {"type": "http.request", "body": b'{"partial":', "more_body": True},
+            {"type": "http.disconnect"},
+        ])
+
+        async def receive():
+            return next(incoming)
+
+        async def send(message):
+            messages.append(message)
+
+        await compat_app(
+            {
+                "type": "http", "http_version": "1.1", "method": method,
+                "scheme": "http", "path": "/api/diagnostic", "query_string": b"token=query-secret",
+                "headers": [(b"content-type", b"application/json")],
+                "server": ("127.0.0.1", 80), "client": ("127.0.0.1", 12345),
+            },
+            receive,
+            send,
+        )
+        return messages
+
+    with caplog.at_level("DEBUG", logger=ui_server.logger.name):
+        messages = asyncio.run(exercise())
+
+    assert not called
+    assert messages[0]["status"] == 499
+    assert messages[1]["body"] == b""
+    assert not [record for record in caplog.records if record.levelno >= 40]
+    assert f"UI client disconnected method={method} path=/api/diagnostic" in caplog.text
+    assert "query-secret" not in caplog.text
+
+
 def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
     request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
     request_headers.update(headers or {})
@@ -4122,6 +4215,8 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
     assert sends[0][0]["endpoint"] == subscription["endpoint"]
     assert sends[0][1]["title"] == "Hello"
     assert sends[0][1]["badge_count"] == 0
+    # The iOS App shows a notification while it is in front only for this tag.
+    assert sends[0][1]["tag"] == "web-push-test"
     # The test surface carries the same authorization evaluation the normal
     # path applies, so a successful test send can be compared against the
     # normal-only gates (#1434). A local install has no remote gates.

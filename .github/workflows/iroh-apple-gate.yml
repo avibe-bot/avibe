@@ -1,5 +1,5 @@
 name: iroh Apple datapath gate
-run-name: iOS 17.5 iroh binary qualification (no private datapath or local discovery)
+run-name: iOS 17.0 iroh binary qualification (no private datapath or local discovery)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ env:
 
 jobs:
   gate:
-    name: iOS 17.5 qualified iroh binary gate
+    name: iOS 17.0 qualified iroh binary gate
     runs-on: macos-26
     timeout-minutes: 90
     steps:
@@ -64,12 +64,20 @@ jobs:
           test "$(git -C "$checkout_dir" rev-parse "$IROH_FFI_TAG^{commit}")" = "$IROH_FFI_COMMIT"
           echo "IROH_SOURCE=$checkout_dir" >> "$GITHUB_ENV"
 
+      - name: Install lowest available iOS 17.x runtime below 17.5
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/iroh-apple-artifacts"
+          bash "$IROH_GATE_DIR/prepare-ios-runtime.sh" "$output_dir"
+          cat "$output_dir/ios-runtime.env" >> "$GITHUB_ENV"
+
       - name: Build qualified iOS xcframework and Swift package
         run: |
           set -euo pipefail
           output_dir="$RUNNER_TEMP/iroh-apple-artifacts"
           bash "$IROH_GATE_DIR/build-iroh-apple.sh" "$IROH_SOURCE" "$output_dir" \
             | tee "$RUNNER_TEMP/iroh-apple-build.log"
+          bash "$IROH_GATE_DIR/test-ios-runtime.sh" "$IROH_SOURCE" "$output_dir"
           echo "IROH_OUTPUT=$output_dir" >> "$GITHUB_ENV"
 
       - name: Verify upstream prebuilt positive control (including iOS arm64)
@@ -106,3 +114,7 @@ jobs:
             ${{ runner.temp }}/iroh-apple-artifacts/patched-check.log
             ${{ runner.temp }}/iroh-apple-artifacts/positive-control-check.log
             ${{ runner.temp }}/iroh-apple-artifacts/xcodebuild-*.log
+            ${{ runner.temp }}/iroh-apple-artifacts/ios-runtime-*.json
+            ${{ runner.temp }}/iroh-apple-artifacts/ios-runtime-*.log
+            ${{ runner.temp }}/iroh-apple-artifacts/ios-runtime.env
+            ${{ runner.temp }}/iroh-apple-artifacts/ios-runtimes-at-test.json
