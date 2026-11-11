@@ -35,6 +35,44 @@ def _clear_web_push_delivery_dispositions():
     yield
 
 
+@pytest.mark.parametrize("dispatch", [False, True])
+def test_compat_exception_log_preserves_error_and_request_metadata(caplog, dispatch):
+    error = RuntimeError("diagnostic failure")
+
+    def fail():
+        raise error
+
+    if dispatch:
+        compat_app = CompatApp()
+        compat_app.errorhandler(Exception)(ui_server.handle_exception)
+        compat_app.route("/api/diagnostic", methods=["POST"])(fail)
+        response = compat_app.test_client().post(
+            "/api/diagnostic?token=query-secret",
+            headers={"Authorization": "Bearer header-secret", "Cookie": "session=cookie-secret"},
+            json={"password": "body-secret"},
+        )
+        status_code = response.status_code
+    else:
+        try:
+            fail()
+        except RuntimeError:
+            pass
+        # Deliberately invoke after leaving except: the record must use the
+        # supplied exception, not the handler thread's current exception state.
+        with app.test_request_context("/api/diagnostic?token=query-secret", method="POST"):
+            _, status_code = ui_server.handle_exception(error)
+
+    [record] = [item for item in caplog.records if "Unhandled exception in UI server" in item.getMessage()]
+    assert status_code == 500
+    assert record.getMessage() == "Unhandled exception in UI server method=POST path=/api/diagnostic"
+    assert record.exc_info == (RuntimeError, error, error.__traceback__)
+    assert record.exc_info[2] is not None
+    assert "RuntimeError: diagnostic failure" in caplog.text
+    assert "NoneType: None" not in caplog.text
+    for secret in ("query-secret", "header-secret", "cookie-secret", "body-secret"):
+        assert secret not in caplog.text
+
+
 def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
     request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
     request_headers.update(headers or {})

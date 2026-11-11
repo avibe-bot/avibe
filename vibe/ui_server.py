@@ -3514,8 +3514,15 @@ def handle_exception(e):
     if isinstance(status_code, int) and 400 <= status_code < 500:
         return jsonify({"error": detail or str(e)}), status_code
 
-    # Log and return 500 for unexpected server errors
-    logger.exception("Unhandled exception in UI server")
+    # The compatibility dispatcher runs this handler in a worker without the
+    # endpoint's active exception context. Preserve the supplied traceback and
+    # log only method/path, not query strings, headers, cookies, or bodies.
+    logger.exception(
+        "Unhandled exception in UI server method=%s path=%s",
+        request.method,
+        request.path,
+        exc_info=(type(e), e, e.__traceback__),
+    )
     return jsonify({"error": str(e)}), 500
 
 
