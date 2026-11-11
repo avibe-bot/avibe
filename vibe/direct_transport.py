@@ -43,6 +43,7 @@ DATA_HEADER_TIMEOUT_SECONDS = 2.0
 MAX_CONNECTIONS = 64
 MAX_STREAMS_PER_CONNECTION = 64
 STOP_GRACE_SECONDS = 3.0
+CONTROL_WRITE_TIMEOUT_SECONDS = 1.0
 RESTART_INITIAL_DELAY_SECONDS = 0.25
 RESTART_MAX_DELAY_SECONDS = 5.0
 
@@ -512,19 +513,40 @@ class DirectTransportSupervisor:
             raise _ProtocolError("invalid_addresses")
         return addresses
 
-    async def _write_control(self, stdin: asyncio.StreamWriter, message: dict[str, Any]) -> None:
+    async def _write_control(
+        self,
+        stdin: asyncio.StreamWriter,
+        message: dict[str, Any],
+        *,
+        interruptible: bool = True,
+    ) -> None:
         encoded = (json.dumps(message, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
         if len(encoded) > CONTROL_LINE_LIMIT_BYTES:
             raise _ProtocolError("control_line_too_large")
         stdin.write(encoded)
-        await stdin.drain()
+        if not interruptible or self._stop_event is None:
+            await stdin.drain()
+            return
+        drain_task = asyncio.create_task(stdin.drain())
+        stop_task = asyncio.create_task(self._stop_event.wait())
+        done, _pending = await asyncio.wait(
+            (drain_task, stop_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_task in done:
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
+            raise _Stopping
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+        await drain_task
 
     async def _drain_stderr(self, reader: asyncio.StreamReader | None) -> None:
         if reader is None:
             return
         try:
-            while line := await reader.readline():
-                logger.debug("direct transport sidecar: %s", line.decode("utf-8", "replace").rstrip())
+            while chunk := await reader.read(4096):
+                logger.debug("direct transport sidecar: %s", chunk.decode("utf-8", "replace").rstrip())
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
 
@@ -535,11 +557,14 @@ class DirectTransportSupervisor:
             stdin = process.stdin
             if stdin is not None:
                 with contextlib.suppress(Exception):
-                    await self._write_control(stdin, {"type": "stop"})
+                    await asyncio.wait_for(
+                        self._write_control(stdin, {"type": "stop"}, interruptible=False),
+                        timeout=CONTROL_WRITE_TIMEOUT_SECONDS,
+                    )
                 with contextlib.suppress(Exception):
                     stdin.close()
                 with contextlib.suppress(Exception):
-                    await stdin.wait_closed()
+                    await asyncio.wait_for(stdin.wait_closed(), timeout=CONTROL_WRITE_TIMEOUT_SECONDS)
             try:
                 await asyncio.wait_for(process.wait(), timeout=self._stop_grace_seconds)
             except asyncio.TimeoutError:
@@ -583,6 +608,7 @@ DirectTransport = DirectTransportSupervisor
 
 __all__ = [
     "CONTROL_LINE_LIMIT_BYTES",
+    "CONTROL_WRITE_TIMEOUT_SECONDS",
     "DATA_HEADER_LIMIT_BYTES",
     "DATA_HEADER_TIMEOUT_SECONDS",
     "DIRECT_TRANSPORT_ALPN",
