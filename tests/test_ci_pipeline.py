@@ -528,7 +528,14 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
         (index, step) for index, step in enumerate(steps)
         if step.get("name") == "Verify bundled mobile UI"
     )
-    assert node_index < bundle_index < verify_index
+    generate_index, generate_step = next(
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Generate the App's license notices"
+    )
+    assert node_index < bundle_index < generate_index < verify_index
+    assert generate_step["run"] == (
+        "python3 ios/scripts/app_licenses.py generate --bundle ios/Avibe/Resources/MobileApp"
+    )
     assert bundle_step["working-directory"] == "ui"
     assert bundle_step["run"].splitlines() == ["npm ci", "npm run build:mobile"]
     assert verify_step["run"] == (
@@ -596,12 +603,41 @@ def test_xcode_mobile_bundle_guard_is_actionable_and_checks_vite_assets(tmp_path
     assert "npm run build:mobile" in incomplete.stderr
 
     (assets / "mobile.css").write_text("", encoding="utf-8")
+    unlicensed = subprocess.run(
+        ["/bin/sh", str(script), str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert unlicensed.returncode == 1
+    assert "app_licenses.py generate" in unlicensed.stderr
+
+    (bundle / "licenses-web.json").write_text(json.dumps({"schema_version": 1, "packages": [
+        {"name": "react", "version": "19.3.1", "license": "MIT", "files": [{"name": "LICENSE", "text": "MIT"}]},
+    ]}), encoding="utf-8")
+    generated = subprocess.run(
+        [sys.executable, str(ROOT / "ios/scripts/app_licenses.py"), "generate", "--bundle", str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert generated.returncode == 0, generated.stderr
     complete = subprocess.run(
         ["/bin/sh", str(script), str(bundle)],
         capture_output=True,
         text=True,
     )
     assert complete.returncode == 0, complete.stderr
+
+    # Data left from another pin fails the guard rather than shipping stale notices.
+    stale = json.loads((bundle / "licenses.json").read_text(encoding="utf-8"))
+    stale["native"]["release_tag"] = "iroh-apple-v0.0.0-1"
+    (bundle / "licenses.json").write_text(json.dumps(stale), encoding="utf-8")
+    mismatched = subprocess.run(
+        ["/bin/sh", str(script), str(bundle)],
+        capture_output=True,
+        text=True,
+    )
+    assert mismatched.returncode == 1
+    assert "different iroh pin" in mismatched.stderr
 
     project = (ROOT / "ios/Avibe.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
     target_phases = project.split("buildPhases = (", 1)[1].split(");", 1)[0]

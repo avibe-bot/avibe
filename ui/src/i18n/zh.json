@@ -352,6 +352,27 @@
     },
     "errors": {
       "network": "暂时连不上 avibe.bot。检查网络后重试。"
+    },
+    "licenses": {
+      "about": "关于",
+      "title": "开源许可",
+      "intro": "Avibe App 包含以下开源组件。感谢它们的作者。",
+      "sourceTitle": "MPL-2.0 组件的源代码",
+      "sourceBody": "以下组件按 Mozilla Public License 2.0 分发，未作修改。可从 crates.io 归档或上游源代码获取它们的源代码。",
+      "family": "{{name}} 及 {{related}} 个相关组件，{{version}}",
+      "archives": "crates.io 归档：",
+      "archive": "crates.io 归档",
+      "archiveFor": "{{name}} 的 crates.io 归档",
+      "sourceCode": "源代码",
+      "sourceFor": "{{name}} 的源代码",
+      "texts": "许可文本",
+      "covers": "覆盖的组件",
+      "generated": "此列表随 App 构建时生成。",
+      "components_one": "{{count}} 个组件",
+      "components_other": "{{count}} 个组件",
+      "crate": "{{name}} {{version}}",
+      "withAuthors": "{{crate}}（{{authors}}）",
+      "separator": "、"
     }
   },
   "common": {
