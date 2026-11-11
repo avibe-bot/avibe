@@ -1039,12 +1039,13 @@ def _load_released_directory(directory: Path) -> dict[str, ReleasedAvibe]:
         return {}
     result: dict[str, ReleasedAvibe] = {}
     for path in sorted(directory.glob("*.json")):
+        role = path.stem
+        if role not in AVIBE_ROLES:
+            continue
         if path.is_symlink() or not path.is_file():
             raise QualificationError(f"{path.name} is not a released Avibe record")
         record = _load_released(path)
-        role = path.stem
-        if role in AVIBE_ROLES:
-            result[role] = record
+        result[role] = record
     return result
 
 

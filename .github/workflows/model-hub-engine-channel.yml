@@ -176,6 +176,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}
         run: |
           set -euo pipefail
           record="$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json"

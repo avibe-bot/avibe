@@ -924,7 +924,14 @@ def test_the_two_hosted_wire_modes_do_not_mix(arguments) -> None:
 
 
 
-def test_untrusted_rehearsal_cli_assembles_the_real_artifact_paths(tmp_path) -> None:
+def test_released_context_skips_bundled_manifests_before_deserialization(tmp_path) -> None:
+    released = tmp_path / "released"
+    _write(released / "minimum.json", AVIBE["minimum"].__dict__)
+    _write(released / "current_stable.json", AVIBE["current_stable"].__dict__)
+    _write(released / "bundled-manifest-model-hub-engine-v8.0.63-1.json", {"not": "a released Avibe record"})
+    loaded = qualification._load_released_directory(released)
+    assert set(loaded) == set(AVIBE)
+
     candidate_dir = _record(tmp_path / "records")
     candidate = qualification.load_candidate(candidate_dir)
     evidence_dir = tmp_path / "evidence"
@@ -1052,6 +1059,9 @@ def test_candidate_workflow_is_untrusted_and_has_no_authoritative_receipt() -> N
     assert "secrets." not in text and "gh release" not in text and "s3api" not in text
     assert workflow["jobs"]["untrusted-rehearsal"]["if"] == "always()"
     assert workflow["jobs"]["untrusted-rehearsal"]["needs"] == ["build", "platform-smoke", "released-avibe-e2e", "hosted-wire"]
+    hosted_wire_steps = workflow["jobs"]["hosted-wire"]["steps"]
+    baseline_upload = next(step for step in hosted_wire_steps if step.get("name") == "Upload the baseline list")
+    assert baseline_upload["if"] == "always()"
     assert all(
         any(step.get("with", {}).get("persist-credentials") is False for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
         for job in workflow["jobs"].values()
@@ -1069,6 +1079,7 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     assert "model-hub-engine-untrusted-assets" in text
     assert "rehearsal-baselines" in text
     assert "Runtime pass/fail assertions above are rehearsal data" in text
+    assert "REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}" in text
     assert "persist-credentials: false" in text
     assert "secrets." not in json.dumps(workflow["jobs"]["prepare"])
 
