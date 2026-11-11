@@ -107,7 +107,7 @@ A ready answer admits `client_endpoint_id` to the transport until `admitted_unti
 ## 5. What the client must do
 
 1. Ask through Cloudflare first. The direct path does not exist until a ready answer arrives. Later refreshes may use either path; both reach the same instance behind the same public certificate.
-2. Make the request from native code, over the account's own same-origin transport, and use only the answer that request returned. Do not accept an answer handed over by page content: Show Pages are same-origin with the Workbench and can reach the native bridge, so an Agent-authored page could supply a forged one.
+2. Make the request from native code, as a same-origin request to the instance on the account's data store, and use only the answer that request returned. Do not accept an answer handed over by page content: Show Pages are same-origin with the Workbench and can reach the native bridge, so an Agent-authored page could supply a forged one.
 3. Accept a ready answer only if `version` is one it supports, `instance_id` and `hostname` match the instance the user selected, and `expires_at` is in the future.
 4. Probe only addresses it can check for itself: private IPv4 or unique-local IPv6 for `lan`, global unicast IPv6 for `ipv6`, at most eight per answer. The App holds the user's Local Network grant; an answer must not be able to point it at anything else.
 5. Dial `endpoint.id` with `alpn` at those addresses, using no public or multicast discovery. Reject a peer with any other identity.
