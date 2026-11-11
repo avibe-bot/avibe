@@ -6702,6 +6702,7 @@
       "noteNoSource": "No model source supplies {{name}} yet.",
       "pickModelNamed": "Pick a model for {{name}}",
       "allModels": "All models…",
+      "recommended": "Recommended",
       "modelsUnreadable": "Could not read the models.",
       "noModelsToPick": "No provider supplies a model yet.",
       "suppliersChanged": "This model's providers changed. Pick it again.",

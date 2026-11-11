@@ -118,7 +118,7 @@ describe('the built-in assistant card', () => {
     expect(await card().findByText(en.onboarding.setup.noteBuiltinUnset)).toBeTruthy();
     const pick = await card().findByRole('button', { name: /gpt-5\.6-mini/ });
     expect(card().getAllByRole('button').map((node) => node.textContent)).toEqual([
-      'gpt-5.6-solOpenAI', 'gpt-5.6-miniOpenAI', 'gpt-5.6-nanoOpenAI', en.onboarding.setup.allModels,
+      `gpt-5.6-sol${en.onboarding.setup.recommended}`, 'gpt-5.6-miniOpenAI', 'gpt-5.6-nanoOpenAI', en.onboarding.setup.allModels,
     ]);
     expect(enter().disabled).toBe(true);
     expect(screen.getByText(en.onboarding.connection.builtinModelHint.replace('{{name}}', 'Vibey'))).toBeTruthy();

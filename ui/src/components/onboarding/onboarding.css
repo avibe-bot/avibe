@@ -1274,6 +1274,7 @@ span.onboarding-model-offer-row { cursor: default; }
 .onboarding-model-offer-row > svg { flex-shrink: 0; color: var(--muted); }
 .onboarding-model-offer-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .onboarding-model-offer-supplier { flex-shrink: 0; font-size: 11px; font-weight: 400; color: var(--muted); }
+.onboarding-model-offer-recommended { flex-shrink: 0; font-size: 11px; font-weight: 500; color: var(--mint-ink); }
 .onboarding-model-offer-all {
   border-top: 1px solid var(--ob-divider);
   border-radius: 0 0 6px 6px;

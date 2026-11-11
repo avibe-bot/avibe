@@ -23,26 +23,49 @@ const deferred = <T,>() => {
  * of a backend whose Agent has none fills that Agent with the list's first row, as the
  * controller's catalog reconciliation does.
  */
-function server(initial: { catalog?: string[]; model?: string | null; effort?: string | null } = {}) {
+function server(initial: {
+  catalog?: string[]; model?: string | null; effort?: string | null;
+  /** The main Bot's Agent (`main`, D9), when the fixture has one, and its model. */
+  main?: { model: string | null };
+} = {}) {
   const state = {
     catalog: (initial.catalog ?? []).map((id) => ({ id, reasoning_efforts: [] }) as unknown as BackendModel),
     model: initial.model ?? null,
     effort: initial.effort ?? null,
+    main: initial.main ? { model: initial.main.model, effort: null as string | null } : null,
   };
-  const agent = () => ({ ok: true, agent: { name: 'vibey', model: state.model, reasoning_effort: state.effort }, default_agent_name: null });
+  const agent = (name = 'vibey') => {
+    const row = name === 'main' && state.main ? state.main : { model: state.model, effort: state.effort };
+    return { ok: true, agent: { name, model: row.model, reasoning_effort: row.effort }, default_agent_name: null };
+  };
   const api = {
-    getVibeAgent: vi.fn(async () => agent()),
-    updateVibeAgent: vi.fn(async (_name: string, payload: { model?: string; reasoning_effort?: string | null }) => {
+    getVibeAgent: vi.fn(async (name: string) => agent(name)),
+    updateVibeAgent: vi.fn(async (name: string, payload: { model?: string; reasoning_effort?: string | null }) => {
+      if (name === 'main' && state.main) {
+        state.main.model = payload.model ?? state.main.model;
+        if ('reasoning_effort' in payload) state.main.effort = payload.reasoning_effort ?? null;
+        return agent(name);
+      }
       state.model = payload.model ?? state.model;
       if ('reasoning_effort' in payload) state.effort = payload.reasoning_effort ?? null;
       return agent();
     }),
+    listVibeAgents: vi.fn(async () => ({
+      ok: true,
+      default_agent_name: 'vibey',
+      agents: [
+        { name: 'vibey', backend: 'vibey', model: state.model, bot: null },
+        ...(state.main ? [{ name: 'main', backend: 'vibey', model: state.main.model, bot: { handle: 'main', display_name: '', builtin: true } }] : []),
+      ],
+    })),
   };
   const models = {
     getAgentModelCandidates: vi.fn(async () => read('lab-large', 'lab-mini')),
     putAgentModels: vi.fn(async (_backend: string, body: { models: BackendModel[] }) => {
       state.catalog = body.models;
       if (!state.model && state.catalog.length) state.model = state.catalog[0].id;
+      // The controller's reconciliation: a main Bot with no model takes Vibey's.
+      if (state.main && !state.main.model) state.main.model = state.model;
       return {} as AgentSupply;
     }),
   };
@@ -239,5 +262,47 @@ describe('the built-in model choice', () => {
     act(() => { void view.result.current.read('vibey'); });
     expect(view.result.current.offer('vibey')?.kind).toBe('ready');
     await act(async () => again.resolve(read('lab-large')));
+  });
+});
+
+describe('AUTH-SETUP-162 the main Bot follows the setup choice', () => {
+  it.each([
+    ['on the model Vibey had', { model: 'lab-large', catalog: ['lab-large'], main: { model: 'lab-large' } }],
+    ['given one while Vibey had none', { catalog: ['lab-large'], main: { model: 'lab-large' } }],
+    ['with no model of its own yet', { catalog: [], main: { model: null } }],
+  ])('AUTH-SETUP-162 the main Bot %s takes the model picked for Vibey', async (_case, initial) => {
+    const fixture = server(initial);
+    const { view } = mount(fixture);
+    await act(async () => view.result.current.choose('vibey', chosenCandidate(candidate('lab-mini'))));
+    expect(fixture.state.model).toBe('lab-mini');
+    expect(fixture.state.main?.model).toBe('lab-mini');
+    expect(view.result.current.failure('vibey')).toBeNull();
+  });
+
+  it('AUTH-SETUP-162 leaves a main Bot someone set to another model alone', async () => {
+    const fixture = server({ model: 'lab-large', catalog: ['lab-large', 'lab-xl'], main: { model: 'lab-xl' } });
+    const { view } = mount(fixture);
+    await act(async () => view.result.current.choose('vibey', chosenCandidate(candidate('lab-mini'))));
+    expect(fixture.state.model).toBe('lab-mini');
+    expect(fixture.state.main?.model).toBe('lab-xl');
+    expect(fixture.api.updateVibeAgent).not.toHaveBeenCalledWith('main', expect.anything());
+  });
+
+  it('AUTH-SETUP-162 holds the choice for Retry when the main Bot did not take it', async () => {
+    const fixture = server({ catalog: ['lab-large'], main: { model: 'lab-large' } });
+    const write = fixture.api.updateVibeAgent.getMockImplementation()!;
+    fixture.api.updateVibeAgent.mockImplementation(async (name, payload) => {
+      if (name === 'main') throw new Error('offline');
+      return write(name, payload);
+    });
+    const { view } = mount(fixture);
+    await act(async () => view.result.current.choose('vibey', chosenCandidate(candidate('lab-mini'))));
+    expect(view.result.current.failure('vibey')).toEqual({ model: 'lab-mini', kind: 'failed' });
+    expect(view.result.current.holds('vibey')).toBe(true);
+
+    fixture.api.updateVibeAgent.mockImplementation(write);
+    await act(async () => view.result.current.retry('vibey'));
+    expect(fixture.state.main?.model).toBe('lab-mini');
+    expect(view.result.current.holds('vibey')).toBe(false);
   });
 });
