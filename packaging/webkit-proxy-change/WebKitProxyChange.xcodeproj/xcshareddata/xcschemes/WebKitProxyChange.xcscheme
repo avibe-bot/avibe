@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
-   LastUpgradeVersion = "2600"
-   version = "1.7">
+   LastUpgradeVersion = "1600"
+   version = "1.3">
    <BuildAction
       parallelizeBuildables = "NO"
       buildImplicitDependencies = "YES">
@@ -14,9 +14,23 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A50000000000000000000001"
+               BlueprintIdentifier = "A2A2C561177C5C25C2830530"
                BuildableName = "ProbeHost.app"
                BlueprintName = "ProbeHost"
+               ReferencedContainer = "container:WebKitProxyChange.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "D38D95E138A24ECD6653BA8B"
+               BuildableName = "WebKitProxyChangeTests.xctest"
+               BlueprintName = "WebKitProxyChangeTests"
                ReferencedContainer = "container:WebKitProxyChange.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -26,15 +40,14 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES"
-      codeCoverageEnabled = "NO">
+      shouldUseLaunchSchemeArgsEnv = "YES">
       <Testables>
          <TestableReference
             skipped = "NO"
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A50000000000000000000002"
+               BlueprintIdentifier = "D38D95E138A24ECD6653BA8B"
                BuildableName = "WebKitProxyChangeTests.xctest"
                BlueprintName = "WebKitProxyChangeTests"
                ReferencedContainer = "container:WebKitProxyChange.xcodeproj">
@@ -50,6 +63,7 @@
       useCustomWorkingDirectory = "NO"
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
+      debugServiceExtension = "internal"
       allowLocationSimulation = "YES">
    </LaunchAction>
    <ProfileAction
@@ -58,17 +72,12 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "A50000000000000000000001"
-            BuildableName = "ProbeHost.app"
-            BlueprintName = "ProbeHost"
-            ReferencedContainer = "container:WebKitProxyChange.xcodeproj">
-         </BuildableReference>
-      </BuildableProductRunnable>
    </ProfileAction>
-   <AnalyzeAction buildConfiguration = "Debug"/>
-   <ArchiveAction buildConfiguration = "Release" install="NO" distribution="NO"/>
+   <AnalyzeAction
+      buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "Release"
+      revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
 </Scheme>

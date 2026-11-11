@@ -128,13 +128,57 @@ xcrun simctl bootstatus "$device_id" -b
 
 project="$probe_dir/WebKitProxyChange.xcodeproj"
 set +e
-xcodebuild test -project "$project" -scheme WebKitProxyChange \
+xcodebuild build-for-testing -project "$project" -scheme WebKitProxyChange \
   -destination "platform=iOS Simulator,id=$device_id" \
-  -resultBundlePath "$out/xcresult/WebKitProxyChange.xcresult" \
-  -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
-  CODE_SIGNING_ALLOWED=NO | tee "$out/xcodebuild.log"
-test_status=${PIPESTATUS[0]}
+  -derivedDataPath "$out/derived-data" \
+  CODE_SIGNING_ALLOWED=NO | tee "$out/build-for-testing.log"
+build_status=${PIPESTATUS[0]}
 set -e
+
+if [[ "$build_status" -eq 0 ]]; then
+  set +e
+  xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
+    -destination "platform=iOS Simulator,id=$device_id" \
+    -derivedDataPath "$out/derived-data" \
+    -resultBundlePath "$out/xcresult/direct-minimal.xcresult" \
+    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
+    -only-testing:WebKitProxyChangeTests/testDirectTLSMinimal \
+    CODE_SIGNING_ALLOWED=NO | tee "$out/direct-minimal.log"
+  direct_status=${PIPESTATUS[0]}
+  set -e
+else
+  direct_status=125
+fi
+
+if [[ "$build_status" -eq 0 && "$direct_status" -eq 0 ]]; then
+  set +e
+  xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
+    -destination "platform=iOS Simulator,id=$device_id" \
+    -derivedDataPath "$out/derived-data" \
+    -resultBundlePath "$out/xcresult/cold-minimal.xcresult" \
+    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
+    -only-testing:WebKitProxyChangeTests/testColdMinimal \
+    CODE_SIGNING_ALLOWED=NO | tee "$out/cold-minimal.log"
+  minimal_status=${PIPESTATUS[0]}
+  set -e
+else
+  minimal_status=$([[ "$build_status" -ne 0 ]] && echo "$build_status" || echo "$direct_status")
+fi
+
+if [[ "$build_status" -eq 0 && "$direct_status" -eq 0 && "$minimal_status" -eq 0 ]]; then
+  set +e
+  xcodebuild test-without-building -project "$project" -scheme WebKitProxyChange \
+    -destination "platform=iOS Simulator,id=$device_id" \
+    -derivedDataPath "$out/derived-data" \
+    -resultBundlePath "$out/xcresult/full-matrix.xcresult" \
+    -parallel-testing-enabled NO -maximum-parallel-testing-workers 1 \
+    -only-testing:WebKitProxyChangeTests/testMatrix \
+    CODE_SIGNING_ALLOWED=NO | tee "$out/full-matrix.log"
+  test_status=${PIPESTATUS[0]}
+  set -e
+else
+  test_status=$([[ "$build_status" -ne 0 ]] && echo "$build_status" || echo "$minimal_status")
+fi
 
 xcrun simctl spawn "$device_id" log show --style compact --last 30m \
   --predicate 'process == "com.apple.WebKit.Networking" OR process == "com.apple.WebKit.WebContent"' \
@@ -145,10 +189,10 @@ xcrun simctl spawn "$device_id" log show --style compact --last 30m \
 find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -type f \
   \( -iname '*WebKit*' -o -iname '*Networking*' -o -iname '*WebContent*' \) \
   -newermt "$(date -u -v-2H '+%Y-%m-%d %H:%M:%S')" -print -exec cp {} "$out/derived/" \; 2>/dev/null || true
-python3 - "$out/summary.json" "$test_status" <<'PY'
-import json, sys
+BUILD_STATUS="$build_status" DIRECT_STATUS="$direct_status" MINIMAL_STATUS="$minimal_status" python3 - "$out/summary.json" "$test_status" <<'PY'
+import json, os, sys
 p=sys.argv[1]
-data=json.load(open(p)); data.update({"status":"passed" if int(sys.argv[2]) == 0 else "failed", "testExit":int(sys.argv[2])})
+data=json.load(open(p)); data.update({"status":"passed" if int(sys.argv[2]) == 0 else "failed", "buildExit":int(os.environ.get("BUILD_STATUS", "0")), "directExit":int(os.environ.get("DIRECT_STATUS", "0")), "minimalExit":int(os.environ.get("MINIMAL_STATUS", "0")), "testExit":int(sys.argv[2])})
 json.dump(data, open(p, "w"), sort_keys=True); print(json.dumps(data, sort_keys=True))
 PY
 exit "$test_status"

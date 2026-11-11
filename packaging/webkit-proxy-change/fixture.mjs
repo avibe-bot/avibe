@@ -18,8 +18,11 @@ const events = [];
 let sequence = 0;
 let connectionID = 0;
 const proxyConnections = new Map();
+const originConnections = new Map();
 const proxyModes = new Map();
+const stalledClients = new Set();
 const recordedProcesses = new Set();
+
 function log(event, fields = {}) {
   const entry = { sequence: ++sequence, time: new Date().toISOString(), event, ...fields };
   events.push(entry);
@@ -94,6 +97,15 @@ function makeOrigin(route, protocol, host, port) {
   };
   server.on('secureConnection', socket => {
     const connection = idFor(socket, 'socket');
+    if (route === 'origin' && socket.servername) {
+      const connections = originConnections.get(socket.servername) ?? new Set();
+      connections.add(socket);
+      originConnections.set(socket.servername, connections);
+      socket.once('close', () => {
+        connections.delete(socket);
+        if (connections.size === 0) originConnections.delete(socket.servername);
+      });
+    }
     log('tls_open', {route, protocol, connection, alpn:socket.alpnProtocol, sni:socket.servername, port});
     socket.on('error', error => log('tls_error', {route, connection, error:String(error)}));
     socket.on('close', () => log('tls_close', {route, connection}));
@@ -200,7 +212,21 @@ proxy.on('connect', (req, client, head) => {
   });
 });
 proxy.listen(18080, '127.0.0.1', () => log('proxy_listening', {port:18080}));
-
+const refuseProxy = net.createServer(client => {
+  log('proxy_refuse_accept', {port:18082});
+  client.once('data', () => {
+    client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    log('proxy_refused', {port:18082});
+  });
+});
+refuseProxy.listen(18082, '127.0.0.1', () => log('proxy_refuse_listening', {port:18082}));
+const stallProxy = net.createServer(client => {
+  stalledClients.add(client);
+  log('proxy_stall_accept', {port:18083});
+  client.on('close', () => stalledClients.delete(client));
+  client.on('error', () => stalledClients.delete(client));
+});
+stallProxy.listen(18083, '127.0.0.1', () => log('proxy_stall_listening', {port:18083}));
 const control = http.createServer(async (req,res) => {
   try {
     const url = new URL(req.url, 'http://127.0.0.1:18090');
@@ -217,6 +243,10 @@ const control = http.createServer(async (req,res) => {
         entry.client.destroy(); entry.upstream.destroy(); closed++;
       }
       log('proxy_forced_close', {host, closed}); result = {ok:true, closed};
+    } else if (url.pathname === '/close-origin') {
+      const host = url.searchParams.get('host'); let closed = 0;
+      for (const socket of originConnections.get(host) ?? []) { socket.destroy(); closed++; }
+      log('origin_forced_close', {host, closed}); result = {ok:true, closed};
     } else if (url.pathname === '/proxy-mode') {
       const host = url.searchParams.get('host'); const mode = url.searchParams.get('mode');
       if (!byHost.has(host) || !['origin','transport'].includes(mode)) throw new Error('invalid mode');
@@ -246,6 +276,7 @@ control.listen(18090, '127.0.0.1', () => log('control_listening', {port:18090}))
 process.on('SIGTERM', () => {
   log('fixture_stopping', {recordedProcesses:[...recordedProcesses]});
   for (const entry of proxyConnections.values()) { entry.client.destroy(); entry.upstream.destroy(); }
-  for (const server of [...servers,proxy,control]) server.close();
+  for (const client of stalledClients) client.destroy();
+  for (const server of [...servers,proxy,refuseProxy,stallProxy,control]) server.close();
   setTimeout(() => process.exit(0), 200).unref();
 });

@@ -55,10 +55,13 @@ private final class Browser: NSObject, WKNavigationDelegate {
     private var navigationDeadline: Task<Void, Never>?
     private(set) var contentTerminations = 0
 
-    init(fixture: ProbeCase, anchor: SecCertificate) {
+    init(fixture: ProbeCase, anchor: SecCertificate, initialRoute: String? = nil) {
         self.fixture = fixture
         self.anchor = anchor
         store = WKWebsiteDataStore(forIdentifier: UUID())
+        if let initialRoute {
+            store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: initialRoute)]
+        }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = store
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 700), configuration: configuration)
@@ -116,14 +119,21 @@ private final class Browser: NSObject, WKNavigationDelegate {
         catch { emit(["case":fixture.id, "step":"record_failed", "error":String(describing:error)]) }
     }
 
+    private static func proxy(for host: String, mode: String) -> ProxyConfiguration {
+        let port = mode == "failover" ? 18081 : mode == "refuse" ? 18082 : mode == "stall" ? 18083 : 18080
+        var proxy = ProxyConfiguration(httpCONNECTProxy: .hostPort(
+            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(port))!
+        ))
+        proxy.matchDomains = [mode == "placeholder" ? "never-\(UUID().uuidString.lowercased()).invalid" : host]
+        proxy.allowFailover = mode == "failover"
+        return proxy
+    }
+
     func route(_ mode: String) {
         if mode == "empty" {
             store.proxyConfigurations = []
         } else {
-            var proxy = ProxyConfiguration(httpCONNECTProxy: .hostPort(host: "127.0.0.1", port: 18080))
-            proxy.matchDomains = [mode == "placeholder" ? "never-\(UUID().uuidString.lowercased()).invalid" : fixture.host]
-            proxy.allowFailover = false
-            store.proxyConfigurations = [proxy]
+            store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: mode)]
         }
         emit(["case":fixture.id, "step":"setter", "mode":mode,
               "count":store.proxyConfigurations.count, "networkPID":networkPID(),
@@ -198,6 +208,51 @@ private final class Browser: NSObject, WKNavigationDelegate {
 
 final class WebKitProxyChangeTests: XCTestCase {
     @MainActor
+    func testDirectTLSMinimal() async throws {
+        let bundle = Bundle(for: Self.self)
+        let cases = try JSONDecoder().decode([ProbeCase].self, from: Data(contentsOf: XCTUnwrap(bundle.url(forResource: "matrix", withExtension: "json"))))
+        let fixture = try XCTUnwrap(cases.first { $0.action == "coldBeforeFirstRequest" && $0.origin == "h1" })
+        let anchorData = try Data(contentsOf: XCTUnwrap(bundle.url(forResource: "Anchor", withExtension: "der")))
+        let anchor = try XCTUnwrap(SecCertificateCreateWithData(nil, anchorData as CFData))
+        _ = try await control("/health")
+        let browser = Browser(fixture: fixture, anchor: anchor)
+        do {
+            try await browser.load("\(fixture.id)-direct-minimal")
+            let page = try await browser.observe("direct-minimal-page", expression: "window.probe.page")
+            let fetch = try await browser.fetch("direct-minimal-fetch")
+            guard page["route"] as? String == "origin", fetch["route"] as? String == "origin"
+            else { throw ProbeError("minimal direct TLS request did not reach origin: \(page) / \(fetch)") }
+        } catch {
+            await browser.close()
+            throw error
+        }
+        await browser.close()
+    }
+
+    @MainActor
+    func testColdMinimal() async throws {
+        let bundle = Bundle(for: Self.self)
+        let cases = try JSONDecoder().decode([ProbeCase].self, from: Data(contentsOf: XCTUnwrap(bundle.url(forResource: "matrix", withExtension: "json"))))
+        let fixture = try XCTUnwrap(cases.first { $0.action == "coldBeforeWebView" && $0.origin == "h1" })
+        let anchorData = try Data(contentsOf: XCTUnwrap(bundle.url(forResource: "Anchor", withExtension: "der")))
+        let anchor = try XCTUnwrap(SecCertificateCreateWithData(nil, anchorData as CFData))
+        _ = try await control("/health")
+        let browser = Browser(fixture: fixture, anchor: anchor, initialRoute: "direct")
+        do {
+            try await browser.load("\(fixture.id)-minimal")
+            let page = try await browser.observe("minimal-page", expression: "window.probe.page")
+            let fetch = try await browser.fetch("minimal-fetch")
+            guard page["route"] as? String == "proxy-backend",
+                  fetch["route"] as? String == "proxy-backend"
+            else { throw ProbeError("minimal cold proxy request did not reach proxy backend: \(page) / \(fetch)") }
+        } catch {
+            await browser.close()
+            throw error
+        }
+        await browser.close()
+    }
+
+    @MainActor
     func testMatrix() async throws {
         let bundle = Bundle(for: Self.self)
         let cases = try JSONDecoder().decode([ProbeCase].self, from: Data(contentsOf: XCTUnwrap(bundle.url(forResource: "matrix", withExtension: "json"))))
@@ -208,7 +263,8 @@ final class WebKitProxyChangeTests: XCTestCase {
               "system":ProcessInfo.processInfo.operatingSystemVersionString, "cases":cases.count])
         var fixtureFailures = 0
         for fixture in cases {
-            let browser = Browser(fixture: fixture, anchor: anchor)
+            let initialRoute = fixture.action == "coldBeforeWebView" ? "direct" : nil
+            let browser = Browser(fixture: fixture, anchor: anchor, initialRoute: initialRoute)
             do {
                 try await run(fixture, browser)
                 await browser.record("case_complete", ["ok":true])
@@ -264,6 +320,17 @@ final class WebKitProxyChangeTests: XCTestCase {
     private func run(_ fixture: ProbeCase, _ browser: Browser) async throws {
         await browser.record("case_start", ["action":fixture.action,"originProtocol":fixture.origin,"proxyProtocol":fixture.proxy])
         switch fixture.action {
+        case "coldBeforeWebView", "coldBeforeFirstRequest":
+            if fixture.action == "coldBeforeFirstRequest" { browser.route("direct") }
+            try await browser.load("\(fixture.id)-cold-navigation")
+            let page = try await browser.observe("cold-page", expression:"window.probe.page")
+            let fetch = try await browser.fetch("cold-fetch")
+            let expectedProtocol = fixture.proxy == "h2" ? "2.0" : "1.1"
+            guard page["route"] as? String == "proxy-backend",
+                  fetch["route"] as? String == "proxy-backend",
+                  page["protocol"] as? String == expectedProtocol,
+                  fetch["protocol"] as? String == expectedProtocol
+            else { throw ProbeError("cold proxy precondition failed: \(page) / \(fetch)") }
         case "idle":
             try await warm(browser, viaProxy:false)
             browser.route("direct")
@@ -321,7 +388,19 @@ final class WebKitProxyChangeTests: XCTestCase {
             guard newPID > 1, newPID != oldPID else { throw ProbeError("NetworkProcess restart not demonstrated") }
             _ = try await browser.observe("restart-page", expression:"window.probe.page")
             _ = try await browser.fetch("after-restart")
-        case "constantProxy":
+        case "failoverAbsent", "refuse", "stall":
+            try await browser.load("\(fixture.id)-failure-page")
+            _ = try await browser.observe("failure-page", expression:"window.probe.page")
+            _ = try await control("/close-origin?host=\(fixture.host)")
+            browser.route(fixture.action == "failoverAbsent" ? "failover" : fixture.action)
+            let result = try await browser.fetch("failure-fetch")
+            await browser.record("bounded-failure", ["action":fixture.action,"result":result,"routeObserved":result["route"] ?? NSNull()])
+            if fixture.action == "failoverAbsent" {
+                guard result["route"] as? String == "origin" else {
+                    throw ProbeError("allowFailover did not produce a server-observed direct fallback: \(result)")
+                }
+            }
+        case "constantProxy", "constantProxySurviving":
             _ = try await control("/proxy-mode?host=\(fixture.host)&mode=transport")
             browser.route("direct")
             try await browser.load("\(fixture.id)-navigation")
@@ -333,7 +412,9 @@ final class WebKitProxyChangeTests: XCTestCase {
             else { throw ProbeError("constant proxy transport precondition failed") }
             _ = try await browser.observe("old-sse-first", expression:"window.probe.openEvents('\(fixture.id)-old-sse')")
             _ = try await control("/proxy-mode?host=\(fixture.host)&mode=origin")
-            _ = try await control("/close-proxy?host=\(fixture.host)")
+            if fixture.action == "constantProxy" {
+                _ = try await control("/close-proxy?host=\(fixture.host)")
+            }
             // Deliberately no WebsiteDataStore setter here.
             try await afterMutation(browser)
             _ = try await browser.observe("old-sse-after", expression:"window.probe.streamSnapshot('\(fixture.id)-old-sse')")

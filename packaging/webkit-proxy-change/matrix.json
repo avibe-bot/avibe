@@ -1,4 +1,8 @@
 [
+  {"id":"cold-before-webview-h1","origin":"h1","proxy":"h1","action":"coldBeforeWebView"},
+  {"id":"cold-before-webview-h2","origin":"h2","proxy":"h2","action":"coldBeforeWebView"},
+  {"id":"cold-before-first-h1","origin":"h1","proxy":"h1","action":"coldBeforeFirstRequest"},
+  {"id":"cold-before-first-h2","origin":"h2","proxy":"h2","action":"coldBeforeFirstRequest"},
   {"id":"idle-h1","origin":"h1","proxy":"h1","action":"idle"},
   {"id":"idle-h2","origin":"h2","proxy":"h1","action":"idle"},
   {"id":"sse-h2","origin":"h2","proxy":"h1","action":"live"},
@@ -14,5 +18,9 @@
   {"id":"restart-empty-h2","origin":"h2","proxy":"h2","action":"restartEmpty"},
   {"id":"restart-placeholder-h1","origin":"h1","proxy":"h1","action":"restartPlaceholder"},
   {"id":"restart-placeholder-h2","origin":"h2","proxy":"h2","action":"restartPlaceholder"},
-  {"id":"constant-proxy-h2","origin":"h2","proxy":"h2","action":"constantProxy"}
+  {"id":"failover-absent-h1","origin":"h1","proxy":"h1","action":"failoverAbsent"},
+  {"id":"refuse-h1","origin":"h1","proxy":"h1","action":"refuse"},
+  {"id":"stall-h1","origin":"h1","proxy":"h1","action":"stall"},
+  {"id":"constant-proxy-h2","origin":"h2","proxy":"h2","action":"constantProxy"},
+  {"id":"constant-proxy-surviving-h2","origin":"h2","proxy":"h2","action":"constantProxySurviving"}
 ]
