@@ -1015,4 +1015,23 @@ scenarios:
       - tests/test_model_hub_api.py::test_refresh_names_a_rejected_key_and_its_status
       - tests/test_model_hub_runtime.py::test_adapter_discovery_names_only_a_credential_refusal
       - ui/src/components/onboarding/providers/providerStage.test.ts
+  - id: AUTH-SETUP-161
+    name: Setup can finish without a provider (Set up later) and the home leads back to adding a model
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test:
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 finishes setup without a provider and lands home, choosing nothing about supply
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 stays in setup and says so when the finish cannot be confirmed
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 is not offered once a provider is there to continue with
+    reason: >-
+      Covered is bounded to the registered Wizard journey against controlled APIs:
+      the provider screen offers the way out only with nothing to continue with,
+      completion is written once and believed only on readback, and no entry gate or
+      default Agent is touched. The home's model card after that is pinned by the
+      supporting HomeGuide case; the live skip, the home card and a message to the
+      main Bot with no model were run once in a fresh-install Incus environment.
+    supporting_tests:
+      - ui/src/components/home/HomeGuide.test.tsx
 next_priority: []
