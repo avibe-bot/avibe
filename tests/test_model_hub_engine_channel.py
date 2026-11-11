@@ -13,6 +13,8 @@ import base64
 import copy
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -452,15 +454,81 @@ def test_an_index_recorded_before_a_later_avibe_raised_its_floor_no_longer_meets
         lambda path: path.write_text(json.dumps({**json.loads(path.read_text()), "schema_version": 2})),
     ],
 )
-def test_damaged_state_fails_closed_instead_of_starting_over(tmp_path, signer, damage) -> None:
+def test_damaged_state_is_replaced_only_by_an_authenticated_fetch(tmp_path, signer, damage, caplog) -> None:
+    """Readable history is enforced; lost history cannot be reconstructed from a single file.
+
+    Previously any damaged record permanently rejected even an authenticated
+    fetch. The Simple contract deliberately permits a new local floor instead.
+    """
     store = channel.ChannelStateStore(tmp_path / "channel")
-    _accept(store, signer, signed(signer, 5))
+    _accept(store, signer, _history(signer)["base"])
     damage(store.state_path)
     damaged = store.state_path.read_bytes()
 
-    assert _reason(lambda: _accept(store, signer, signed(signer, 6))) == "state_unreadable"
     assert _reason(lambda: store.cached(roots=signer.roots(), verifier=LocalVerifier())) == "state_unreadable"
     assert store.state_path.read_bytes() == damaged
+    # It is older than the lost sequence 10 and omits its withdrawal: both
+    # losses are intentional, not a promise that atomic replacement recovers history.
+    assert _accept(store, signer, _history(signer)["older"]) is True
+    assert store.load().sequence == 9
+    assert store.load().revoked == ()
+    assert "history" in caplog.text and "withdrawal" in caplog.text
+
+
+def test_a_failed_recovery_write_preserves_the_damaged_file(tmp_path, signer, monkeypatch) -> None:
+    """The real atomic publisher must preserve damaged bytes if replacement fails."""
+    from config import atomic_io
+
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    store.directory.mkdir()
+    store.state_path.write_bytes(b"{damaged")
+
+    def fail_replace(*_args):
+        raise OSError("replacement refused")
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replacement refused"):
+        _accept(store, signer, signed(signer, 5))
+    assert store.state_path.read_bytes() == b"{damaged"
+    assert sorted(path.name for path in store.directory.iterdir()) == [".state.lock", "state.json"]
+
+
+def test_channel_acceptance_publishes_a_complete_file_before_returning(tmp_path, signer, monkeypatch) -> None:
+    """Channel reads see whole old/new documents through the shared atomic writer.
+
+    The generic helper covers overlapping writers. This verifies the channel
+    calls it under its acceptance lock, flushes before success, and publishes
+    the actual envelope/digest/history rather than a partial projection.
+    """
+    from config import atomic_io
+
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    _accept(store, signer, signed(signer, 4))
+    before = store.state_path.read_bytes()
+    replace = atomic_io.os.replace
+    sync_directory = atomic_io._fsync_directory
+    published = []
+
+    def observe_replace(source, destination):
+        assert Path(source).parent == store.directory
+        assert Path(source) != store.state_path
+        assert store.state_path.read_bytes() == before
+        # Read through the real loader at both sides of atomic publication.
+        assert store.load().sequence == 4
+        replace(source, destination)
+        assert store.load().sequence == 5
+        published.append("replace")
+
+    def observe_directory_sync(directory):
+        assert published == ["replace"]
+        sync_directory(directory)
+        published.append("directory_sync")
+
+    monkeypatch.setattr(atomic_io.os, "replace", observe_replace)
+    monkeypatch.setattr(atomic_io, "_fsync_directory", observe_directory_sync)
+    assert _accept(store, signer, signed(signer, 5)) is True
+    assert published == ["replace", "directory_sync"]
+    assert sorted(path.name for path in store.directory.iterdir()) == [".state.lock", "state.json"]
 
 
 def test_a_recorded_envelope_swapped_on_disk_is_not_served_as_the_accepted_index(tmp_path, signer) -> None:
@@ -495,6 +563,62 @@ def test_concurrent_refreshes_never_move_the_recorded_sequence_back(tmp_path, si
 
     assert store.load().sequence == 12
     assert set(outcomes) <= {"accepted", "replayed"} and outcomes.count("accepted") >= 1
+
+
+@pytest.mark.reap_processes
+def test_acceptance_reloads_history_after_waiting_for_another_process(tmp_path, signer) -> None:
+    """The acceptance lock covers re-read/compare/publication across processes.
+
+    Thread-only coverage cannot detect a missing OS lock. A slower process
+    must see the newer floor published by the lock holder, not clobber it.
+    """
+    from storage.lock import MigrationFileLock
+
+    store = channel.ChannelStateStore(tmp_path / "channel")
+    _accept(store, signer, signed(signer, 5))
+    incoming = tmp_path / "incoming.json"
+    incoming.write_bytes(signed(signer, 6))
+    ready = tmp_path / "ready"
+    script = """
+import sys
+from pathlib import Path
+from core.model_hub_engine_channel import ChannelError, ChannelStateStore, TrustRoot, TrustRoots, authenticate
+from tests.engine_channel_support import LocalVerifier
+store = ChannelStateStore(Path(sys.argv[1]))
+envelope, payload = authenticate(Path(sys.argv[2]).read_bytes(),
+    roots=TrustRoots((TrustRoot('test-channel-key', sys.argv[3]),)), verifier=LocalVerifier())
+Path(sys.argv[4]).write_text('attempting acceptance')
+try:
+    store.accept(envelope, payload, floor=0)
+except ChannelError as exc:
+    print(exc.reason)
+else:
+    print('accepted')
+"""
+    child = None
+    try:
+        with MigrationFileLock(store.lock_path):
+            child = subprocess.Popen(
+                [sys.executable, "-c", script, str(store.directory), str(incoming), signer.public_key, str(ready)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                cwd=Path(__file__).resolve().parents[1],
+            )
+            deadline = time.monotonic() + 15
+            while not ready.exists():
+                if child.poll() is not None or time.monotonic() >= deadline:
+                    pytest.fail("accepting process did not become ready")
+                time.sleep(0.01)
+            # The child has authenticated and is waiting for the real OS lock.
+            assert child.poll() is None
+            _accept(store, signer, signed(signer, 7))
+        stdout, stderr = child.communicate(timeout=15)
+        assert child.returncode == 0, stderr
+        assert stdout.strip() == "replayed"
+        assert store.load().sequence == 7
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            child.communicate(timeout=15)
 
 
 # ----- selection -------------------------------------------------------------
