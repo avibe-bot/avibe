@@ -6865,6 +6865,7 @@
       "actionRetryImport_other": "查看 {{count}} 项迁移状态",
       "actionContinue": "继续，选择 AI 助手",
       "actionAdd": "添加订阅或 API Key",
+      "later": "稍后再配",
       "actionConnecting": "正在连接…",
       "actionChecking": "正在检查连接…",
       "addTitle": "添加订阅或 API Key",

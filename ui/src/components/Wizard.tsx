@@ -298,6 +298,7 @@ export function Wizard() {
   // A config read on its own authorizes no runtime read and no bootstrap.
   const [runtimeRead, setRuntimeRead] = useState<SetupScreenProps['runtimeRead']>(() => loadingRegion());
   const completing = useRef(false);
+  const [laterPending, setLaterPending] = useState(false);
   /**
    * The single place a config read becomes shell state.
    *
@@ -537,27 +538,53 @@ export function Wizard() {
         }
       }
       // Persist completion last: failed start/readiness leaves AuthGuard's
-      // existing setup gate intact. The locked config API validates existing IM.
-      //
-      // Issued once, and settled by a read. A write that lost its reply on the way
-      // back is indistinguishable here from one that never arrived, so it is neither
-      // believed nor sent again — the config itself is the only thing that can say
-      // which happened, and it is read uncached because a cached answer from before
-      // the write cannot settle anything about it.
-      try {
-        await api.mutateConfig([setConfigField(['setup_completed'], true)]);
-      } catch {
-        // Unknown, not failed. The readback below is what decides.
-      }
-      if (!holds()) return;
-      const persisted = await fetchSetupConfig();
-      if (persisted.state !== 'read' || !persisted.config.setup_completed) {
-        throw new Error(t('onboarding.flow.completionUnconfirmed'));
-      }
-      // Confirmed persisted, so the journey is over whatever else changed meanwhile:
-      // the lease exists to stop the next write, not to take back a finished setup.
-      navigate('/');
+      // existing setup gate intact.
+      await finishSetup(holds);
     } finally { completing.current = false; }
+  };
+  /**
+   * End the journey: write `setup_completed` and go home once the config says so.
+   *
+   * The locked config API validates existing IM. The write is issued once and settled
+   * by a read. A write that lost its reply on the way back is indistinguishable here
+   * from one that never arrived, so it is neither believed nor sent again — the config
+   * itself is the only thing that can say which happened, and it is read uncached
+   * because a cached answer from before the write cannot settle anything about it.
+   * `holds` is the caller's lease, asked once between the write and the read.
+   */
+  const finishSetup = async (holds: () => boolean) => {
+    try {
+      await api.mutateConfig([setConfigField(['setup_completed'], true)]);
+    } catch {
+      // Unknown, not failed. The readback below is what decides.
+    }
+    if (!holds()) return;
+    const persisted = await fetchSetupConfig();
+    if (persisted.state !== 'read' || !persisted.config.setup_completed) {
+      throw new Error(t('onboarding.flow.completionUnconfirmed'));
+    }
+    // Confirmed persisted, so the journey is over whatever else changed meanwhile:
+    // the lease exists to stop the next write, not to take back a finished setup.
+    navigate('/');
+  };
+  /**
+   * 「稍后再配」: finish setup with no provider. Someone without a subscription or key
+   * yet otherwise has no way out of the provider screen. Nothing about supply is
+   * claimed or chosen here — no gate, no default Agent — so the home's Getting started
+   * shows the missing model and leads back to Settings · Models.
+   */
+  const later = async () => {
+    if (completing.current) return;
+    completing.current = true;
+    setLaterPending(true);
+    try {
+      await finishSetup(() => true);
+    } catch (cause) {
+      setError({ message: cause instanceof Error ? cause.message : t('onboarding.flow.completionUnconfirmed') });
+    } finally {
+      completing.current = false;
+      setLaterPending(false);
+    }
   };
   // The stylesheet's stacked and folded reservations count the cards; the lineup is
   // the one place that count lives.
@@ -571,7 +598,8 @@ export function Wizard() {
           ? <Welcome ref={ref} data={data ?? undefined} active={props.active} onActionChange={props.onActionChange}
               onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
           : id === 'providers'
-          ? <ProvidersEntry ref={ref} {...props} agentReads={setupAgentReads} onEnter={enterProviders} />
+          ? <ProvidersEntry ref={ref} {...props} agentReads={setupAgentReads} onEnter={enterProviders}
+              onLater={() => void later()} laterPending={laterPending} />
           : <AssistantsEntry ref={ref} data={data ?? {}} active={props.active} onEnter={load} onActionChange={props.onActionChange}
               flowState={props.flowState} setFlowState={props.setFlowState} onNavigate={props.onNavigate} agentReads={setupAgentReads}
               onNext={complete} />}
