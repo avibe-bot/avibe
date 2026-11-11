@@ -420,6 +420,7 @@ final class AppModel: ObservableObject {
         WebsiteDataStoreReleaseBarrier
     ] {
         clearPendingPushOpened()
+        nativeBadge.clear()
         stopRuntime()
         switch route {
         case .browser:
