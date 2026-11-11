@@ -16,7 +16,7 @@ import json, sys
 p, stages_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = json.load(open(p))
 stages = [json.loads(line) for line in open(stages_path)]
-names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "direct-minimal", "cold-minimal", "full-matrix")
+names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "lifecycle", "direct-minimal", "cold-minimal", "full-matrix")
 if not stages:
     cause = data.get("reason", "setup failed before build")
     stages = [{"stage": name, "status": "skipped", "verdict": "unmeasured", "exit": None, "cause": cause} for name in names]
@@ -115,6 +115,8 @@ import json, sys
 for row in json.load(open(sys.argv[1])):
     ip = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
     print(ip, f"{row['id']}.webkit-proxy.test")
+for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
+    print("127.0.0.1", f"{case_id}.webkit-proxy.test")
 PY
 )
 
@@ -138,7 +140,7 @@ for _ in {1..100}; do
   sleep 0.1
 done
 curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
 bounded 20 python3 - "$probe_dir/matrix.json" <<'PY'
 import json, socket, sys
 for row in json.load(open(sys.argv[1])):
@@ -146,6 +148,10 @@ for row in json.load(open(sys.argv[1])):
     expected = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
     actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}
     assert actual == {expected}, (host, expected, actual)
+for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
+    host = case_id + ".webkit-proxy.test"
+    actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}
+    assert actual == {"127.0.0.1"}, (host, actual)
 print("Runner host mappings verified (simulator visibility still requires real requests)")
 PY
 
@@ -195,6 +201,13 @@ run_stage() {
     set -e
     if [[ "$status" -eq 0 ]]; then status=$evidence_status; fi
   fi
+  if [[ "$stage" == "lifecycle" && "$status" -eq 0 ]]; then
+    set +e
+    python3 "$probe_dir/validate-stage.py" lifecycle "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
+    local evidence_status=${PIPESTATUS[0]}
+    set -e
+    status=$evidence_status
+  fi
   if [[ "$status" -ne 0 ]]; then
     blocked_by=$stage
     test_status=$status
@@ -220,6 +233,57 @@ test_method() {
     CODE_SIGNING_ALLOWED=NO
 }
 
+wait_lifecycle_event() {
+  local case_id=$1 step=$2
+  for _ in {1..160}; do
+    if python3 - "$out/cert/fixture.jsonl" "$case_id" "$step" <<'PY'
+import json, sys
+path, case_id, step = sys.argv[1:]
+try:
+    events = [json.loads(line) for line in open(path) if line.strip()]
+except FileNotFoundError:
+    raise SystemExit(1)
+raise SystemExit(0 if any(
+    event.get("event") == "client" and event.get("case") == case_id and event.get("step") == step
+    for event in events
+) else 1)
+PY
+    then return 0; fi
+    sleep 0.25
+  done
+  echo "lifecycle event timeout: $case_id/$step" >&2
+  return 124
+}
+
+run_lifecycle() {
+  local process_log="$out/lifecycle-process.log"
+  : > "$process_log"
+  for case_id in lifecycle-reload lifecycle-recreate lifecycle-relaunch; do
+    local store_id
+    store_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+    bounded 30 xcrun simctl terminate "$device_id" com.avibe.webkit-probe >>"$process_log" 2>&1 || true
+    if [[ "$case_id" == "lifecycle-relaunch" ]]; then
+      bounded 30 xcrun simctl launch "$device_id" com.avibe.webkit-probe \
+        --lifecycle-case "$case_id" --lifecycle-phase prepare \
+        --lifecycle-store-id "$store_id" --lifecycle-control-url http://127.0.0.1:18090 \
+        | tee -a "$process_log"
+      wait_lifecycle_event "$case_id" lifecycle_ready
+      bounded 30 xcrun simctl terminate "$device_id" com.avibe.webkit-probe | tee -a "$process_log"
+      bounded 30 xcrun simctl launch "$device_id" com.avibe.webkit-probe \
+        --lifecycle-case "$case_id" --lifecycle-phase resume \
+        --lifecycle-store-id "$store_id" --lifecycle-control-url http://127.0.0.1:18090 \
+        | tee -a "$process_log"
+    else
+      bounded 30 xcrun simctl launch "$device_id" com.avibe.webkit-probe \
+        --lifecycle-case "$case_id" --lifecycle-phase single \
+        --lifecycle-store-id "$store_id" --lifecycle-control-url http://127.0.0.1:18090 \
+        | tee -a "$process_log"
+    fi
+    wait_lifecycle_event "$case_id" lifecycle_done
+    bounded 30 xcrun simctl terminate "$device_id" com.avibe.webkit-probe >>"$process_log" 2>&1 || true
+  done
+}
+
 run_stage build-for-testing python3 "$probe_dir/validate-stage.py" timeout 600 \
   xcodebuild build-for-testing -project "$project" -scheme WebKitProxyChange \
   -destination "platform=iOS Simulator,id=$device_id" \
@@ -228,6 +292,7 @@ run_stage product-validation validate_products
 run_stage simulator-ready python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
 run_stage install python3 "$probe_dir/validate-stage.py" timeout 60 xcrun simctl install "$device_id" "$app"
 run_stage test-launch test_method test-launch testHostLaunch 150
+run_stage lifecycle run_lifecycle
 run_stage direct-minimal test_method direct-minimal testDirectTLSMinimal 120
 run_stage cold-minimal test_method cold-minimal testColdMinimal 120
 run_stage full-matrix test_method full-matrix testMatrix 900

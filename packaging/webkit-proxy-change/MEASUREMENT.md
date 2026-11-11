@@ -9,7 +9,16 @@ The matrix has **27 cells**: four cold H1/H2 controls, two idle-pool installs,
 one active H2 stream install, four removal variants, four in-flight variants,
 four NetworkProcess restart variants, six failure-listener controls
 (absent/refuse/stall × allowFailover false/true), and two constant-proxy controls.
-`evidence.py` checks that inventory independently of completion markers.
+The experiment also has exactly **three lifecycle cells** on the newest installed
+iOS runtime: reload, same-data-store WebView recreation, and App kill/relaunch.
+Each lifecycle cell warms a TLS H1 connection through route A (direct), verifies a
+same-identity GET remains open at the lifecycle boundary, installs route B (the
+CONNECT proxy) before the lifecycle load, and correlates the new page/fetch
+requests with their authoritative route and proxy CONNECT identity. Lifecycle
+cases answer whether new traffic uses route B; true and false are both valid
+measured outcomes, while missing evidence is unmeasured. They do not claim
+old-stream survival.
+`evidence.py` checks the 27-cell matrix independently of completion markers.
 
 The matrix XCTest passing means execution/observation coverage, **not transport
 qualification**. An unchanged route or an explicit fetch/SSE/WebSocket error can
@@ -39,11 +48,13 @@ reuse, missing listener activity, or unavailable process restart is unmeasured.
 ## Gates and artifacts
 
 Build → actual-product/loader/xctestrun validation → simulator ready → install →
-one host-launch XCTest → one direct TLS XCTest → one cold CONNECT XCTest → one
-matrix XCTest. Simulator migration can overlap compilation, but readiness still
-must pass before installation; overlap is not a proven cure for migration stalls.
-Every test gate requires exactly one expected passing test. The early H1 controls
-prove the basic path; each H2 cell must independently prove its protocol/reuse.
+one host-launch XCTest → exactly three newest-runtime lifecycle cases → one direct
+TLS XCTest → one cold CONNECT XCTest → one matrix XCTest. Simulator migration can overlap
+compilation, but readiness still must pass before installation; overlap is not a
+proven cure for migration stalls. Every XCTest gate requires exactly one expected
+passing test. The lifecycle stage is an app-launch/terminate orchestration gate,
+not an XCTest count gate. The early H1 controls prove the basic path; each H2 cell
+must independently prove its protocol/reuse.
 
 `matrix-observations.json` contains per-case and per-operation verdicts, raw client
 results, authoritative routes, attempted routes, connection IDs, and old-stream

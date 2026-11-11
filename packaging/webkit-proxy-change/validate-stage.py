@@ -43,6 +43,8 @@ def validate_bundle(app: Path, build_log: Path) -> None:
         if bundle == test:
             for name in ("Anchor.der", "matrix.json"):
                 require((bundle / name).is_file(), f"{bundle.name}: missing {name}")
+        else:
+            require((bundle / "Anchor.der").is_file(), f"{bundle.name}: missing Anchor.der")
         print(json.dumps({"bundle": bundle.name, "executable": executable, "valid": True}))
 
     # Use the command that actually linked this bundle, not a new Xcode
@@ -80,7 +82,156 @@ def validate_bundle(app: Path, build_log: Path) -> None:
     print(json.dumps({"xctestrun": runs[0].name, "hostAndLoaderPathsValid": True}))
 
 
+def validate_lifecycle(out: Path) -> None:
+    lifecycle_cases = ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch")
+    events = [json.loads(line) for line in (out / "cert/fixture.jsonl").read_text().splitlines() if line.strip()]
+    observations = []
+    errors = []
+
+    def clients(case: str, step: str) -> list[dict]:
+        return [event for event in events if event.get("event") == "client"
+                and event.get("case") == case and event.get("step") == step]
+
+    def request_for(case: str, result: dict, route: str, path: str, after: int | None = None) -> dict:
+        matches = [event for event in events if event.get("event") == "request"
+                   and event.get("case") == case and event.get("id") == result.get("id")
+                   and event.get("route") == route and event.get("path") == path
+                   and event.get("connection") == result.get("connection")
+                   and event.get("method") == "GET"
+                   and (after is None or event.get("sequence", 0) > after)]
+        require(matches, f"{case}: missing correlated {route} GET {path} request")
+        return matches[-1] if after is not None else matches[0]
+
+    def write_observations() -> None:
+        (out / "lifecycle-observations.json").write_text(
+            json.dumps(observations, indent=2, sort_keys=True)
+        )
+
+    for case in lifecycle_cases:
+        try:
+            initial_events = clients(case, "lifecycle_initial")
+            result_events = clients(case, "lifecycle_result")
+            done_events = clients(case, "lifecycle_done")
+            require(len(initial_events) == 1, f"{case}: expected one lifecycle_initial event")
+            require(len(result_events) == 1, f"{case}: expected one lifecycle_result event")
+            require(len(done_events) == 1, f"{case}: expected one lifecycle_done event")
+            initial_client = initial_events[0]
+            result_client = result_events[0]
+            route_a = initial_client["result"]
+            route_a_page = route_a["page"]
+            route_a_warm = route_a["warmFetch"]
+            route_b = result_client["result"]["routeB"]
+            route_b_page = route_b["page"]
+            route_b_fetch = route_b["fetch"]
+            require(route_a_page.get("route") == "origin" and route_a_page.get("protocol") == "1.1"
+                    and route_a_page.get("proxyConnection") is None,
+                    f"{case}: route A page was not an unproxied H1 origin request")
+            require(route_a_warm.get("route") == "origin" and route_a_warm.get("protocol") == "1.1"
+                    and route_a_warm.get("ok") is True
+                    and route_a_page.get("connection") == route_a_warm.get("connection")
+                    and route_a_page.get("tcpConnection") == route_a_warm.get("tcpConnection"),
+                    f"{case}: route A warm GET did not reuse the page TLS/H1 identity")
+            require(route_b_page.get("route") in ("origin", "proxy-backend")
+                    and route_b_page.get("protocol") == "1.1"
+                    and route_b_fetch.get("route") in ("origin", "proxy-backend")
+                    and route_b_fetch.get("protocol") == "1.1"
+                    and route_b_fetch.get("ok") is True,
+                    f"{case}: lifecycle load did not produce correlated H1 results")
+
+            boundary_step = "lifecycle_ready" if case == "lifecycle-relaunch" else "lifecycle_before_route_b"
+            boundary_events = clients(case, boundary_step)
+            require(len(boundary_events) == 1, f"{case}: expected one {boundary_step} event")
+            boundary_sequence = boundary_events[0]["sequence"]
+            for connection in {route_a_page.get("connection"), route_a_warm.get("connection")}:
+                closes = [event for event in events if event.get("event") == "tls_close"
+                          and event.get("connection") == connection
+                          and event.get("sequence", 0) < boundary_sequence]
+                require(not closes, f"{case}: route A connection closed before lifecycle boundary")
+
+            initial_page_request = request_for(case, route_a_page, "origin", "/page")
+            warm_request = request_for(case, route_a_warm, "origin", "/fetch")
+            final_page_request = request_for(
+                case, route_b_page, route_b_page["route"], "/page", after=boundary_sequence
+            )
+            final_fetch_request = request_for(
+                case, route_b_fetch, route_b_fetch["route"], "/fetch", after=boundary_sequence
+            )
+
+            operation_connects = {}
+            for name, result, request in (("page", route_b_page, final_page_request),
+                                          ("fetch", route_b_fetch, final_fetch_request)):
+                if result["route"] == "proxy-backend":
+                    proxy_connection = result.get("proxyConnection")
+                    require(isinstance(proxy_connection, str),
+                            f"{case}: {name} proxy result lacks CONNECT identity")
+                    connects = [event for event in events if event.get("event") == "proxy_connect"
+                                and event.get("case") == case
+                                and event.get("connection") == proxy_connection]
+                    require(len(connects) == 1, f"{case}: {name} missing authoritative CONNECT identity")
+                    require(request.get("proxyConnection") == proxy_connection,
+                            f"{case}: {name} request/CONNECT identity mismatch")
+                    operation_connects[name] = connects[0]
+                else:
+                    require(result["route"] == "origin" and result.get("proxyConnection") is None
+                            and request.get("proxyConnection") is None,
+                            f"{case}: {name} direct result lacks an unproxied identity")
+                    operation_connects[name] = None
+
+            page_uses_route_b = route_b_page["route"] == "proxy-backend"
+            fetch_uses_route_b = route_b_fetch["route"] == "proxy-backend"
+            observed_route_b = page_uses_route_b and fetch_uses_route_b
+            result_payload = result_client["result"]
+            require(result_payload.get("newTrafficUsesRouteB") is observed_route_b,
+                    f"{case}: lifecycle Boolean disagrees with observed operations")
+            require(result_payload.get("newTrafficOperationsUseRouteB") == {
+                "page": page_uses_route_b, "fetch": fetch_uses_route_b
+            }, f"{case}: per-operation route Boolean disagrees with observed routes")
+            outcome = ("all-route-b" if observed_route_b else
+                       "none-route-b" if not page_uses_route_b and not fetch_uses_route_b else "mixed")
+            require(result_payload.get("newTrafficRouteOutcome") == outcome,
+                    f"{case}: lifecycle route outcome disagrees with observed operations")
+
+            if case == "lifecycle-relaunch":
+                require(initial_client.get("phase") == "prepare" and result_client.get("phase") == "resume",
+                        f"{case}: missing prepare/resume lifecycle phases")
+                require(initial_client.get("appPID") != result_client.get("appPID"),
+                        f"{case}: app PID did not change across kill/relaunch")
+            else:
+                require(initial_client.get("phase") == "single" and result_client.get("phase") == "single",
+                        f"{case}: unexpected lifecycle phase")
+            observations.append({
+                "case": case,
+                "initial": route_a,
+                "initialPageRequest": initial_page_request,
+                "warmRequest": warm_request,
+                "routeB": route_b,
+                "routeBPageRequest": final_page_request,
+                "routeBFetchRequest": final_fetch_request,
+                "connect": operation_connects,
+                "newTrafficUsesRouteB": observed_route_b,
+                "newTrafficOperationsUseRouteB": {
+                    "page": page_uses_route_b, "fetch": fetch_uses_route_b
+                },
+                "newTrafficRouteOutcome": outcome,
+                "streamSurvival": "not claimed",
+                "replaySafety": "unmeasured: GET only",
+            })
+        except (KeyError, StopIteration, ValueError) as error:
+            observations.append({"case": case, "verdict": "unmeasured", "error": str(error)})
+            errors.append(f"{case}: {error}")
+        write_observations()
+
+    require(not errors, "lifecycle evidence incomplete: " + "; ".join(errors))
+    print(json.dumps({"stage": "lifecycle", "cases": len(observations),
+                      "authoritativeRouteBObservations": len(observations),
+                      "negativeObservations": sum(not item.get("newTrafficUsesRouteB", False)
+                                                   for item in observations)}))
+
+
 def validate_evidence(stage: str, out: Path, matrix_path: Path) -> None:
+    if stage == "lifecycle":
+        validate_lifecycle(out)
+        return
     methods = {"test-launch": "testHostLaunch", "direct-minimal": "testDirectTLSMinimal",
                "cold-minimal": "testColdMinimal", "full-matrix": "testMatrix"}
     cases = json.loads(matrix_path.read_text())

@@ -11,7 +11,12 @@ import { execFileSync } from 'node:child_process';
 const out = process.argv[2];
 if (!out) throw new Error('usage: node fixture.mjs <output-directory>');
 const cases = JSON.parse(fs.readFileSync(new URL('./matrix.json', import.meta.url)));
-const byHost = new Map(cases.map(c => [`${c.id}.webkit-proxy.test`, c]));
+const lifecycleCases = [
+  {id: 'lifecycle-reload', origin: 'h1', proxy: 'h1'},
+  {id: 'lifecycle-recreate', origin: 'h1', proxy: 'h1'},
+  {id: 'lifecycle-relaunch', origin: 'h1', proxy: 'h1'},
+];
+const byHost = new Map([...cases, ...lifecycleCases].map(c => [`${c.id}.webkit-proxy.test`, c]));
 const key = fs.readFileSync(`${out}/key.pem`);
 const cert = fs.readFileSync(`${out}/cert.pem`);
 const events = [];
@@ -317,7 +322,8 @@ const control = http.createServer(async (req,res) => {
     } else if (url.pathname === '/health') {
       const ports = [443,18443,18444,18080,18082,18083,18090];
       result = {ok:servers.every(server => server.listening) && ports.every(port => listening.has(port)),
-        cases:cases.length, listening:[...listening].sort(), originAddresses:['127.0.0.1:443','127.0.0.2:443']};
+        cases:cases.length, lifecycleCases:lifecycleCases.length,
+        listening:[...listening].sort(), originAddresses:['127.0.0.1:443','127.0.0.2:443']};
     } else { throw new Error('unknown control operation'); }
     res.setHeader('content-type','application/json'); res.end(JSON.stringify(result));
   } catch (error) {

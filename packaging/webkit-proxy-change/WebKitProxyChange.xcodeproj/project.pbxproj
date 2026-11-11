@@ -184,6 +184,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8DF737FC42AD01D2CEB1E688 /* Anchor.der in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
