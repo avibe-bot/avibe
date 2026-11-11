@@ -17,6 +17,13 @@ extension Notification.Name {
 final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
+    static let foregroundPresentationOptions: UNNotificationPresentationOptions = [
+        .banner,
+        .list,
+        .sound,
+        .badge,
+    ]
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [
@@ -46,6 +53,16 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
             name: .avibePushDidFailToRegister,
             object: nil
         )
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (
+            UNNotificationPresentationOptions
+        ) -> Void
+    ) {
+        completionHandler(Self.foregroundPresentationOptions)
     }
 
     func userNotificationCenter(

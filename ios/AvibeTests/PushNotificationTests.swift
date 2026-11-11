@@ -17,6 +17,13 @@ final class PushNotificationTests: XCTestCase {
         XCTAssertNotEqual(value, "AVIBE_PUSH_FALLBACK")
     }
 
+    func testForegroundNotificationsRequestVisiblePresentation() {
+        XCTAssertEqual(
+            AvibeAppDelegate.foregroundPresentationOptions,
+            [.banner, .list, .sound, .badge]
+        )
+    }
+
     func testSharedAccessGroupResolverRejectsUnexpandedOrMissingValues() {
         XCTAssertEqual(
             try? PushKeychainStore.resolveSharedAccessGroup(
