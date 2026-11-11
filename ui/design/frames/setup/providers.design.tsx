@@ -72,6 +72,8 @@ const narrowed = {
 };
 const keyCard = `.setup-provider-card[data-provider="${savedKey.vendor}"]`;
 const saved = (api: Record<string, unknown>): SetupSpec => ({ sources: [savedKey], api });
+/** A key that already supplies its list: the narrower list waits on the person. */
+const supplying = (api: Record<string, unknown>): SetupSpec => ({ sources: [{ ...savedKey, models: anthropicKey.models }], api });
 
 const designFrames = frames([
   screen('default', '设置向导 · 模型供应商 · 已添加 OpenAI 与 Anthropic'),
@@ -90,7 +92,7 @@ const designFrames = frames([
   screen('key-checking', '设置向导 · 模型供应商 · 刚保存的 Key 正在检查', saved({ [check]: UNANSWERED })),
   screen('key-connected', '设置向导 · 模型供应商 · Key 已连接，列出模型数', saved(listed)),
   screen('key-rejected', '设置向导 · 模型供应商 · Key 被拒绝，继续旁提示没有供应商通过', saved(refused)),
-  screen('key-list-changed', '设置向导 · 模型供应商 · Key 可用但模型列表变少', saved(narrowed)),
+  screen('key-list-changed', '设置向导 · 模型供应商 · Key 可用但模型列表变少', supplying(narrowed)),
   screen('key-dialog', '设置向导 · 模型供应商 · 点被拒绝的卡片：换 Key 或移除', saved(refused), {
     click: [...toProviders, keyCard],
     hover: undefined,
@@ -99,7 +101,7 @@ const designFrames = frames([
     click: [...toProviders, keyCard, 'role=button[name="{t:onboarding.providers.editRemove}"]'],
     hover: undefined,
   }),
-  screen('key-list-changed-dialog', '设置向导 · 模型供应商 · 模型列表变少：说明并更新列表', saved(narrowed), {
+  screen('key-list-changed-dialog', '设置向导 · 模型供应商 · 模型列表变少：说明并更新列表', supplying(narrowed), {
     click: [...toProviders, keyCard],
     hover: undefined,
   }),

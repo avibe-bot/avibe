@@ -180,8 +180,9 @@ export function byCheckAttention(
  * Whether the line beside Continue has to say that nothing passed.
  *
  * Only once every check on the stage has answered, and only when none of the staged
- * sources can supply a model: one proven before this visit (nothing to check) or one
- * whose listing came back with models. A listing with no models passes nothing — the
+ * sources can supply a model: one proven before this visit (nothing to check), one
+ * whose listing came back with models, or a working key whose new list is waiting
+ * on the person while the list it supplies still stands. A listing with no models passes nothing — the
  * next screen picks a model per assistant, and there would be none to pick.
  */
 export function nothingPassed(
@@ -198,6 +199,10 @@ export function nothingPassed(
     const check = checks.get(sourceCheckKey(source));
     if (check && check.kind !== 'checking') {
       if (check.kind === 'connected' && check.models > 0) return false;
+      // The key works and the list it already supplies stands until the person
+      // updates it: the card leads to that question, and saying here that nothing
+      // passed would be false.
+      if (check.kind === 'changed' && usableSource(source) && suppliedModelCount(source) > 0) return false;
       continue;
     }
     if (sourceNeedsCheck(source)) {

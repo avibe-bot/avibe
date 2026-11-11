@@ -619,9 +619,9 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(within(cardFor('anthropic')).getByText('Connected · 1 model')).toBeTruthy());
   });
 
-  it('AUTH-SETUP-139 asks before a check that would drop routed models, and passes nothing until then', async () => {
+  it('AUTH-SETUP-139 asks before a check that would drop routed models, and still counts the working key', async () => {
     serve({
-      sources: [savedKey('src_narrow', 'anthropic', { state: { status: 'error', detail_key: 'models.source.error.unclassified' }, models: [modelOf('claude-opus'), modelOf('claude-sonnet')] })],
+      sources: [savedKey('src_narrow', 'anthropic', { models: [modelOf('claude-opus'), modelOf('claude-sonnet')] })],
     });
     const hop = { backend: 'vibey', menu_model: 'claude-opus', source_id: 'src_narrow', model_id: 'claude-opus', position: 1 };
     const gap = { backend: 'vibey', model_id: 'claude-opus', agents: ['main'] };
@@ -641,7 +641,9 @@ describe('ProvidersScreen — the stage', () => {
     // The key works, but the cached two models are not what it supplies now.
     await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('changed'));
     expect(within(cardFor('anthropic')).getByText('Model list changed · review')).toBeTruthy();
-    expect(summary()?.textContent).toBe('No provider passed the check, so assistants have no model yet.');
+    // The key works and its current list still supplies the assistants.
+    expect(summary()?.textContent).toBe('1 provider added: Anthropic');
+    expect(summary()?.dataset.tone).toBeUndefined();
 
     await user.click(cardFor('anthropic'));
     const dialog = await screen.findByRole('dialog');
