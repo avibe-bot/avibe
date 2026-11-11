@@ -3831,6 +3831,7 @@
         "enable": "Enable notifications",
         "enabled": "Notifications on",
         "enabledPwa": "PWA notifications on",
+        "registering": "Registering this device…",
         "disable": "Disable",
         "disablePending": "Notifications are off; device cleanup is still pending.",
         "disableFailed": "Notifications are off, but cleanup could not be confirmed. Try again later.",
@@ -3840,6 +3841,7 @@
         "testBody": "Notifications are ready.",
         "testSent": "Test notification sent",
         "testFailed": "Test notification failed",
+        "testRegistering": "Still registering this device; try again in a moment",
         "normalBlocked": "normal notifications are currently skipped for you ({{policy}} policy: {{disposition}})"
       },
       "navUnread": "Inbox, {{count}} unread",
