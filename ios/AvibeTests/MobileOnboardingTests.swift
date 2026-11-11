@@ -761,6 +761,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.openExternal",
                 "app.setAccountActionAvailable",
                 "app.showAccount",
+                "badge.set",
                 "haptics.impact",
                 "haptics.notify",
                 "haptics.selection",
