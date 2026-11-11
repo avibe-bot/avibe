@@ -830,7 +830,7 @@ scenarios:
       - ui/src/components/onboarding/AssistantSetup.test.tsx
       - ui/src/components/onboarding/useSetupModelChoice.test.ts
       - ui/e2e/onboarding-fidelity/pm-main-flow.spec.ts
-  - id: AUTH-SETUP-164
+  - id: AUTH-SETUP-166
     name: Setup picks a model no provider lists (a catalog model or a typed ID) and completes on it
     status: covered
     kind: happy_path

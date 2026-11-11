@@ -5813,7 +5813,7 @@ def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes
     ],
 )
 def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_path, model_id, origin, row):
-    """AUTH-SETUP-164: unlisted pick -> catalog write with no supplier promise -> Agent model -> runnable route -> completion.
+    """AUTH-SETUP-166: unlisted pick -> catalog write with no supplier promise -> Agent model -> runnable route -> completion.
 
     The setup picker also offers what no provider lists: a catalog model, or the ID the
     user typed. Neither showed a supplier, so the catalog write states no expectation for
