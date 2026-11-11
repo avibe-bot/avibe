@@ -694,6 +694,21 @@ def keypair_reply(vector: dict, **overrides) -> dict:
     }
 
 
+@pytest.mark.parametrize("keypair", [
+    {"curve": "ed25519", "source": "generate"},
+    {"curve": "ed25519", "source": "import", "format": "base58-secret"},
+])
+def test_invalid_protection_rejects_solana_keypair_before_avault_dispatch(avault, keypair):
+    payload = {"name": "SOL", "kind": "keypair", "protection": "bogus", "keypair": keypair}
+    if keypair["source"] == "import":
+        payload["blind_box"] = BLIND_BOX
+    with pytest.raises(api.VaultApiError) as error:
+        api.create_vault_secret(payload)
+    assert error.value.code == "invalid_protection"
+    assert avault.calls == []
+    assert api.get_vault_secrets()["secrets"] == []
+
+
 @pytest.mark.parametrize("source", ["generate", "solana-cli-json", "base58-secret"])
 def test_avault_creates_the_solana_key_and_python_stores_only_public_metadata(avault, source):
     """Python relays the request and the opaque blind box; the seed stays inside avault."""

@@ -3834,6 +3834,8 @@ def create_vault_secret(
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     protection = str(payload.get("protection") or "standard").strip().lower()
+    if protection not in {"standard", "protected"}:
+        raise VaultApiError("invalid protection tier", code="invalid_protection")
     establishing_vmk = bool(payload.get("establishing_vmk"))
     kind = str(payload.get("kind") or "static").strip().lower()
     signer_kind = payload.get("signer_kind")
