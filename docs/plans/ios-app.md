@@ -145,6 +145,7 @@ interface AvibeNative {
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
+| [`direct`](remote-direct-ios.md) | `direct.status()` → `{transport: "tunnel" \| "direct", sequence: number}`. Read-only, no parameters. | `direct.transportChanged({transport, sequence})` |
 
 Phase 0a PR 2 implements this v1 subset:
 
@@ -216,6 +217,36 @@ Rules:
 - **Fixed surface**: the method set is compiled into the shell. Web content can
   call it but cannot extend it, which is what keeps the app within App Review
   2.5.2 (section 13).
+
+### `direct`: which path carries the instance origin
+
+Proposed for remote direct paths ([the App side](remote-direct-ios.md)); not
+implemented by any shell yet. The shell can carry the instance origin's
+connections over a direct path instead of Cloudflare Tunnel. The origin does
+not change, so the Web UI needs to know only one thing: connections it opened
+before a change stay on the path they were opened on.
+
+- `transport` is `"tunnel"` (Cloudflare Tunnel, the default) or `"direct"`.
+  It describes the calling document's instance; a shell with no direct
+  transport always answers `"tunnel"` and never emits the event.
+- `sequence` is an integer that grows with every change while the shell
+  process lives. The call and the event carry the same shape, so the Web UI
+  keeps the answer with the highest `sequence` and ignores an older one that
+  arrives late.
+- The shell emits `direct.transportChanged` after the change has been applied
+  to the data store, to every instance-origin main frame it manages, the
+  primary and instance-origin child windows alike.
+- On the event the Web UI rebuilds its long-lived connections (the SSE stream
+  and terminal WebSockets) through their existing reconnect owners. It never
+  replays a request whose result is unknown. Without the capability, nothing
+  changes.
+- `direct.status()` takes no parameters; any parameter is `invalid_argument`.
+- The surface is closed on purpose. No call lets web content choose an
+  address, start a probe, or supply a rendezvous answer, and the answer
+  carries no address, endpoint identity, or network name. Show Pages are
+  same-origin with the Workbench and can reach the bridge, so anything a call
+  accepted, an Agent-authored page could supply. Native code fetches the
+  rendezvous itself.
 
 ## 5. Composer and keyboard
 
