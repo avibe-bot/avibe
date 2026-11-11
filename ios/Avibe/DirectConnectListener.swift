@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import os
 
 /// Bounds on one loopback CONNECT listener. The head limits are the
 /// instance's own (docs/plans/remote-direct-ingress.md section 3).
@@ -244,16 +243,6 @@ actor DirectConnectListener {
     private var relays: [UUID: Task<Void, Never>] = [:]
     private var isStopped = false
 
-    /// How many listening sockets this process has asked the system for on
-    /// behalf of the direct path. Counted in `start()`, the one place that
-    /// makes one, so a build that never activates the path leaves it at
-    /// zero, and a test can read that.
-    static var socketsCreated: Int {
-        createdSockets.withLock { $0 }
-    }
-
-    private static let createdSockets = OSAllocatedUnfairLock(initialState: 0)
-
     init(
         authority: DirectAuthority,
         limits: DirectConnectLimits = .standard,
@@ -279,7 +268,6 @@ actor DirectConnectListener {
             port: .any
         )
         let listener = try NWListener(using: parameters, on: .any)
-        Self.createdSockets.withLock { $0 += 1 }
         self.listener = listener
         listener.newConnectionHandler = { [weak self, queue] connection in
             guard let self else {

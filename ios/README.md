@@ -282,16 +282,14 @@ observes the App entering the background and the foreground; without a
 transport each of those callbacks returns without doing anything. The bridge
 advertises `direct: 1`.
 
-The tests hold the inactive state by counting, not by looking at the end
-state: `DirectRouteOwner.writeCount` counts every write of
-`proxyConfigurations` at the only assignment in the App, and
-`DirectConnectListener.socketsCreated` counts every listening socket at the
-only place one is made. Both must stay where they were across launch,
-opening and switching instances, background and foreground, rotation, and
-sign-out. A scan of the process's listening sockets, on any address of
-either family, is the second line, and the tests also observe the real
-setter on the account's stores. The tests that install a route show that the
-counters, the scan and the observer do move.
+The tests hold the inactive state from outside the App's code, not by
+looking at the end state. They count every call of WebKit's
+`proxyConfigurations` setter in the process, on any store, from before the
+App exists; the count must not move across launch, opening and switching
+instances, background and foreground, rotation, and sign-out. They scan the
+process's listening sockets, on any address of either family, at each of
+those steps. The tests that install a route show that the count and the scan
+do move.
 
 - `DirectTransport.swift` is the seam: `DirectTransporting` is told which
   instance is selected, reports when its path is usable or lost, and opens

@@ -61,12 +61,6 @@ struct DirectPathStatus: Equatable {
 /// set here applies to all of them, and nothing else may set one.
 @MainActor
 final class DirectRouteOwner {
-    /// How many times this process has written `proxyConfigurations`. Every
-    /// write goes through `write(_:to:)` below, the only assignment in the
-    /// App, so a build that never installs a route leaves this at zero, and
-    /// a test can read that.
-    private(set) static var writeCount = 0
-
     private let websiteDataStore: AccountWebsiteDataStore
     private weak var routedStore: WKWebsiteDataStore?
     private(set) var installedTag: DirectRouteTag?
@@ -90,7 +84,7 @@ final class DirectRouteOwner {
         route.matchDomains = [tag.target.authority.host]
         route.allowFailover = false
         let store = websiteDataStore.dataStore
-        write([route], to: store)
+        store.proxyConfigurations = [route]
         routedStore = store
         installedTag = tag
         return true
@@ -102,19 +96,9 @@ final class DirectRouteOwner {
         guard installedTag != nil else {
             return
         }
-        if let routedStore {
-            write([], to: routedStore)
-        }
+        routedStore?.proxyConfigurations = []
         routedStore = nil
         installedTag = nil
-    }
-
-    private func write(
-        _ configurations: [ProxyConfiguration],
-        to store: WKWebsiteDataStore
-    ) {
-        store.proxyConfigurations = configurations
-        Self.writeCount += 1
     }
 }
 

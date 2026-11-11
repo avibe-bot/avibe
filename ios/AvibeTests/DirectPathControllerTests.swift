@@ -1,4 +1,5 @@
 import Network
+import ObjectiveC
 import UIKit
 import WebKit
 import XCTest
@@ -13,20 +14,24 @@ final class DirectPathControllerTests: XCTestCase {
 
     // MARK: Inactive without a transport
 
-    /// Counted, not inferred from the end state: no listening socket is
-    /// ever created and `proxyConfigurations` is never written, on any
-    /// store, at any step. `testTheRouteIsInstalledOnlyWhile...` shows the
-    /// same counters and the same observer do move when a route is used.
+    /// Observed, not inferred from the end state: WebKit's
+    /// `proxyConfigurations` setter is never called, on any store, and no
+    /// listening socket exists at any step.
+    /// `testTheRouteIsInstalledOnlyWhile...` shows the same count and the
+    /// same scan do move when a route is used.
     @MainActor
     func testWithoutATransportNoListenerIsCreatedAndNoRouteIsEverWritten() async throws {
         try assertSocketScanSeesListeners()
         let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
         let harness = try Harness(transport: nil, test: self)
 
         func assertUntouched(_ step: String) throws {
-            XCTAssertEqual(harness.routeWrites, 0, step)
-            XCTAssertEqual(harness.observedRouteWrites, 0, step)
-            XCTAssertEqual(harness.listenersCreated, 0, step)
+            XCTAssertEqual(
+                try ProxyConfigurationWrites.count(),
+                routeWrites,
+                step
+            )
             XCTAssertEqual(try newListeners(since: listening), [], step)
             XCTAssertEqual(harness.routedStoreCount, 0, step)
             XCTAssertEqual(harness.changes, [], step)
@@ -56,9 +61,6 @@ final class DirectPathControllerTests: XCTestCase {
         try assertUntouched("signed out")
         try await Task.sleep(for: .milliseconds(200))
         try assertUntouched("afterwards")
-        // Every store the account ever had was watched, the rotated ones
-        // included.
-        XCTAssertGreaterThan(harness.observedStoreCount, 2)
     }
 
     // MARK: Activation and fallback
@@ -66,6 +68,7 @@ final class DirectPathControllerTests: XCTestCase {
     @MainActor
     func testTheRouteIsInstalledOnlyWhileTheTransportReportsAUsablePath() async throws {
         let listening = try listeningSockets()
+        let routeWrites = try ProxyConfigurationWrites.count()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try harness.select("instance-1")
@@ -79,19 +82,14 @@ final class DirectPathControllerTests: XCTestCase {
         // Selecting is not activating.
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(try newListeners(since: listening), [])
-        XCTAssertEqual(harness.routeWrites, 0)
-        XCTAssertEqual(harness.observedRouteWrites, 0)
-        XCTAssertEqual(harness.listenersCreated, 0)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
 
         harness.transport?.report(.usable(generation: "g1"), for: target)
         try await eventually { harness.changes == [self.direct] }
         XCTAssertEqual(harness.currentStoreRouteCount, 1)
         XCTAssertEqual(try newListeners(since: listening).map(\.address), ["127.0.0.1"])
-        // One listener, and one write that both the App's counter and the
-        // observer of the real setter saw.
-        XCTAssertEqual(harness.listenersCreated, 1)
-        XCTAssertEqual(harness.routeWrites, 1)
-        XCTAssertEqual(harness.observedRouteWrites, 1)
+        // One listener, and one call of the real setter.
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 1)
         XCTAssertEqual(
             harness.controller.status(for: harness.origin("instance-1")),
             DirectPathStatus(transport: .direct, sequence: 1)
@@ -106,8 +104,7 @@ final class DirectPathControllerTests: XCTestCase {
         harness.transport?.report(.lost, for: target)
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(harness.changes, [direct, tunnel])
-        XCTAssertEqual(harness.routeWrites, 2)
-        XCTAssertEqual(harness.observedRouteWrites, 2)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 2)
         XCTAssertEqual(
             harness.controller.status(for: harness.origin("instance-1")),
             DirectPathStatus(transport: .tunnel, sequence: 2)
@@ -120,9 +117,7 @@ final class DirectPathControllerTests: XCTestCase {
             harness.changes == [self.direct, self.tunnel, self.direct]
         }
         XCTAssertEqual(harness.currentStoreRouteCount, 1)
-        XCTAssertEqual(harness.listenersCreated, 2)
-        XCTAssertEqual(harness.routeWrites, 3)
-        XCTAssertEqual(harness.observedRouteWrites, 3)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 3)
     }
 
     @MainActor
@@ -556,8 +551,6 @@ private final class Harness {
     let transport: StandInDirectTransport?
     private let stores = InMemoryAccountStores()
     private let notifications = NotificationCenter()
-    private let routeWritesAtStart = DirectRouteOwner.writeCount
-    private let listenersAtStart = DirectConnectListener.socketsCreated
     private(set) var statuses: [DirectPathStatus] = []
 
     private(set) lazy var controller: DirectPathController = DirectPathController(
@@ -632,27 +625,6 @@ private final class Harness {
         // Each change has the next sequence number.
         XCTAssertEqual(statuses.map(\.sequence), Array(1..<(statuses.count + 1)))
         return statuses.map(\.transport)
-    }
-
-    /// Writes of `proxyConfigurations` since this harness was made, as the
-    /// App counts them at its one assignment.
-    var routeWrites: Int {
-        DirectRouteOwner.writeCount - routeWritesAtStart
-    }
-
-    /// The same writes as the real setter saw them, on every store this
-    /// account has had.
-    var observedRouteWrites: Int {
-        stores.observer.writes
-    }
-
-    var observedStoreCount: Int {
-        stores.created.count
-    }
-
-    /// Listening sockets the App has created since this harness was made.
-    var listenersCreated: Int {
-        DirectConnectListener.socketsCreated - listenersAtStart
     }
 
     /// How many account stores, current or rotated away, have a route.
@@ -750,14 +722,12 @@ private final class PageLoad: NSObject, WKNavigationDelegate {
 @MainActor
 private final class InMemoryAccountStores {
     private(set) var created: [WKWebsiteDataStore] = []
-    let observer = RouteWriteObserver()
 
     var operations: AccountWebsiteDataStoreOperations {
         AccountWebsiteDataStoreOperations(
             makeDataStore: { [self] _ in
                 let store = WKWebsiteDataStore.nonPersistent()
                 created.append(store)
-                observer.observe(store)
                 return store
             },
             removeIdentifier: { _ in
@@ -854,36 +824,48 @@ private final class StandInAccountTransport: MobileAuthTransporting {
     }
 }
 
-/// Counts real calls of the `proxyConfigurations` setter on the stores it is
-/// given, by key-value observing them. It sees a write wherever it comes
-/// from, including one that sets the value the store already had.
-final class RouteWriteObserver: NSObject {
-    private(set) var writes = 0
-    private var stores: [WKWebsiteDataStore] = []
+/// Counts every call of WebKit's `proxyConfigurations` setter in this
+/// process, on any store, from the first time it is asked. It replaces the
+/// setter's implementation with one that counts and then calls the original,
+/// so it sees a write wherever it comes from, including one that sets the
+/// value the store already had, and on stores made later. Shared with the
+/// App-level tests.
+enum ProxyConfigurationWrites {
+    struct SetterNotFound: Error {}
 
-    func observe(_ store: WKWebsiteDataStore) {
-        stores.append(store)
-        store.addObserver(
-            self,
-            forKeyPath: "proxyConfigurations",
-            options: [],
-            context: nil
-        )
-    }
-
-    override func observeValue(
-        forKeyPath keyPath: String?,
-        of object: Any?,
-        change: [NSKeyValueChangeKey: Any]?,
-        context: UnsafeMutableRawPointer?
-    ) {
-        writes += 1
-    }
-
-    deinit {
-        for store in stores {
-            store.removeObserver(self, forKeyPath: "proxyConfigurations")
+    private static let lock = NSLock()
+    private static var calls = 0
+    private static let installed: Bool = {
+        let selector = NSSelectorFromString("setProxyConfigurations:")
+        guard
+            let method = class_getInstanceMethod(
+                WKWebsiteDataStore.self,
+                selector
+            )
+        else {
+            return false
         }
+        typealias Setter = @convention(c) (AnyObject, Selector, AnyObject?) -> Void
+        let original = unsafeBitCast(
+            method_getImplementation(method),
+            to: Setter.self
+        )
+        let counting: @convention(block) (AnyObject, AnyObject?) -> Void = {
+            store, configurations in
+            lock.withLock { calls += 1 }
+            original(store, selector, configurations)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(counting))
+        return true
+    }()
+
+    /// The calls so far. Throws if the setter cannot be found, so a count
+    /// that cannot see is never read as "no writes".
+    static func count() throws -> Int {
+        guard installed else {
+            throw SetterNotFound()
+        }
+        return lock.withLock { calls }
     }
 }
 

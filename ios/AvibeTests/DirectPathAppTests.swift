@@ -13,24 +13,22 @@ final class DirectPathAppTests: XCTestCase {
 
     // MARK: The App as shipped
 
-    /// Counted from before the App exists, and checked at every step: the
-    /// App creates no listening socket and never writes
-    /// `proxyConfigurations`. The counters sit at the one place each act can
-    /// happen (`DirectConnectListener.start`, `DirectRouteOwner.write`); the
-    /// socket scan and the observer of the real setter are a second line.
-    /// The test with a transport, below, shows all four do move.
+    /// Observed from before the App exists, and checked at every step:
+    /// WebKit's `proxyConfigurations` setter is never called, on any store,
+    /// and the App has no listening socket. The test with a transport,
+    /// below, shows the count and the scan do move.
     @MainActor
     func testTheAppAsShippedCreatesNoListenerAndNeverWritesARoute() async throws {
         try assertSocketScanSeesListeners()
-        let routeWrites = DirectRouteOwner.writeCount
-        let listeners = DirectConnectListener.socketsCreated
-        let observer = RouteWriteObserver()
+        let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
 
         func assertUntouched(_ step: String) throws {
-            XCTAssertEqual(DirectRouteOwner.writeCount, routeWrites, step)
-            XCTAssertEqual(DirectConnectListener.socketsCreated, listeners, step)
-            XCTAssertEqual(observer.writes, 0, step)
+            XCTAssertEqual(
+                try ProxyConfigurationWrites.count(),
+                routeWrites,
+                step
+            )
             XCTAssertEqual(try newListeners(since: listening), [], step)
         }
 
@@ -41,7 +39,6 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         let firstStore = app.runtimeWebsiteDataStore
-        observer.observe(firstStore)
         try assertUntouched("launched and signed in")
 
         let runtime = try select("instance-1", in: app)
@@ -69,7 +66,6 @@ final class DirectPathAppTests: XCTestCase {
         _ = try await app.mobileSessionCoordinator.logout()
         trackStore(of: app)
         XCTAssertFalse(app.runtimeWebsiteDataStore === firstStore)
-        observer.observe(app.runtimeWebsiteDataStore)
         try assertUntouched("signed out and the store rotated")
         try await Task.sleep(for: .milliseconds(200))
         try assertUntouched("afterwards")
@@ -84,15 +80,12 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testATransportChangeReachesThePageAndTheRouteFollowsTheRuntime() async throws {
         let transport = StandInDirectTransport()
-        let routeWrites = DirectRouteOwner.writeCount
-        let listeners = DirectConnectListener.socketsCreated
-        let observer = RouteWriteObserver()
+        let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
         let app = try await makeApp(directTransport: transport) {
             listening = try listeningSockets()
         }
         let firstStore = app.runtimeWebsiteDataStore
-        observer.observe(firstStore)
 
         let runtime = try select("instance-1", in: app)
         let page = try await showRuntimePage(app, runtime)
@@ -103,9 +96,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(before, #"{"sequence":0,"transport":"tunnel"}"#)
         // Selecting is not activating: what the shipped-App test counts is
         // still untouched here, with a transport present.
-        XCTAssertEqual(DirectRouteOwner.writeCount, routeWrites)
-        XCTAssertEqual(DirectConnectListener.socketsCreated, listeners)
-        XCTAssertEqual(observer.writes, 0)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
         XCTAssertEqual(try newListeners(since: listening), [])
 
         // The transport finds a path: the store gets the route, and the
@@ -117,10 +108,8 @@ final class DirectPathAppTests: XCTestCase {
             try await page.changes() == #"[{"sequence":1,"transport":"direct"}]"#
         }
         XCTAssertEqual(try newListeners(since: listening).map(\.address), ["127.0.0.1"])
-        // The same counters, scan and observer do move once a route is used.
-        XCTAssertGreaterThan(DirectRouteOwner.writeCount, routeWrites)
-        XCTAssertGreaterThan(DirectConnectListener.socketsCreated, listeners)
-        XCTAssertGreaterThan(observer.writes, 0)
+        // The same count and the same scan do move once a route is used.
+        XCTAssertGreaterThan(try ProxyConfigurationWrites.count(), routeWrites)
         let after = try await page.directStatus()
         XCTAssertEqual(after, #"{"sequence":1,"transport":"direct"}"#)
         page.close()
@@ -164,8 +153,7 @@ final class DirectPathAppTests: XCTestCase {
         let transport = StandInDirectTransport()
         let firstHold = PushHold(path: "/api/push/hold-1")
         let secondHold = PushHold(path: "/api/push/hold-2")
-        let routeWrites = DirectRouteOwner.writeCount
-        let listeners = DirectConnectListener.socketsCreated
+        let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
         let app = try await makeApp(
             directTransport: transport,
@@ -204,8 +192,7 @@ final class DirectPathAppTests: XCTestCase {
             runtime: runtime,
             in: app
         )
-        XCTAssertEqual(DirectRouteOwner.writeCount, routeWrites)
-        XCTAssertEqual(DirectConnectListener.socketsCreated, listeners)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
         XCTAssertEqual(store.proxyConfigurations.count, 0)
         XCTAssertEqual(try newListeners(since: listening), [])
 
@@ -242,7 +229,7 @@ final class DirectPathAppTests: XCTestCase {
         secondHold.release.signal()
         try await secondManagement.value
         try await eventually { try newListeners(since: listening).isEmpty }
-        let writes = DirectRouteOwner.writeCount
+        let writes = try ProxyConfigurationWrites.count()
         try await reportUsableWhileTheAccountIsIdle(
             transport,
             for: secondTarget,
@@ -250,7 +237,7 @@ final class DirectPathAppTests: XCTestCase {
             runtime: second,
             in: app
         )
-        XCTAssertEqual(DirectRouteOwner.writeCount, writes)
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), writes)
         XCTAssertEqual(store.proxyConfigurations.count, 0)
         XCTAssertEqual(try newListeners(since: listening), [])
     }
