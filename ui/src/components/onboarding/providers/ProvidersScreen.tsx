@@ -762,7 +762,9 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     });
     // Said beside Continue rather than discovered on the next screen: every key on the
     // stage has been asked, and none of them can supply a model.
-    const warnNothingPassed = sourceRead === 'read' && hubAdmitted && nothingPassed(sources, checks);
+    // A picture the screen could not read keeps its own error and Retry instead.
+    const warnNothingPassed = summary.kind !== 'error' && sourceRead === 'read' && hubAdmitted
+      && nothingPassed(sources, checks);
     const summaryTone = summary.kind === 'error' || warnNothingPassed ? 'error' : null;
     const summaryText = warnNothingPassed
       ? t('onboarding.providers.nothingPassed')
