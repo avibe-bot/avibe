@@ -1854,10 +1854,19 @@ def _not_an_out_of_band_interruption() -> Any:
     NULL``. Nullness would also exclude ``no_terminal_result`` /
     ``refused_concurrent_turn`` / ``transport_unavailable`` / ``queue_hold_expired``,
     which are the ordinary per-fire failures this whole feature exists to surface.
+    A missed schedule likewise ran no work and cannot suppress later execution failures.
     """
 
     reason = literal_column(INTERRUPT_REASON_SQL)
-    return or_(reason.is_(None), reason.notin_(sorted(RUN_INTERRUPTION_REASONS)))
+    missed = case(
+        (func.json_valid(agent_runs.c.metadata_json) == 1,
+         func.json_extract(agent_runs.c.metadata_json, "$.owed_failure_notice.schedule_missed")),
+        else_=None,
+    )
+    return and_(
+        or_(reason.is_(None), reason.notin_(sorted(RUN_INTERRUPTION_REASONS))),
+        func.coalesce(missed, 0) != 1,
+    )
 
 
 def _is_a_definition_verdict() -> Any:
@@ -4343,6 +4352,7 @@ class SQLiteBackgroundTaskStore:
         expected_updated_at: Optional[str] = None,
         expected_job_id: Optional[str] = None,
         terminal_error: Optional[str] = None,
+        schedule_missed: bool = False,
         drop_definition_resource_context: bool = False,
     ) -> Optional[dict[str, Any]]:
         """Enqueue one internally consistent snapshot of a live definition."""
@@ -4357,6 +4367,8 @@ class SQLiteBackgroundTaskStore:
             raise ValueError(
                 "expected run_at and scheduler job id must be supplied together"
             )
+        if schedule_missed and terminal_error is None:
+            raise ValueError("a missed schedule requires a terminal error")
         if terminal_error is not None and expected_run_at is None:
             raise ValueError("a terminal enqueue error requires a one-shot identity")
         values = self._run_values(payload)
@@ -4548,6 +4560,27 @@ class SQLiteBackgroundTaskStore:
             )
             if schedule_consumed:
                 now = _utc_now_iso()
+                retirement_values = {
+                    "enabled": 0,
+                    "retired_at": now,
+                    "retirement_reason": (
+                        TASK_RETIREMENT_SCHEDULE_MISSED
+                        if schedule_missed else TASK_RETIREMENT_SCHEDULE_CONSUMED
+                    ),
+                    "last_run_id": values["id"],
+                    "updated_at": now,
+                }
+                if schedule_missed:
+                    # An earlier manual execution is not the result of this fire.
+                    definition_metadata = _json_loads(definition["metadata_json"], {})
+                    if not isinstance(definition_metadata, dict):
+                        definition_metadata = {}
+                    definition_metadata.pop(COMMAND_TIMED_OUT_METADATA_KEY, None)
+                    definition_metadata.pop(TASK_LAST_RESULT_STATUS_METADATA_KEY, None)
+                    retirement_values.update(
+                        last_run_at=None, last_error=None, last_exit_code=None,
+                        metadata_json=_json_dumps(definition_metadata),
+                    )
                 consumed = conn.execute(
                     update(run_definitions)
                     .where(run_definitions.c.id == definition_id)
@@ -4563,13 +4596,7 @@ class SQLiteBackgroundTaskStore:
                             run_definitions.c.updated_at == expected_updated_at,
                         )
                     )
-                    .values(
-                        enabled=0,
-                        retired_at=now,
-                        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
-                        last_run_id=values["id"],
-                        updated_at=now,
-                    )
+                    .values(**retirement_values)
                 )
                 if not consumed.rowcount:
                     return None
@@ -4601,6 +4628,12 @@ class SQLiteBackgroundTaskStore:
                         row_metadata_json=values["metadata_json"],
                         now=now,
                     )
+                    if schedule_missed:
+                        # A missed fire is its own bounded event, not another failed
+                        # execution in a streak of earlier manual runs.
+                        notice_metadata = _json_loads(values["metadata_json"], {})
+                        notice_metadata[OWED_FAILURE_NOTICE_KEY]["schedule_missed"] = True
+                        values["metadata_json"] = _json_dumps(notice_metadata)
             enqueue_run_in_connection(conn, values)
         return {
             "agent_name": values["agent_name"],

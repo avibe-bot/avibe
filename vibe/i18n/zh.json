@@ -154,6 +154,7 @@
     },
     "task": {
       "resultNotRecorded": "无法记录本次运行的结果：任务在运行期间被回收、改绑或删除，其存储状态未发生变化。",
+      "scheduleMissed": "原定于 {run_at} 执行的一次性任务未运行：调度器恢复时已超过五分钟宽限期。任务已结束；如需手动运行，请先确认任务内容仍适用。",
       "schedulerCallbackFailed": "计划触发在入队前失败：{detail}",
       "scheduleReplaced": "本次计划触发属于任务的旧调度版本，因此未执行。"
     },
