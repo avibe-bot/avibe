@@ -120,7 +120,40 @@ def test_offer_describes_the_endpoint_and_admits_the_client():
     assert not rendezvous.is_admitted("d" * 64)
 
 
-def test_generation_changes_exactly_when_the_endpoint_or_its_addresses_change():
+def test_admission_listener_notifies_before_offer_return_and_on_extension():
+    """The notice hook runs before the route can return and repeats on refresh."""
+    rendezvous = DirectRendezvous(_Clock())
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    events: list[tuple[str, int]] = []
+    order: list[str] = []
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl: (events.append((endpoint_id, ttl)), order.append("notice")))
+
+    _offer(rendezvous)
+    order.append("answer")
+    _offer(rendezvous)
+    order.append("answer")
+
+    assert events == [(CLIENT_ENDPOINT, RENDEZVOUS_TTL_SECONDS)] * 2
+    assert order == ["notice", "answer", "notice", "answer"]
+
+
+def test_admission_listener_reports_early_drops_and_no_listener_is_optional():
+    """Evictions send zero, while a rendezvous without a listener remains unchanged."""
+    rendezvous = DirectRendezvous(_Clock())
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    events: list[tuple[str, int]] = []
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl: events.append((endpoint_id, ttl)))
+    clients = [f"{index:064x}" for index in range(9)]
+    for client in clients:
+        _offer(rendezvous, client=client, subject="same-subject")
+
+    assert events[-2:] == [(clients[0], 0), (clients[-1], RENDEZVOUS_TTL_SECONDS)]
+    rendezvous.set_admission_listener(None)
+    no_listener = DirectRendezvous(_Clock())
+    no_listener.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    assert _offer(no_listener)["status"] == "ready"
+    assert no_listener.is_admitted(CLIENT_ENDPOINT)
+
     rendezvous = DirectRendezvous(_Clock())
     addresses = ("192.168.1.20:51234", "[240e:b86:551:7700::1]:51234", "10.0.0.5:51234")
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, addresses))
