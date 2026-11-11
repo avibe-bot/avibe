@@ -984,4 +984,26 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mcp_hub_same_name_oauth_logins_stay_in_their_scope
+  - id: AUTH-SETUP-139
+    name: Setup checks a saved key against its provider, names a rejected key on its card, and lets it be replaced or removed there
+    status: covered
+    kind: historical_regression
+    layer: contract
+    backend: web
+    test:
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 checks a saved key and writes the answer on its card, checking then connected with its count
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 names a rejected key on its card, keeps it pressable, and says nothing passed beside Continue
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 says nothing passed in Chinese, and stays quiet once any key passes
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 replaces a rejected key from its card, and the card reports the key that passed
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 removes a key from its card after a confirmation
+    reason: >-
+      Covered is bounded to the real provider screen against a controlled source
+      API. The server half — a listing the provider refuses with 401/403 reaching
+      the refresh response as authentication_failed with its status — is pinned
+      by the supporting Python tests. The live wrong-key-then-right-key journey
+      was verified once by hand in a fresh-install Incus environment.
+    supporting_tests:
+      - tests/test_model_hub_api.py::test_refresh_names_a_rejected_key_and_its_status
+      - tests/test_model_hub_runtime.py::test_adapter_discovery_names_only_a_credential_refusal
+      - ui/src/components/onboarding/providers/providerStage.test.ts
 next_priority: []

@@ -28,7 +28,7 @@ import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
 import { requiredBackends } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
-import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
+import { apiFailure, modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { foldRegionRead } from '@/components/settings/models/regionRead';
 import {
   installAndStartStep,
@@ -47,6 +47,7 @@ import { AddSourceDialog } from './AddSourceDialog';
 import { DestinationRow } from './DestinationRow';
 import { GatewayCard, type GatewayPhase } from './GatewayCard';
 import { AddMoreCard, ProviderCard } from './ProviderCard';
+import { SourceKeyDialog } from './SourceKeyDialog';
 import { SupplyWires } from './SupplyWires';
 import {
   addedThroughMoreCount,
@@ -55,6 +56,7 @@ import {
   offeredImportKeys,
   gatewayEvidenceSettled,
   gatewayIntent,
+  nothingPassed,
   pendingImportRows,
   providerAction,
   providerSetupAction,
@@ -62,10 +64,15 @@ import {
   providerSummary,
   reconcileSelection,
   slotSelected,
+  sourceCheckFailure,
+  sourceCheckKey,
+  sourceNeedsCheck,
+  stagedSource,
+  suppliedModelCount,
   toggleSlotSelection,
   unlistedDetected,
-  usableSource,
   type ProviderSlot,
+  type SourceCheck,
 } from './providerStage';
 
 // The tier tokens this screen is measured in, and the shell classes it renders
@@ -204,6 +211,14 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     const [importOpen, setImportOpen] = React.useState(false);
     const [importFailed, setImportFailed] = React.useState(false);
     const [verifying, setVerifying] = React.useState(false);
+    // What setup's free check found for each key on the stage, by source and key
+    // generation. Held by the screen, not the server: the server keeps only whether a
+    // listing failed, and the card has to say whether the provider refused the key.
+    const [checks, setChecks] = React.useState<ReadonlyMap<string, SourceCheck>>(() => new Map());
+    // Every key a check was started for, so a re-render, a re-read or a revisit never
+    // asks the provider the same question twice. Cleared for one key by Check again.
+    const checkedRef = React.useRef(new Set<string>());
+    const [editing, setEditing] = React.useState<string | null>(null);
 
     const selection = flowState.providerSelection;
     const ready = setupNavigationReady(capability, gatewayEnabled);
@@ -571,7 +586,59 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // What the screen knows, not what the list happens to hold: an inventory it
     // could not read is not an empty one, and 「添加」 offered against it is how a
     // credential that already exists gets written a second time.
-    const hasSource = sourceRead === 'read' && sources.some(usableSource);
+    const hasSource = sourceRead === 'read' && sources.some(stagedSource);
+
+    // ── Key checks ──────────────────────────────────────────────────────────
+
+    // Saving a key does not ask the provider about it, so a refused key would look
+    // exactly like a working one until the next screen came up empty. Listing its
+    // models is free and answers that, so every staged key nothing has answered for
+    // yet is listed once, as soon as the inventory says it is there.
+    const runCheck = React.useCallback(async (source: Source) => {
+      const key = sourceCheckKey(source);
+      checkedRef.current.add(key);
+      setChecks((previous) => new Map(previous).set(key, { kind: 'checking' }));
+      let result: SourceCheck;
+      try {
+        const refreshed = await modelsApi.refreshSource(source.id);
+        result = { kind: 'connected', models: suppliedModelCount(refreshed.source) };
+      } catch (error) {
+        result = sourceCheckFailure(apiFailure(error), source);
+      }
+      setChecks((previous) => new Map(previous).set(key, result));
+      // The listing rewrote the source's state either way; the stage reads it back.
+      try {
+        const read = await sourceReads.refresh();
+        if (read.kind === 'current') setSources(read.value);
+      } catch {
+        // The card already carries the answer; a failed re-read changes nothing it says.
+      }
+    }, [sourceReads]);
+
+    const checkable = active && hubAdmitted && sourceRead === 'read' && !verifying;
+    React.useEffect(() => {
+      if (!checkable) return;
+      for (const source of sources) {
+        if (!stagedSource(source) || !sourceNeedsCheck(source)) continue;
+        if (checkedRef.current.has(sourceCheckKey(source))) continue;
+        void runCheck(source);
+      }
+    }, [checkable, sources, runCheck]);
+
+    /** The check a card shows: its own answer, or 「checking」 for one about to start. */
+    const checkFor = (source: Source | undefined): SourceCheck | undefined => {
+      if (!source) return undefined;
+      const held = checks.get(sourceCheckKey(source));
+      if (held) return held;
+      return hubAdmitted && sourceNeedsCheck(source) ? { kind: 'checking' } : undefined;
+    };
+    const checking = hubAdmitted && sources.some((source) =>
+      stagedSource(source) && checkFor(source)?.kind === 'checking');
+    const editingSource = editing === null ? null : sources.find((source) => source.id === editing) ?? null;
+    const openEdit = React.useCallback((id: string) => {
+      if (!writeAdmitted || sourceRead !== 'read') return;
+      setEditing(id);
+    }, [writeAdmitted, sourceRead]);
 
     const action = providerAction({
       pendingCount: pending.length,
@@ -585,6 +652,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       // `verifying` are answered earlier in that ordering and stay separate facts.
       hubAdmitted,
       verifying,
+      checking,
     });
 
     // Held in a ref so a shell that re-renders on every publication cannot turn this
@@ -692,7 +760,13 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       failed: supplyFailed,
       reading: sourceRead === 'reading',
     });
-    const summaryText = summary.kind === 'pending'
+    // Said beside Continue rather than discovered on the next screen: every key on the
+    // stage has been asked, and none of them can supply a model.
+    const warnNothingPassed = sourceRead === 'read' && hubAdmitted && nothingPassed(sources, checks);
+    const summaryTone = summary.kind === 'error' || warnNothingPassed ? 'error' : null;
+    const summaryText = warnNothingPassed
+      ? t('onboarding.providers.nothingPassed')
+      : summary.kind === 'pending'
       ? ''
       : summary.kind === 'none'
       ? t('onboarding.providers.summaryNone')
@@ -738,6 +812,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
                   // vendor, and a card standing for a credential the server named no
                   // provider for has none to open on.
                   onAdd={() => openAdd(false, slot.brand)}
+                  onEdit={slot.source ? () => openEdit(slot.source!.id) : undefined}
+                  check={checkFor(slot.source)}
                 />
               ))}
               <AddMoreCard
@@ -768,7 +844,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
 
             <p
               className="setup-provider-summary"
-              {...(summary.kind === 'error' ? { 'data-tone': 'error' } : {})}
+              {...(summaryTone ? { 'data-tone': summaryTone } : {})}
               role="status"
               aria-live="polite"
             >
@@ -800,6 +876,29 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
             onReviewDetected={() => { setAddDialog(null); openImport(); }}
             onAdded={(created) => landSource(created, addDialog.more)}
             onClose={() => setAddDialog(null)}
+          />
+        )}
+
+        {editingSource && (
+          <SourceKeyDialog
+            source={editingSource}
+            label={slots.find((slot) => slot.source?.id === editingSource.id)?.label ?? editingSource.display_name}
+            check={checkFor(editingSource)}
+            writable={writeAdmitted}
+            onReplaced={async (replaced, check) => {
+              // The replacement listed the provider's models before it committed, so
+              // the card can say what that found without asking a second time.
+              const key = sourceCheckKey(replaced);
+              checkedRef.current.add(key);
+              setChecks((previous) => new Map(previous).set(key, check));
+              await landSource(null, false);
+            }}
+            onChanged={() => landSource(null, false)}
+            onRecheck={() => {
+              checkedRef.current.delete(sourceCheckKey(editingSource));
+              void runCheck(editingSource);
+            }}
+            onClose={() => setEditing(null)}
           />
         )}
 

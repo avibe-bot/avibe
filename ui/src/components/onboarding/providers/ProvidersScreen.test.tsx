@@ -71,6 +71,26 @@ const source = (over: Partial<Source> & { id: string; vendor: string }): Source 
   ...over,
 });
 
+const modelOf = (id: string): Source['models'][number] => ({
+  id, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null,
+});
+
+/** What the server answers when the provider refused the key while listing. */
+const rejectedListing = (status: number) => new ApiCallError(
+  'discovery_failed', 'modelHub.errors.authentication_failed', true, [], [], [], 502, undefined, {}, status,
+);
+
+/** A key the wizard just saved: stored, and nothing has asked the provider yet. */
+const savedKey = (id: string, vendor: string, over: Partial<Source> = {}) => source({
+  id,
+  vendor,
+  state: { status: 'standby' },
+  verification_pending: `vp_${id}`,
+  credential_generation: `gen_${id}`,
+  masked_credential: 'sk-ant-…0000',
+  ...over,
+});
+
 const supply = (over: Partial<AgentSupply> & { backend: AgentSupply['backend'] }): AgentSupply => ({
   cli_present: true,
   mode: 'direct',
@@ -180,6 +200,9 @@ type Server = {
   agents: AgentSupply[];
   scan: MigrationItem[];
   runtime: RuntimeDependency;
+  /** What a model listing answers for a source: the models it lists, or the error
+   *  it fails with. Absent lists the models the source already holds. */
+  listing: Record<string, string[] | Error>;
 };
 
 let server: Server;
@@ -191,8 +214,23 @@ const serve = (over: Partial<Server> = {}) => {
     agents: [supply({ backend: 'codex' }), supply({ backend: 'opencode' })],
     scan: [],
     runtime: runtimeOf('ok'),
+    listing: {},
     ...over,
   };
+  // The free check is a listing, and a listing rewrites the source's state the way
+  // the server does: standby when it answers, error when it fails.
+  vi.spyOn(modelsApi, 'refreshSource').mockImplementation(async (id) => {
+    const row = server.sources.find((item) => item.id === id);
+    if (!row) throw new ApiCallError('source_not_found', undefined, true, [], [], [], 404);
+    const listed = server.listing[id];
+    if (listed instanceof Error) {
+      row.state = { status: 'error', detail_key: 'models.source.error.unclassified' };
+      throw listed;
+    }
+    row.state = { status: 'standby' };
+    if (listed) row.models = listed.map((model) => modelOf(model));
+    return { source: { ...row }, removed_hops: [], interrupted: [] };
+  });
   vi.spyOn(modelsApi, 'listSources').mockImplementation(async () => server.sources.map((row) => ({ ...row })));
   vi.spyOn(modelsApi, 'listAgents').mockImplementation(async () => server.agents.map((row) => ({ ...row })));
   vi.spyOn(modelsApi, 'refreshAgentPresence')
@@ -401,9 +439,9 @@ describe('ProvidersScreen — the stage', () => {
 
     const connected = cardFor('zhipuai');
     const detected = cardFor('openai');
-    // A fact is not a toggle: no pressed state to announce, and nothing to press.
+    // A fact is not a toggle: no pressed state to announce. Pressing it opens its key.
     expect(connected.getAttribute('aria-pressed')).toBeNull();
-    expect((connected as HTMLButtonElement).disabled).toBe(true);
+    expect((connected as HTMLButtonElement).disabled).toBe(false);
     // The server proposed this row, so the card opens on that proposal.
     expect(detected.getAttribute('aria-pressed')).toBe('true');
 
@@ -432,24 +470,148 @@ describe('ProvidersScreen — the stage', () => {
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
   });
 
-  it('says so when a key is stored but nothing has checked it yet', async () => {
-    // `save_unverified: true` is what the key form sends, so a card can be connected
-    // with nothing having confirmed the key answers. Settings discloses that; a card
-    // that did not would report it as a provider already supplying models.
+  it('AUTH-SETUP-139 checks a saved key and writes the answer on its card, checking then connected with its count', async () => {
+    const listing = deferred<{ source: Source; removed_hops: []; interrupted: [] }>();
+    serve({ sources: [savedKey('src_good', 'anthropic')] });
+    // Held open, so the checking state is observable rather than a frame.
+    const answered = vi.mocked(modelsApi.refreshSource).getMockImplementation()!;
+    vi.mocked(modelsApi.refreshSource).mockImplementationOnce(() => listing.promise);
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('checking'));
+    expect(within(cardFor('anthropic')).getByText('API Key sk-ant-…0000 · Checking…')).toBeTruthy();
+    expect(cardFor('anthropic').querySelector('.lucide-check')).toBeNull();
+    // Continuing now would leave the answer to the next screen.
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionChecking', busy: true });
+    expect(modelsApi.refreshSource).toHaveBeenCalledWith('src_good');
+
+    server.listing.src_good = Array.from({ length: 12 }, (_, index) => `claude-${index}`);
+    await act(async () => { listing.resolve(await answered('src_good') as never); });
+
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('connected'));
+    expect(within(cardFor('anthropic')).getByText('Connected · 12 models')).toBeTruthy();
+    expect(cardFor('anthropic').querySelector('.setup-provider-check')).toBeTruthy();
+    expect(cardFor('anthropic').getAttribute('aria-label')).toBe('Change or remove Anthropic · Connected · 12 models');
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: false }));
+    expect(summary()?.textContent).toBe('1 provider added: Anthropic');
+    // One question per key: the re-read the answer triggers does not ask again.
+    expect(modelsApi.refreshSource).toHaveBeenCalledTimes(1);
+  });
+
+  it('AUTH-SETUP-139 names a rejected key on its card, keeps it pressable, and says nothing passed beside Continue', async () => {
     serve({
-      sources: [source({
-        id: 'src_pending',
-        vendor: 'openai',
-        state: { status: 'standby' },
-        verification_pending: 'vp_fixture',
-      })],
+      sources: [savedKey('src_wrong', 'anthropic')],
+      listing: { src_wrong: rejectedListing(401) },
     });
     renderScreen();
     await settled();
 
-    await waitFor(() => expect(cardFor('openai').dataset.pending).toBe('true'));
-    expect(within(cardFor('openai')).getByText(/Saved/)).toBeTruthy();
-    expect(cardFor('openai').getAttribute('aria-label')).toContain('Saved');
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('rejected'));
+    // Still the person's key, after the server marked it failed: the card stays, so
+    // the fix is where the failure is, rather than an empty offer to add another.
+    expect(cardFor('anthropic').dataset.state).toBe('connected');
+    expect(within(cardFor('anthropic')).getByText('Key rejected (401) · re-enter')).toBeTruthy();
+    expect(cardFor('anthropic').querySelector('.setup-provider-check')).toBeNull();
+    expect((cardFor('anthropic') as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect(summary()?.textContent).toBe('No provider passed the check, so assistants have no model yet.'));
+    expect(summary()?.dataset.tone).toBe('error');
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: false });
+  });
+
+  it('AUTH-SETUP-139 says nothing passed in Chinese, and stays quiet once any key passes', async () => {
+    await i18n.changeLanguage('zh');
+    serve({
+      sources: [savedKey('src_wrong', 'anthropic'), savedKey('src_good', 'openai', { masked_credential: 'sk-…1111' })],
+      listing: { src_wrong: rejectedListing(403), src_good: ['gpt-5'] },
+    });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('rejected'));
+    expect(within(cardFor('anthropic')).getByText('Key 被拒绝（403）· 重新填写')).toBeTruthy();
+    await waitFor(() => expect(cardFor('openai').dataset.check).toBe('connected'));
+    expect(within(cardFor('openai')).getByText('已连接 · 1 个模型')).toBeTruthy();
+    expect(summary()?.textContent).not.toContain('通过检查');
+    expect(summary()?.dataset.tone).toBeUndefined();
+
+    cleanup();
+    serve({ sources: [savedKey('src_wrong', 'anthropic')], listing: { src_wrong: rejectedListing(401) } });
+    renderScreen();
+    await settled();
+    await waitFor(() => expect(summary()?.textContent).toBe('还没有供应商通过检查，助手暂时没有可用的模型'));
+  });
+
+  it('AUTH-SETUP-139 replaces a rejected key from its card, and the card reports the key that passed', async () => {
+    serve({
+      sources: [savedKey('src_wrong', 'anthropic')],
+      listing: { src_wrong: rejectedListing(401) },
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('rejected'));
+
+    const replace = vi.spyOn(modelsApi, 'replaceCredential')
+      .mockRejectedValueOnce(rejectedListing(401))
+      .mockImplementationOnce(async (id) => {
+        const row = server.sources.find((item) => item.id === id)!;
+        Object.assign(row, {
+          state: { status: 'standby' },
+          credential_generation: 'gen_replaced',
+          masked_credential: 'sk-ant-…9999',
+          models: [modelOf('claude-opus'), modelOf('claude-sonnet')],
+        });
+        return { source: { ...row }, removed_hops: [], interrupted: [] };
+      });
+
+    await user.click(cardFor('anthropic'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('sk-ant-…0000 · Key rejected (401) · re-enter')).toBeTruthy();
+
+    // Refused again: the dialog says so, and the card keeps the key it had.
+    await user.type(within(dialog).getByLabelText('New API Key'), 'still-wrong');
+    await user.click(within(dialog).getByRole('button', { name: 'Save and check' }));
+    expect(await within(dialog).findByText('Key rejected (401). Check it and try again.')).toBeTruthy();
+
+    await user.clear(within(dialog).getByLabelText('New API Key'));
+    await user.type(within(dialog).getByLabelText('New API Key'), 'right-key');
+    await user.click(within(dialog).getByRole('button', { name: 'Save and check' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    expect(replace).toHaveBeenLastCalledWith('src_wrong', { key: 'right-key' });
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('connected'));
+    expect(within(cardFor('anthropic')).getByText('Connected · 2 models')).toBeTruthy();
+    // The replacement already listed the models; the card does not ask again.
+    expect(modelsApi.refreshSource).toHaveBeenCalledTimes(1);
+    expect(summary()?.textContent).toBe('1 provider added: Anthropic');
+  });
+
+  it('AUTH-SETUP-139 removes a key from its card after a confirmation', async () => {
+    serve({
+      sources: [savedKey('src_wrong', 'anthropic')],
+      listing: { src_wrong: rejectedListing(401) },
+    });
+    const remove = vi.spyOn(modelsApi, 'deleteSource').mockImplementation(async (id) => {
+      server.sources = server.sources.filter((item) => item.id !== id);
+      return { removed_hops: [], interrupted: [] };
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('rejected'));
+
+    await user.click(cardFor('anthropic'));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
+    expect(within(dialog).getByText('Remove this key from Model Hub?')).toBeTruthy();
+    expect(remove).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Remove' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(remove).toHaveBeenCalledWith('src_wrong', undefined);
+    await waitFor(() => expect(cardFor('anthropic').dataset.state).toBe('empty'));
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionAdd' });
   });
 
   it('names a subscription by its sign-in, not by a mask it cannot have', async () => {
@@ -900,7 +1062,7 @@ describe('ProvidersScreen — source required before continuing', () => {
     expect(modelsApi.applyMigration).not.toHaveBeenCalled();
   });
 
-  it.each(['needs_action', 'error', 'cooldown'] as const)('cannot continue with only a %s source', async (status) => {
+  it.each(['needs_action', 'cooldown'] as const)('cannot continue with only a %s source', async (status) => {
     serve({ sources: [source({ id: 'src_unusable', vendor: 'openai', state: { status } })] });
     const { handle } = renderScreen();
     await settled();
