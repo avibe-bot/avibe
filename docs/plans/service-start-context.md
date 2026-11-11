@@ -36,20 +36,45 @@ unchanged.
    two share, the caller's own leading entries stay first (a service unit's
    virtualenv), and its other own entries follow. A desktop-managed Runtime is left alone. Every failure keeps
    the caller's `PATH`.
-2. **Login session (macOS).** At the shared start and restart boundary, a
-   caller that is not in the user's current desktop session hands the work to a
-   one-shot launchd job in `gui/<uid>`, which carries the caller's environment
-   and leaves nothing installed. The SSH probe below confirms or replaces this
-   entry mechanism before it is built. With no desktop session the start proceeds as
-   today and says that Keychain-backed credentials are unavailable. When the
-   session cannot be entered the restart proceeds and warns; it does not refuse,
-   because a remote restart must still be possible.
+2. **Login session (macOS).** The running service is already in the desktop
+   session, with the right environment and privacy permissions, so a restart it
+   seeds itself yields a successor in the same context, as restarts from the
+   Web UI and from Agent shells already do. At the shared restart boundary
+   (`schedule_restart`), a caller whose audit session is not `gui/<uid>`'s
+   hands the restart to the running service when its health identity reports a
+   `healthy` login session. `POST /internal/restart` says when and what to
+   restart and names the install generation the caller's job would run; it
+   carries no path. The service seeds the restart job in its own process, off
+   the controller loop, with the launcher it restarts itself with, as a restart
+   from the Web UI does, and refuses when that launcher does not select the
+   named generation: the desktop session reaches the Keychain, so the service
+   never runs there what a caller names. The caller prints the job and says
+   that the running Avibe performs the restart. It keeps the activation lock
+   across the hand-over and the service does not take it, so an upgrade hands
+   over too, onto the generation it just activated.
+   A caller in the desktop session seeds the job itself, as before: the desktop
+   terminal stays the manual repair for a stale service. With no desktop
+   session, or when the probe cannot tell, nothing changes. When the caller is
+   outside and no service can take the restart (none is running, it is not
+   `healthy`, it is a desktop-managed Runtime, it predates the endpoint, its
+   launcher selects another generation, the caller's install is not a managed
+   generation, or the request fails), the caller seeds the job and warns that
+   Avibe will run outside the desktop session, so Keychain-backed credentials
+   are unavailable until `vibe restart` is run from a terminal on the Mac's
+   desktop. It does not refuse, because a remote restart must still be
+   possible. `vibe start` with nothing running stays a local start and gives
+   the same warning.
 3. **Notice (macOS).** "A desktop session exists and the service is outside it"
-   becomes a degraded state on the surfaces that show `stale_login_session`
-   today: the Web banner, Doctor, and `vibe status`.
-4. **Self-recovery (macOS), separate.** A service that finds itself stale while
-   a new desktop session exists restarts itself once through step 2. This waits
-   until step 2 has been verified from a session that really ended.
+   is the degraded state `outside_gui_session` on the surfaces that show
+   `stale_login_session`: the Web banner, Doctor, and `vibe status`. A service
+   in that state is not `healthy`, so step 2 does not hand it a restart.
+4. **Launch at login (macOS), separate.** This replaces self-recovery by the
+   service, which step 2 cannot give: a restart seeded by a stale service
+   copies the ended session. What starts Avibe at the next desktop login
+   replaces such a service instead, as the next paragraph describes; for a CLI
+   install that is `vibe autostart` (#3515), an opt-in LaunchAgent that fires
+   once per desktop login. It runs in the desktop session, so the restart it
+   schedules is seeded there, as step 2 leaves any caller inside to do.
 
 **Replacement at the next desktop login (macOS), built.** A service left in
 another login session is replaced by whatever starts Avibe in the new desktop
@@ -62,21 +87,37 @@ ended login session, or its audit session is known to differ from the desktop
 session's; anything inconclusive is left alone.
 
 Rejected: only warning or refusing (a remote restart would never work);
-`launchctl asuser` (keeps the caller's `PATH`, and is not known to cross
-sessions without root); a resident LaunchAgent (a second lifecycle owner, which
-is the launch-at-login feature in `macos-stale-session-auto-recovery.md`, not
-needed for these failures); hard-coded `PATH` additions (misses nvm, bun, cargo);
-starting every service through launchd (changes the working terminal path for
-no gain).
+`launchctl asuser` (keeps the caller's `PATH`, and cannot cross sessions from
+SSH, see the probe below); a one-shot launchd job in `gui/<uid>` (it enters the
+desktop session, but loses the privacy permissions the terminal was granted,
+see the probe below); a kept-alive LaunchAgent (a second lifecycle owner that
+runs between logins; the login-only agent of step 4 is not one); hard-coded
+`PATH` additions (misses nvm, bun, cargo);
+starting every service through launchd (the same loss of permissions, and it
+changes the working terminal path for no gain).
+
+## SSH probe (2026-11-11)
+
+A read-only probe run over SSH from another machine settled step 2's entry
+mechanism:
+
+- `launchctl asuser <uid>` from an SSH session fails: "Could not switch to
+  audit session: Operation not permitted".
+- A one-shot launchd job in `gui/<uid>` does land in the desktop session, with
+  the Keychain reachable. But a process launchd starts is its own responsible
+  process for macOS privacy permissions: it loses what the terminal, or sshd,
+  was granted, such as Full Disk Access, and with it workspaces on an external
+  volume. So step 2 does not use launchd.
+- The running service is in the desktop session with the right environment and
+  permissions, which is what step 2 builds on.
 
 ## Validation that code cannot give
 
-- A read-only probe run over SSH from another machine decides step 2's entry
-  mechanism: it submits a one-shot job into `gui/<uid>` and reports the job's
-  audit session and Keychain reach.
-- Step 2 from an ended session needs one real log-out and log-in on a Mac.
-- A service started by launchd is no longer attributed to the terminal for
-  macOS privacy permissions (folders, screen recording); check for new prompts.
+- Step 2 needs one real `vibe restart` over SSH on a Mac whose service is in
+  the desktop session: the command says that the running Avibe performs the
+  restart, the startup diagnostic of the new service records `asid_match: true`,
+  and `gh` reads its token.
+- Step 4 needs one real log-out and log-in on a Mac.
 - The desktop app's replacement needs a packaged build and one real log-out and
   log-in: open the app, log out and in, and open it again. The Workbench opens
   with no stale-session banner, and the app's `bootstrap.log` (in its local
@@ -87,10 +128,13 @@ no gain).
 ## Todo
 
 - [x] Step 1: login-shell `PATH` at Runtime start.
-- [ ] SSH probe result recorded here.
-- [ ] Steps 2 and 3.
-- [x] Replacement at the next desktop login: `vibe autostart` for CLI installs,
-      the app's launch for the desktop app.
-- [ ] Log-out/log-in verification, then step 4.
+- [x] SSH probe result recorded here.
+- [x] Step 2: a restart from outside the desktop session goes through the
+      running service.
+- [ ] Step 2 verified by a real restart over SSH.
+- [x] Step 3: the `outside_gui_session` state and its notice.
+- [x] Step 4, replacement at the next desktop login: `vibe autostart` (#3515)
+      for CLI installs, the app's launch for the desktop app.
+- [ ] Step 4 verified by a real log-out and log-in.
 - [ ] Update the stale-session guidance in the `use-avibe` playbook and the
-      Doctor action text once any restart repairs it.
+      Doctor action text once step 4 repairs a stale service at login.

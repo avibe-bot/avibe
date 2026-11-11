@@ -506,6 +506,156 @@ def test_health_endpoint_reports_the_controller_runtime_identity(monkeypatch):
     }
 
 
+@pytest.mark.real_desktop_session_probe
+def test_restart_endpoint_seeds_this_service_s_own_restart_off_the_loop(monkeypatch, tmp_path):
+    """A caller outside the desktop session hands its restart to the service, which runs only its own launcher."""
+    import shutil
+    from functools import partial
+
+    from config import paths
+    from core.control_ipc import ControlIpcClientEndpoint
+    from vibe import internal_client, restart_supervisor, runtime
+    from vibe.macos_session_diagnostics import CommandResult, MacOSSessionProbe
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+
+    def select_generation(generation: str) -> str:
+        """Leave the stable launcher on one generation of the managed install, as a copying activation does."""
+        launcher = tmp_path / "bin" / "vibe"
+        export = tmp_path / "runtime" / "install-generations" / generation / "bin" / "vibe"
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_text(f"#!/bin/sh\n# {generation}\n", encoding="utf-8")
+        export.chmod(0o755)
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(export, launcher)
+        (launcher.parent / ".vibe.avibe-generation").write_text(str(export.parents[1]), encoding="utf-8")
+        return str(launcher)
+
+    # The launcher this service was started from, and so restarts itself with.
+    service_launcher = select_generation("generation-1")
+    monkeypatch.setenv("VIBE_CURRENT_EXECUTABLE", service_launcher)
+    # Everything a hand-over needs is here: this process is outside the desktop
+    # session and a service inside it answers. A seed that handed on would ask
+    # that service, which is this one, and never spawn the job.
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+
+    def launchctl_print(command, _timeout):
+        target = command[-1]
+        session, asid = ("", 106269) if target.startswith("pid/") else ("    session = Aqua\n", 105819)
+        context = f"    security context = {{\n        uid = 501\n        asid = {asid}\n    }}\n"
+        return CommandResult(0, f"{target} = {{\n{session}{context}}}\n")
+
+    monkeypatch.setattr(
+        "vibe.macos_session_diagnostics.MacOSSessionProbe",
+        partial(
+            MacOSSessionProbe,
+            service_pid=4242,
+            service_uid=501,
+            command_runner=launchctl_print,
+            console_user_reader=lambda: ("owner", None),
+            service_user_reader=lambda uid: ("owner", None),
+        ),
+    )
+    handed_on: list[str] = []
+
+    def service(request: httpx.Request) -> httpx.Response:
+        handed_on.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/internal/health":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "service": "vibe-remote-internal",
+                    "version": 1,
+                    "macos_login_session_state": "healthy",
+                },
+            )
+        return httpx.Response(200, json={"job_id": "handed-on"})
+
+    monkeypatch.setattr(
+        internal_client,
+        "_resolve_endpoint",
+        lambda _socket_path: ControlIpcClientEndpoint(transport="unix", socket_path=tmp_path / "dispatch.sock"),
+    )
+    monkeypatch.setattr("vibe.internal_client.httpx.HTTPTransport", lambda **kwargs: httpx.MockTransport(service))
+
+    class CallerHoldsActivation:
+        # The caller waits for this answer with the activation lock held.
+        def __enter__(self):
+            raise AssertionError("the service waited for the lock its caller holds")
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(restart_supervisor, "atomic_upgrade_lock", CallerHoldsActivation)
+    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    spawned: list[tuple[list[str], dict, int]] = []
+    monkeypatch.setattr(
+        restart_supervisor.subprocess,
+        "Popen",
+        lambda command, **kwargs: spawned.append((command, kwargs["env"], threading.get_ident()))
+        or SimpleNamespace(pid=45678),
+    )
+    app = internal_server.create_app(_build_controller_double())
+    restart = {"delay_seconds": 60.0, "trigger": "upgrade", "scope": "service", "prepare_show_runtime": True}
+    # What a caller might name to have run inside the desktop session.
+    foreign = {"vibe_path": "/foreign/vibe", "python_executable": "/foreign/python"}
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            refused = [
+                # No generation named, a trigger that is not a label, and a
+                # generation this service's launcher does not select.
+                await client.post("/internal/restart", json={**restart, **foreign}),
+                await client.post(
+                    "/internal/restart",
+                    json={**restart, "generation": "generation-1", "trigger": "--vibe-path=/foreign/vibe"},
+                ),
+                await client.post("/internal/restart", json={**restart, **foreign, "generation": "generation-2"}),
+            ]
+            assert spawned == []
+            # An upgrade activates a newer generation: the same launcher now selects it.
+            select_generation("generation-2")
+            stale = await client.post("/internal/restart", json={**restart, "generation": "generation-1"})
+            assert spawned == []
+            seeded = await client.post("/internal/restart", json={**restart, **foreign, "generation": "generation-2"})
+        return threading.get_ident(), [*refused, stale], seeded
+
+    loop_thread, refused, seeded = asyncio.run(_go())
+
+    assert [response.status_code for response in refused] == [400, 400, 409, 409]
+    assert seeded.status_code == 200
+    job = seeded.json()
+    assert job["supervisor_pid"] == 45678
+    assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == job["job_id"]
+    assert handed_on == []
+    [(command, environment, spawn_thread)] = spawned
+    assert spawn_thread != loop_thread
+    # The job is this service's launcher with the caller's when and what, and
+    # nothing the request named reaches its command or its environment.
+    assert command == [
+        service_launcher,
+        "__restart-supervisor",
+        "--job-id",
+        job["job_id"],
+        "--delay-seconds",
+        "60.0",
+        "--trigger",
+        "upgrade",
+        "--scope",
+        "service",
+        "--vibe-path",
+        service_launcher,
+        "--prepare-show-runtime",
+    ]
+    assert environment["VIBE_CURRENT_EXECUTABLE"] == service_launcher
+    assert not {"/foreign/vibe", "/foreign/python"} & {*command, *environment.values()}
+
+
 @pytest.mark.parametrize("env_value", [None, "1"])
 def test_model_hub_rpc_uses_controller_owned_service(monkeypatch, env_value):
     if env_value is None:

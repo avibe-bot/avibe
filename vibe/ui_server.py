@@ -8927,7 +8927,9 @@ async def wechat_qr_login_poll():
             logger.warning("Failed to auto-bind WeChat user: %s", e)
 
         try:
-            restart = _schedule_wechat_qr_login_restart()
+            # Scheduling waits on the activation lock, on a macOS session probe
+            # and, outside the desktop session, on the service: off the loop.
+            restart = await asyncio.to_thread(_schedule_wechat_qr_login_restart)
             logger.info("Scheduled service restart after WeChat QR login: %s", restart.get("job_id"))
         except Exception as exc:
             logger.warning("Failed to schedule service restart after WeChat QR login: %s", exc)

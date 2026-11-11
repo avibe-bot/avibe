@@ -15627,6 +15627,13 @@ def cmd_start(
             )
         service_pid = runtime.start_service(**service_kwargs)
         service_reused = service_start.reused
+        if not service_reused:
+            from vibe.restart_supervisor import OUTSIDE_DESKTOP_SESSION_WARNING, outside_desktop_session
+
+            # The service joins this command's login session; nothing running
+            # could start it from inside the desktop session instead.
+            if outside_desktop_session():
+                print(OUTSIDE_DESKTOP_SESSION_WARNING, file=sys.stderr)
         bind_host = receipt_bind_host if receipt_bind_host is not None else runtime.effective_ui_bind_host(config)
         ui_kwargs = {"start_info": ui_start}
         if desktop_receipt:
@@ -17842,7 +17849,7 @@ def cmd_upgrade():
                 return 2
             if restart is not None:
                 print("Restart scheduled to use the new version.")
-                print(f"Job ID: {restart['job_id']}")
+                _print_restart_job(restart)
                 print("Run `vibe status` to inspect the restart result and database migration progress.")
             else:
                 print("Avibe was not running; the new version will be used next time you start it.")
@@ -18544,13 +18551,19 @@ def _format_restart_delay(delay_seconds: float) -> str:
     return f"{delay_seconds:g} seconds"
 
 
+def _print_restart_job(restart: dict) -> None:
+    print(f"Job ID: {restart['job_id']}")
+    if restart.get("handed_over"):
+        print("The running Avibe, which is in this Mac's desktop session, performs the restart.")
+
+
 def _schedule_delayed_restart(delay_seconds: float) -> int:
     from vibe.restart_supervisor import schedule_restart
 
     current_vibe_path = cache_running_vibe_path()
     result = schedule_restart(delay_seconds=delay_seconds, vibe_path=current_vibe_path, trigger="cli")
     print(f"Restart scheduled in {_format_restart_delay(delay_seconds)}.")
-    print(f"Job ID: {result['job_id']}")
+    _print_restart_job(result)
     print("This command exits immediately; the restart supervisor will run in the background.")
     print("Run `vibe status` to inspect the restart result and database migration progress.")
     return 0
@@ -18602,7 +18615,7 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 
     result = schedule_restart(delay_seconds=0.0, vibe_path=cache_running_vibe_path(), trigger="cli")
     print("Restart scheduled.")
-    print(f"Job ID: {result['job_id']}")
+    _print_restart_job(result)
     print("Run `vibe status` to inspect the restart result and database migration progress.")
     return 0
 
