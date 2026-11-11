@@ -19,7 +19,9 @@ Example: publish `model-hub-engine-v8.0.63-2` with minimum Avibe `3.2.6`.
 An installed 3.2.6 or later discovers it without an Avibe release, verifies it,
 and changes only CPA at a safe boundary. An older Avibe stays on its own engine.
 A failed activation restores the previous working engine. A withdrawn release
-cannot be selected again. This is an example, not approval of that engine build.
+cannot be selected again while the local channel history remembers its withdrawal.
+Loss of that history has the explicit limitation in section 2. This is an
+example, not approval of that engine build.
 
 Independent **artifacts already exist**: the builder produces six deterministic
 archives and the guard publishes `model-hub-engine-v…` releases. What is missing
@@ -167,8 +169,9 @@ permits engine B. Sequence 11 withdraws B, but the device cannot get 11 while
 B's pinned archive is still reachable. With no index expiry, it may newly
 install B even a month later. The signature proves 10 was authorized. The
 sequence rule prevents going backward from something already seen. Neither
-proves that 11 was received. A device that has accepted 11 refuses 10.
-Explicit offline mode still makes no network requests. So the behaviour is
+proves that 11 was received. With its local history readable, a device that
+accepted 11 refuses 10. Explicit offline mode still makes no network requests.
+So the behaviour is
 "continue following the latest accepted list", not merely "keep the already
 installed engine".
 
@@ -182,15 +185,48 @@ What is kept, and the result each piece protects:
 | Kept | What it protects |
 | --- | --- |
 | A signature over the exact payload, by a key shipped in Avibe | Only an index the channel key signed is acted on. Whoever controls the mirror cannot change a download and its expected hash together. |
-| The recorded highest sequence and payload digest | A device never goes back from an index it accepted, and two different indexes cannot share a sequence. |
+| The recorded highest sequence and payload digest | While the one local history file is readable, a device refuses an index below its recorded sequence and different bytes at an equal sequence. State loss removes that local memory; the shipped floor still applies. |
 | The shipped sequence floor | A device that installs an Avibe release with a higher floor accepts no index below it and adopts nothing new from a recorded index below it. The floor does not deliver a newer index, does not reveal a withdrawal the device has not received, and does not stop an engine that is already installed and that the device's record does not show as withdrawn. |
-| Permanent tombstones and remembered release identities | A withdrawal a device has seen cannot be dropped later, and a promoted release cannot return with other bytes. |
-| Explicit offline mode | No network request and nothing adopted, while withdrawals the device already recorded still apply. |
+| Cumulative tombstones and remembered release identities | While local history is readable, a later list cannot drop/change a remembered withdrawal or change a promoted release's bytes/minimum. They are not recoverable after that file is lost or unreadable. |
+| Single-file atomic publication | Readers observe the whole old or new document, not a partial write. The shared helper flushes the temp file before replacement and attempts the parent-directory flush; it does not provide a second-fault history guarantee or certify physical power-loss persistence. |
+| Explicit offline mode | No network request and nothing adopted, while withdrawals still available in the readable record apply. Lost history cannot authorize a new adoption offline. |
 | Regular metadata checks (section 3; arrives with step 3) | A device learns of a withdrawal the first time it can reach the index. |
 | The signer's ledger, allocation before signing, exact resume | One sequence is signed over one payload. A publication that failed is finished with the identical envelope, however much later. |
 | Per-run approval, the protected environment, the runner-group restriction | Only an approved promotion or withdrawal reaches the key. |
 | Separate signer and writer credentials, conditional write, read-back | A stale or racing writer, or the mirror's credential, cannot replace a newer index or drop a withdrawal. |
 | The release-asset guard | Every listed release stays downloadable. It is unrelated to signing and was never a renewal. |
+
+### One local history file: the accepted state-loss trade-off
+
+The channel uses **one** local `channel/state.json` file as the source of local
+sequence, payload and cumulative release/withdrawal history. There is no second
+authority, registry replica, backup, immutable generation bundle, completion
+marker or witness. Product chose this Simple contract on 2026-11-11; the rejected
+dual-authority designs are historical scratch artifacts, not requirements.
+
+If that file is missing or unreadable, the installation has **unavailable local
+history**, not proof of a clean first install. Until a signed list can be fetched
+and accepted, the channel returns restrictive `keep`: no new channel adoption or
+fallback is authorized. The existing engine may remain usable only after its
+owner independently verifies its installed identity and integrity (and ordinary
+compatibility/health checks); `keep` itself proves none of those facts. Offline
+mode and fetch failure do not reconstruct a lost withdrawal.
+
+A successfully fetched, authenticated and validated list may then become the new
+local floor **even when its sequence is lower than one this installation saw
+before losing the file**. It must still meet the running Avibe's shipped floor,
+signature, schema, manifest and minimum-version rules, and any candidate still
+passes the ordinary integrity, compatibility, quarantine and health gates before
+activation. A valid signature proves authorization, not that a list is newest.
+
+For example, this installation once accepted 11 withdrawing B, loses its state,
+and later fetches valid signed 10 with no withdrawal. It may accept 10 and select
+B again. The lost withdrawal stays lost until a newer list carrying it arrives;
+there is **no time bound**. This limitation is intentional. Atomic replacement
+protects the normal complete-document publication path, not deletion, corruption,
+or a second fault that destroys local history. No expiry, renewal, hidden backup
+or never-reopen rule is added to compensate. A future requirement never to reopen
+a withdrawal after state loss needs a new owner decision.
 
 What was removed with the expiry: the `expires_at` field, the seven-day
 bound, the clock-skew allowance and every wall-clock check on the device; the
@@ -263,11 +299,14 @@ On restart, intent without commit restores old; durable commit repairs a stale
 pointer to candidate; no pending intent uses the last committed generation. A
 revoked/incompatible recovery target is never restarted; use the permitted safe
 fallback or block Model Hub. Stop surviving owned CPA processes only after checking
-recorded process identity. POSIX writes require file fsync, atomic replacement and
-parent-directory fsync; Windows needs tested native flush/write-through semantics.
-Plain atomic rename is insufficient. An unsupported durability primitive blocks
-automatic activation rather than claiming power-loss safety. Inject failure at
-every write/flush/stop/start boundary, including commit-with-stale-pointer recovery.
+recorded process identity. The **activation journal**, independently of the
+single-file channel history, requires file fsync, atomic replacement and
+parent-directory fsync on POSIX, and tested native flush/write-through semantics
+on Windows. An unsupported journal primitive blocks automatic activation rather
+than claiming power-loss safety. Inject failure at every journal write/flush/
+stop/start boundary, including commit-with-stale-pointer recovery. This does not
+upgrade the channel record into a second authority: loss of its history retains
+section 2's deliberately weaker recovery contract.
 
 Do not automatically replay a request already sent upstream, especially one
 that streamed or invoked a hosted tool. Existing transports drain unchanged;
@@ -489,32 +528,47 @@ caller never installs or upgrades avault, selects no store, and removes
 verifies. Until the managed avault pin reaches 0.1.10 (#3517), a managed
 install reports the verifier as too old and the channel stays closed.
 
-**Recorded state.** `<engine runtime dir>/channel/state.json`, separate from
-the install claim. It holds the highest accepted sequence, that payload's
-digest, the accepted envelope, every withdrawal, and the minimum and manifest
-digest of every release ever listed. A release that stops being listed keeps
-its recorded identity, so it cannot come back with other bytes. Acceptance
-runs under a cross-process lock against the file's current contents. A
-rejected index changes nothing. On read the stored envelope is authenticated
-again. Nothing in the record ages: it is this machine's index until a higher
-sequence replaces it, and the same index offered again is accepted at any
-time. One that is below the sequence floor the running Avibe ships is
-returned marked as not meeting it: its withdrawals still apply, and it brings
-in nothing new.
+**Recorded state (Simple single-file contract).**
+`<engine runtime dir>/channel/state.json`, separate from the install claim, is the
+only local channel history authority. It holds the highest accepted sequence
+currently known here, that payload's digest/envelope, every withdrawal and the
+minimum/manifest digest of every release seen while the file remains readable.
+A release that stops being listed keeps its recorded identity. Acceptance runs
+under the existing cross-process lock against current readable contents and
+rejects replay, equivocation, changed identities/minimums and dropped/changed
+tombstones. Authentication and payload/manifest validation precede acceptance;
+a rejected fetch does not replace even a damaged file.
 
-Damaged state is never treated as a fresh start. Every refresh is rejected as
-`state_unreadable`, including a newer index that would otherwise be accepted,
-and the damaged bytes stay as they are. `resolve` returns `keep` with the
-reason `state_unreadable`: no channel change is authorized. Nothing intact
-shows that the engine in effect was withdrawn, so a withdrawal is not
-invented. This step has no recovery from that state, and removing the file is
-not one: it would discard the replay and withdrawal memory the file exists to
-keep.
+On read the stored envelope is authenticated again. The payload digest is
+SHA-256 of its **exact decoded payload bytes**, not the outer envelope or
+signature-domain digest. Nothing ages. A recorded list below the shipped floor
+still reports remembered withdrawals but authorizes no new adoption.
 
-The file is written by atomic replacement, with a directory flush that is
-best effort. That is enough while nothing acts on the channel. It is not
-proof that an accepted sequence or withdrawal survives power loss; step 3
-carries that obligation (below).
+**Missing/unreadable history and recovery.** `snapshot` returns no index for a
+missing file, and `state_unreadable` for an unreadable/malformed file. Neither
+claims that history survived or that the installation is clean fresh. With no
+successful fetch, `resolve` returns restrictive `keep` (`no_index` or
+`state_unreadable`): no new adoption/fallback, no fabricated withdrawal. Existing
+engine use remains subject to its owner's independent installed-identity,
+integrity, compatibility and health checks. Offline/fetch-unavailable inspection
+creates no recovery marker and leaves existing damaged bytes untouched.
+
+Once a signed fetch passes the current shipped floor and normal validation,
+`accept` may replace missing/unreadable history with that list, even at a lower
+sequence than the lost one, and logs the lost-history limitation for unreadable
+state. The new file has only history carried by that fetched list and accumulated
+since it. Lost withdrawals may reopen until a newer list carrying them is fetched,
+with no time bound. This is state-loss recovery, **not recovery of lost history**.
+It is not an instruction to delete state as a routine repair.
+
+**Publication guarantee.** The existing `config.atomic_io.write_atomic` creates
+a distinct temp file in the same directory, writes/flushes/fsyncs its complete
+bytes, atomically replaces the destination, and attempts the helper-owned
+best-effort parent-directory flush (where supported). Acceptance returns only
+after that path completes. Errors before replacement preserve the old file;
+a successful replacement can be visible before a later failure. These are
+whole-document reader/writer guarantees, not a guarantee against loss of the
+one file or physical power-loss certification. No second authority is added.
 
 **Selection.** `resolve` returns one of four actions. A withdrawal of the
 engine in effect is decided first and by itself.
@@ -548,8 +602,8 @@ roots document that is missing or damaged. If the recorded state names the
 engine in effect as withdrawn, the result is `blocked`: the engine is not
 kept, and no fallback is taken from an index that could not be checked. The
 keyless case reads the record and nothing else: no request, no verifier. A
-machine with no record, which is every machine before commissioning, keeps
-its engine and creates no state.
+machine with no readable record keeps only an independently verified installed
+engine and creates no state; missing history does not prove it never saw an index.
 
 A manifest override is the one documented way out of the channel, withdrawals
 included. It takes precedence whether or not this Avibe ships a root.
@@ -607,15 +661,14 @@ decisions; these are what a lifecycle that acts on them must hold.
 - A `keep` whose reason is `state_unreadable`, `uncommissioned`, or a verifier
   that cannot run is a degraded state. What the user sees must say that
   updates are blocked, not that Model Hub is ready.
-- Recovery from a damaged record needs its own supported trust protocol,
-  which decides what replaces the lost replay and withdrawal memory. Removing
-  the file is not that protocol and must not be documented as a remedy.
-- Before any consumer activates an engine on the channel's word, the accepted
-  sequence and history must be durable to the bar section 3 sets for the
-  activation journal: file flush, atomic replacement and parent-directory
-  flush on POSIX, tested native write-through on Windows, with crash recovery
-  tested by injected failure. The current write path does not meet that bar,
-  and a platform that cannot meet it blocks automatic activation.
+- State-loss recovery is the Simple single-file contract in section 2: no
+  adoption before a successful signed fetch; the fetched list then becomes the
+  new local history even if lower than the lost floor. No lifecycle marker or
+  backup is used to reconstruct channel history. The installed engine remains
+  independently verified, and a lost withdrawal may reopen without a time bound.
+- The activation journal's separate durability/health gates remain necessary
+  before execution. They do not strengthen or replace the one-file channel
+  history guarantee and may not silently add a never-reopen requirement.
 
 **Containment of candidate execution, owed before every evidence class has a
 producer.** Qualification runs the candidate in the smoke, hosted-wire and

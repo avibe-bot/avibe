@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -84,6 +85,8 @@ _STATUS_HEARTBEAT_STARTED = False
 _STATUS_REPORT_LOCK = threading.Lock()
 _STATUS_REPORT_THREADS: set[threading.Thread] = set()
 _STATUS_REPORT_PENDING: tuple[V2Config | None, str, str | None] | None = None
+# Opt-in changes must not be coalesced away by a heartbeat or an ABA toggle.
+_DIRECT_STATUS_REPORT_PENDING: deque[tuple[V2Config | None, str, str | None]] = deque()
 _STATUS_REPORT_ATEXIT_REGISTERED = False
 _ACTIVE_HOSTNAMES_LOCK = threading.Lock()
 _ACTIVE_HOSTNAMES_CACHE: tuple[Path, str, frozenset[str], float | None] | None = None
@@ -1244,6 +1247,19 @@ def status(
             "edge_bind_address": "",
         },
     }
+    try:
+        from vibe import direct_lifecycle
+
+        result["direct"] = direct_lifecycle.status_for_config(config)
+    except Exception:
+        result["direct"] = {
+            "enabled": bool(getattr(cloud, "direct", False)),
+            "state": "waiting-permission" if getattr(cloud, "direct", False) else "disabled",
+            "reason": "awaiting_runtime_status" if getattr(cloud, "direct", False) else "setting_off",
+            "certificate_not_after": None,
+            "transport_running": False,
+            "direct_access_allowed": None,
+        }
     quality = tunnel_quality_snapshot()
     if quality is not None:
         result["tunnel_quality"] = quality
@@ -1637,6 +1653,33 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def live_direct_status(config: V2Config, *, wait_for_setting: bool = False) -> dict[str, Any] | None:
+    """CLI-only local readback; never a recursive runtime-status dependency."""
+    from vibe import runtime
+
+    if runtime.recorded_ui_is_gone():
+        return None
+    deadline = time.monotonic() + (2.0 if wait_for_setting else 0.0)
+    with requests.Session() as client:
+        client.trust_env = False
+        while True:
+            try:
+                response = client.get(
+                    f"{origin_service_for_pairing(config)}/api/remote-access/status",
+                    timeout=(0.5, 1.0), allow_redirects=False,
+                )
+                payload = response.json() if response.status_code == 200 else None
+                direct = payload.get("direct") if isinstance(payload, dict) else None
+                if isinstance(direct, dict):
+                    if direct.get("enabled") == bool(config.remote_access.vibe_cloud.direct):
+                        return direct
+            except (requests.RequestException, ValueError):
+                return None
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+
+
 def _local_ui_healthy(config: V2Config) -> bool:
     try:
         response = requests.get(f"{origin_service_for_pairing(config)}/health", timeout=1.0)
@@ -1656,6 +1699,7 @@ def runtime_status_payload(config: V2Config | None = None, event: str = "heartbe
         "tunnel_running": bool(current.get("running")),
         "cloudflared_found": bool(current.get("binary_found")),
         "expected_origin_service": origin_service_for_pairing(config),
+        "direct_paths_enabled": bool(config.remote_access.vibe_cloud.direct),
     }
     if observed_origin_service:
         payload["observed_origin_service"] = observed_origin_service
@@ -1688,11 +1732,29 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
             "instance_secret": cloud.instance_secret,
             **runtime_status_payload(config, event=event, last_error=last_error),
         }
+        try:
+            from vibe import direct_lifecycle
+
+            runtime_status_ticket = (
+                direct_lifecycle.runtime_status_request(config)
+                if payload.get("direct_paths_enabled") is True else None
+            )
+        except Exception:
+            direct_lifecycle = None
+            runtime_status_ticket = None
         result = _json_request(
             f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
             payload,
             timeout=5.0,
         )
+        try:
+            if direct_lifecycle is not None:
+                direct_lifecycle.accept_runtime_status_response(
+                    runtime_status_ticket,
+                    {"ok": True, **result},
+                )
+        except Exception:
+            logger.debug("Direct runtime-status response handoff failed")
         _replace_active_hostnames(config, result.get("active_hostnames"))
         reported_kind = _normalized_instance_kind(result.get("instance_kind"))
         if reported_kind is not None:
@@ -2797,21 +2859,33 @@ def _report_runtime_status_async(config: V2Config | None = None, event: str = "h
         global _STATUS_REPORT_PENDING
         while True:
             with _STATUS_REPORT_LOCK:
-                pending = _STATUS_REPORT_PENDING
+                if _DIRECT_STATUS_REPORT_PENDING:
+                    pending = _DIRECT_STATUS_REPORT_PENDING.popleft()
+                else:
+                    pending = _STATUS_REPORT_PENDING
+                    _STATUS_REPORT_PENDING = None
                 if pending is None:
                     thread = holder.get("thread")
                     if thread is not None:
                         _STATUS_REPORT_THREADS.discard(thread)
                     return
-                _STATUS_REPORT_PENDING = None
             pending_config, pending_event, pending_error = pending
             try:
+                # Transition snapshots must preserve an explicit false across
+                # ABA. Ordinary observations instead read current disk state:
+                # a coalesced heartbeat may predate the transitions drained
+                # above and must not undo their last reported owner choice.
+                if pending_event not in {"direct_paths_enabled", "direct_paths_disabled"}:
+                    pending_config = None
                 report_runtime_status(pending_config, event=pending_event, last_error=pending_error)
             except Exception:
                 logger.debug("Tunnel runtime status report failed", exc_info=True)
 
     with _STATUS_REPORT_LOCK:
-        _STATUS_REPORT_PENDING = (config, event, last_error)
+        if event in {"direct_paths_enabled", "direct_paths_disabled"}:
+            _DIRECT_STATUS_REPORT_PENDING.append((config, event, last_error))
+        else:
+            _STATUS_REPORT_PENDING = (config, event, last_error)
         if any(thread.is_alive() for thread in _STATUS_REPORT_THREADS):
             return
         try:
@@ -5535,6 +5609,75 @@ def _pairing_identity_revoked(base_config: V2Config | None, candidate_config: V2
     return previous.is_runtime_paired() and not current.is_runtime_paired()
 
 
+def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> None:
+    """Fence a previously opted-in UI owner before retiring its pairing keys."""
+
+    # Read the persisted/base choice, never the candidate: ON -> OFF can
+    # still have a running owner, while OFF must retain the old pairing save
+    # behavior without depending on the UI process or its loopback listener.
+    if base_config is None or not base_config.remote_access.vibe_cloud.direct:
+        return
+    try:
+        from vibe import direct_lifecycle
+
+        lifecycle = direct_lifecycle.active_lifecycle()
+    except ImportError:
+        return
+    if lifecycle is not None:
+        if not direct_lifecycle.stop_for_pairing_change():
+            raise _PairingRevocationUnavailable(
+                "direct access lifecycle could not stop before certificate retirement"
+            )
+        return
+    if not base_config.remote_access.vibe_cloud.is_runtime_paired():
+        return
+    try:
+        from vibe import runtime
+
+        if runtime.recorded_ui_is_gone():
+            return
+        from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+
+        with requests.Session() as client:
+            # The shared local token must never follow a proxy or redirect.
+            client.trust_env = False
+            response = client.post(
+                f"{origin_service_for_pairing(base_config)}/api/remote-access/direct/suspend",
+                headers={
+                    "X-Vibe-Show-Client": "cli",
+                    SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token(),
+                },
+                timeout=(1.0, 11.0),
+                allow_redirects=False,
+            )
+    except requests.RequestException as exc:
+        try:
+            if runtime.recorded_ui_is_gone():
+                return
+        except Exception:
+            pass
+        raise _PairingRevocationUnavailable(
+            "UI direct access lifecycle could not be reached before certificate retirement"
+        ) from exc
+    if response.status_code == 404:
+        # A pre-I3 UI has no owner and cannot be serving this path.
+        return
+    if response.status_code != 200:
+        raise _PairingRevocationUnavailable(
+            "UI direct access lifecycle refused to stop before certificate retirement"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise _PairingRevocationUnavailable(
+            "UI direct access lifecycle returned an invalid stop response"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("stopped") is not True:
+        raise _PairingRevocationUnavailable(
+            "UI direct access lifecycle did not confirm certificate retirement safety"
+        )
+
+
 def prepare_pairing_revocation(
     base_config: V2Config | None,
     candidate_config: V2Config,
@@ -5552,6 +5695,7 @@ def prepare_pairing_revocation(
         or previous_cloud is None
         or _pairing_identity_from_cloud(previous_cloud) != _pairing_identity_from_cloud(current_cloud)
     ):
+        _stop_direct_lifecycle_before_pairing_discard(base_config)
         from vibe.direct_certificates import discard_direct_certificates
 
         discard_direct_certificates()
