@@ -34,7 +34,10 @@ jobs:
       run_id: ${{ steps.verify.outputs.run_id }}
     permissions:
       actions: read
+      # An RC is proven from its pull request's check runs.
+      checks: read
       contents: read
+      pull-requests: read
     steps:
       - name: Checkout release gate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -43,12 +46,12 @@ jobs:
           # dispatch/tag input through the API and never trusts a workflow
           # context SHA as the release source.
           ref: ${{ github.ref }}
-      - name: Require exact full master backstop
+      - name: Require the full master backstop, or an RC's green pull request
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate
 
   resolve-show-runtime-ref:
     needs: release-backstop
