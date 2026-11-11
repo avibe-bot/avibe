@@ -87,13 +87,22 @@ not cancelled by cancelling its asyncio waiter.
 
 ## Pairing and process boundary
 
-Before existing certificate retirement, an in-process pairing writer posts a
-stop barrier to the owner loop. The barrier does not load config or await a
-certificate worker: the writer already holds the config file lock. The owner
-remains suspended until it observes the committed changed pairing. A failed
-config commit deliberately leaves the optional path closed.
+The stop-before-discard fence is conditional on the **persisted/base** direct
+setting. When it is off (or there is no previous config), pairing saves do not
+contact or wait for the UI owner: existing certificate retirement and pairing
+save behavior are preserved. The candidate's setting is not the guard. A
+previously-on pairing still stops before retirement even when the same save
+turns direct off; a previously-off pairing does not acquire an IPC dependency
+when a re-pairing candidate opts in.
 
-A CLI pairing writer uses `POST /api/remote-access/direct/suspend` on the
+For a previously-on pairing, an in-process writer posts a stop barrier to the
+owner loop before existing certificate retirement. The barrier does not load
+config or await a certificate worker: the writer already holds the config file
+lock. The owner remains suspended until it observes the committed changed
+pairing. A failed config commit deliberately leaves the optional path closed.
+
+A CLI writer for a previously-on pairing uses
+`POST /api/remote-access/direct/suspend` on the
 ordinary loopback listener. This stop-only endpoint requires the existing
 local CLI token **and** a direct loopback connection, and refuses direct-ingress
 and forwarded/proxied requests. Normal Owner authorization remains; the exact
@@ -109,8 +118,9 @@ and the stop complete while another process holds the writer file lock, with
 a failed lock-acquisition positive control to rule out reentrancy.
 
 The connect/read and owner-stop timeouts are not a hard end-to-end 12-second
-deadline. An unreachable or refusing UI owner can delay or fail a pairing save,
-including when the direct setting is off. This is pairing-writer serialization,
+deadline. An unreachable or refusing UI owner can delay or fail a pairing save
+only when the persisted/base direct setting was on; the off case makes no IPC
+call. This is pairing-writer serialization,
 not universal atomicity with every external event or already admitted HTTP.
 If the UI is gone, nothing can serve; a 404 is compatibility with a pre-I3 UI
 that has no lifecycle. Other

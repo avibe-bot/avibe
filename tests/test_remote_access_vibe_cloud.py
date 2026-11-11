@@ -48,35 +48,54 @@ def test_direct_suspend_route_requires_local_cli_token(monkeypatch):
     assert stopped == [10.0]
 
 
-def test_pairing_discard_fences_ui_lifecycle_from_cli_process(monkeypatch):
+@pytest.mark.parametrize("persisted_direct", [False, True])
+@pytest.mark.parametrize("candidate_direct", [False, True])
+@pytest.mark.parametrize("pairing_change", ["unpair", "re-pair"])
+def test_pairing_save_stop_fence_uses_persisted_direct_choice(
+    monkeypatch, persisted_direct, candidate_direct, pairing_change,
+):
+    from vibe import direct_certificates
+
     config = _config()
     cloud = config.remote_access.vibe_cloud
     cloud.backend_url = "https://backend.test"
     cloud.instance_secret = "device-secret"
+    cloud.direct = persisted_direct
+    config.save()
     calls = []
 
     monkeypatch.setattr(direct_lifecycle, "active_lifecycle", lambda: None)
     monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: False)
     monkeypatch.setattr("core.show_pages.show_cli_event_token", lambda: "test-cli-token")
-
-    class Response:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return {"ok": True, "stopped": True}
+    monkeypatch.setattr(direct_certificates, "discard_direct_certificates", lambda: calls.append("discard"))
 
     def post(client, url, **kwargs):
-        assert client.trust_env is False
-        assert kwargs["allow_redirects"] is False
-        calls.append((url, kwargs))
-        return Response()
+        calls.append("stop")
+        # An unavailable UI must not affect a pairing save while previously
+        # off, even if this same candidate opts in to its new pairing.
+        if not persisted_direct:
+            raise remote_access.requests.ConnectionError("test UI unavailable")
+        assert client.trust_env is False and kwargs["allow_redirects"] is False
+        assert url.endswith("/api/remote-access/direct/suspend")
+        assert kwargs["headers"]["X-Vibe-Show-Cli-Token"] == "test-cli-token"
+        assert V2Config.load().remote_access.vibe_cloud.direct is True
+        return SimpleNamespace(status_code=200, json=lambda: {"ok": True, "stopped": True})
 
     monkeypatch.setattr(remote_access.requests.Session, "post", post)
-    remote_access._stop_direct_lifecycle_before_pairing_discard(config)
+    change = {"direct": candidate_direct}
+    if pairing_change == "unpair":
+        change["enabled"] = False
+    else:
+        change["instance_id"] = "replacement-instance"
+    saved = api.save_config({"remote_access": {"vibe_cloud": change}})
 
-    assert calls and calls[0][0].endswith("/api/remote-access/direct/suspend")
-    assert calls[0][1]["headers"]["X-Vibe-Show-Cli-Token"] == "test-cli-token"
+    assert calls == (["stop", "discard"] if persisted_direct else ["discard"])
+    assert saved.remote_access.vibe_cloud.direct is candidate_direct
+    assert V2Config.load().remote_access.vibe_cloud.direct is candidate_direct
+    if pairing_change == "unpair":
+        assert not saved.remote_access.vibe_cloud.is_runtime_paired()
+    else:
+        assert saved.remote_access.vibe_cloud.instance_id == "replacement-instance"
 
 
 @pytest.fixture(autouse=True)
@@ -2659,6 +2678,7 @@ def test_transition_reports_survive_heartbeat_coalescing_and_aba(monkeypatch, la
 @pytest.mark.parametrize("status", [301, 403, 500])
 def test_cross_process_suspend_does_not_retire_on_unconfirmed_response(monkeypatch, status):
     config = _config()
+    config.remote_access.vibe_cloud.direct = True
     config.remote_access.vibe_cloud.backend_url = "https://backend.test"
     config.remote_access.vibe_cloud.instance_secret = "test-secret"
     monkeypatch.setattr(direct_lifecycle, "active_lifecycle", lambda: None)

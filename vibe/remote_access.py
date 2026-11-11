@@ -5610,8 +5610,13 @@ def _pairing_identity_revoked(base_config: V2Config | None, candidate_config: V2
 
 
 def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> None:
-    """Fence the UI owner, including when this writer runs in the CLI process."""
+    """Fence a previously opted-in UI owner before retiring its pairing keys."""
 
+    # Read the persisted/base choice, never the candidate: ON -> OFF can
+    # still have a running owner, while OFF must retain the old pairing save
+    # behavior without depending on the UI process or its loopback listener.
+    if base_config is None or not base_config.remote_access.vibe_cloud.direct:
+        return
     try:
         from vibe import direct_lifecycle
 
@@ -5624,7 +5629,7 @@ def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) 
                 "direct access lifecycle could not stop before certificate retirement"
             )
         return
-    if base_config is None or not base_config.remote_access.vibe_cloud.is_runtime_paired():
+    if not base_config.remote_access.vibe_cloud.is_runtime_paired():
         return
     try:
         from vibe import runtime

@@ -646,7 +646,7 @@ def test_suspend_cookie_guard_reads_config_while_another_process_holds_writer_lo
     from config.v2_config import config_file_lock
     from core.show_pages import show_cli_event_token
 
-    config = _config(direct=False)
+    config = _config(direct=True)
     config.save()
     show_cli_event_token()  # Seed only the isolated test home's local CLI token.
     script = textwrap.dedent("""\
