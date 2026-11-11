@@ -177,6 +177,34 @@ const networkBack = () => {
   window.dispatchEvent(new Event('online'));
 };
 
+/**
+ * A native shell that carries this origin over a direct path. The provider
+ * subscribes at mount, so this goes in before it; the returned function is the
+ * shell reporting a change.
+ */
+const installDirectShell = () => {
+  let deliver: (payload: unknown) => void = () => {};
+  Object.defineProperty(window, 'avibeNative', {
+    configurable: true,
+    value: {
+      contract: 1,
+      platform: 'ios',
+      shellVersion: '1.0 (1)',
+      capabilities: { direct: 1 },
+      call: vi.fn(async () => null),
+      on: (event: string, handler: (payload: unknown) => void) => {
+        if (event === 'direct.transportChanged') deliver = handler;
+        return () => undefined;
+      },
+    },
+  });
+  let sequence = 0;
+  return (transport: 'tunnel' | 'direct') => {
+    sequence += 1;
+    deliver({ transport, sequence });
+  };
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   // jsdom reports no window focus, and a page that never counts as active never
@@ -198,6 +226,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(window, 'avibeNative');
   Reflect.deleteProperty(document, 'hasFocus');
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -504,5 +533,51 @@ describe('ApiProvider workbench stream liveness', () => {
     FakeEventSource.latest().emit('connected', { type: 'connected' });
     vi.advanceTimersByTime(1_000);
     expect(declared.closed).toBe(true);
+  });
+
+  it('moves a healthy stream to the new path when the native shell changes transport', () => {
+    const changeTransport = installDirectShell();
+    mountConnectedStream();
+    const onTunnel = FakeEventSource.latest();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    // The stream is alive and proving itself, which is what every other path
+    // would keep. It is also pinned to the path it was opened on, so it is
+    // replaced now, not after a backoff.
+    changeTransport('direct');
+    expect(onTunnel.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(localStore.noteLocalStoreStreamState).toHaveBeenLastCalledWith(false);
+    // The gap is the replacement's to announce, as on any reconnect.
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    emitHandshake(2);
+    emitControllerLeg(true);
+    expect(onConnected).toHaveBeenCalledTimes(2);
+    expect(localStore.noteLocalStoreStreamState).toHaveBeenLastCalledWith(true);
+
+    // No retry was left scheduled behind the immediate reconnect.
+    vi.advanceTimersByTime(WORKBENCH_EVENT_RETRY_INITIAL_MS * 2);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    // And back: a failed direct path is the same event in the other direction.
+    changeTransport('tunnel');
+    expect(FakeEventSource.instances).toHaveLength(3);
+  });
+
+  it('opens the replacement when a hidden page returns after a transport change', () => {
+    const changeTransport = installDirectShell();
+    mountConnectedStream();
+    const pinned = FakeEventSource.latest();
+
+    // A hidden page opens no stream, but the one it holds is on the old path
+    // all the same.
+    setVisibility('hidden');
+    changeTransport('direct');
+    expect(pinned.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(2);
   });
 });

@@ -27,6 +27,7 @@ import { mcpPath } from '../lib/mcpPath';
 import { parseHomePreferences, type HomePreferences } from '../lib/homePreferences';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import { onNativeDirectTransportChanged } from '../lib/native';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
 import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
@@ -2734,6 +2735,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
+  const rebuildWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
@@ -3596,6 +3598,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
+  /**
+   * The native shell moved this origin between Cloudflare Tunnel and a direct
+   * path. A stream stays on the path it was opened on, so the open one is over
+   * even while it is healthy. It ends the way any lost stream ends, and the
+   * loop then reconnects at once instead of sitting out a backoff. The
+   * replacement's handshake announces the gap, so consumers catch up exactly
+   * as they do after an ordinary reconnect. A hidden page opens its
+   * replacement when it returns.
+   *
+   * Nothing but the stream is rebuilt here. A request in flight on the old
+   * path completes or fails by itself and is never sent again.
+   */
+  const rebuildWorkbenchEventsOnNewTransport = () => {
+    if (eventHandlersRef.current.size === 0) return;
+    failWorkbenchEventStream();
+    getWorkbenchEventReconnectLoop().wake();
+  };
+  rebuildWorkbenchEventsRef.current = rebuildWorkbenchEventsOnNewTransport;
+
   useEffect(() => {
     const wakeIfVisible: PageReactivationListener = (awaySince) => {
       if (document.visibilityState !== 'visible') return;
@@ -3608,9 +3629,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const wakeFromNetwork = () => wakeIfVisible(null);
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
+    const stopTransportChanges = onNativeDirectTransportChanged(() => rebuildWorkbenchEventsRef.current());
     if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       stopReactivation();
+      stopTransportChanges();
       window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };

@@ -2,6 +2,7 @@ export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
   | 'app'
+  | 'direct'
   | 'haptics'
   | 'keyboardResizesViewport'
   | 'push'
@@ -25,6 +26,17 @@ export type NativePushStatus =
       state: 'on';
       revokeState?: NativePushRevokeState;
     } & NativePushSubscription);
+
+export type NativeDirectTransport = 'tunnel' | 'direct';
+/**
+ * Which path carries this origin inside the native shell: Cloudflare Tunnel or
+ * a direct path. `sequence` grows with every change, so a late answer can be
+ * told from a newer one.
+ */
+export type NativeDirectStatus = {
+  transport: NativeDirectTransport;
+  sequence: number;
+};
 
 export type NativeBridgeError = {
   code: string;
@@ -290,5 +302,34 @@ export function onNativePushOpened(
         // Ignore malformed navigation payloads from the native shell.
       }
     }
+  });
+}
+
+function parseNativeDirectStatus(payload: unknown): NativeDirectStatus | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const { transport, sequence } = payload as { transport?: unknown; sequence?: unknown };
+  if (transport !== 'tunnel' && transport !== 'direct') return null;
+  if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 0) return null;
+  return { transport, sequence };
+}
+
+/**
+ * The native shell moved this origin between Cloudflare Tunnel and a direct
+ * path. The origin is unchanged, but a connection stays on the path it was
+ * opened on, so whoever owns a long-lived one rebuilds it here. A change that
+ * is not newer than the last one delivered is dropped. Without the `direct`
+ * capability this never fires.
+ */
+export function onNativeDirectTransportChanged(
+  handler: (status: NativeDirectStatus) => void,
+): () => void {
+  const native = bridge();
+  if (!native || (native.capabilities.direct ?? 0) < 1) return () => undefined;
+  let lastSequence = -1;
+  return native.on('direct.transportChanged', (payload) => {
+    const status = parseNativeDirectStatus(payload);
+    if (!status || status.sequence <= lastSequence) return;
+    lastSequence = status.sequence;
+    handler(status);
   });
 }

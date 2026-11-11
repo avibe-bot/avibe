@@ -19,6 +19,7 @@ import {
 import { IS_APPLE } from '../../lib/platform';
 import { openLinkInNewContext } from '../../lib/pwaNavigation';
 import { isComposingKey } from '@/lib/imeComposition';
+import { onNativeDirectTransportChanged } from '@/lib/native';
 import { useLatestRef } from '@/lib/useLatestRef';
 import {
   REMOTE_AUTH_STATE_EVENT,
@@ -154,6 +155,13 @@ export const TerminalView: React.FC<{
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
   const authorizationRecoveryPendingRef = useRef(false);
+  // What the current socket has reached, for the transport-change handler below. `attached`: it
+  // got its 'ready' frame. `persistent`: that frame said the session survives its socket (tmux).
+  // `settled`: the shell exited, the terminal is disabled, or an authorization recovery owns the
+  // reconnect, so nothing else should reconnect it.
+  const attachedRef = useRef(false);
+  const persistentRef = useRef(false);
+  const settledRef = useRef(false);
   // Auto-dismiss timer for the mobile Paste key's "clipboard blocked" hint.
   const pasteHintTimerRef = useRef<number | null>(null);
   // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
@@ -189,6 +197,24 @@ export const TerminalView: React.FC<{
     window.addEventListener(REMOTE_AUTH_STATE_EVENT, onAuthorizationState);
     return () => window.removeEventListener(REMOTE_AUTH_STATE_EVENT, onAuthorizationState);
   }, []);
+
+  // The native shell moved this origin between Cloudflare Tunnel and a direct path. A socket
+  // stays on the path it was opened on, and a browser WebSocket never reconnects by itself, so
+  // reattach through the same reconnect the button uses, but only where that costs nothing:
+  // a persistent session reattaches as it was, and a socket that never attached has nothing to
+  // lose. A live plain shell dies with its socket, so it stays on the path it has; one that was
+  // already lost keeps the overlay, which is what tells the user its process is gone. Input typed
+  // while there is no open socket is dropped, never queued, so nothing is replayed.
+  useEffect(
+    () =>
+      onNativeDirectTransportChanged(() => {
+        if (settledRef.current) return;
+        if (attachedRef.current && !persistentRef.current) return;
+        busyRetriesRef.current = 0;
+        setReconnectKey((key) => key + 1);
+      }),
+    [],
+  );
 
   useEffect(() => {
     const term = new Terminal({
@@ -325,6 +351,9 @@ export const TerminalView: React.FC<{
     const ws = new WebSocket(buildWsUrl(sessionId, cwd));
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
+    attachedRef.current = false;
+    persistentRef.current = false;
+    settledRef.current = false;
     ws.onopen = () => {
       try {
         refit();
@@ -338,12 +367,15 @@ export const TerminalView: React.FC<{
           const msg = JSON.parse(ev.data) as { type?: string; persistent?: boolean; code?: number };
           if (msg.type === 'ready') {
             busyRetriesRef.current = 0; // a successful attach resets the transient-retry budget
+            attachedRef.current = true;
+            persistentRef.current = !!msg.persistent;
             setStatus('ready');
             onPersistentRef.current?.(!!msg.persistent);
             // The shell is live and about to paint its first content — settle the fit again so a
             // late cell-metric correction doesn't leave the terminal a few rows tall.
             settle();
           } else if (msg.type === 'exit') {
+            settledRef.current = true;
             setExitCode(typeof msg.code === 'number' ? msg.code : null);
             setStatus('closed');
           }
@@ -356,18 +388,21 @@ export const TerminalView: React.FC<{
     };
     ws.onclose = (ev: CloseEvent) => {
       if (ev.code === AUTHORIZATION_LOGIN_REQUIRED_CLOSE_CODE) {
+        settledRef.current = true;
         authorizationRecoveryPendingRef.current = true;
         setStatus('error');
         reportRemoteAuthorizationState('login_required');
         return;
       }
       if (ev.code === AUTHORIZATION_REVOKED_CLOSE_CODE) {
+        settledRef.current = true;
         authorizationRecoveryPendingRef.current = false;
         setStatus('disabled');
         reportRemoteAuthorizationState('revoked');
         return;
       }
       if (ev.code === AUTHORIZATION_UNAVAILABLE_CLOSE_CODE) {
+        settledRef.current = true;
         authorizationRecoveryPendingRef.current = true;
         setStatus('error');
         reportRemoteAuthorizationState('unavailable');
@@ -394,6 +429,8 @@ export const TerminalView: React.FC<{
         );
         return;
       }
+      // 1008: the terminal is disabled on this instance, which no reconnect changes.
+      if (ev.code === 1008) settledRef.current = true;
       setStatus((prev) =>
         prev === 'closed' ? prev : ev.code === 1008 ? 'disabled' : prev === 'ready' ? 'closed' : 'error',
       );
