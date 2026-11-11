@@ -95,6 +95,73 @@ App Store, and TestFlight archives. The Phase 1 app archive must repeat the
 binary check on its final linked products (including any transitive/static-link
 result). Do not add that check to `ios/scripts/testflight.py` in this phase.
 
+## Optional publication and consumer pin
+
+`release.json` is the single repository pin. It starts in `pending` state with
+no zip checksum: **consumers must reject pending pins**. The separate build
+manifest describes a CI qualification; it is not proof that a release exists.
+The qualified 17.0 artifact serves iOS 17.0 and later; there is no parallel 17.5
+publication to select.
+
+A manual dispatch may supply `release_tag=iroh-apple-v1.2.0-1`, matching
+`IROH_FFI_TAG` and `IROH_APPLE_REVISION` in `versions.env`. `dry_run` defaults to
+true. The read-only manifest job runs after the full gate, verifies the
+same-run files, and records URLs, byte counts and SHA-256s. Regular PR runs keep
+the existing checks and the original qualified artifact; the additional
+support bundle and pending release-candidate manifest are separate artifacts.
+If the gate falls back to another runtime below 17.5, its qualification remains
+valid, but publication refuses unless the tested runtime equals the deployment
+target exactly. A no-tag PR dry run records that runtime without publishing it.
+
+Only an explicit non-dry-run dispatch in `avibe-bot/avibe` on `master` can enter
+the publication job. Only that job has `contents: write`; PRs and other branches
+cannot publish. It revalidates the same-run candidate and refuses mismatched
+pins, patch/build recipe hashes, missing evidence/licenses, checksum changes,
+failed tests, and existing tags or releases (including drafts). Collision/API
+lookup failures are not absence. Publication is serialized, targets the tested
+source SHA and never overwrites assets. A failure after creating a release is
+not automatically repaired: diagnose it and use a new reviewed revision.
+
+**Owner approval is procedural, not a technical reviewer lock.** No protected
+environment is created here; a repository writer can dispatch with dry run off.
+Merging this mechanism does not approve its first use or publish anything.
+
+Release assets and layout:
+
+- `IrohLib.xcframework.zip` is byte-for-byte the checked zip from the same run.
+  Its top-level directory is `Iroh.xcframework/`, containing `Info.plist`,
+  `ios-arm64/libiroh_ffi.a` and
+  `ios-arm64_x86_64-simulator/libiroh_ffi-ios-simulator.a`; each slice has
+  `Headers/Export.h`, `Headers/iroh_ffiFFI.h` and `Headers/module.modulemap`.
+  Use SwiftPM `.binaryTarget(name: "Iroh", url: ..., checksum: ...)`, or download
+  and SHA-256-verify before extracting. This is a C/UniFFI binary, not the Swift
+  wrapper by itself.
+- `IrohLib-support.zip` contains the matching `IrohLib.swift`, upstream
+  `LICENSE-APACHE` and `LICENSE-MIT` under `LICENSES/iroh-ffi/`, and license/NOTICE
+  texts from locked dependencies indexed by `LICENSES/packages.json`. This
+  deliberately includes build/host dependencies too. Consumers must obtain
+  and preserve this bundle's notices with the redistributed binary and wrapper.
+  The binding is also published as `IrohLib.swift`; both forms are checksummed.
+- `iroh-apple-release.json` records tag, binary URL/checksum, upstream commit,
+  **resolved iroh core version**, patch/build recipe hashes, target/runtime,
+  source commit/run and each asset's URL, size and SHA-256. Qualification logs,
+  feature graphs, runtime-test JSON and the build manifest accompany it.
+
+After an owner-approved publication, independently read the release back and
+**download every named asset**. The promotion PR copies the verified release
+manifest into this directory's `release.json` with `release_state: published`,
+and includes read-back asset names, byte counts and computed SHA-256s as review
+evidence. Never promote based only on a dispatch result or an anticipated URL.
+The publication workflow cannot push the pin to master.
+
+This tag family is not a product version. Publication explicitly sets
+`make_latest: false` and the silent update-notification marker. Product release
+selection and desktop updates accept only their canonical `v…`/`gh-v…` families.
+The existing hourly release mirror naturally retains this full release and its
+assets; its `latest/` installer selection requires product tags and desktop
+installers, so this release cannot replace those aliases. GitHub URLs remain
+the pin; no new mirror guard or backup infrastructure is added.
+
 ## Bumping the pin
 
 1. Update `versions.env` with the new tag, exact commit, resolved versions,
