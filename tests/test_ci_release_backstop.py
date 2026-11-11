@@ -80,9 +80,11 @@ def _run(
     sha: str = SOURCE_SHA,
     conclusion: str | None = "success",
     status: str = "completed",
+    run_attempt: int | None = 2,
 ) -> dict[str, Any]:
     return {
         "id": run_id,
+        "run_attempt": run_attempt,
         "event": event,
         "path": ".github/workflows/lint.yml",
         "head_branch": branch,
@@ -137,7 +139,7 @@ def test_prove_backstop_resolves_annotated_tag_and_exact_successful_run() -> Non
 
     proof = gate.prove_backstop(api, tag=TAG)
 
-    assert proof == gate.BackstopProof(run_id=1, source_sha=SOURCE_SHA, event="push")
+    assert proof == gate.BackstopProof(run_id=1, source_sha=SOURCE_SHA, event="push", run_attempt=2)
     assert [path for path, _query in api.calls[:2]] == ["git/ref/tags/v4.2.0", f"git/tags/{'b' * 40}"]
     run_queries = [query for path, query in api.calls if path.endswith("/runs")]
     assert {query["event"] for query in run_queries if query is not None} == {"push", "workflow_dispatch"}
@@ -310,7 +312,7 @@ def test_only_an_opted_in_rc_releases_without_the_full_backstop(tag: str, rc_pul
         _rc_api(runs=[_run()], jobs={1: [_job()]}), tag=tag, rc_pull_request_gate=rc_pull_request_gate
     )
 
-    assert proof == gate.BackstopProof(run_id=1, source_sha=SOURCE_SHA, event="push")
+    assert proof == gate.BackstopProof(run_id=1, source_sha=SOURCE_SHA, event="push", run_attempt=2)
 
 
 @pytest.mark.parametrize(
@@ -318,9 +320,11 @@ def test_only_an_opted_in_rc_releases_without_the_full_backstop(tag: str, rc_pul
     [
         (RC_TAG, _rc_api(runs=[_run(conclusion="failure")]), f"source_sha={SOURCE_SHA}\n", True),
         (RC_TAG, _rc_api(), f"source_sha={SOURCE_SHA}\n", False),
-        (TAG, _rc_api(runs=[_run()], jobs={1: [_job()]}), f"source_sha={SOURCE_SHA}\nrun_id=1\n", False),
+        (RC_TAG, _rc_api(runs=[_run(status="in_progress", conclusion=None)]), f"source_sha={SOURCE_SHA}\n", False),
+        (RC_TAG, _rc_api(runs=[_run()], jobs={1: [_job()]}), f"source_sha={SOURCE_SHA}\nrun_id=1\nrun_attempt=2\n", False),
+        (TAG, _rc_api(runs=[_run()], jobs={1: [_job()]}), f"source_sha={SOURCE_SHA}\nrun_id=1\nrun_attempt=2\n", False),
     ],
-    ids=["rc-with-red-backstop", "rc-without-backstop", "stable"],
+    ids=["rc-with-red-backstop", "rc-without-backstop", "rc-pending-backstop", "rc-with-green-backstop", "stable"],
 )
 def test_gate_hands_the_exact_source_to_the_release_and_reports_a_red_rc_backstop(
     tag: str,
@@ -340,7 +344,19 @@ def test_gate_hands_the_exact_source_to_the_release_and_reports_a_red_rc_backsto
     assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", tag, "--rc-pull-request-gate"]) == 0
 
     assert github_output.read_text(encoding="utf-8") == outputs
+    assert not any("artifacts" in path for path, _ in api.calls)
+    if tag == RC_TAG and "run_id=" not in outputs:
+        assert not any(path.endswith("/jobs") for path, _ in api.calls)
     assert ("::warning::The full master backstop failed at RC source" in capsys.readouterr().out) is warned
+
+
+@pytest.mark.parametrize("attempt", [None, 0, -1, True, "2"])
+def test_missing_attempt_disables_reuse_without_changing_gate_acceptance(attempt):
+    api = _rc_api(runs=[_run(run_attempt=attempt)], jobs={1: [_job()]})
+    proof = gate.prove_release(api, tag=RC_TAG, rc_pull_request_gate=True)
+    assert proof.backstop == "success"
+    assert proof.full_backstop is not None
+    assert proof.full_backstop.run_attempt == 0
 
 
 @pytest.mark.parametrize(

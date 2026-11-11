@@ -40,6 +40,8 @@ class BackstopProof:
     run_id: int
     source_sha: str
     event: str
+    # Optional optimization provenance, not a new release-gate requirement.
+    run_attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class PullRequestProof:
     # Reported, never required: "success", "pending", "failed", "missing" or "unknown".
     backstop: str
     backstop_run_id: int | None = None
+    full_backstop: BackstopProof | None = None
 
 
 class GitHubApi:
@@ -192,7 +195,11 @@ def _backstop(api: GitHubApi, source_sha: str) -> tuple[BackstopProof | None, st
         elif run.get("conclusion") == "success":
             terminal = [job for job in _jobs(api, run_id) if job.get("name") == TERMINAL_JOB]
             if any(job.get("status") == "completed" and job.get("conclusion") == "success" for job in terminal):
-                proof = BackstopProof(run_id=run_id, source_sha=source_sha, event=str(run.get("event")))
+                attempt = run.get("run_attempt")
+                if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                    attempt = 0  # No exact-attempt UI reuse; gate policy is unchanged.
+                proof = BackstopProof(run_id=run_id, source_sha=source_sha, event=str(run.get("event")),
+                                      run_attempt=attempt)
                 return proof, "success", run_id
         elif run.get("conclusion") not in {"cancelled", "skipped"} and state[0] == "missing":
             state = ("failed", run_id)
@@ -306,15 +313,16 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
     pull_number, head_sha = _merged_pull(api, source_sha)
     _require_green_checks(api, pull_number=pull_number, head_sha=head_sha)
     try:
-        _proof, backstop, run_id = _backstop(api, source_sha)
+        full_backstop, backstop, run_id = _backstop(api, source_sha)
     except ReleaseBackstopError:
-        backstop, run_id = "unknown", None
+        full_backstop, backstop, run_id = None, "unknown", None
     return PullRequestProof(
         source_sha=source_sha,
         pull_number=pull_number,
         head_sha=head_sha,
         backstop=backstop,
         backstop_run_id=run_id,
+        full_backstop=full_backstop,
     )
 
 
@@ -353,7 +361,6 @@ def main(argv: list[str] | None = None) -> int:
     outputs = [f"source_sha={proof.source_sha}"]
     if isinstance(proof, BackstopProof):
         print(f"Exact full master backstop verified for {proof.source_sha} (run {proof.run_id}, event {proof.event}).")
-        outputs.append(f"run_id={proof.run_id}")
     else:
         print(
             f"RC pull-request gate verified for {proof.source_sha}: it is on {MASTER_BRANCH} and pull request "
@@ -366,6 +373,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"::warning::The full master backstop failed at RC source {proof.source_sha}{run}. "
                 "The RC is not blocked; report it as docs/release.md describes."
             )
+    # The RC path already inspected the backstop for reporting. Reuse only that
+    # existing successful proof; pending/missing/red RCs incur no new discovery
+    # requests and never wait for the backstop just to build their UI.
+    full_backstop = proof if isinstance(proof, BackstopProof) else proof.full_backstop
+    if full_backstop is not None:
+        outputs.extend([f"run_id={full_backstop.run_id}", f"run_attempt={full_backstop.run_attempt}"])
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a", encoding="utf-8") as output:
