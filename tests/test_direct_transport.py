@@ -17,7 +17,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from vibe import direct_rendezvous
 from vibe.direct_ingress import DirectIngress
 from vibe.direct_rendezvous import DirectEndpoint, DirectRendezvous
 from vibe.direct_transport import (
@@ -26,7 +25,6 @@ from vibe.direct_transport import (
 )
 
 PEER = "a" * 64
-UNKNOWN_PEER = "b" * 64
 ENDPOINT_ONE = "1" * 64
 ENDPOINT_TWO = "2" * 64
 HOSTNAME = "alex.avibe.bot"
@@ -83,7 +81,6 @@ SIDECAR = textwrap.dedent(
     port = int(port_text)
     generation = next_generation()
     peer = "a" * 64
-    unknown_peer = "b" * 64
     endpoint_one = "1" * 64
     endpoint_two = "2" * 64
     endpoint_id = (endpoint_one if generation % 2 else endpoint_two)
@@ -92,26 +89,19 @@ SIDECAR = textwrap.dedent(
     def ready(protocol=1):
         send({"type": "ready", "protocol": protocol, "endpoint_id": endpoint_id, "addresses": addresses})
 
-    def ask(request, peer):
-        send({"type": "admit", "request": request, "endpoint_id": peer})
-        reply = json.loads(sys.stdin.readline())
-        event({"kind": "admission", "reply": reply})
+    def read_admission_notice():
+        message = json.loads(sys.stdin.readline())
+        event({"kind": "admission_notice", "message": message})
 
     if mode == "ready_addresses":
         ready()
         time.sleep(0.1)
         send({"type": "addresses", "addresses": ["192.168.1.21:51235"]})
         wait_for_stop()
-    elif mode == "admit":
+    elif mode == "admission":
         ready()
-        time.sleep(float(os.environ.get("DIRECT_TEST_ADMIT_DELAY", "0.15")))
-        ask(1, peer)
-        ask(2, unknown_peer)
-        wait_for_stop()
-    elif mode == "expired_admit":
-        ready()
-        time.sleep(float(os.environ.get("DIRECT_TEST_ADMIT_DELAY", "0.15")))
-        ask(1, peer)
+        read_admission_notice()
+        read_admission_notice()
         wait_for_stop()
     elif mode == "stream":
         ready()
@@ -242,6 +232,10 @@ def _events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def _admission_notices(path: Path) -> list[dict]:
+    return [item["message"] for item in _events(path) if item["kind"] == "admission_notice"]
+
+
 @pytest.mark.asyncio
 async def test_ready_addresses_and_restart_publish_each_generation(sidecar):
     """Protect endpoint publication, address refresh, new tokens, and generations."""
@@ -292,10 +286,10 @@ async def test_ready_addresses_and_restart_publish_each_generation(sidecar):
 
 
 @pytest.mark.asyncio
-async def test_admission_answers_use_rendezvous_and_expiry(sidecar):
-    """Protect admission truth, denial, and expiry without sidecar-local policy."""
+async def test_admission_notices_follow_rendezvous_admissions(sidecar):
+    """Protect pre-answer admission notices, extensions, and sidecar-local state."""
     path, events, env = sidecar
-    env["DIRECT_TEST_MODE"] = "admit"
+    env["DIRECT_TEST_MODE"] = "admission"
     rendezvous = RecordingRendezvous()
     old_env = os.environ.copy()
     os.environ.update(env)
@@ -303,45 +297,28 @@ async def test_admission_answers_use_rendezvous_and_expiry(sidecar):
     try:
         await supervisor.start()
         await _wait_until(lambda: supervisor.diagnostics.endpoint_id == ENDPOINT_ONE)
-        rendezvous.offer(
+        first = await asyncio.to_thread(
+            rendezvous.offer,
             instance_id="inst_test",
             hostname=HOSTNAME,
             subject="subject",
             client_endpoint_id=PEER,
         )
-        await _wait_until(lambda: len([item for item in _events(events) if item["kind"] == "admission"]) == 2)
-        replies = [item["reply"] for item in _events(events) if item["kind"] == "admission"]
-        assert replies == [
-            {"type": "admission", "request": 1, "allow": True},
-            {"type": "admission", "request": 2, "allow": False},
+        assert first["status"] == "ready"
+        await _wait_until(lambda: len(_admission_notices(events)) == 1)
+        second = await asyncio.to_thread(
+            rendezvous.offer,
+            instance_id="inst_test",
+            hostname=HOSTNAME,
+            subject="subject",
+            client_endpoint_id=PEER,
+        )
+        assert second["expires_at"] > first["issued_at"]
+        await _wait_until(lambda: len(_admission_notices(events)) == 2)
+        assert _admission_notices(events) == [
+            {"type": "admission", "endpoint_id": PEER, "ttl_seconds": 300},
+            {"type": "admission", "endpoint_id": PEER, "ttl_seconds": 300},
         ]
-        assert supervisor.diagnostics.connections == 2
-        assert supervisor.diagnostics.refusals == 1
-    finally:
-        await supervisor.stop()
-        os.environ.clear()
-        os.environ.update(old_env)
-
-    now = [1000.0]
-    events.write_text("", encoding="utf-8")
-    expired_rendezvous = RecordingRendezvous(clock=lambda: now[0])
-    old_env = os.environ.copy()
-    env["DIRECT_TEST_MODE"] = "expired_admit"
-    os.environ.update(env)
-    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), expired_rendezvous)
-    try:
-        await supervisor.start()
-        await _wait_until(lambda: supervisor.diagnostics.endpoint_id == ENDPOINT_TWO)
-        expired_rendezvous.offer(
-            instance_id="inst_test",
-            hostname=HOSTNAME,
-            subject="subject",
-            client_endpoint_id=PEER,
-        )
-        now[0] += direct_rendezvous.RENDEZVOUS_TTL_SECONDS + 1
-        await _wait_until(lambda: any(item["kind"] == "admission" for item in _events(events)))
-        reply = next(item["reply"] for item in _events(events) if item["kind"] == "admission")
-        assert reply["allow"] is False
     finally:
         await supervisor.stop()
         os.environ.clear()

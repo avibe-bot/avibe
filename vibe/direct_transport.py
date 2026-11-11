@@ -32,7 +32,13 @@ from os import PathLike
 from typing import Any
 
 from vibe.direct_ingress import AsyncioByteStream, DirectIngress
-from vibe.direct_rendezvous import DIRECT_ALPN, DirectEndpoint, DirectRendezvous, is_endpoint_id
+from vibe.direct_rendezvous import (
+    DIRECT_ALPN,
+    DirectEndpoint,
+    DirectRendezvous,
+    RENDEZVOUS_TTL_SECONDS,
+    is_endpoint_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +61,10 @@ _REASON_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 class DirectTransportDiagnostics:
     """Safe transport state for status surfaces.
 
-    ``connections`` is the monotonic count of sidecar peer connections that
-    have been admitted at least once during this supervisor lifetime.  A
-    repeated admission refresh does not increment it.  ``refusals`` counts
-    denied admissions and loopback data connections rejected before ingress.
-    Neither field contains a peer label or address.
+    ``connections`` is the monotonic count of valid loopback stream headers
+    handed to ingress during this supervisor lifetime. ``refusals`` counts
+    loopback data connections rejected before ingress. Neither field contains
+    a peer label or address.
     """
 
     running: bool
@@ -127,13 +132,16 @@ class DirectTransportSupervisor:
         self._supervisor_task: asyncio.Task[None] | None = None
         self._process: Any = None
         self._stderr_task: asyncio.Task[None] | None = None
+        self._control_write_lock: asyncio.Lock | None = None
+        self._admission_notice_tasks: set[asyncio.Task[None]] = set()
+        self._admission_listener_generation = 0
+        self._active_admission_generation: int | None = None
         self._stream_port: int | None = None
 
         # These are intentionally private: neither token nor a peer address is
         # part of the diagnostic surface.
         self._token: bytes | None = None
         self._endpoint_id: str | None = None
-        self._admitted_peers: set[str] = set()
 
         self._running = False
         self._reason: str | None = "not_running"
@@ -172,12 +180,15 @@ class DirectTransportSupervisor:
         if self._started:
             return
         self._stop_event = asyncio.Event()
+        self._control_write_lock = asyncio.Lock()
         self._started = True
         self._running = False
         self._reason = "starting"
         self._endpoint_id = None
-        self._admitted_peers.clear()
+        self._active_admission_generation = None
+        self._rendezvous.set_admission_listener(None)
         self._rendezvous.publish(None, reason="starting")
+
         try:
             self._server = await asyncio.start_server(
                 self._spawn_stream_task,
@@ -258,6 +269,7 @@ class DirectTransportSupervisor:
                 return
             peer = self._data_header_peer(line)
             accepted = True
+            self._connections += 1
             await self._ingress.handle_stream(
                 AsyncioByteStream(reader, writer),
                 peer=peer,
@@ -323,7 +335,6 @@ class DirectTransportSupervisor:
                     )
                     self._token = secrets.token_bytes(32)
                     self._endpoint_id = None
-                    self._admitted_peers.clear()
                     self._running = True
                     self._reason = None
                     await self._send_start(process)
@@ -403,8 +414,6 @@ class DirectTransportSupervisor:
                 self._handle_ready(message)
             elif message_type == "addresses":
                 self._handle_addresses(message)
-            elif message_type == "admit":
-                await self._handle_admit(process, message)
             elif message_type == "peer_closed":
                 self._handle_peer_closed(message)
             elif message_type == "fatal":
@@ -448,10 +457,25 @@ class DirectTransportSupervisor:
         if not is_endpoint_id(endpoint_id):
             raise _ProtocolError("invalid_endpoint_id")
         self._endpoint_id = endpoint_id
-        self._rendezvous.publish(
-            DirectEndpoint(endpoint_id=endpoint_id, addresses=tuple(addresses)),
-            reason="running",
+        self._admission_listener_generation += 1
+        generation = self._admission_listener_generation
+        self._active_admission_generation = generation
+        self._rendezvous.set_admission_listener(
+            lambda client_endpoint_id, ttl_seconds, generation=generation: self._admission_notice_from_thread(
+                generation,
+                client_endpoint_id,
+                ttl_seconds,
+            )
         )
+        try:
+            self._rendezvous.publish(
+                DirectEndpoint(endpoint_id=endpoint_id, addresses=tuple(addresses)),
+                reason="running",
+            )
+        except BaseException:
+            self._rendezvous.set_admission_listener(None)
+            self._active_admission_generation = None
+            raise
 
     def _handle_addresses(self, message: dict[str, Any]) -> None:
         if self._endpoint_id is None:
@@ -462,26 +486,6 @@ class DirectTransportSupervisor:
             reason="running",
         )
 
-    async def _handle_admit(self, process: Any, message: dict[str, Any]) -> None:
-        if self._endpoint_id is None:
-            raise _ProtocolError("admit_before_ready")
-        request = message.get("request")
-        endpoint_id = message.get("endpoint_id")
-        if not self._is_request_id(request) or not is_endpoint_id(endpoint_id):
-            raise _ProtocolError("invalid_admit")
-        allow = self._rendezvous.is_admitted(endpoint_id)
-        if endpoint_id not in self._admitted_peers:
-            self._admitted_peers.add(endpoint_id)
-            self._connections += 1
-        if not allow:
-            self._refusals += 1
-        if process.stdin is None:
-            raise _ProtocolError("missing_stdin")
-        await self._write_control(
-            process.stdin,
-            {"type": "admission", "request": request, "allow": allow},
-        )
-
     def _handle_peer_closed(self, message: dict[str, Any]) -> None:
         if self._endpoint_id is None:
             raise _ProtocolError("peer_closed_before_ready")
@@ -489,7 +493,56 @@ class DirectTransportSupervisor:
         reason = message.get("reason")
         if not is_endpoint_id(endpoint_id) or not isinstance(reason, str) or not reason:
             raise _ProtocolError("invalid_peer_closed")
-        self._admitted_peers.discard(endpoint_id)
+
+    def _admission_notice_from_thread(self, generation: int, endpoint_id: str, ttl_seconds: int) -> None:
+        if self._loop is None or not is_endpoint_id(endpoint_id):
+            return
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):
+            return
+        try:
+            self._loop.call_soon_threadsafe(
+                self._queue_admission_notice,
+                generation,
+                endpoint_id,
+                max(0, min(RENDEZVOUS_TTL_SECONDS, ttl_seconds)),
+            )
+        except RuntimeError:
+            return
+
+    def _queue_admission_notice(self, generation: int, endpoint_id: str, ttl_seconds: int) -> None:
+        if (
+            generation != self._active_admission_generation
+            or self._stop_event is None
+            or self._stop_event.is_set()
+            or self._process is None
+            or self._process.stdin is None
+        ):
+            return
+        task = asyncio.create_task(
+            self._send_admission_notice(self._process, generation, endpoint_id, ttl_seconds),
+            name="direct-transport-admission-notice",
+        )
+        self._admission_notice_tasks.add(task)
+        task.add_done_callback(self._admission_notice_tasks.discard)
+
+    async def _send_admission_notice(
+        self,
+        process: Any,
+        generation: int,
+        endpoint_id: str,
+        ttl_seconds: int,
+    ) -> None:
+        if generation != self._active_admission_generation or process is not self._process or process.stdin is None:
+            return
+        try:
+            await self._write_control(
+                process.stdin,
+                {"type": "admission", "endpoint_id": endpoint_id, "ttl_seconds": ttl_seconds},
+            )
+        except (_Stopping, BrokenPipeError, ConnectionError, OSError):
+            return
+        except Exception:
+            logger.debug("direct transport admission notice failed", exc_info=True)
 
     @staticmethod
     def _handle_fatal(message: dict[str, Any]) -> str:
@@ -501,10 +554,6 @@ class DirectTransportSupervisor:
     @staticmethod
     def _is_protocol(value: Any) -> bool:
         return isinstance(value, int) and not isinstance(value, bool) and value == DIRECT_TRANSPORT_PROTOCOL
-
-    @staticmethod
-    def _is_request_id(value: Any) -> bool:
-        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
     @staticmethod
     def _addresses(message: dict[str, Any]) -> list[str]:
@@ -519,6 +568,20 @@ class DirectTransportSupervisor:
         message: dict[str, Any],
         *,
         interruptible: bool = True,
+    ) -> None:
+        lock = self._control_write_lock
+        if lock is None:
+            await self._write_control_unlocked(stdin, message, interruptible=interruptible)
+            return
+        async with lock:
+            await self._write_control_unlocked(stdin, message, interruptible=interruptible)
+
+    async def _write_control_unlocked(
+        self,
+        stdin: asyncio.StreamWriter,
+        message: dict[str, Any],
+        *,
+        interruptible: bool,
     ) -> None:
         encoded = (json.dumps(message, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
         if len(encoded) > CONTROL_LINE_LIMIT_BYTES:
@@ -596,8 +659,12 @@ class DirectTransportSupervisor:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     def _withdraw(self, reason: str) -> None:
+        self._rendezvous.set_admission_listener(None)
+        self._active_admission_generation = None
+        for task in tuple(self._admission_notice_tasks):
+            task.cancel()
+        self._admission_notice_tasks.clear()
         self._endpoint_id = None
-        self._admitted_peers.clear()
         self._reason = reason
         self._rendezvous.publish(None, reason=reason)
 

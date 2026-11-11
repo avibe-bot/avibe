@@ -86,6 +86,9 @@ class DirectEndpoint:
     addresses: tuple[str, ...]
 
 
+AdmissionListener = Callable[[str, int], None]
+
+
 class DirectRendezvous:
     """The published endpoint and the client endpoints admitted to dial it.
 
@@ -105,6 +108,20 @@ class DirectRendezvous:
         self._unavailable_reason = "not_running"
         # client endpoint ID -> (subject, admitted_until), oldest first.
         self._admissions: dict[str, tuple[str, int]] = {}
+        self._admission_listener: AdmissionListener | None = None
+
+    def set_admission_listener(self, listener: AdmissionListener | None) -> None:
+        """Set the optional non-blocking hook for admission notices.
+
+        The hook is called after the in-memory admission change and before
+        :meth:`offer` returns. It receives an endpoint ID and a TTL in seconds;
+        a zero TTL means the admission was dropped early. The listener is
+        intentionally not replayed when installed, so a new sidecar starts
+        with an empty set.
+        """
+
+        with self._lock:
+            self._admission_listener = listener
 
     def publish(self, endpoint: DirectEndpoint | None, *, reason: str = "not_running") -> None:
         """Replace the published endpoint; ``None`` withdraws it for ``reason``.
@@ -156,8 +173,9 @@ class DirectRendezvous:
                 reason = self._unavailable_reason if endpoint is None else "no_reachable_address"
                 return unavailable(instance_id=instance_id, hostname=hostname, reason=reason)
             expires_at = now + RENDEZVOUS_TTL_SECONDS
-            self._admit(client_endpoint_id, subject, expires_at, now)
-            return {
+            notifications = self._admit(client_endpoint_id, subject, expires_at, now)
+            listener = self._admission_listener
+            response = {
                 **base,
                 "status": "ready",
                 "generation": f"{self._boot}:{self._revision}",
@@ -171,6 +189,10 @@ class DirectRendezvous:
                 },
                 "client": {"endpoint_id": client_endpoint_id, "admitted_until": expires_at},
             }
+        if listener is not None:
+            for endpoint_id, ttl_seconds in notifications:
+                listener(endpoint_id, ttl_seconds)
+        return response
 
     def is_admitted(self, client_endpoint_id: str) -> bool:
         """Whether a transport peer with this endpoint ID may open streams now."""
@@ -180,18 +202,31 @@ class DirectRendezvous:
             admission = self._admissions.get(client_endpoint_id)
             return admission is not None and admission[1] > now
 
-    def _admit(self, client_endpoint_id: str, subject: str, admitted_until: int, now: int) -> None:
+    def _admit(
+        self,
+        client_endpoint_id: str,
+        subject: str,
+        admitted_until: int,
+        now: int,
+    ) -> list[tuple[str, int]]:
         admissions = self._admissions
+        notifications: list[tuple[str, int]] = []
         for endpoint_id in [key for key, (_subject, until) in admissions.items() if until <= now]:
             del admissions[endpoint_id]
+            if endpoint_id != client_endpoint_id:
+                notifications.append((endpoint_id, 0))
         admissions.pop(client_endpoint_id, None)
         own = [key for key, (owner, _until) in admissions.items() if owner == subject]
         for endpoint_id in own[: max(0, len(own) - _MAX_ADMISSIONS_PER_SUBJECT + 1)]:
             del admissions[endpoint_id]
+            notifications.append((endpoint_id, 0))
         while len(admissions) >= _MAX_ADMISSIONS:
-            del admissions[next(iter(admissions))]
+            endpoint_id = next(iter(admissions))
+            del admissions[endpoint_id]
+            notifications.append((endpoint_id, 0))
         admissions[client_endpoint_id] = (subject, admitted_until)
-
+        notifications.append((client_endpoint_id, max(0, min(RENDEZVOUS_TTL_SECONDS, admitted_until - now))))
+        return notifications
 
 def unavailable(*, instance_id: str, hostname: str, reason: str) -> dict[str, Any]:
     """The answer when there is no endpoint to dial; the client stays on the tunnel."""
