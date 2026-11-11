@@ -63,7 +63,9 @@ const isLicenses = (value: unknown): value is AppLicenses => {
 export async function loadAppLicenses(): Promise<AppLicenses | null> {
   try {
     const response = await fetch(LICENSES_URL);
-    if (!response.ok) return null;
+    // The App's bundle scheme answers with a plain URLResponse, which WebKit reports as status 0;
+    // a missing file fails the request instead.
+    if (!response.ok && response.status !== 0) return null;
     const data: unknown = await response.json();
     return isLicenses(data) && data.groups.length > 0 ? data : null;
   } catch {

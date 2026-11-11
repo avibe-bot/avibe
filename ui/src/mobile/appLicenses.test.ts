@@ -72,11 +72,16 @@ describe('loadAppLicenses', () => {
     sources: [],
     groups: [{ title: 'MIT', text: 'Permission is hereby granted.', components: [{ name: 'react', version: '19.3.1', origin: 'web' }] }],
   };
-  const respond = (body: unknown, ok = true) =>
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok, json: async () => body })));
+  const respond = (body: unknown, ok = true, status = ok ? 200 : 404) =>
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok, status, json: async () => body })));
 
   it('reads the bundled data', async () => {
     respond(data);
+    await expect(loadAppLicenses()).resolves.toEqual(data);
+  });
+
+  it('reads it through the App bundle scheme, which WebKit reports as status 0', async () => {
+    respond(data, false, 0);
     await expect(loadAppLicenses()).resolves.toEqual(data);
   });
 
