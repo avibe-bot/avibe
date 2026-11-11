@@ -416,21 +416,71 @@ it('drops what was made or pasted for one chain when the chain changes', async (
   expect(api.createVaultSecret).not.toHaveBeenCalled();
 });
 
-it('keeps a chosen Protected tier for a Solana key, blocks Create, and never opens the passkey vault for it', async () => {
+// A protected Solana key is born in the sandbox as an Ed25519 record. The form must ask for that
+// curve, pin the key exactly as the record names it, and send nothing avault would create a key from.
+const solanaRecord = {
+  envelope: { ciphertext: 'ciphertext', nonce: 'nonce', wrap_meta: '{"record_meta":{"kind":"keypair","curve":"ed25519"}}' },
+  establishingVmk: false,
+  publicKey: 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
+  addresses: { solana: 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z' },
+};
+
+it('creates a protected Solana key from an Ed25519 record the sandbox generated', async () => {
+  vault.sealValue.mockResolvedValueOnce(solanaRecord);
   await startSolanaKey();
   fireEvent.click(tier(en.vaults.dialog.protectedProtection));
-  // The tier is the person's choice: it is not switched back for them.
-  expect(tier(en.vaults.dialog.protectedProtection).getAttribute('aria-pressed')).toBe('true');
-  expect(screen.getByRole('alert').textContent).toBe(en.vaults.dialog.solanaProtectedUnavailable);
   expect(screen.queryByRole('button', { name: en.vaults.dialog.signingImport })).toBeNull();
   expect(createButton().disabled).toBe(true);
-  fireEvent.click(createButton());
-  expect(vault.refresh).not.toHaveBeenCalled();
-  expect(vault.sealValue).not.toHaveBeenCalled();
-  expect(api.createVaultSecret).not.toHaveBeenCalled();
-  fireEvent.click(tier(en.vaults.dialog.standardProtection));
-  expect(screen.queryByText(en.vaults.dialog.solanaProtectedUnavailable)).toBeNull();
+  fireEvent.click(await screen.findByRole('button', { name: en.vaults.dialog.signingGenerateCta }));
+  expect(await screen.findByText(solanaRecord.addresses.solana)).toBeTruthy();
+  expect(vault.sealValue).toHaveBeenCalledExactlyOnceWith('SOL_KEY', 'keypair', undefined, 'ed25519');
   await waitFor(() => expect(createButton().disabled).toBe(false));
+  fireEvent.click(createButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload).toMatchObject({ name: 'SOL_KEY', protection: 'protected', kind: 'keypair', signer_kind: 'local', sealed: solanaRecord.envelope });
+  expect(payload.public_meta).toEqual({
+    signing_public_key: { curve: 'ed25519', chain: 'solana', public_key: solanaRecord.publicKey },
+  });
+  for (const field of ['keypair', 'blind_box']) expect(payload).not.toHaveProperty(field);
+  expect(sealBlindBox).not.toHaveBeenCalled();
+});
+
+it('saves nothing when the sandbox cannot create a Solana key', async () => {
+  vault.sealValue.mockRejectedValueOnce(Object.assign(new Error('The sandbox did not create an Ed25519 keypair record'), { code: 'sandbox_curve_unsupported' }));
+  await startSolanaKey();
+  fireEvent.click(tier(en.vaults.dialog.protectedProtection));
+  fireEvent.click(await screen.findByRole('button', { name: en.vaults.dialog.signingGenerateCta }));
+  expect(await screen.findByText(en.errors.sandbox_curve_unsupported)).toBeTruthy();
+  expect(createButton().disabled).toBe(true);
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+});
+
+it('drops a sandbox-sealed Solana record when the chain changes', async () => {
+  vault.sealValue.mockResolvedValueOnce(solanaRecord);
+  await startSolanaKey();
+  fireEvent.click(tier(en.vaults.dialog.protectedProtection));
+  fireEvent.click(await screen.findByRole('button', { name: en.vaults.dialog.signingGenerateCta }));
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.chainEvmBitcoin }));
+  expect(createButton().disabled).toBe(true);
+  expect(screen.queryByText(solanaRecord.addresses.solana)).toBeNull();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+});
+
+it('still asks the sandbox for a secp256k1 key when EVM / Bitcoin is chosen', async () => {
+  vault.sealValue.mockResolvedValueOnce({ ...solanaRecord, publicKey: `02${'11'.repeat(32)}`, addresses: {} });
+  render(form(<VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />));
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: 'ETH_KEY' } });
+  fireEvent.click(tier(en.vaults.dialog.protectedProtection));
+  fireEvent.click(await screen.findByRole('button', { name: en.vaults.dialog.signingGenerateCta }));
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+  expect(vault.sealValue).toHaveBeenCalledExactlyOnceWith('ETH_KEY', 'keypair');
+  fireEvent.click(createButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(api.createVaultSecret.mock.calls[0][0].public_meta.signing_public_key).toEqual({ curve: 'secp256k1', public_key: `02${'11'.repeat(32)}` });
 });
 
 it('shows the chain of a Solana key in Edit, where it cannot be changed', () => {

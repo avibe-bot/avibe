@@ -2,8 +2,9 @@
 // Add dialog, its row in the list, and approving a signature over exact message bytes. avault creates
 // the key, so the dialog shows no address before saving. The key is the RFC 8032 test-1 public key and
 // the recipient its test-2 key: published vectors, never a wallet. Protected Solana keys and their
-// approval window are designed separately; until they ship, choosing Protected for a Solana key only
-// shows why it cannot be created.
+// approval window live in the sandbox. On the protected tier the dialog first sets up or unlocks the
+// protected vault, as for any protected key; the frames draw the key builder that follows.
+import { VaultProtectedKeyFields } from '@/components/ui/vault-protected-key-fields';
 import { VaultSecretDialog } from '@/components/ui/vault-secret-dialog';
 import { VaultSolanaKeyFields } from '@/components/ui/vault-solana-key-fields';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
@@ -107,13 +108,31 @@ const designFrames = frames([
   },
   {
     name: 'create-protected',
-    title: '添加密钥 · 给 Solana 密钥选了保护档（保护档上线前）',
-    width: 1000,
-    height: 1100,
+    title: '添加密钥 · 保护档 Solana 密钥 · 在沙箱内生成',
+    width: 512,
+    height: 200,
     status: 'shipped',
     fixtures: listed,
-    click: [...solana, 'text="{t:vaults.dialog.protectedProtection}"'],
-    render: dialog,
+    // The dialog reaches this builder only once the protected vault is unlocked in the sandbox, so
+    // the builder is drawn on its own, at the width the dialog gives it.
+    render: () => (
+      <div className="p-6">
+        <VaultProtectedKeyFields chain="solana" generating={false} onGenerate={noop} />
+      </div>
+    ),
+  },
+  {
+    name: 'create-protected-generated',
+    title: '添加密钥 · 保护档 Solana 密钥 · 已在沙箱内生成',
+    width: 512,
+    height: 280,
+    status: 'shipped',
+    fixtures: listed,
+    render: () => (
+      <div className="p-6">
+        <VaultProtectedKeyFields chain="solana" generated={{ addresses: { solana: address } }} generating={false} onGenerate={noop} />
+      </div>
+    ),
   },
   {
     name: 'create-generate-phone',

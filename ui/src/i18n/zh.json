@@ -3273,7 +3273,8 @@
     "provider_unavailable": "提供商不可用。",
     "provider_error": "提供商拒绝了请求。",
     "endpoint_not_configured": "尚未配置提供商端点。",
-    "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。"
+    "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。",
+    "sandbox_curve_unsupported": "当前 Avibe 的安全沙箱还不能创建 Solana 密钥，没有保存任何内容。请更新 Avibe 后重试。"
   },
   "modelHub": {
     "errors": {
@@ -6317,7 +6318,8 @@
       "solanaGenerateHint": "保存时生成新密钥，保存后会显示地址。",
       "solanaImportPlaceholder": "粘贴 Solana CLI 密钥对（64 个数字的 JSON 数组）或 base58 私钥",
       "solanaImportHelp": "私钥在浏览器中加密后交给 avault 校验，保存后会显示地址。不支持助记词。",
-      "solanaProtectedUnavailable": "Solana 密钥暂不支持保护档。改选标准档即可创建这把密钥。",
+      "solanaProtectedHelp": "在沙箱内新生成一把 Solana 密钥并就地封存。只有密文和它的地址会到达 Avibe，私钥绝不离开沙箱。",
+      "solanaProtectedBornHint": "私钥在沙箱内生成，从未进入本应用。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
       "browserSealingPending": "浏览器侧封箱需要兼容的 avault 发布版。这个 UI 永远不会把明文值发送给 Python。",

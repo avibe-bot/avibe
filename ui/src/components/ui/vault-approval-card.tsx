@@ -21,9 +21,9 @@ import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { vaultHasNamedFieldShape, vaultFieldNames } from '@/lib/vaultFields';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
-import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
+import { openVaultAuthorizationWindow, type VaultSandboxSignScheme } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
-import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib/vaultCrypto';
+import { type BlindBox, type SignatureResult } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
@@ -511,13 +511,18 @@ export const VaultApprovalCard: React.FC<{
         const authorizationWindow = openVaultAuthorizationWindow();
         let sig: SignatureResult;
         try {
-          sig = await vault.signProtectedRequest(material, signingContext, scheme as SignatureScheme, operationContext, authorizationWindow?.id);
+          sig = await vault.signProtectedRequest(material, signingContext, scheme as VaultSandboxSignScheme, operationContext, authorizationWindow?.id);
         } finally {
           authorizationWindow?.close();
         }
         const signature: Record<string, unknown> = { signature: sig.signature };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
-        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, ...signed, scheme, signature }));
+        // An exact-message completion is bound to the context it was requested with: the daemon
+        // compares it with the stored request and refuses a completion that leaves it out.
+        failIfNotOk(await api.signVaultDigest({
+          name, request_id: request.id, ...signed, scheme, signature,
+          ...(signsMessage ? { signing_context: signingContext } : {}),
+        }));
       } else {
         // Standard keypair: avault signs; we only relay the approved request.
         failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, ...signed, scheme }));
