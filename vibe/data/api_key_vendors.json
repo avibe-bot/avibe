@@ -127,6 +127,13 @@
     "models_dev_provider": "volcengine"
   },
   {
+    "id": "minimax",
+    "label": "MiniMax",
+    "region": "cn",
+    "official_base_url": "https://api.minimax.cn/anthropic",
+    "protocol": "anthropic"
+  },
+  {
     "id": "mistral",
     "label": "Mistral",
     "official_base_url": "https://api.mistral.ai/v1",
