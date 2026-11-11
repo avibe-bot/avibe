@@ -2256,7 +2256,7 @@
           "hub": {
             "label": "Add as a Model Hub provider",
             "desc": {
-              "claude": "Hand this subscription to Model Hub so it can supply Codex, OpenCode and other Agents.",
+              "claude": "Model Hub manages this subscription, so Vibey, Codex, OpenCode and others can use it.",
               "chatgpt": "Model Hub supplies it to Codex and other Agents, with usage, quota and takeover all visible."
             }
           }

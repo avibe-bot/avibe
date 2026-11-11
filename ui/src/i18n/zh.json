@@ -2256,7 +2256,7 @@
           "hub": {
             "label": "添加为模型供应商",
             "desc": {
-              "claude": "由模型网关管理这个订阅，让 Codex、OpenCode 等其他 Agent 使用。",
+              "claude": "由模型网关管理这个订阅，Vibey、Codex、OpenCode 等都能用。",
               "chatgpt": "由模型网关管理这个订阅，让 Codex 和其他 Agent 使用；用量、额度和自动切换都能看到。"
             }
           }
