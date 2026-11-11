@@ -48,6 +48,24 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         )
     }
 
+    /// A notification that arrives while the App is in front shows as it
+    /// would in the background, as a banner, in the list, and with its sound,
+    /// the way a PWA's service worker shows every push. Without this, iOS
+    /// silences it, and the test notification sent from the App's own
+    /// Settings could never be seen. The badge is left alone here: in front,
+    /// the Web UI sets it from the live Inbox total through `badge.set`, and
+    /// the count a push carries, computed when it was sent, could only put an
+    /// older one back.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (
+            UNNotificationPresentationOptions
+        ) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,

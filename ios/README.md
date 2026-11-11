@@ -236,6 +236,9 @@ After a validated notification tap, the native shell emits
 `push.opened({url})` to the selected instance's primary WebView. The event
 contains only a same-origin path, query, and fragment; invalid, unavailable,
 or mismatched notification context opens the instance recovery surface.
+A notification that arrives while the App is in the foreground is shown as a
+banner, in Notification Center, and with its sound, but does not set the badge,
+which the Web UI keeps through `badge.set` there.
 
 Covering the runtime instead of closing it did not change any capability
 number: `app.showAccount()` keeps its parameters and `null` result, and no Web

@@ -369,6 +369,64 @@ final class PushNotificationTests: XCTestCase {
 
         assertFallback(result)
     }
+
+    /// A notification that arrives while the App is in front is shown, as a
+    /// PWA shows every push; the badge stays the Web UI's (`badge.set`).
+    @MainActor
+    func testTheAppShowsANotificationThatArrivesWhileItIsInFront() throws {
+        // The App is the notification center's delegate, so it decides.
+        XCTAssertTrue(
+            UNUserNotificationCenter.current().delegate is AvibeAppDelegate
+        )
+        let delegate: UNUserNotificationCenterDelegate = AvibeAppDelegate()
+        let notification = try XCTUnwrap(
+            UNNotification(
+                coder: StubNotificationCoder(requiringSecureCoding: false)
+            )
+        )
+        let presented = PresentationRecorder()
+        delegate.userNotificationCenter?(
+            UNUserNotificationCenter.current(),
+            willPresent: notification
+        ) { options in
+            presented.options = options
+        }
+        XCTAssertEqual(presented.options, [.banner, .list, .sound])
+    }
+}
+
+private final class PresentationRecorder: @unchecked Sendable {
+    var options: UNNotificationPresentationOptions?
+}
+
+/// `UNNotification` has no public initializer. Decoding one from a coder that
+/// answers its request and date, and nothing else, gives a notification the
+/// presentation decision can be handed.
+private final class StubNotificationCoder: NSKeyedArchiver {
+    override func decodeObject(forKey key: String) -> Any? {
+        switch key {
+        case "request":
+            return UNNotificationRequest(
+                identifier: "web-push-test",
+                content: UNNotificationContent(),
+                trigger: nil
+            )
+        case "date":
+            return Date()
+        default:
+            return nil
+        }
+    }
+
+    override func decodeBool(forKey key: String) -> Bool { false }
+
+    override func decodeInt64(forKey key: String) -> Int64 { 0 }
+
+    override func decodeDouble(forKey key: String) -> Double { 0 }
+
+    override func containsValue(forKey key: String) -> Bool {
+        key == "request" || key == "date"
+    }
 }
 
 private final class RecordingPushKeychainItemAccess:

@@ -923,6 +923,13 @@ handed to the system, erase plaintext already held by an in-flight extension,
 or remove an already displayed alert; lifecycle behavior below does not claim
 otherwise.
 
+A notification that arrives while the app is in the foreground is shown as a
+banner, in Notification Center, and with its sound, as a PWA's service worker
+shows every push; the app's notification-center delegate presents it. It does
+not apply the push's badge there: in the foreground the Web UI sets the badge
+from the live Inbox total through `badge.set`, and a push's `badge_count`,
+computed when it was sent, can only be as recent or older.
+
 ## 8. Tap routing
 
 On tap, native compares the notification's account and instance origin with
