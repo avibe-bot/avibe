@@ -3,11 +3,12 @@ name: Mirror releases to dl.avibe.bot
 on:
   # Release assets are uploaded with GITHUB_TOKEN, which does not emit release
   # events to other workflows, so the mirror follows the publishing workflows.
+  # Token-dispatched Desktop Stage 2 explicitly dispatches this workflow after
+  # attaching its assets instead of relying on workflow_run chaining.
   workflow_run:
     workflows:
       - Publish to PyPI
       - Release (AI Notes)
-      - Desktop Release (Stage 2)
       - Guard Model Hub engine release
       - Guard Git Runtime release
       - Build local-only Git runtime

@@ -126,9 +126,16 @@ that guard: the mirror holds the pinned release, verified against the manifest.
 
 `Mirror releases to dl.avibe.bot` copies published release assets to
 `https://dl.avibe.bot/releases/<tag>/<asset>` and writes the release index at
-`https://dl.avibe.bot/index/releases.json`. It follows `Publish to PyPI`,
-`Release (AI Notes)`, and `Desktop Release (Stage 2)`, so either stage can
-reconcile the same release without overwriting immutable bytes. It also keeps
+`https://dl.avibe.bot/index/releases.json`. It follows `Publish to PyPI` and
+`Release (AI Notes)` via `workflow_run`. `Desktop Release (Stage 2)` explicitly
+dispatches the mirror on `master` with `dry_run=false` after successfully
+attaching its verified assets; this does not depend on a downstream event from
+the token-dispatched desktop workflow. A rejected dispatch fails Stage 2
+visibly; recover by dispatching `release-mirror.yml` on `master` with
+`dry_run=false`, without rebuilding the signed installers. Dispatch acceptance
+is not mirror completion: require the mirror run to succeed and verify the
+published download URLs. Either stage can reconcile the same release without
+overwriting immutable bytes. It also keeps
 version-less links to the newest stable desktop installers, such as
 `https://dl.avibe.bot/latest/Avibe_aarch64-apple-darwin.dmg`. The contract and retention rules are in
 `docs/plans/release-download-mirror.md`.
