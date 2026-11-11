@@ -924,6 +924,7 @@ const NON_KEY_LITERALS = [
   'auth.verifyOtp',
   'auth.verifyPasskey',
   'auth.verifySecondFactor',
+  'badge.set',
   'haptics.impact',
   'haptics.notify',
   'haptics.selection',
