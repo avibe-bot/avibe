@@ -1122,6 +1122,7 @@ describe('nothingPassed', () => {
     ['a listing with no models passes nothing', [saved], checks({ kind: 'connected', models: 0 }), true],
     ['a listing with models passes', [saved], checks({ kind: 'connected', models: 3 }), false],
     ['a source proven before this visit passes without a check', [saved, proven], checks({ kind: 'rejected', status: 401 }), false],
+    ['a recovered source whose listing was empty still passes nothing', [{ ...saved, verification_pending: null }], checks({ kind: 'connected', models: 0 }), true],
   ])('%s', (_name, sources, held, expected) => {
     expect(nothingPassed(sources, held)).toBe(expected);
   });

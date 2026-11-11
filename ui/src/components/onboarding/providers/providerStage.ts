@@ -173,13 +173,19 @@ export function nothingPassed(
   if (staged.length === 0) return false;
   let answered = true;
   for (const source of staged) {
-    if (!sourceNeedsCheck(source)) {
-      if (usableSource(source)) return false;
+    // A check this visit made is the answer, whatever state its readback left the
+    // source in: a listing that answered with no models leaves a usable standby
+    // source behind, and that source still supplies nothing.
+    const check = checks.get(sourceCheckKey(source));
+    if (check && check.kind !== 'checking') {
+      if (check.kind === 'connected' && check.models > 0) return false;
       continue;
     }
-    const check = checks.get(sourceCheckKey(source));
-    if (!check || check.kind === 'checking') answered = false;
-    else if (check.kind === 'connected' && check.models > 0) return false;
+    if (sourceNeedsCheck(source)) {
+      answered = false;
+      continue;
+    }
+    if (usableSource(source)) return false;
   }
   return answered;
 }
