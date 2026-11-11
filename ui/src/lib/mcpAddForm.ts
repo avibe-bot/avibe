@@ -44,7 +44,7 @@ export function parseMcpTarget(input: string): McpTarget {
     }
     return { kind: 'http', url: text };
   }
-  if (!/\s/.test(text) && /^(?=[^/:]+\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\:\d+|\/)/.test(text)) {
+  if (!/\s/.test(text) && /^(?=[^/:]+\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+|\/)/.test(text)) {
     return { kind: 'error', issue: 'missingScheme' };
   }
   const tokens: string[] = [];
