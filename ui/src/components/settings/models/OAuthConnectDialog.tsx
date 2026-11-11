@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
+import { SubscriptionTermsNote } from './SubscriptionTermsNote';
 import { callbackRedirect, pageOnAvibeMachine } from './oauthCallback';
 import {
   classifyOAuthFailure,
@@ -55,7 +56,6 @@ import {
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
-  recommendedSubscriptionChannel,
   subscriptionChooser,
   subscriptionOptionOrder,
 } from './subscriptionOptions';
@@ -232,7 +232,9 @@ export const OAuthConnectDialog: React.FC<{
     // A vendor with no chooser copy has no channel choice to put in front of the
     // user, so it opens straight into its flow — the same entry the re-auth
     // journey takes above.
-    setPhase(chooser === null ? 'flow' : 'choose');
+    // Nor does a choice with one option: it would ask the person to confirm the only
+    // thing there is (owner decision, 2026-11-11, item 2).
+    setPhase(chooser === null || hubOnly || subscriptionOptionOrder(vendor).length === 1 ? 'flow' : 'choose');
   }, [chooser, hubOnly, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
   /**
@@ -791,7 +793,6 @@ export const OAuthConnectDialog: React.FC<{
   // interpolate i18n keys at the user. Narrowing on `chooser` here rather than on
   // a bare phase check is what makes that a type error, not a runtime one.
   const choosing = !isReauth && phase === 'choose' && chooser !== null;
-  const recommended = hubOnly ? 'hub' : recommendedSubscriptionChannel(vendor);
   const optionOrder: SupplyChannel[] = hubOnly ? ['hub'] : subscriptionOptionOrder(vendor);
   const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
   const selectableChannels = optionOrder.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
@@ -843,11 +844,6 @@ export const OAuthConnectDialog: React.FC<{
                 const isNative = candidate === 'native_cli';
                 const disabled = isNative && nativeSlotTaken;
                 const selected = channel === candidate;
-                const badgeKey = disabled
-                  ? 'settings.models.addSub.opt.added'
-                  : candidate === recommended
-                    ? 'settings.models.addSub.badge.recommended'
-                    : 'settings.models.addSub.badge.secondary';
                 const optionKey = isNative ? 'native' : 'hub';
                 return (
                   <button
@@ -894,21 +890,15 @@ export const OAuthConnectDialog: React.FC<{
                         <span className="model-hub-add-sub-option-label font-semibold text-foreground">
                           {t(`settings.models.addSub.opt.${optionKey}.label`)}
                         </span>
-                        {(optionOrder.length > 1 || disabled) && (
+                        {disabled && (
                           <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
-                            {t(badgeKey)}
+                            {t('settings.models.addSub.opt.added')}
                           </span>
                         )}
                       </span>
                       <span className="model-hub-add-sub-description block text-muted">
                         {t(isNative ? 'settings.models.addSub.opt.native.desc.claude' : `settings.models.addSub.opt.hub.desc.${vendorCopy}`)}
                       </span>
-                      {vendorCopy === 'claude' && candidate === 'hub' && (
-                        <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10">
-                          <TriangleAlert className="mt-0.5 size-3 shrink-0" />
-                          <span>{t('settings.models.addSub.tos.claude')}</span>
-                        </span>
-                      )}
                     </span>
                   </button>
                 );
@@ -920,6 +910,7 @@ export const OAuthConnectDialog: React.FC<{
                 <span>{t('settings.models.addSub.hint.claude')}</span>
               </p>
             )}
+            {vendorCopy === 'claude' && channel === 'hub' && <SubscriptionTermsNote />}
           </div>
 
           <div className="model-hub-add-sub-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">

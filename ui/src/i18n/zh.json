@@ -1541,10 +1541,6 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "推荐由 Agent 管理",
-          "gateway": "推荐由模型网关管理"
         }
       },
       "sources": {
@@ -2265,12 +2261,9 @@
             }
           }
         },
-        "badge": {
-          "recommended": "推荐",
-          "secondary": "次选"
-        },
         "tos": {
-          "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
+          "claude": "Anthropic 的订阅条款只覆盖它自己的应用。",
+          "learnMore": "了解更多"
         },
         "hint": {
           "claude": "两条都要也可以，分两次添加。"

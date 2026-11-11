@@ -3,7 +3,6 @@ import { ArrowDownToLine, Activity, Gauge, LoaderCircle, RefreshCw, Route, Scrol
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -1684,13 +1683,8 @@ export const SettingsModelsPage: React.FC = () => {
                               }
                             }}
                           >
-                            {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor, recommendation }, index) => {
+                            {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor }, index) => {
                               const vendorLabel = t(`settings.models.subscriptionPicker.vendor.${vendor}`);
-                              // A hub-only vendor has no native channel to recommend against, so
-                              // it carries no badge rather than a 网关推荐 over its only custody.
-                              const recommendationLabel = recommendation
-                                ? t(`settings.models.subscriptionPicker.recommendation.${recommendation}`)
-                                : null;
                               return (
                                 <Button
                                   key={vendor}
@@ -1712,18 +1706,6 @@ export const SettingsModelsPage: React.FC = () => {
                                 >
                                   <VendorGlyph vendor={vendor} />
                                   <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={vendorLabel}>{vendorLabel}</span>
-                                  {recommendationLabel && (
-                                    <Badge
-                                      variant="recommendation"
-                                      className={cn(
-                                        recommendation === 'native'
-                                          ? 'model-hub-accent-tile--mint model-hub-accent-ink--mint border-transparent'
-                                          : 'model-hub-accent-pill--neutral',
-                                      )}
-                                    >
-                                      {recommendationLabel}
-                                    </Badge>
-                                  )}
                                 </Button>
                               );
                             })}

@@ -52,6 +52,7 @@ import {
 } from '@/components/settings/models/mutationSettlement';
 import { modelsApi, type Adoption, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { OAuthConnectDialog } from '@/components/settings/models/OAuthConnectDialog';
+import { SubscriptionTermsNote } from '@/components/settings/models/SubscriptionTermsNote';
 import { reconcileUnknownWrite } from '@/components/settings/models/reconcileUnknownWrite';
 import { serverText } from '@/components/settings/models/serverCopy';
 import { subscriptionChooser } from '@/components/settings/models/subscriptionOptions';
@@ -473,8 +474,8 @@ export const AddSourceDialog: React.FC<{
               <>
                 <p className="setup-add-note">{t('onboarding.providers.addSubscriptionNote')}</p>
                 {SUBSCRIPTION_CHOICES.map((item) => (
+                  <React.Fragment key={item}>
                   <button
-                    key={item}
                     type="button"
                     className="setup-add-row"
                     data-provider={item}
@@ -493,6 +494,10 @@ export const AddSourceDialog: React.FC<{
                       <Check className="setup-add-row-check" strokeWidth={2.2} aria-hidden="true" />
                     )}
                   </button>
+                  {/* Model Hub holds the subscription this signs in; what Anthropic's
+                      terms cover is one quiet line under its row, not a warning. */}
+                  {item === 'anthropic' && <SubscriptionTermsNote className="setup-add-terms" />}
+                  </React.Fragment>
                 ))}
               </>
             )}

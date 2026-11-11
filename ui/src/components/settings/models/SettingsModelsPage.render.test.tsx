@@ -16,7 +16,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
-import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
+import { SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
@@ -997,8 +997,6 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
     const picker = await screen.findByRole('menu');
-    expect(within(picker).getByText(/Own login recommended|推荐由 Agent 管理/i)).toBeTruthy();
-    expect(within(picker).getByText(/Managed recommended|推荐由模型网关管理/i)).toBeTruthy();
     expect(within(picker).queryByText(/Claude Pro \/ Max|ChatGPT Plus \/ Pro/i)).toBeNull();
     await userEvent.click(within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
@@ -1006,7 +1004,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect((await screen.findByRole('dialog')).textContent).toMatch(/Add Claude subscription|添加 anthropic 订阅/i);
   });
 
-  it('lists every offered subscription vendor in frame 13 order, with a mark and only the badge it earns', async () => {
+  it('lists every offered subscription vendor in frame 13 order, with a mark and no badge', async () => {
     renderPage([retainedSource]);
 
     await screen.findByText('Retained source');
@@ -1024,10 +1022,9 @@ describe('SettingsModelsPage surface branches', () => {
       // Each row carries the vendor's mark, consistent with the api-key picker.
       expect(row.querySelector('svg'), `${row.textContent} has no mark`).toBeTruthy();
     }
-    // A hub-held vendor recommends nothing — its only custody is the hub — so it
-    // draws no recommendation badge, while the two with a channel choice do.
-    const badges = rows.map((row) => /Own login recommended|Managed recommended|推荐由/i.test(row.textContent ?? ''));
-    expect(badges).toEqual(SUBSCRIPTION_VENDORS.map(hasNativeSubscriptionCustody));
+    // Model Hub is the default everywhere (owner decision, 2026-11-11, item 2), so no
+    // row has a choice for a badge to rank.
+    expect(rows.every((row) => !/recommended|推荐/i.test(row.textContent ?? ''))).toBe(true);
   });
 
   it('opens a hub-only subscription straight into its flow, posted as a hub source', async () => {

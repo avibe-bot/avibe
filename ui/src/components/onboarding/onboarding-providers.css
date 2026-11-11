@@ -564,6 +564,15 @@
   padding: var(--obs-gap) var(--obs-pad);
 }
 
+.setup-add-terms {
+  margin: -6px 2px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.setup-add-terms a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.setup-add-terms a:hover { color: var(--foreground); }
+
 .setup-add-note {
   font-size: 12px;
   line-height: 1.55;

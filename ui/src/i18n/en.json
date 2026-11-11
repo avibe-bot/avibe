@@ -1541,10 +1541,6 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "Own login recommended",
-          "gateway": "Managed recommended"
         }
       },
       "sources": {
@@ -2265,12 +2261,9 @@
             }
           }
         },
-        "badge": {
-          "recommended": "Recommended",
-          "secondary": "Second choice"
-        },
         "tos": {
-          "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
+          "claude": "Anthropic's subscription terms cover only its own apps.",
+          "learnMore": "Learn more"
         },
         "hint": {
           "claude": "You can have both — add them one at a time."
