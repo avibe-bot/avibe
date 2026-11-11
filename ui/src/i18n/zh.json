@@ -1285,6 +1285,7 @@
         "info": "模型跟随默认路由，已保存手动路由的模型除外。优先使用匹配的供应商；未匹配时向符合条件的 API Key 供应商透传。",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
+        "addModel": "添加模型",
         "switchToGateway": "交给模型网关管理",
         "switchToDirect": "改为 Agent 管理",
         "modeMenu": {
@@ -1389,7 +1390,9 @@
           "moved_other": "已把 {{model}} 移到第 {{position}} / {{count}} 位。",
           "dropped_one": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
           "dropped_other": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
-          "grabCancelled": "已取消移动 {{model}}，位置已还原。"
+          "grabCancelled": "已取消移动 {{model}}，位置已还原。",
+          "added_one": "已添加 {{model}}",
+          "added_other": "已添加 {{count}} 个模型"
         },
         "picker": {
           "title": "添加 {{backend}} 模型",

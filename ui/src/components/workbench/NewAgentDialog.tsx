@@ -5,7 +5,8 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull } from '../../context/ApiContext';
-import { loadBackendModelsWithRefresh, modelOptionLabel, readHubBackendModels, useAddModelExit } from '../../lib/backendModels';
+import { useAddModelDialog } from '../../lib/useAddModelDialog';
+import { loadBackendModelsWithRefresh, modelOptionLabel, readHubBackendModels } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
@@ -69,7 +70,8 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     setSubmitting(false);
   }, [backend, open]);
   const [editorOpen, setEditorOpen] = useState(false);
-  const openAddModel = useAddModelExit(backend, open);
+  // Added in place, the new model is the one the Agent will use.
+  const addModel = useAddModelDialog(backend, open, setModel);
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
@@ -296,10 +298,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
               placeholder={t('agents.detail.modelPlaceholder')}
               emptyText={t('agents.detail.modelEmpty')}
               allowCustomValue
-              // The dialog stays open: Settings hides the page it sits in, and
-              // the form is here again when the user comes back.
-              footerAction={openAddModel ? { label: t('chat.picker.addModel'), onSelect: openAddModel } : undefined}
+              footerAction={addModel.open ? { label: t('chat.picker.addModel'), onSelect: addModel.open } : undefined}
             />
+            {addModel.dialog}
           </div>
           {effortOptions.length > 0 && (
             <div className="flex flex-col gap-1.5">

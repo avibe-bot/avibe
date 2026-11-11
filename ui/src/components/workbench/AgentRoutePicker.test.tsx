@@ -13,6 +13,8 @@ import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizatio
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
 import type { InstanceRole } from '../../lib/sessionInfo';
+import { ToastContext } from '../../context/ToastContext';
+import { modelsApi } from '../settings/models/modelsApi';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch, AgentRouteValue } from './AgentRoutePicker';
 
@@ -205,6 +207,7 @@ const HubPicker: React.FC<{
 
 describe('AgentRoutePicker', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     cleanup();
     catalogReasoning = {};
     catalogMenus = {};
@@ -218,11 +221,20 @@ describe('AgentRoutePicker', () => {
     pendingReads.length = 0;
   });
 
-  it("ends a Hub backend's model list with an exit to that backend's catalog in the Model Hub", async () => {
+  it("ends a Hub backend's model list with Add model, which adds in place and picks what was added", async () => {
     hubMode = 'hub';
     const user = userEvent.setup();
     const onNavigateAway = vi.fn();
-    render(<HubPicker role="owner" onNavigateAway={onNavigateAway} />);
+    const onChange = vi.fn();
+    const supply = { backend: 'claude', mode: 'hub', menu_kind: 'fixed', cli_present: true, catalog_models: [] };
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(supply as never);
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({
+      builtin: [], in_list: [],
+      providers: [{ id: 'opus-x', display_name: null, reasoning_efforts: [], origin: 'provider', suppliers: [{ source_id: 'src_a', source_name: 'Relay', model_id: 'opus-x' }] }],
+    });
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(supply as never);
+    render(<ToastContext.Provider value={{ showToast: vi.fn() }}><HubPicker role="owner" onNavigateAway={onNavigateAway} onChange={onChange} /></ToastContext.Provider>);
     await openMenu(user);
 
     const addModel = await screen.findByRole('button', { name: 'chat.picker.addModel' });
@@ -230,11 +242,19 @@ describe('AgentRoutePicker', () => {
     expect(lastModel.compareDocumentPosition(addModel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await user.click(addModel);
-
-    expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=claude');
+    // The add dialog over the chat, not a trip to Settings.
+    const dialog = within(await screen.findByRole('dialog', { name: 'settings.models.gateway.picker.title' }));
     expect(screen.queryByText('chat.picker.model')).toBeNull();
-    // Settings opens over the host, which suspends under it with its draft
-    // instead of being closed the way leaving for /agents closes it.
+    await user.click(await dialog.findByRole('checkbox', { name: /opus-x/ }));
+    await user.click(dialog.getByRole('button', { name: 'settings.models.gateway.picker.confirm' }));
+
+    // Saved at once, with the suppliers the row showed, then picked.
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus-x' })));
+    expect(write).toHaveBeenCalledWith('claude', expect.objectContaining({
+      expected_suppliers: { 'opus-x': [{ source_id: 'src_a', model_id: 'opus-x' }] },
+    }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByTestId('location').textContent).toBe('/');
     expect(onNavigateAway).not.toHaveBeenCalled();
   });
 

@@ -1639,12 +1639,14 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.queryByText('agents.detail.effort')).toBeNull();
   });
 
-  it("offers the Model Hub from a Hub backend's model list, and reads the list again on return", async () => {
+  it("offers Add model from a Hub backend's model list in place, and reads the list again on return", async () => {
     modelCatalog = { models: ['gpt-hub'] };
     const initial = brief('agent-a', 'description');
     const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
     api.readModelHubAgentCatalogForModelPicker.mockResolvedValue({ backend: 'codex', mode: 'hub' });
     apiRef.current = api;
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue({ backend: 'codex', mode: 'hub', menu_kind: 'fixed', cli_present: true, catalog_models: [] } as never);
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({ builtin: [], providers: [], in_list: [] });
     const LocationProbe = () => {
       const location = useLocation();
       return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
@@ -1682,7 +1684,9 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.getByRole('option', { name: 'gpt-hub' })).toBeTruthy();
     expect((screen.getByRole('button', { name: 'medium', exact: true, hidden: true }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(await screen.findByText('chat.picker.addModel'));
-    expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=codex');
+    // The add dialog opens over the page instead of leaving for Settings.
+    expect(await screen.findByRole('dialog', { name: /^settings\.models\.gateway\.picker\.title/ })).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).toBe('/agents');
   });
 
   it('keeps an unset server effort unset instead of lighting a default', async () => {

@@ -510,40 +510,6 @@ describe('SettingsModelsPage surface branches', () => {
   });
 
   it.each([
-    ['opens the catalog of a Hub backend a model picker sent the user to', 'codex', true],
-    ['opens nothing for a backend that is not on the Hub', 'claude', false],
-  ])('%s, and drops the request from the address', async (_case, backend, opens) => {
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent, directAgent('claude')]);
-    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(takeoverAgent);
-    const LocationProbe = () => {
-      const location = useLocation();
-      return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
-    };
-
-    render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <MemoryRouter initialEntries={[`/settings/models?manage=${backend}`]}>
-            <SettingsModelsRoute />
-            <LocationProbe />
-          </MemoryRouter>
-        </I18nextProvider>
-      </ToastProvider>,
-    );
-
-    // A reload or Back must not open it again, so the request is consumed.
-    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/models'));
-    if (opens) {
-      expect(await screen.findByRole('dialog', { name: /^Codex models$|^Codex 模型$/i })).toBeTruthy();
-    } else {
-      expect(screen.queryByRole('dialog')).toBeNull();
-    }
-  });
-
-  it.each([
     ['opens the Source a failed turn named', 'src_retained', true],
     ['opens nothing for a Source that is gone', 'src_removed', false],
   ])('%s, and drops the request from the address', async (_case, sourceId, opens) => {
