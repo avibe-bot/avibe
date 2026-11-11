@@ -29,6 +29,7 @@ export const PROVIDER_VENDOR_ALIAS: Readonly<Record<string, string>> = {
   alibaba: 'qwen',
   dashscope: 'qwen',
   zhipu: 'zhipuai',
+  'siliconflow-cn': 'siliconflow',
 };
 
 /** The catalog vendor id a provider id resolves to — itself when it is already

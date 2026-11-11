@@ -64,6 +64,24 @@ def test_save_first_uses_declared_owner_despite_unavailable_inventory(tmp_path, 
     assert adapter.credential_count == 1
 
 
+@pytest.mark.parametrize(("changes", "name"), [
+    ({}, "relay.example"),
+    ({"base_url": "http://127.0.0.1:8317/v1"}, "127.0.0.1:8317"),
+    ({"base_url": "https://Relay.Example:443/v1"}, "relay.example"),
+    ({"display_name": "  "}, "relay.example"),
+    ({"display_name": "Team relay"}, "Team relay"),
+    ({"vendor": "deepseek", "base_url": None, "protocol": None}, "DeepSeek"),
+])
+def test_an_unnamed_custom_endpoint_is_named_by_its_host(tmp_path, changes, name):
+    """Two unnamed relays both called ``custom`` cannot be told apart in the list."""
+    service, store, adapter = _service(tmp_path)
+    adapter.discover_models = AsyncMock(side_effect=ModelHubError("discovery_failed", status=502))
+    draft = {key: value for key, value in _draft(**changes).items() if value is not None}
+    created = asyncio.run(service.create_source(draft))["source"]
+    assert created["display_name"] == name
+    assert store.config.sources[0].display_name == name
+
+
 @pytest.mark.parametrize("invalid", [
     {"protocol": None}, {"protocol": "unknown"}, {"key": " "},
     {"base_url": "file:///tmp/credentials"}, {"save_unverified": "true"},

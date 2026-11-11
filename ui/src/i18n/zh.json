@@ -2165,7 +2165,6 @@
         "deletedSource": "已删除"
       },
       "addKey": {
-        "saveFirstHint": "保存供应商时会尝试拉取模型列表。测试是可选的，可在添加后进行。",
         "title": "添加 API Key",
         "subtitle": "API Key 与模型接口",
         "field": {
@@ -2219,12 +2218,15 @@
           "openaiChatCompletions": "OpenAI Chat Completions",
           "google": "Google Gemini",
           "search": "搜索服务",
-          "idleHint": "填好 Base URL 和 API Key 后自动识别",
-          "detecting": "识别接口中…",
+          "idleHint": "填好 Base URL 和 API Key 后自动识别，不影响保存。",
+          "detecting": "正在识别 API 格式…不用等它也能保存。",
           "manual": "手动选择 API 格式",
           "catalogPinned": "内置目录",
           "catalogPinned.hint": "接口由内置目录指定；凭证是否有效仍需单独验证",
-          "declared": "手动指定"
+          "declared": "手动指定",
+          "detected": "已识别为 {{format}}",
+          "unrecognised": "没能识别 API 格式，先用 {{format}}；不对的话可以换一个。",
+          "unrecognisedRejected": "这个地址拒绝了这个 Key，没能识别 API 格式；先用 {{format}}。"
         },
         "inventory": {
           "title": "接口已经识别，但这次没有拿到模型清单"

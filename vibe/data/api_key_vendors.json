@@ -27,6 +27,8 @@
   {
     "id": "deepseek",
     "label": "DeepSeek",
+    "label_zh": "深度求索",
+    "region": "cn",
     "official_base_url": "https://api.deepseek.com",
     "protocol": "openai_chat",
     "models_dev_provider": "deepseek",
@@ -75,6 +77,8 @@
   {
     "id": "qwen",
     "label": "Qwen",
+    "label_zh": "通义千问",
+    "region": "cn",
     "official_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "protocol": "openai_chat",
     "models_dev_provider": "alibaba-cn"
@@ -82,6 +86,8 @@
   {
     "id": "kimi",
     "label": "Kimi",
+    "label_zh": "月之暗面",
+    "region": "cn",
     "official_base_url": "https://api.moonshot.cn/v1",
     "protocol": "openai_chat",
     "models_dev_provider": "moonshotai-cn"
@@ -96,9 +102,29 @@
   {
     "id": "zhipuai",
     "label": "Zhipu AI",
+    "label_zh": "智谱",
+    "region": "cn",
     "official_base_url": "https://open.bigmodel.cn/api/paas/v4",
     "protocol": "openai_chat",
     "models_dev_provider": "zhipuai"
+  },
+  {
+    "id": "siliconflow",
+    "label": "SiliconFlow",
+    "label_zh": "硅基流动",
+    "region": "cn",
+    "official_base_url": "https://api.siliconflow.cn/v1",
+    "protocol": "openai_chat",
+    "models_dev_provider": "siliconflow-cn"
+  },
+  {
+    "id": "volcengine",
+    "label": "Volcengine Ark",
+    "label_zh": "火山方舟·豆包",
+    "region": "cn",
+    "official_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "protocol": "openai_chat",
+    "models_dev_provider": "volcengine"
   },
   {
     "id": "mistral",

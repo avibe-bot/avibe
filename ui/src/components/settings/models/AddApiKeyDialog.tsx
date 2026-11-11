@@ -342,10 +342,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
               <X className="size-[15px]" />
             </Button>
           </div>
-          <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3 font-mono">
+          <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3">
             {replaceMode
               ? t('settings.models.repair.replaceBody')
-              : serviceVendor ? t(serviceVendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.createModelSource', { vendor: serviceVendor.name }) : t('settings.models.addKey.saveFirstHint')}
+              : serviceVendor ? t(serviceVendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.createModelSource', { vendor: serviceVendor.name }) : t('onboarding.providers.addDescriptionKey')}
           </DialogPrimitive.Description>
         </header>
 
