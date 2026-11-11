@@ -1083,6 +1083,7 @@ scenarios:
     layer: contract
     backend: web
     test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_loopback_callback_signs_in_without_a_paste
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 offers the sign-in page as a button and a copyable link, never the raw URL as text
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 folds the paste for a loopback redirect, and opens it on request with the real address and what to expect
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 opens the paste once the person is back with the link used and nothing has arrived for 10 s
@@ -1090,9 +1091,12 @@ scenarios:
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 keeps the paste open where nothing can arrive by itself
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 leaves a pasted-code sign-in as it was, apart from the link
     reason: >-
-      Covered is bounded to the dialog against controlled flow responses. That a
-      loopback redirect reaches the gateway without a paste is the engine's
-      forwarder (started for every Web-UI-originated flow): verified live in a
+      The closed loop starts a Hub sign-in through the real adapter, lets the
+      engine receive the grant the way its loopback forwarder hands it over, and
+      shows the status poll alone materializing the subscription Source with no
+      paste. The dialog cases pin what it shows against controlled responses. The
+      forwarder itself is the engine's (AUTH-SETUP-130 pins it on loopback); it
+      was also verified live in a
       fresh-install Incus environment by sending a simulated redirect with a test
       code to localhost:1455 inside the instance, which the forwarder handed to the
       engine and the flow ended on the provider's refusal of that code, no paste.
