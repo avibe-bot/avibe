@@ -35,6 +35,7 @@ Callers on the controller loop run it on a thread.
 from __future__ import annotations
 
 import logging
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -54,6 +55,7 @@ from core.model_hub_engine_channel import (
     Resolution,
     ResolutionAction,
     SignatureVerifier,
+    Tombstone,
     TrustRoots,
     authenticate,
     parse_trust_roots,
@@ -165,10 +167,12 @@ class EngineChannel:
         )
         self.store = ChannelStateStore(self.manager.runtime_dir / "channel")
         self._fetch = fetch
-        # A verified withdrawal learned in THIS process may block execution even
-        # when its state publication fails. This is volatile, not another
-        # channel-history authority or a promise after history loss/restart.
-        self._restrictive_payload = None
+        # Authenticated withdrawals learned in THIS process may block execution
+        # when state publication fails. Keep failures additive until a refresh
+        # actually succeeds; rejecting another attempt cannot forget them. This
+        # is volatile, not another history authority after file loss/restart.
+        self._unpublished_withdrawals: dict[str, Tombstone] = {}
+        self._refresh_lock = threading.Lock()
         if avibe_version is None:
             from vibe import __version__ as avibe_version
         self._avibe_version = avibe_version
@@ -208,21 +212,32 @@ class EngineChannel:
             return ChannelStatus("unavailable", str(exc.details.get("kind") or "network"), str(exc))
         except (OSError, ValueError, urllib.error.URLError) as exc:
             return ChannelStatus("unavailable", "network", type(exc).__name__)
-        try:
-            envelope, payload = authenticate(raw, roots=self.roots, verifier=self.verifier)
-            self._restrictive_payload = payload
-            changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
-            self._restrictive_payload = None
-        except ChannelError as exc:
-            # A signed payload rejected by acceptance validation never became
-            # authoritative, so it cannot remain a volatile withdrawal gate.
-            self._restrictive_payload = None
-            logger.warning("Model Hub engine channel index rejected: %s", exc)
-            return ChannelStatus("rejected", exc.reason, exc.detail)
-        except Exception as exc:  # noqa: BLE001 - a refresh reports, it does not raise
-            logger.exception("Model Hub engine channel refresh failed")
-            return ChannelStatus("rejected", "state_unreadable", type(exc).__name__)
-        return ChannelStatus("accepted", sequence=payload.sequence, changed=changed)
+        # Serialize publication/settlement, not resolve(): execution can still
+        # observe an earlier withdrawal while another refresh is stuck in I/O.
+        with self._refresh_lock:
+            payload = None
+            try:
+                envelope, payload = authenticate(raw, roots=self.roots, verifier=self.verifier)
+                changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
+            except ChannelError as exc:
+                # This attempt never became authoritative. Neither publish its
+                # withdrawals nor discard restrictions from an earlier failure.
+                logger.warning("Model Hub engine channel index rejected: %s", exc)
+                return ChannelStatus("rejected", exc.reason, exc.detail)
+            except Exception as exc:  # noqa: BLE001 - a refresh reports, it does not raise
+                if payload is not None:
+                    self._unpublished_withdrawals = {
+                        **self._unpublished_withdrawals,
+                        **{item.asset_release_tag: item for item in payload.revoked},
+                    }
+                logger.exception("Model Hub engine channel refresh failed")
+                return ChannelStatus("rejected", "state_unreadable", type(exc).__name__)
+            # A completed publication, not a rejection or unchanged-file
+            # refresh, hands authority back to the single state file (including
+            # its deliberate loss contract).
+            if changed:
+                self._unpublished_withdrawals = {}
+            return ChannelStatus("accepted", sequence=payload.sequence, changed=changed)
 
     def snapshot(self) -> ChannelSnapshot | None:
         """The last accepted index, re-authenticated from disk; no network.
@@ -267,10 +282,9 @@ class EngineChannel:
         reason = self.opt_out_reason()
         if reason == "manifest_override":
             return Resolution(ResolutionAction.KEEP, reason)
-        if self._restrictive_payload is not None:
-            withdrawal = self._restrictive_payload.tombstone(current)
-            if withdrawal is not None:
-                return Resolution(ResolutionAction.BLOCKED, "channel_state_write_failed", None, withdrawal)
+        withdrawal = self._unpublished_withdrawals.get(current)
+        if withdrawal is not None:
+            return Resolution(ResolutionAction.BLOCKED, "channel_state_write_failed", None, withdrawal)
         if reason is not None:
             return self._unverifiable(current, reason)
         try:

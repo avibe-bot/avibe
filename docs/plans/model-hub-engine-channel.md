@@ -234,6 +234,14 @@ or a second fault that destroys local history. No expiry, renewal, hidden backup
 or never-reopen rule is added to compensate. A future requirement never to reopen
 a withdrawal after state loss needs a new owner decision.
 
+Within a running controller, authenticated withdrawals from failed state
+publication remain restrictive until a later state publication completes.
+Rejected refresh attempts contribute no withdrawal and cannot erase an earlier
+one; an unchanged-file refresh is not publication completion either. Further
+publication failures accumulate only in-process restrictions. No extra history
+file or restart-survival promise is introduced, and successful signed recovery
+of lost history still has the state-loss behavior above.
+
 What was removed with the expiry: the `expires_at` field, the seven-day
 bound, the clock-skew allowance and every wall-clock check on the device; the
 renewal operation, its schedule, the open question of standing approval for

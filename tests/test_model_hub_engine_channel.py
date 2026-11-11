@@ -475,24 +475,130 @@ def test_damaged_state_is_replaced_only_by_an_authenticated_fetch(tmp_path, sign
     assert "history" in caplog.text and "withdrawal" in caplog.text
 
 
-def test_rejected_authenticated_payload_does_not_leave_a_volatile_withdrawal_gate(tmp_path, signer, monkeypatch):
+def test_rejected_authenticated_payload_does_not_leave_a_volatile_withdrawal_gate(tmp_path, signer):
     from types import SimpleNamespace
     from vibe.model_hub_runtime.engine_channel import EngineChannel
 
-    payload = signed(signer, 11)
+    releases = [release_entry(manifest_bytes(build=build)) for build in (1, 2)]
     manager = SimpleNamespace(
         runtime_dir=tmp_path, manifest_path=None, manifest_url=None, offline=False,
+        bundled_manifest=lambda: SimpleNamespace(payload={"asset_release_tag": V63_1}),
+        host_platform=lambda: "linux-amd64",
     )
     engine_channel = EngineChannel(
-        manager, roots=signer.roots(), verifier=LocalVerifier(), fetch=lambda: payload, avibe_version="3.2.6",
+        manager, roots=signer.roots(), verifier=LocalVerifier(),
+        fetch=lambda: signed(signer, 10, releases=releases), avibe_version="3.2.6",
     )
-    monkeypatch.setattr(engine_channel.store, "accept", lambda *_args, **_kwargs: (_ for _ in ()).throw(ChannelError("replayed")))
-
+    assert engine_channel.refresh().state == "accepted"
+    engine_channel._fetch = lambda: signed(signer, 9, releases=releases, revoked=[tombstone(V63_2, V63_1)])
     status = engine_channel.refresh()
     assert status.state == "rejected" and status.reason == "replayed"
-    assert engine_channel._restrictive_payload is None
+    assert engine_channel.resolve(current=V63_2).action is ResolutionAction.KEEP
 
 
+@pytest.mark.parametrize("failure", [
+    "signature", "schema", "replay", "equivocation", "history", "network", "publication", "inflight_replay", "unchanged",
+])
+def test_failed_refresh_preserves_prior_unpublished_withdrawals(tmp_path, signer, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    from config import atomic_io
+    from vibe.model_hub_runtime.engine_channel import EngineChannel
+
+    releases = [release_entry(manifest_bytes(build=build)) for build in (1, 2, 3)]
+    manager = SimpleNamespace(
+        runtime_dir=tmp_path, manifest_path=None, manifest_url=None, offline=False,
+        bundled_manifest=lambda: SimpleNamespace(payload={"asset_release_tag": V63_1}),
+        host_platform=lambda: "linux-amd64",
+    )
+    engine_channel = EngineChannel(
+        manager, roots=signer.roots(), verifier=LocalVerifier(),
+        fetch=lambda: signed(signer, 10, releases=releases), avibe_version="3.2.6",
+    )
+    assert engine_channel.refresh().state == "accepted"
+    before = engine_channel.store.state_path.read_bytes()
+    replace = atomic_io.os.replace
+
+    def fail_publication(*_args):
+        raise OSError("test-owned channel publication refused")
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_publication)
+    engine_channel._fetch = lambda: signed(signer, 11, releases=releases, revoked=[tombstone(V63_2, V63_1)])
+    assert engine_channel.refresh().reason == "state_unreadable"
+    assert engine_channel.resolve(current=V63_2).action is ResolutionAction.BLOCKED
+
+    attempt = signed(signer, 12, releases=releases, revoked=[tombstone(V63_3, V63_1)])
+    if failure == "signature":
+        attempt = signed(Signer(), 12, releases=releases, revoked=[tombstone(V63_3, V63_1)])
+    elif failure == "schema":
+        attempt = b"{}"
+    elif failure in {"replay", "equivocation", "inflight_replay"}:
+        attempt = signed(signer, 10 if failure == "equivocation" else 9, releases=releases, revoked=[tombstone(V63_3, V63_1)])
+    elif failure == "unchanged":
+        attempt = engine_channel.store.load().envelope
+    elif failure == "history":
+        attempt = signed(signer, 12, releases=[
+            releases[0], release_entry(manifest_bytes(build=2), minimum="3.2.7"), releases[2],
+        ], revoked=[tombstone(V63_3, V63_1)])
+    engine_channel._fetch = lambda: attempt
+    if failure == "network":
+        engine_channel._fetch = fail_publication
+    if failure == "inflight_replay":
+        from concurrent.futures import ThreadPoolExecutor
+
+        entered, proceed = threading.Event(), threading.Event()
+        accept = engine_channel.store.accept
+
+        def held_accept(*args, **kwargs):
+            entered.set()
+            assert proceed.wait(5)
+            return accept(*args, **kwargs)
+
+        with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as executor:
+            patch.setattr(engine_channel.store, "accept", held_accept)
+            refresh = executor.submit(engine_channel.refresh)
+            try:
+                assert entered.wait(5)
+                assert engine_channel.resolve(current=V63_2).action is ResolutionAction.BLOCKED
+                assert engine_channel.resolve(current=V63_3).action is ResolutionAction.KEEP
+                assert not refresh.done()
+            finally:
+                proceed.set()
+            status = refresh.result(timeout=5)
+    else:
+        status = engine_channel.refresh()
+    expected_reason = {
+        "signature": "signature_invalid", "schema": "envelope_invalid", "replay": "replayed",
+        "equivocation": "equivocation", "history": "release_mutated", "network": "network",
+        "publication": "state_unreadable", "inflight_replay": "replayed", "unchanged": None,
+    }[failure]
+    assert status.reason == expected_reason
+    if failure == "unchanged":
+        assert status.state == "accepted" and not status.changed
+    else:
+        assert status.state == ("unavailable" if failure == "network" else "rejected")
+    assert engine_channel.store.state_path.read_bytes() == before
+    decision = engine_channel.resolve(current=V63_2)
+    assert decision.action is ResolutionAction.BLOCKED and decision.reason == "channel_state_write_failed"
+    # Failed publication is additive; rejected attempts contribute nothing.
+    expected = ResolutionAction.BLOCKED if failure == "publication" else ResolutionAction.KEEP
+    assert engine_channel.resolve(current=V63_3).action is expected
+
+    monkeypatch.setattr(atomic_io.os, "replace", replace)
+    engine_channel._fetch = lambda: signed(signer, 12, releases=releases, revoked=[
+        tombstone(V63_2, V63_1), tombstone(V63_3, V63_1),
+    ])
+    assert engine_channel.refresh().state == "accepted"
+    assert engine_channel.resolve(current=V63_2).action is ResolutionAction.WITHDRAW
+    # Successful publication hands authority back to the single file. Its
+    # deliberate loss contract remains unchanged; this is not a replay backup.
+    engine_channel.store.state_path.unlink()
+    engine_channel._fetch = lambda: signed(signer, 1, releases=releases)
+    assert engine_channel.refresh().state == "accepted"
+    assert engine_channel.resolve(current=V63_2, allow_adoption=False).action is ResolutionAction.KEEP
+
+
+def test_a_failed_recovery_write_preserves_the_damaged_file(tmp_path, signer, monkeypatch) -> None:
     """The real atomic publisher must preserve damaged bytes if replacement fails."""
     from config import atomic_io
 

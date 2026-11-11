@@ -210,6 +210,48 @@ async def test_explicit_retry_recovers_a_quarantined_required_baseline_without_a
 
 
 @pytest.mark.asyncio
+async def test_bad_refresh_cannot_reopen_admission_after_unpublished_withdrawal(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from config import atomic_io
+    from tests.engine_channel_support import manifest_bytes, release_entry, signed, tombstone
+    from tests.test_model_hub_engine_lifecycle import owner_fixture, signed_candidate
+
+    owner, supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
+    candidate, signer, manifest, _envelope = signed_candidate(owner, tmp_path)
+    owner.activate(candidate)
+    owner.ensure_running()
+    supervisor.installer = owner.manager
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=object())
+    transport.status = AsyncMock(return_value=object())
+    await transport.recover_lifecycle()
+    withdrawn = signed(signer, 11, releases=[
+        release_entry(manifest), release_entry(manifest_bytes(version="v8.0.30", build=1)),
+    ], revoked=[tombstone(candidate.asset_release_tag, "model-hub-engine-v8.0.30-1")])
+    replace = atomic_io.os.replace
+
+    def refuse_channel_publication(source, destination):
+        if destination == owner.channel.store.state_path:
+            raise OSError("test-owned channel publication refused")
+        return replace(source, destination)
+
+    monkeypatch.setattr(atomic_io.os, "replace", refuse_channel_publication)
+    owner.channel._fetch = lambda: withdrawn
+    await transport._reconcile_engine(explicit=False)
+    assert transport._engine_admission.reason == "engine_withdrawn"
+    assert supervisor.running is None
+    starts = sum(event == "start" for event, _tag in supervisor.events)
+
+    owner.channel._fetch = lambda: b"{}"
+    await transport._reconcile_engine(explicit=False)
+    assert transport._engine_admission.reason == "engine_withdrawn"
+    with pytest.raises(EngineUnavailableError):
+        transport._engine_admission.acquire()
+    assert supervisor.running is None
+    assert sum(event == "start" for event, _tag in supervisor.events) == starts
+
+
+@pytest.mark.asyncio
 async def test_routine_drain_releases_routing_for_admitted_continuations():
     owner = adapter()
     flow = owner._engine_admission.retain()
