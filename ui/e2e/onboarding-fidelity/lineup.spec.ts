@@ -3,7 +3,7 @@
 // models never has the shell's aside drawn over it while the action stays where every
 // screen puts it. Hermetic: every read is answered here and every write is refused.
 import { expect, test, type Page } from '../support/browserTest';
-import { PHASES, VIEWPORTS, freezeAt, openOnboarding, openSetup, serveProduct, size } from './support';
+import { PHASES, VIEWPORTS, freezeAt, openOnboarding, openSetup, serveProduct, showMoreAssistants, size } from './support';
 import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 
 const LINEUP = ['vibey', 'claude', 'codex', 'opencode'];
@@ -78,11 +78,16 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
   expect(action.width).toBeCloseTo(299, 0);
   expect(action.x + action.width / 2).toBeCloseTo(600, 0);
 
-  await openSetup(page, 'en');
+  await openSetup(page, 'en', { keepFolded: true });
   await page.clock.runFor(2000);
   // The built-in card grows to offer its models; the others keep the card's own height.
   const vibey = page.locator('.onboarding-assistant[data-backend="vibey"]');
   await expect(vibey.getByRole('button', { name: /gpt-5\.6-sol/ })).toBeVisible();
+  // Folded, the CLI assistants share the three tracks their cards take unfolded.
+  const folded = await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant');
+  expect(folded.map((box) => Math.round(box.x))).toEqual(intro.slice(0, 2).map((box) => Math.round(box.x)));
+  expect(Math.round(folded[1].x + folded[1].width)).toBe(Math.round(intro[3].x + intro[3].width));
+  await showMoreAssistants(page, 'en');
   const assistants = await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant');
   expect(assistants.map((box) => Math.round(box.x))).toEqual(intro.map((box) => Math.round(box.x)));
   expect(assistants[0].height).toBeGreaterThan(assistants[1].height);

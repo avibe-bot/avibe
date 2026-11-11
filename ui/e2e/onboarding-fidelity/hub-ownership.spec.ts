@@ -1,5 +1,5 @@
 import { expect, test } from '../support/browserTest';
-import { ORIGIN, serveProduct } from './support';
+import { ORIGIN, serveProduct, showMoreAssistants } from './support';
 
 // Exercise the actual App/AuthGuard/Settings overlay/Wizard boundary. All
 // server responses are fixture-owned; the Vite server has a dead backend.
@@ -146,6 +146,7 @@ for (const width of [1200, 390]) {
 
     await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
     await expect(page.locator('.onboarding-assistants')).toBeVisible();
+    await showMoreAssistants(page, 'en');
     const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
     const claude = page.getByLabel('Claude Code', { exact: true });
     await expect(claude.getByRole('button', { name: 'Add API Key', exact: true })).toHaveCount(0);

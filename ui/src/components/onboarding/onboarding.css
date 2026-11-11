@@ -1114,7 +1114,34 @@
   .onboarding-assistants-list:has(> .onboarding-assistant .onboarding-model-offer) > .onboarding-setup-aside {
     grid-column: 2 / -1;
   }
+  /* Folded, the CLI assistants share the tracks their own cards take unfolded. */
+  .onboarding-assistants-list > .onboarding-more-assistants { grid-column: 2 / -1; }
 }
+/* The folded CLI assistants: each named with whether it is on, and one action that
+   unfolds them. The action keeps its label's width; across three tracks a full-width
+   row would outweigh the primary action under the cards. */
+/* Quieter than an assistant's card: it holds a choice for later, not a card to act on now. */
+.onboarding-more-assistants { background: transparent; border-style: dashed; }
+.onboarding-more-assistants-logo { color: var(--muted); }
+.onboarding-more-assistants-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-bottom: var(--ob-spacer-2);
+}
+.onboarding-more-assistants-list > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ob-note-fs);
+  line-height: var(--ob-note-lh);
+}
+.onboarding-more-assistants-name { font-weight: 500; }
+.onboarding-more-assistants-state { color: var(--muted); }
+.onboarding-more-assistants-state[data-state="enabled"] { color: var(--mint-ink); }
+.onboarding-more-assistants-state[data-state="attention"] { color: var(--destructive-ink); }
+.onboarding-more-assistants .onboarding-assistant-actions { align-items: flex-start; }
+.onboarding-more-assistants .onboarding-method-row { width: auto; }
 /* The state row is where the story puts its caption: the lifecycle pill on the left
    and, opposite it, the one action the pill offers — update or install — on the right.
    Wrapping is allowed so a long localized pill drops the button to its own line

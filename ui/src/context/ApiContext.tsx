@@ -62,6 +62,7 @@ import {
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
 import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
+import { useLatestRef } from '../lib/useLatestRef';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
 import {
   configMutationsToPayload,
@@ -2696,7 +2697,12 @@ export const useApi = () => {
 
 export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { showToast } = useToast();
+  // Read through a ref, never a memo dependency: `t` is replaced on every language
+  // change, and a value memoized on it handed every `useApi()` consumer a new
+  // identity and re-ran their effects (AuthGuard's setup check unmounted the
+  // wizard back to its first screen). Messages are localized when produced.
   const { t } = useTranslation();
+  const tRef = useLatestRef(t);
   const readCacheRef = useRef(new Map<string, {
     expiresAt: number;
     promise: Promise<any>;
@@ -2774,7 +2780,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // key like ``errors.[object Object]``.
         errorCode = parsed.code;
         errorMessage = parsed.code
-          ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+          ? tRef.current(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
           : parsed.fallback;
       }
     } catch {
@@ -3827,7 +3833,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return last;
       }
     }
-    return { ...last, ok: false, status: 'failed', message: t('settings.dependencies.installFailed') };
+    return { ...last, ok: false, status: 'failed', message: tRef.current('settings.dependencies.installFailed') };
   };
 
   const startAndPollAgentInstall = async (name: string): Promise<InstallResult> => {
@@ -3856,7 +3862,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...last,
       ok: false,
       status: 'failed',
-      message: t('backendLifecycle.upgradeFailed'),
+      message: tRef.current('backendLifecycle.upgradeFailed'),
     };
   };
 
@@ -3879,11 +3885,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // disabled buttons, setter guards) didn't help because the click
   // wasn't the trigger — the cascading re-render was.
   //
-  // ``[showToast, t]`` are intentional deps: ``showToast`` is stable
-  // (``useCallback`` in ToastContext) so it never invalidates by
-  // itself; ``t`` only changes on locale switch — recomputing then
-  // is correct (cached error messages would otherwise stay in the
-  // old language).
+  // ``showToast`` is stable (``useCallback`` in ToastContext) and
+  // ``t`` is read through ``tRef``, so neither invalidates the value: a
+  // language switch keeps ``api`` as it is.
   const value: ApiContextType = useMemo(() => ({
     getConfig: (options) => (options?.cache === false
       ? getJson('/api/config')
@@ -4286,7 +4290,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         return payloadJson;
       } catch (error) {
-        if (!(error instanceof ApiError)) showToast(t('errors.invalid_project_order'), 'error');
+        if (!(error instanceof ApiError)) showToast(tRef.current('errors.invalid_project_order'), 'error');
         throw error;
       }
     },
@@ -4978,7 +4982,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     },
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
-  }), [sessionDraftPersistence, showToast, t]);
+  }), [sessionDraftPersistence, showToast, tRef]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 };
