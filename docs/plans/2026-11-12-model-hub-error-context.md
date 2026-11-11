@@ -6,7 +6,7 @@ Provider 401/403 errors describe invalid credentials or missing permission, with
 
 The unlisted-model chat summary is one actionable sentence; source names, attempt statuses, and safe upstream text stay in the existing “Show details” provenance view. Setup cards keep the wording from #3569 (“Key rejected (401) · re-enter”); longer explanations distinguish invalid credentials from missing permission without asserting revocation.
 
-No changes to request admission, recovery timing, retries, Source health, or visible waiting notices. Source-wide cooldown isolation is deferred: simply skipping Source settlement makes the existing recovery loop immediately replay an apparently eligible hop; isolating recovery per Source/model requires its own contract.
+Part 3 supersedes the earlier admission/cooldown deferral: a literal upstream HTTP 503 classified as `server_error` for a model absent from the admitted Hub Source inventory does not write shared Source health or cooldown. That request still owes the existing request window, 503 backoff, and validated `Retry-After` timing in request-private Source-id state. Listed-model 503s, other statuses, global blockers, and HTTP 200 buffered overload keep their existing shared behavior. There is no model-keyed shared state or persistence change.
 
 ## Validation
 

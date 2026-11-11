@@ -1071,6 +1071,8 @@ class ResolvedInvocation:
     # This hop's request asked for the vendor's fast tier, so its served response
     # confirms or not that it ran fast (``docs/plans/fast-mode.md``).
     fast_requested: bool = False
+    # Frozen at final transport admission, including inventory/alias revalidation.
+    inventory_member: bool = True
 
 
 @dataclass(frozen=True)
@@ -9604,10 +9606,12 @@ class ModelHubService:
         await self._prepare_engine_for_demand()
         started_at = time.monotonic()
         settlement_generation = None
+        inventory_member = True
 
-        def admitted(generation: int) -> None:
-            nonlocal settlement_generation
+        def admitted(generation: int, listed: bool) -> None:
+            nonlocal settlement_generation, inventory_member
             settlement_generation = generation
+            inventory_member = listed
 
         handle: InvokeHandle | None = None
         try:
@@ -9671,6 +9675,7 @@ class ModelHubService:
                         detail_key=error_key,
                         settlement_generation=settlement_generation,
                         outcome=outcome,
+                        inventory_member=inventory_member,
                     )
             return {
                 "contract_version": PROBE_RESULT_CONTRACT_VERSION,
@@ -10510,12 +10515,28 @@ class ModelHubService:
         detail_key: Optional[str] = None,
         settlement_generation: Optional[int] = None,
         outcome: RawCallOutcome | None = None,
+        inventory_member: bool = True,
+        recovery_request: RecoveryRequest | None = None,
+        recovery_identity: tuple | None = None,
     ) -> tuple[EventReason, bool]:
         """Persist one fallback-class Source result before the turn settles."""
 
         if decision.reason is None:
             raise AssertionError("fallback-class outcome must retain its Source reason")
         event_reason = cast(EventReason, decision.reason)
+        if (
+            not inventory_member and source.supply_channel == "hub"
+            and outcome is not None and outcome.kind is RawOutcomeKind.HTTP_ERROR
+            and outcome.http_status == 503 and decision.reason == "server_error"
+        ):
+            # This model's refusal is not evidence against the whole provider.
+            # Each request still owes its own backoff, even when another admission
+            # superseded this attempt's shared settlement generation.
+            self.recovery.release(source.id, settlement_generation)
+            if recovery_request is not None:
+                assert recovery_identity is not None
+                recovery_request.defer_unlisted(source.id, recovery_identity, outcome)
+            return event_reason, False
         settlement_rule = source_settlement_rule(event_reason)
         if decision.reason == "network" and outcome is not None and outcome.stream_started:
             return event_reason, False
@@ -10918,6 +10939,7 @@ class ModelHubService:
                     model_id=resolved.requested_model_id,
                     settlement_generation=resolved.settlement_generation,
                     outcome=outcome,
+                    inventory_member=resolved.inventory_member,
                 )
         if retry_overload:
             # An attempt failed, not the Turn. The resolver still owns its
@@ -10989,6 +11011,7 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         supply_channel: Literal["hub"] | None = None,
+        recovery_request: RecoveryRequest | None = None,
     ) -> ModelHubTurnResolution:
         if config.agents[backend].mode != "hub":
             # Only Hub turns reach the gateway. One admitted before a switch to
@@ -10996,6 +11019,9 @@ class ModelHubService:
             # Direct, so they never get here.
             config = self._clone_config(config)
             config.agents[backend].mode = "hub"
+        live_recovery = self.recovery_annotations(config)
+        if recovery_request is not None:
+            live_recovery = recovery_request.annotations(config, live_recovery)
         resolution = resolve_model_hub_turn(
             config,
             backend,
@@ -11003,7 +11029,7 @@ class ModelHubService:
             now=self.now(),
             unavailable_source_ids=self._unavailable_native_sources(config, backend),
             supply_channel=supply_channel,
-            live_recovery=self.recovery_annotations(config),
+            live_recovery=live_recovery,
         )
         if resolution.channel == "direct":
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -11022,7 +11048,7 @@ class ModelHubService:
         excluded_hops: set[tuple[str, str]] | None = None,
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
-        on_admitted: Callable[[int], None] | None = None,
+        on_admitted: Callable[[int, bool], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
         hosted: HostedContent = HostedContent(),
         fast_catalog: FastModeCatalog | None = None,
@@ -11044,11 +11070,13 @@ class ModelHubService:
                 admission_confirmed = True
                 release_exclusion()
                 if on_admitted is not None:
-                    on_admitted(generation)
+                    on_admitted(generation, candidate.inventory_member)
 
             try:
                 config = self.store.load()
-                resolution = self._invocation_resolution(config, backend, requested_model_id, supply_channel)
+                resolution = self._invocation_resolution(
+                    config, backend, requested_model_id, supply_channel, recovery_request,
+                )
                 pinned_hop = _pinned_hop(request, backend)
                 candidates = [
                     hop for hop in resolution.candidate_hops
@@ -11171,7 +11199,7 @@ class ModelHubService:
         excluded_hops: set[tuple[str, str]] | None = None,
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
-        on_admitted: Callable[[int], None] | None = None,
+        on_admitted: Callable[[int, bool], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
         hosted: HostedContent = HostedContent(),
         fast_catalog: FastModeCatalog | None = None,
@@ -11185,11 +11213,11 @@ class ModelHubService:
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
 
-        def admitted(value: int) -> None:
+        def admitted(value: int, listed: bool) -> None:
             nonlocal generation
             generation = value
             if on_admitted is not None:
-                on_admitted(value)
+                on_admitted(value, listed)
 
         async def meter_observed(
             observed: ProtocolSSEState | None,
@@ -11328,6 +11356,7 @@ class ModelHubService:
         decision: ResolutionDecision,
         settlement_generation: int,
         attempt_observer: Optional[AttemptObserver],
+        inventory_member: bool,
     ) -> None:
         """Persist facts from an upstream call that beat downstream cancellation."""
 
@@ -11356,6 +11385,7 @@ class ModelHubService:
                 model_id=requested_model_id,
                 settlement_generation=settlement_generation,
                 outcome=outcome,
+                inventory_member=inventory_member,
             )
         elif decision.action == "return" and self._verified_recovery_outcome(outcome):
             await self._record_recovery_success(
@@ -11512,7 +11542,7 @@ class ModelHubService:
         async with self._mutation_lock:
             config = self.store.load()
             resolution = self._invocation_resolution(
-                config, cast(BackendName, backend), model_id, supply_channel,
+                config, cast(BackendName, backend), model_id, supply_channel, recovery_request,
             )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
@@ -11572,7 +11602,7 @@ class ModelHubService:
                     break
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, cast(BackendName, backend), model_id, supply_channel,
+                    config, cast(BackendName, backend), model_id, supply_channel, recovery_request,
                 )
                 inspection = next(
                     (
@@ -11614,11 +11644,15 @@ class ModelHubService:
                     supply_channel="native_cli",
                 )
             settlement_generation = None
+            inventory_member = True
+            recovery_identity = None
 
-            def admitted(generation: int) -> None:
-                nonlocal attempted, settlement_generation
+            def admitted(generation: int, listed: bool) -> None:
+                nonlocal attempted, settlement_generation, inventory_member, recovery_identity
                 attempted = True
                 settlement_generation = generation
+                inventory_member = listed
+                recovery_identity = source_identity(source)
                 if recovery_request is not None:
                     recovery_request.attempt_count += 1
                     recovery_request.source_id = source.id
@@ -11708,6 +11742,7 @@ class ModelHubService:
                     source_identity=identity,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
+                    inventory_member=inventory_member,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             learned = await self._learn_capability_evidence(source, target_model, request, outcome)
@@ -11721,6 +11756,7 @@ class ModelHubService:
                     decision=decision,
                     settlement_generation=settlement_generation,
                     attempt_observer=attempt_observer,
+                    inventory_member=inventory_member,
                 )
                 raise cancelled
             if decision.action == "refresh":
@@ -11777,6 +11813,7 @@ class ModelHubService:
                         source_identity=identity,
                         hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                         fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
+                        inventory_member=inventory_member,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 learned = await self._learn_capability_evidence(source, target_model, request, outcome)
@@ -11790,6 +11827,7 @@ class ModelHubService:
                         decision=decision,
                         settlement_generation=settlement_generation,
                         attempt_observer=attempt_observer,
+                        inventory_member=inventory_member,
                     )
                     raise cancelled
             if attempt_observer is not None and settlement_generation is not None:
@@ -11834,6 +11872,7 @@ class ModelHubService:
                     origin=origin,
                     source_identity=identity,
                     fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
+                    inventory_member=inventory_member,
                 )
             if (
                 pinned_hop is not None
@@ -11859,6 +11898,7 @@ class ModelHubService:
                         model_id=model_id,
                         settlement_generation=settlement_generation,
                         outcome=outcome,
+                        inventory_member=inventory_member,
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
@@ -11894,6 +11934,7 @@ class ModelHubService:
                     model_id=model_id,
                     settlement_generation=settlement_generation,
                     outcome=outcome,
+                    inventory_member=inventory_member,
                 )
                 raise _pin_unavailable()
             if decision.action == "fallback":
@@ -11915,6 +11956,9 @@ class ModelHubService:
                     model_id=model_id,
                     settlement_generation=settlement_generation,
                     outcome=outcome,
+                    inventory_member=inventory_member,
+                    recovery_request=recovery_request,
+                    recovery_identity=recovery_identity,
                 )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
@@ -12042,7 +12086,7 @@ class ModelHubService:
                         raise self._recovery_exhausted(exc, pending.reason) from exc
                     config = self.store.load()
                     resolution = self._invocation_resolution(
-                        config, kwargs["backend"], kwargs["model_id"], supply_channel,
+                        config, kwargs["backend"], kwargs["model_id"], supply_channel, pending,
                     )
                     request = kwargs.get("request")
                     if any(
@@ -12060,7 +12104,7 @@ class ModelHubService:
                     waitable = resolution.self_healing_hops(supply_channel)
                     if not waitable:
                         raise
-                    annotations = self.recovery.annotations(config)
+                    annotations = pending.annotations(config, self.recovery.annotations(config))
                     waits = [
                         (
                             max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds()),
