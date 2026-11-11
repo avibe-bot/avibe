@@ -28,15 +28,15 @@ entitlement.
 The gate excludes iroh's `portmapper` feature; the feature graph may still show
 that crate because `iroh-services` v1.0.0 uses it for its own diagnostics
 dependency, which is distinct from enabling iroh's unsolicited mapping feature.
-manifest (pulled by `iroh-services`) otherwise requests iroh's default
-features, so the build script vendors the upstream lockfile dependencies and
-patches only that manifest's iroh edge to `default-features = false`; the
-upstream `Cargo.lock` remains the lockfile and every Cargo command uses
+The published `irpc-iroh` manifest (pulled by `iroh-services`) otherwise requests
+iroh's default features, so the build script vendors the upstream lockfile
+dependencies and patches only that manifest's iroh edge to `default-features = false`;
+the upstream `Cargo.lock` remains the lockfile and every Cargo command uses
 `--locked`. Every iOS target's resolved feature graph is checked for
 `fast-apple-datapath` on iroh/noq/noq-udp, for iroh's `portmapper` feature, and
 for multicast/mDNS/local-network address-lookup features or crates. The
-manifest records both the declared iroh features and the complete resolved
-iroh feature set; in this pin, `unstable-net-report` is pulled transitively by
+manifest records both the declared iroh features and the complete resolved iroh
+feature set; in this pin, `unstable-net-report` is pulled transitively by
 `iroh-services`.
 
 ## What the gate proves
@@ -51,25 +51,38 @@ On GitHub Actions `macos-26` with the repository's pinned Xcode 26.6 path, it:
 
 1. verifies the exact upstream commit and applies the small feature patch;
 2. builds the Rust static library for `arm64` iOS and a universal `arm64 + x86_64`
-   iOS Simulator slice with `IPHONEOS_DEPLOYMENT_TARGET=17.5` and `--locked`;
+   iOS Simulator slice with `IPHONEOS_DEPLOYMENT_TARGET=17.0` and `--locked`;
 3. generates the UniFFI Swift/C bindings and assembles an iOS-only
    `Iroh.xcframework` using `xcodebuild -create-xcframework -library`;
 4. builds the upstream `IrohLib` Swift package for generic iOS device and
-   generic iOS Simulator destinations with signing disabled;
-5. scans every xcframework slice and every Mach-O/archive product produced by
+   generic iOS Simulator destinations with a 17.0 deployment target and signing
+   disabled;
+5. installs the lowest available iOS 17.x Simulator runtime below 17.5 and runs
+   the upstream `IrohLibTests` XCTest suite on that runtime;
+6. scans every xcframework slice and every Mach-O/archive product produced by
    those Swift builds for both `sendmsg_x` and `recvmsg_x` as symbols and as
    literal strings; and
-6. verifies the same checker **does** find the private names in the upstream
+7. verifies the same checker **does** find the private names in the upstream
    prebuilt `IrohLib.xcframework.zip` after checking its published SHA-256, and
    requires a hit in that archive's `ios-arm64` slice specifically.
 
-The positive control is important: a checker that never fires is not evidence
-that the patched artifact is clean.
+The runtime test proves that the built Swift package can load and execute the
+upstream XCTest suite on one installed iOS 17.x Simulator runtime below 17.5.
+It does not prove behavior on a physical device, every iOS 17.0 hardware
+configuration, or code paths that the upstream tests do not exercise. The gate
+also fails if xcodebuild emits a warning that an object was built for a newer
+iOS deployment target than the one being linked.
+
+A cheap static imported-symbol inventory against the current SDK can show which
+system symbols the device archive references, but it cannot establish their
+availability on iOS 17.0 without an iOS 17.0 SDK. The runtime test is therefore
+the authoritative compatibility check here; no separate availability checker is
+built in this phase.
 
 The artifact contains the iOS-only xcframework zip, its SHA-256, the generated
-`IrohLib.swift` binding, feature-graph captures, build logs, and `manifest.json`
-with pins, declared and resolved iroh features, toolchain versions, deployment
-target, and slice layout.
+`IrohLib.swift` binding, feature-graph captures, build logs, runtime-test logs,
+and `manifest.json` with pins, declared and resolved iroh features, toolchain
+versions, deployment target, tested runtime, and slice layout.
 
 ## What the gate does not prove
 
@@ -93,8 +106,11 @@ result). Do not add that check to `ios/scripts/testflight.py` in this phase.
 3. Run the workflow manually and confirm that the positive control still
    contains both private API names. If it does not, stop and investigate
    rather than weakening the checker.
-4. Record the new artifact's manifest and checker output in the PR body before
-   handing the gate to Phase 1.
+4. Run the workflow manually and confirm that the positive control still
+   contains both private API names and that the iOS 17.x runtime test passes.
+   Record the runtime selected by CI in the artifact manifest and PR body. If
+   no runtime below 17.5 can be installed with the pinned Xcode, stop and
+   report the lowest runtime that was available instead of weakening the gate.
 
 The workflow intentionally runs only on `workflow_dispatch` and pull requests
 that touch this gate or its workflow; it is not part of the normal PR lint
