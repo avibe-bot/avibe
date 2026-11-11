@@ -165,7 +165,7 @@ def test_bindings_persist_across_calls_and_report_console_and_freshness() -> Non
         ]
 
     first, second, third, fourth = _run(scenario)
-    assert first["ok"] is True and first["kernel_fresh"] is True
+    assert first["ok"] is True and first["kernel_fresh"] is True, first
     assert second == {
         "ok": True,
         "result": 42,
@@ -175,6 +175,100 @@ def test_bindings_persist_across_calls_and_report_console_and_freshness() -> Non
     }
     assert third["result"] == {"base": 40, "base2": 43, "sum": 83}
     assert fourth["ok"] is True and fourth["result"] is True
+
+
+def test_cold_start_waits_for_readiness_without_spending_execution_budget(tmp_path) -> None:
+    import shlex
+
+    # Model a cold executable blocked on I/O, not CPU load. This crosses the
+    # former 10-second startup cutoff; no eval is sent before the real ready.
+    node = tmp_path / "cold-node"
+    node.write_text(f"#!/bin/sh\nsleep 10.1\nexec {shlex.quote(NODE)} \"$@\"\n")
+    node.chmod(0o700)
+
+    async def scenario(h: _Harness) -> tuple[dict, dict]:
+        h.kernels._node_resolver = lambda: node
+        first = await h.js("let cold = 42; cold", timeout_ms=1000)
+        second = await h.js("cold", timeout_ms=1000)
+        return first, second
+
+    first, second = _run(scenario)
+    assert first == {"ok": True, "result": 42, "console": "", "screenshots": [], "kernel_fresh": True}
+    assert second == {**first, "kernel_fresh": False}
+
+
+@pytest.mark.parametrize(
+    "ending", ["timeout", "exit", "turn", "reset", "archive", "off", "shutdown", "request_cancel"]
+)
+def test_startup_failure_or_cancellation_reaps_the_child(tmp_path, monkeypatch, ending) -> None:
+    from core import computer_js_kernels
+
+    # A child that never sends ready, with no CPU work and no desktop access.
+    node = tmp_path / "wedged-node"
+    node.write_text("#!/bin/sh\nexec sleep 60\n")
+    node.chmod(0o700)
+    if ending == "timeout":
+        monkeypatch.setattr(computer_js_kernels, "SPAWN_TIMEOUT_SECONDS", 0.05)
+
+    async def scenario(h: _Harness) -> None:
+        h.kernels._node_resolver = lambda: node
+        initialized = asyncio.get_running_loop().create_future()
+        send = h.kernels._send
+
+        async def record_init(kernel, message):
+            await send(kernel, message)
+            if message["type"] == "init":
+                initialized.set_result(kernel)
+
+        monkeypatch.setattr(h.kernels, "_send", record_init)
+        pending = asyncio.create_task(h.kernels.evaluate(SESSION, "42", 1000))
+        kernel = await asyncio.wait_for(initialized, 5)
+        if ending == "exit":
+            kernel.process.terminate()
+        elif ending == "turn":
+            h.controller.session_turns.in_flight[SESSION].task.cancel()
+        elif ending == "reset":
+            h.kernels.reset(SESSION)
+        elif ending == "archive":
+            h.kernels.discard_session(SESSION)
+        elif ending == "off":
+            h.status = "off"
+        elif ending == "shutdown":
+            h.kernels.close_all()
+        elif ending == "request_cancel":
+            pending.cancel()
+
+        if ending == "request_cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        else:
+            # Much less than the normal startup budget: cancellation/EOF is
+            # the wakeup signal, not the startup timer expiring.
+            report = await asyncio.wait_for(pending, 5)
+            assert report["ok"] is False, report
+            if ending in {"timeout", "exit"}:
+                assert report["error"]["code"] == "js_kernel_unavailable"
+                assert report["error"]["params"] == {
+                    "reason": "startup_timeout" if ending == "timeout" else "exited"
+                }
+                if ending == "timeout":
+                    assert "startup deadline" in report["error"]["message"]
+            elif ending == "turn":
+                assert report["error"]["code"] == "script_turn_ended"
+            else:
+                assert report["error"]["code"] == "js_kernel_reset"
+                assert report["error"]["params"] == {
+                    "reason": {"archive": "session_archived", "off": "computer_use_off"}.get(ending, ending)
+                }
+        await asyncio.wait_for(kernel.process.wait(), 5)
+        assert kernel.process.returncode is not None
+        assert not kernel.alive
+        assert h.driver.calls == []
+        assert not h.kernels._in_flight
+        assert all(slot.kernel is None for slot in h.kernels._slots.values())
+
+    scenario.options = {"status_poll_seconds": 0.05}
+    _run(scenario)
 
 
 def test_top_level_let_and_const_redeclare_across_calls_in_any_order() -> None:
