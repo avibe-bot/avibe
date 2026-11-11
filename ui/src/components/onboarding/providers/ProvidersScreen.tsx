@@ -54,6 +54,7 @@ import { SupplyWires } from './SupplyWires';
 import {
   addedThroughMoreCount,
   adoptionBackend,
+  byCheckAttention,
   defaultSelection,
   offeredImportKeys,
   gatewayEvidenceSettled,
@@ -226,9 +227,11 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     const ready = setupNavigationReady(capability, gatewayEnabled);
     const intent = gatewayIntent({ capability, gatewayEnabled, runtimeRead });
 
+    // One card per provider, and every key behind it is checked: the card stands for
+    // the key that needs the person, so pressing it opens that key.
     const slots = React.useMemo(
-      () => providerSlots({ sources, scan: selection.scan }),
-      [sources, selection.scan],
+      () => providerSlots({ sources: byCheckAttention(sources, checks), scan: selection.scan }),
+      [sources, checks, selection.scan],
     );
     const detected = React.useMemo(
       () => unlistedDetected({ sources, scan: selection.scan }),

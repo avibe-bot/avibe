@@ -691,6 +691,26 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: false }));
   });
 
+  it('AUTH-SETUP-139 opens the key that failed when a provider holds two keys', async () => {
+    serve({
+      sources: [
+        source({ id: 'src_works', vendor: 'openai', masked_credential: 'sk-…1111' }),
+        savedKey('src_second', 'openai', { masked_credential: 'sk-…2222' }),
+      ],
+      listing: { src_second: rejectedListing(401) },
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(cardFor('openai').dataset.check).toBe('rejected'));
+    await user.click(cardFor('openai'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('sk-…2222 · Key rejected (401) · re-enter')).toBeTruthy();
+    // The working key still supplies models, so nothing here says nothing passed.
+    expect(summary()?.textContent).toBe('1 provider added: OpenAI');
+  });
+
   it('AUTH-SETUP-139 removes a key from its card after a confirmation', async () => {
     serve({
       sources: [savedKey('src_wrong', 'anthropic')],

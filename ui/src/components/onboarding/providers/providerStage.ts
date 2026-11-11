@@ -158,6 +158,25 @@ export const checkLine = (t: TFunction, check: SourceCheck | undefined): string 
 };
 
 /**
+ * The sources in the order the stage should spend a provider's one card on them.
+ *
+ * The stage draws one card per provider, and every key behind it is checked. A key
+ * whose check needs the person — refused, unanswered, a list change to confirm, or
+ * still being asked — comes first, so the card that opens a key opens the one that
+ * failed rather than a working one beside it. Otherwise the order is the server's.
+ */
+export function byCheckAttention(
+  sources: readonly Source[],
+  checks: ReadonlyMap<string, SourceCheck>,
+): Source[] {
+  const rank = (source: Source): number => {
+    const kind = checks.get(sourceCheckKey(source))?.kind;
+    return kind === 'rejected' || kind === 'failed' || kind === 'changed' ? 0 : kind === 'checking' ? 1 : 2;
+  };
+  return [...sources].sort((left, right) => rank(left) - rank(right));
+}
+
+/**
  * Whether the line beside Continue has to say that nothing passed.
  *
  * Only once every check on the stage has answered, and only when none of the staged

@@ -1000,6 +1000,7 @@ scenarios:
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 asks before a check that would drop routed models, and passes nothing until then
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 does not check again once setup may no longer write to the Hub
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 settles the inventory when a check readback supersedes a read in flight
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 opens the key that failed when a provider holds two keys
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 removes a key from its card after a confirmation
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 asks once more before removing a key assistants still route to
     reason: >-
