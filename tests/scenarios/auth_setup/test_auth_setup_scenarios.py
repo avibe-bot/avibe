@@ -4922,7 +4922,7 @@ def test_hub_oauth_loopback_callback_signs_in_without_a_paste(monkeypatch, tmp_p
 
     client = Mock()
     client.management_request.side_effect = management_request
-    supervisor = Mock()
+    supervisor = Mock(lifecycle=None, _published_release=None)
     supervisor.client.return_value = client
     transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
     service, store, adapter = _service(tmp_path)
