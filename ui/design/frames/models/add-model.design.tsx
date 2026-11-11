@@ -99,6 +99,17 @@ const designFrames = frames([
     render: dialog('Fable 5.2'),
   },
   {
+    name: 'search-catalog-picked',
+    title: '添加模型 · 选中目录里的模型',
+    width: 1000,
+    height: 820,
+    status: 'shipped',
+    fixtures: { api },
+    wait: searched,
+    click: ['.model-hub-picker-row'],
+    render: dialog('Fable 5.2'),
+  },
+  {
     name: 'search-none',
     title: '添加模型 · 哪里都搜不到',
     width: 1000,
