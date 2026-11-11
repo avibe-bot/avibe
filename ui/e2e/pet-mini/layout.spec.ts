@@ -1195,10 +1195,10 @@ test('an old, finished exchange starts with the bubble hidden, and takes no spac
 // The reply lingers for 30s of on-screen time after the turn ends (spec §4.2).
 // It waits until the running turn and its conversation are on screen, so the
 // turn's end is one this page watched happen.
-const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。') => {
+const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。', options: string[] = []) => {
   await expect(page.locator('.pet-mini-reply-toggle')).toContainText('思考中');
-  await page.evaluate((text) =>
-    window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, read_at: null }), text);
+  await page.evaluate(({ text, options }) =>
+    window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, content: { quick_replies: options }, read_at: null }), { text, options });
 };
 // Owner decision 2026-11-06: read and unread replies share the same budget.
 for (const read of [false, true]) {
@@ -1274,10 +1274,10 @@ test('reply lifetime: a pending Vault keeps the existing needs-input entry, not 
   await expect(page.locator('.pet-avatar')).not.toHaveAttribute('data-pose', 'needs_input');
 });
 
-test('reply lifetime: history marks a reply seen but resumes its budget after typing closes', async ({ page }) => {
+test('reply lifetime: history marks a reply seen but resumes its budget after typing closes (quick suggestions)', async ({ page }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
-  await finishTurn(page);
+  await finishTurn(page, '做完了。', ['继续', '稍后']);
   await page.locator('.pet-mini-avatar-button').click();
   await expect(page.locator('.pet-mini-detail.is-open')).toBeVisible();
   await page.clock.runFor(60_000);
@@ -1293,10 +1293,10 @@ test('reply lifetime: history marks a reply seen but resumes its budget after ty
   await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(0);
 });
 
-test('reply lifetime: keyboard focus pauses the budget and leaves three seconds after focus moves', async ({ page, browserName }) => {
+test('reply lifetime: keyboard focus pauses the budget and leaves three seconds after focus moves (quick suggestions)', async ({ page, browserName }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
-  await finishTurn(page);
+  await finishTurn(page, '做完了。', ['继续', '稍后']);
   await page.clock.runFor(19_000);
   await tabToToggle(page, browserName);
   await page.clock.runFor(60_000);
@@ -1308,10 +1308,10 @@ test('reply lifetime: keyboard focus pauses the budget and leaves three seconds 
   await expect(bubbleShown(page)).toHaveCount(0);
 });
 
-test('reply lifetime: typing near expiry pauses and resumes with at least three seconds', async ({ page }) => {
+test('reply lifetime: typing near expiry pauses and resumes with at least three seconds (quick suggestions)', async ({ page }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
-  await finishTurn(page);
+  await finishTurn(page, '做完了。', ['继续', '稍后']);
   await page.clock.runFor(29_000);
   await expect(bubbleShown(page)).toBeVisible();
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } })));
@@ -1374,11 +1374,11 @@ test('a background completion arriving during the linger does not take over its 
   await expect(page.locator('.pet-mini-reply-toggle')).not.toContainText('后台任务');
 });
 
-test('the pointer over the lingering reply holds it, and leaving leaves at least 3s', async ({ page }) => {
+test('the pointer over the lingering reply holds it, and leaving leaves at least 3s (quick suggestions)', async ({ page }) => {
   await page.clock.install();
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
   await page.clock.runFor(500);
-  await finishTurn(page);
+  await finishTurn(page, '做完了。', ['继续', '稍后']);
   // Within the last second of the 30s linger.
   await page.clock.runFor(29_000);
   await page.locator('.pet-mini-reply-toggle').hover();
@@ -1443,14 +1443,21 @@ test('the lingering reply\'s toggle row opens its history; closing it hides the 
   await expect(page.getByRole('textbox')).toBeFocused();
 });
 
-for (const [name, query] of [['a running turn', 'running=1'], ['actionable quick replies', 'history=actions']] as const) {
-  test(`${name} keeps the bubble shown`, async ({ page }) => {
-    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&${query}`);
-    await expect(bubbleShown(page)).toBeVisible();
-    await page.waitForTimeout(500);
-    await expect(bubbleShown(page)).toBeVisible();
-  });
-}
+test('a running turn keeps the bubble shown beyond the reply budget', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(60_000);
+  await expect(bubbleShown(page)).toBeVisible();
+});
+
+test('quick suggestions in old history do not reopen the bubble on load', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&history=actions');
+  await expect(page.locator('.pet-mini-detail-result')).toContainText('Ready to help');
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.locator('.pet-mini-detail.is-open').getByRole('button', { name: '继续', exact: true })).toBeVisible();
+});
 
 for (const theme of ['light', 'dark']) {
   test(`a Vibey click opens the history from a hidden bubble, and a second hides it again (${theme})`, async ({ page }) => {
@@ -1870,10 +1877,10 @@ for (const reduced of [false, true]) {
     await settleMotion(page);
     const avatar = (await page.locator('.pet-mini-avatar-button').boundingBox())!;
     const centre = avatar.x + avatar.width / 2;
-    const full = await page.locator('.pet-mini-slot-body').evaluate((node) => node.clientWidth - 36);
+    const full = await page.locator('.pet-mini-slot-body').evaluate((node) => Math.min(280, node.clientWidth - 36));
     const narrow = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
     expect(narrow.width).toBeGreaterThanOrEqual(160 - 0.5);
-    expect(narrow.width).toBeLessThan(full / 2);
+    expect(narrow.width).toBeLessThan(full);
     expect(Math.abs(narrow.x + narrow.width / 2 - centre)).toBeLessThanOrEqual(1);
     const frames = await page.evaluate(async () => {
       const node = document.querySelector('.pet-mini-reply-bubble')!;
@@ -2128,3 +2135,129 @@ test('keyboard expansion releases focus when the collapsed trigger is replaced',
   await page.clock.runFor(1_500);
   await expect(replied).toHaveCount(0);
 });
+
+// Owner 2026-11-11: suggestions must not bypass expiry. Earlier lifetime
+// tests used plain replies, so they could not catch the independent held flag.
+for (const read of [false, true]) {
+  test(`quick suggestions: ${read ? 'read' : 'unread'} expiry preserves suggestions and authorization/activity entries`, async ({ page }) => {
+    await page.clock.install();
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=1&running=1&pendingVault');
+    await finishTurn(page, '做完了。', ['继续', '稍后']);
+    if (read) await page.evaluate(() => window.petFixtureRead('live_reply'));
+    await page.clock.runFor(29_000);
+    await expect(bubbleShown(page)).toBeVisible();
+    await page.clock.runFor(1_200);
+    await expect(bubbleShown(page)).toHaveCount(0);
+    expect(await page.evaluate(() => window.petFixtureMarkReads)).toEqual([]);
+    await expect(page.locator('.pet-mini-avatar-unread-dot')).toHaveCount(read ? 0 : 1);
+    await expect(page.locator('.pet-mini-card')).toBeVisible();
+    await expect(page.locator('.pet-avatar')).toHaveAttribute('data-pose', 'needs_input');
+    await page.locator('.pet-mini-avatar-button').click();
+    const history = page.locator('.pet-mini-detail.is-open');
+    await expect(history.getByRole('button', { name: '需要授权，在 Avibe 中打开', exact: true })).toBeVisible();
+    await history.getByRole('button', { name: '继续', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{
+      sessionId: 'ses_main', payload: { text: '继续', metadata: { quick_reply_for: 'live_reply' } },
+    }]);
+  });
+}
+
+test('quick suggestions: updating suggestions and reconnecting retain the same reply budget', async ({ page }) => {
+  await page.clock.install();
+  await page.goto('/e2e/pet-mini/fixture.html?lang=zh&activities=0&running=1');
+  await finishTurn(page, '做完了。', ['继续']);
+  await page.clock.runFor(20_000);
+  await page.evaluate(() => {
+    window.petFixtureUpdateMessage('live_reply', { content: { quick_replies: ['查看结果', '稍后'] } });
+    window.petFixtureConnection(false);
+    window.petFixtureConnection(true);
+    window.petFixtureRefreshActivity('ses_main');
+  });
+  await page.clock.runFor(9_000);
+  await expect(bubbleShown(page)).toBeVisible();
+  await page.clock.runFor(1_200);
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await page.evaluate(() => window.petFixtureUpdateMessage('live_reply', { content: { quick_replies: ['再次查看'] } }));
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await page.locator('.pet-mini-avatar-button').click();
+  await expect(page.locator('.pet-mini-detail.is-open').getByRole('button', { name: '再次查看', exact: true })).toBeVisible();
+});
+
+// Reply and activity borders align while input keeps the column width.
+// Long content and action labels must fit in both engines.
+for (const width of [460, 280]) {
+  for (const lang of ['en', 'zh']) {
+    test(`280px reply width keeps the column and scroll/actions usable (${width}, ${lang})`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 600 });
+      await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&activities=1&running=1&pendingVault&lang=${lang}`);
+      await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
+      await expect(page.locator('.pet-mini-reply-toggle')).toContainText(lang === 'zh' ? '思考中' : 'Thinking');
+      await settleMotion(page);
+      const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
+      const card = await page.locator('.pet-mini-card').boundingBox();
+      expect(card!.width).toBeCloseTo(Math.min(280, width * 0.94 - 36), 1);
+      const text = '很长的中文回复。'.repeat(20) + '\n\n' + 'LongUnbrokenWord'.repeat(30) + '\n\n```text\n' + 'long_code_path_'.repeat(30) + '\n```';
+      const action = lang === 'zh' ? '保留当前方案并在稍后继续查看完整结果' : 'Keep this approach and inspect the complete result later';
+      await page.evaluate(({ text, action }) => window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, content: { quick_replies: [action] } }), { text, action });
+      await expect(page.locator('.pet-mini-reply-toggle')).toContainText('很长');
+      await settleMotion(page);
+      const bubble = page.locator('.pet-mini-reply-bubble');
+      const collapsed = (await bubble.boundingBox())!;
+      expect(collapsed.width).toBeCloseTo(Math.min(280, width * 0.94 - 36), 1);
+      expect(collapsed.height).toBeLessThanOrEqual(101);
+      expect(collapsed.x).toBeCloseTo(card!.x, 1);
+      expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
+      expect((await page.locator('.pet-mini-card').boundingBox())!.width).toBe(card!.width);
+      await page.locator('.pet-mini-reply-toggle').click();
+      await expect(page.locator('.pet-mini-detail.is-open')).toBeVisible();
+      await settleMotion(page);
+      expect((await page.locator('.pet-mini-input').boundingBox())!.width).toBeCloseTo(width * 0.94 - 36, 1);
+      const history = page.locator('.pet-mini-bubble-history');
+      const metrics = await history.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight, fullHeight: node.scrollHeight }));
+      expect(metrics.scroll).toBe(metrics.client);
+      expect(metrics.height).toBeLessThanOrEqual(292);
+      expect(metrics.fullHeight).toBeGreaterThan(metrics.height);
+      const button = history.getByRole('button', { name: action, exact: true });
+      await expect(button).toBeVisible();
+      const bounds = (await button.boundingBox())!, outer = (await bubble.boundingBox())!;
+      expect(bounds.x).toBeGreaterThanOrEqual(outer.x);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(outer.x + outer.width);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
+      await button.click();
+      await expect.poll(() => page.evaluate(() => window.petFixtureSends.length)).toBe(1);
+    });
+  }
+}
+
+for (const lang of ['en', 'zh']) {
+  test(`280px activity stack aligns with reply and keeps controls (${lang})`, async ({ page }) => {
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&activities=3&queued=1&lang=${lang}`);
+    await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+    await settleMotion(page);
+    const bubble = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+    const front = (await page.locator('.pet-mini-card').boundingBox())!;
+    expect(front.width).toBeCloseTo(280, 1);
+    expect(front.x).toBeCloseTo(bubble.x, 1);
+    await page.locator('.pet-mini-collapsed').click();
+    await expect(page.locator('.pet-mini-card')).toHaveCount(3);
+    await settleMotion(page);
+    for (const card of await page.locator('.pet-mini-card').all()) {
+      const bounds = (await card.boundingBox())!;
+      expect(bounds.width).toBeCloseTo(280, 1);
+      expect(bounds.x).toBeCloseTo(bubble.x, 1);
+      const close = (await card.locator('.pet-mini-dismiss').boundingBox())!;
+      expect(close.x).toBeGreaterThanOrEqual(0);
+      expect(close.x + close.width).toBeLessThanOrEqual(460);
+      for (const control of await card.locator('button:not(.pet-mini-dismiss)').all()) {
+        const rect = (await control.boundingBox())!;
+        expect(rect.x).toBeGreaterThanOrEqual(bounds.x);
+        expect(rect.x + rect.width).toBeLessThanOrEqual(bounds.x + bounds.width);
+      }
+    }
+    await page.locator('.pet-mini-authorize').click();
+    await expect.poll(() => page.evaluate(() => window.petFixtureOpens.some((link) => link.includes('vr_fixture')))).toBe(true);
+    await page.locator('.pet-mini-card').last().hover();
+    await page.locator('.pet-mini-card').last().locator('.pet-mini-dismiss').click();
+    await expect(page.locator('.pet-mini-card')).toHaveCount(2);
+  });
+}
