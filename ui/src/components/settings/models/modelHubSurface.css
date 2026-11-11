@@ -353,6 +353,18 @@
 }
 
 .model-hub-tabs { scrollbar-width: thin; }
+/* A strip wider than its box fades at each edge that has more beyond it (the
+   mask reads only alpha, so any opaque token serves). */
+.model-hub-tabs[data-more-end] { mask-image: linear-gradient(to right, var(--foreground) calc(100% - 40px), transparent); }
+.model-hub-tabs[data-more-start] { mask-image: linear-gradient(to left, var(--foreground) calc(100% - 40px), transparent); }
+.model-hub-tabs[data-more-start][data-more-end] {
+  mask-image: linear-gradient(to right, transparent, var(--foreground) 40px, var(--foreground) calc(100% - 40px), transparent);
+}
+@media (max-width: 639px) {
+  /* Swiped, not scrolled with a bar: the fade is the affordance. */
+  .model-hub-tabs { scrollbar-width: none; }
+  .model-hub-tabs::-webkit-scrollbar { display: none; }
+}
 .model-hub-tabs svg { flex-shrink: 0; }
 
 @media (max-width: 639px) {

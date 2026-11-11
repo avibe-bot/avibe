@@ -154,7 +154,7 @@
       "avibe/localized-user-text": 1
     },
     "src/components/settings/models/SettingsModelsPage.tsx": {
-      "react-hooks/preserve-manual-memoization": 4,
+      "react-hooks/preserve-manual-memoization": 1,
       "react-hooks/refs": 9,
       "react-hooks/set-state-in-effect": 5
     },

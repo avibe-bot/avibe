@@ -782,6 +782,13 @@ describe('AgentRoutePicker compact presentation', () => {
     await user.click(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }));
     expect(onWrite).toHaveBeenLastCalledWith({ reasoning_effort: 'high' });
     expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('aria-checked')).toBe('true');
+    // No effort set is a state the menu marks too: the model's own default runs.
+    const byDefault = () => effortGroup().getByRole('radio', { name: 'chat.picker.effortDefault' });
+    expect(byDefault().getAttribute('aria-checked')).toBe('false');
+    await user.click(byDefault());
+    expect(onWrite).toHaveBeenLastCalledWith({ reasoning_effort: null });
+    expect(byDefault().getAttribute('aria-checked')).toBe('true');
+    expect(effortGroup().getAllByRole('radio').filter((radio) => radio.getAttribute('aria-checked') === 'true')).toHaveLength(1);
 
     await user.click(screen.getByRole('button', { name: /^opus/ }));
     expect(onWrite).toHaveBeenLastCalledWith({ model: 'opus' });
@@ -800,6 +807,27 @@ describe('AgentRoutePicker compact presentation', () => {
     });
     expect(screen.getByText('chat.picker.model')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
+  });
+
+  it("names the Agent's effort as the Default a route without one runs on", async () => {
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'Low' }, { value: 'high', label: 'High' }] };
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <AgentRoutePicker
+          presentation="compact"
+          value={{ ...CLAUDE_ROUTE, reasoning_effort: null }}
+          agents={[agent({ reasoning_effort: 'high' }), AGENTS[1]]}
+          onChange={onChange}
+        />
+      </MemoryRouter>,
+    );
+    await openMenu(user);
+    // Dispatch falls back to the Agent's effort, so that is what Default runs and says.
+    const byDefault = effortGroup().getByRole('radio', { name: 'chat.picker.effortDefaultNamed' });
+    expect(byDefault.getAttribute('aria-checked')).toBe('true');
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('aria-checked')).toBe('false');
   });
 
   // A Bot's conversation (docs/plans/bots.md D5): its Agent is internal to the Bot,

@@ -543,6 +543,39 @@ describe('SettingsModelsPage surface branches', () => {
     }
   });
 
+  it.each([
+    ['opens the Source a failed turn named', 'src_retained', true],
+    ['opens nothing for a Source that is gone', 'src_removed', false],
+  ])('%s, and drops the request from the address', async (_case, sourceId, opens) => {
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(takeoverAgent);
+    const LocationProbe = () => {
+      const location = useLocation();
+      return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
+    };
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={[`/settings/models?source=${sourceId}`]}>
+            <SettingsModelsRoute />
+            <LocationProbe />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/models'));
+    if (opens) {
+      expect(await screen.findByRole('dialog', { name: retainedSource.display_name })).toBeTruthy();
+    } else {
+      expect(screen.queryByRole('dialog')).toBeNull();
+    }
+  });
+
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
     const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
     const addedId = 'catalog-model-added';

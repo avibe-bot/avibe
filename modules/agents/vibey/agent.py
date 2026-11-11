@@ -208,8 +208,10 @@ class _Run:
     reason: Optional[str] = None
     # The error that decided ``reason`` (``RunEnded.cause``): the failure's kind, text, and Model Hub attribution.
     cause: Optional[AgentError] = None
-    # Model Hub's copy for a route it refused during the run (``_preflight``).
+    # Model Hub's copy for a route it refused during the run (``_preflight``), and the refusal itself:
+    # the failure notice reads its next step (and the Source it names) from the refusal, not the copy.
     refusal: Optional[str] = None
+    refusal_cause: Optional[BaseException] = None
     errors: list[AgentError] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
@@ -1010,6 +1012,7 @@ class VibeyAgent(BaseAgent):
                 )
             except Exception as error:
                 turn.refusal = launch_refusal_copy(self.controller, error)
+                turn.refusal_cause = error
                 raise
             bind_launch(context, launch)
             # Every resolved hop, the first and each retry's, carries the output the Agent asks for on it.
@@ -1457,7 +1460,10 @@ class VibeyAgent(BaseAgent):
             await emit_output(self.controller, context, TurnEnd(silent=True, output=terminal_output_for(request)))
             return
         self._log_failure(run, reason, kind, origin, diagnostic)
-        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
+        await self._fail(
+            request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source,
+            cause=run.refusal_cause if run.refusal else None,
+        )
 
     @staticmethod
     def _log_failure(
