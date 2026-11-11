@@ -8288,7 +8288,8 @@ class ModelHubService:
         """
 
         ranks: dict[str, int] = {}
-        for backend in ("claude", "codex"):
+        # Every native CLI's bundled menu; one without a menu (OpenCode) lists nothing.
+        for backend in sorted(NATIVE_CLI_BACKENDS):
             for index, item in enumerate(self._current_builtin_models(cast(BackendName, backend))):
                 model_id = item.get("id")
                 if isinstance(model_id, str):
