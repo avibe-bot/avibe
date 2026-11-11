@@ -10,6 +10,7 @@ import { ToastProvider } from '../../context/ToastProvider';
 import { DENIED_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import zh from '../../i18n/zh.json';
+import en from '../../i18n/en.json';
 import { ApiCallError, modelsApi } from '../settings/models/modelsApi';
 import type { TurnProvenance } from '../settings/models/types';
 import { FailureDetails } from './FailureDetails';
@@ -17,7 +18,7 @@ import { resetFailureDetailsCache } from './failureDetailsReads';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
-  lng: 'zh', resources: { zh: { translation: zh } }, interpolation: { escapeValue: false },
+  lng: 'zh', resources: { zh: { translation: zh }, en: { translation: en } }, interpolation: { escapeValue: false },
 });
 const notice = {
   id: 'notice', session_id: 'session', type: 'notify', author: 'agent', source: 'agent',
@@ -49,7 +50,8 @@ const record = {
   blockers: [{ source_id: 'src_c', model_id: 'grok-4.6', reason: 'source_missing' }],
 } as unknown as TurnProvenance;
 
-beforeEach(() => {
+beforeEach(async () => {
+  await i18n.changeLanguage('zh');
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue([{ id: 'src_a', display_name: 'xAI 官方' }] as never);
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); resetFailureDetailsCache(); });
@@ -70,6 +72,32 @@ function mount(message: WorkbenchMessage | WorkbenchMessage[] = notice, canManag
 }
 
 describe('failed-turn upstream details', () => {
+  it.each(['en', 'zh'])('keeps unlisted-model diagnostics behind the details toggle (%s)', async (language) => {
+    await i18n.changeLanguage(language);
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
+      ...record,
+      requested_model_id: 'claude-regression-unlisted',
+      outcome: 'exhausted',
+      failed_attempts: [{
+        source_id: 'src_a', configured_model_id: 'claude-regression-unlisted', channel: 'hub',
+        reason: 'server_error', http_status: 503, upstream_detail: 'No available accounts',
+      }],
+      terminal_error: null,
+      blockers: [{ source_id: 'src_b', model_id: 'claude-regression-unlisted', reason: 'cooldown' }],
+    } as TurnProvenance);
+    mount();
+    const toggle = await screen.findByRole('button', { name: language === 'zh' ? '查看详情' : 'Show details' });
+    expect(screen.queryByText('503')).toBeNull();
+    expect(screen.queryByText('No available accounts')).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByText('xAI 官方 · claude-regression-unlisted')).toBeTruthy();
+    expect(screen.getByText('503')).toBeTruthy();
+    expect(screen.getByText('No available accounts')).toBeTruthy();
+    expect(screen.getByText(/src_b · claude-regression-unlisted/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: language === 'zh' ? '收起详情' : 'Hide details' }));
+    expect(screen.queryByText('No available accounts')).toBeNull();
+  });
+
   it('stays hidden for a notice that is not a linked backend failure', () => {
     const read = vi.spyOn(modelsApi, 'getTurnProvenance');
     mount({ ...notice, metadata: { event: 'backend_failure' } } as WorkbenchMessage);

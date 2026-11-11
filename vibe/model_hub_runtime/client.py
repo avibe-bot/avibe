@@ -256,8 +256,10 @@ class EngineClientError(RuntimeError):
         error_code: str | None = None,
         error_candidates: tuple[str, ...] = (),
         os_errno: int | None = None,
+        upstream_detail: str | None = None,
     ) -> None:
         super().__init__(message)
+        self.upstream_detail = upstream_detail
         self.status_code = status_code
         self.error_type = error_type
         self.error_code = error_code
@@ -1158,6 +1160,29 @@ class EngineClient:
         return url
 
 
+async def _model_discovery_http_error(response: aiohttp.ClientResponse, secret: str | None) -> EngineClientError:
+    """Read bounded provider context without exposing a credential or replacing its status."""
+
+    detail = None
+    try:
+        # A rejected listing does not need the unbounded inventory reader. Ignore
+        # oversized/partial bodies, and preserve the known status on read failure.
+        limit = 64 * 1024
+        try:
+            payload = await response.content.readexactly(limit + 1)
+        except asyncio.IncompleteReadError as exc:
+            payload = exc.partial
+        if len(payload) <= limit:
+            detail = _upstream_error_detail(payload, (("error",), ()), secret=secret)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+        pass
+    return EngineClientError(
+        f"model discovery returned HTTP {response.status}",
+        status_code=response.status,
+        upstream_detail=detail,
+    )
+
+
 async def probe_models(
     *,
     vendor: str,
@@ -1204,10 +1229,7 @@ async def probe_models(
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.get(url, headers=headers, allow_redirects=False) as response:
                 if response.status >= 300:
-                    raise EngineClientError(
-                        f"model discovery returned HTTP {response.status}",
-                        status_code=response.status,
-                    )
+                    raise await _model_discovery_http_error(response, secret)
                 with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
                     while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
                         await run_owned_in_thread(payload.write, chunk)
@@ -1315,9 +1337,7 @@ async def _probe_google_models(
                     allow_redirects=False, timeout=aiohttp.ClientTimeout(total=remaining),
                 ) as response:
                     if response.status >= 300:
-                        raise EngineClientError(
-                            f"model discovery returned HTTP {response.status}", status_code=response.status,
-                        )
+                        raise await _model_discovery_http_error(response, secret)
                     with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as body:
                         while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
                             await run_owned_in_thread(body.write, chunk)
@@ -2315,8 +2335,15 @@ def _raw_error_fields(
 def _upstream_error_detail(
     payload: bytes,
     envelope_paths: tuple[ErrorEnvelopePath, ...],
+    *,
+    secret: str | None = None,
 ) -> str | None:
-    """Project the first envelope's ``message`` as bounded, redacted display text."""
+    """Project the first envelope's ``message`` as bounded, redacted display text.
+
+    Credentialed discovery bounds the body before calling this with its exact
+    secret. Decode those messages losslessly so JSON escaping or truncation
+    cannot hide the credential from redaction, then apply the display bound.
+    """
 
     message_paths = tuple((*path, "message") for path in envelope_paths)
     values: dict[JSONPath, str] = {}
@@ -2332,10 +2359,16 @@ def _upstream_error_detail(
         elif event == "scalar" and isinstance(value, str):
             values[path] = value
 
-    if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
+    if not payload or not project_json_reader(
+        io.BytesIO(payload), message_paths, visit,
+        lossless_string_paths=message_paths if secret else (),
+    ):
         return None
     for path in message_paths:
-        text = bounded_diagnostic_detail(values.get(path, ""))
+        message = values.get(path, "")
+        if secret:
+            message = message.replace(secret, "[redacted]")
+        text = bounded_diagnostic_detail(message)
         if text:
             return text
     return None

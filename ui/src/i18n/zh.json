@@ -2455,7 +2455,7 @@
           "needsAction": {
             "oauthExpired": "需要重新登录",
             "balanceExhausted": "余额用完",
-            "credentialRevoked": "凭据被吊销",
+            "credentialRevoked": "无效或无权限",
             "accountBanned": "账号被限制",
             "planExcludesProduct": "套餐不含 Codex",
             "spendLimitReached": "已达用量上限"
@@ -2515,7 +2515,9 @@
           "edit": "编辑 {{model}} 的推理强度"
         },
         "fail": {
-          "refetch": "拉取没有回来，下面是这一页最后一次真的读到的列表",
+          "refetch": "模型拉取失败，下面保留上次的模型列表。",
+          "upstreamStatus": "HTTP {{status}}",
+          "upstreamError": "HTTP {{status}} · {{detail}}",
           "tier": "档位没保存上",
           "tierManaged": "这个模型的档位是自动确定的，这次改动没有保存",
           "addModel": "这个模型没有添加",
@@ -3123,7 +3125,7 @@
       "needs_action": {
         "oauth_expired": "需要重新登录",
         "balance_exhausted": "余额不足，需要充值",
-        "credential_revoked": "凭据已失效，需要重新填写",
+        "credential_revoked": "凭据无效或无权限，请检查或更换",
         "account_banned": "账号被限制使用",
         "plan_excludes_product": "套餐不含 Codex，需要升级套餐或改用其他供应商",
         "spend_limit_reached": "已达用量上限，需要提高上限或改用其他供应商"
@@ -3298,7 +3300,7 @@
   },
   "modelHub": {
     "errors": {
-      "authentication_failed": "API Key 无效，请检查后重试。",
+      "authentication_failed": "API Key 无效或无权限，请检查或更换。",
       "credential_replacement_unverified": "暂时无法验证新密钥，原密钥未改动，请稍后重试",
       "source_model_tiers_managed": "这个模型的档位是自动确定的，这次改动没有保存"
     }
@@ -6051,7 +6053,7 @@
         "recovery": "恢复中",
         "manual": "手动切换",
         "credential_expired": "凭据已过期",
-        "credential_revoked": "凭据已吊销",
+        "credential_revoked": "凭据无效或无权限",
         "balance_exhausted": "余额不足",
         "account_banned": "账号被封禁",
         "plan_excludes_product": "套餐不含此产品",
@@ -6856,8 +6858,8 @@
       "editSubscriptionNote": "要换一个账号，请先移除这个，再重新登录",
       "editSave": "保存并检查",
       "editSaving": "正在检查新 Key…",
-      "editRejectedStatus": "Key 被拒绝（{{status}}），请检查后重试",
-      "editRejected": "Key 被拒绝，请检查后重试",
+      "editRejectedStatus": "API Key 无效或无权限（{{status}}），请检查或更换。",
+      "editRejected": "API Key 无效或无权限，请检查或更换。",
       "editSaveFailed": "无法保存这个 Key，请重试",
       "editReplaceImpact": "新 Key 提供的模型更少，部分助手将没有可用的模型。仍要保存？",
       "editRecheck": "重新检查",

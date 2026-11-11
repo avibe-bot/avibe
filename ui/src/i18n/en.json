@@ -2455,7 +2455,7 @@
           "needsAction": {
             "oauthExpired": "Sign in again",
             "balanceExhausted": "Out of balance",
-            "credentialRevoked": "Credential revoked",
+            "credentialRevoked": "Invalid or no access",
             "accountBanned": "Account restricted",
             "planExcludesProduct": "Plan doesn't include Codex",
             "spendLimitReached": "Usage limit reached"
@@ -2515,7 +2515,9 @@
           "edit": "Edit reasoning tiers for {{model}}"
         },
         "fail": {
-          "refetch": "The fetch did not come back. The list below is the last one this page actually read",
+          "refetch": "Could not fetch models. The last model list is shown below.",
+          "upstreamStatus": "HTTP {{status}}",
+          "upstreamError": "HTTP {{status}} · {{detail}}",
           "tier": "The tier was not saved",
           "tierManaged": "This model's tiers are set automatically, so the change was not saved",
           "addModel": "The model was not added",
@@ -3123,7 +3125,7 @@
       "needs_action": {
         "oauth_expired": "Needs a new sign-in",
         "balance_exhausted": "Out of balance — top it up",
-        "credential_revoked": "Credential revoked — enter a new one",
+        "credential_revoked": "Credential invalid or lacks permission — check or replace it",
         "account_banned": "Account is restricted",
         "plan_excludes_product": "Plan doesn't include Codex — upgrade it or use another Source",
         "spend_limit_reached": "Usage limit reached — raise it or use another Source"
@@ -3298,7 +3300,7 @@
   },
   "modelHub": {
     "errors": {
-      "authentication_failed": "The API key was rejected. Check it and try again.",
+      "authentication_failed": "API key invalid or lacks permission. Check or replace it.",
       "credential_replacement_unverified": "The new key could not be verified yet. Your old key is unchanged; please try again later.",
       "source_model_tiers_managed": "This model's tiers are set automatically, so the change was not saved"
     }
@@ -6051,7 +6053,7 @@
         "recovery": "Recovering",
         "manual": "Switched manually",
         "credential_expired": "Credential expired",
-        "credential_revoked": "Credential revoked",
+        "credential_revoked": "Credential invalid or lacks permission",
         "balance_exhausted": "Balance exhausted",
         "account_banned": "Account suspended",
         "plan_excludes_product": "Plan doesn't include this product",
@@ -6856,8 +6858,8 @@
       "editSubscriptionNote": "To use another account, remove this one and sign in again.",
       "editSave": "Save and check",
       "editSaving": "Checking the new key…",
-      "editRejectedStatus": "Key rejected ({{status}}). Check it and try again.",
-      "editRejected": "Key rejected. Check it and try again.",
+      "editRejectedStatus": "API key invalid or lacks permission ({{status}}). Check or replace it.",
+      "editRejected": "API key invalid or lacks permission. Check or replace it.",
       "editSaveFailed": "Could not save the key. Try again.",
       "editReplaceImpact": "The new key lists fewer models, so some assistants will have no model. Save anyway?",
       "editRecheck": "Check again",

@@ -54,6 +54,15 @@ describe('apiFailure — whether the route named the failure', () => {
     expect(failure).toMatchObject({ code: 'discovery_failed', serverNamed: true, responseStatus: 409 });
   });
 
+  it('preserves provider diagnostics separately from the API failure status', async () => {
+    const failure = await failureFor(() => Response.json({
+      error: 'discovery_failed', upstream_status: 403, upstream_detail: 'Model listing is forbidden.',
+    }, { status: 502 }));
+    expect(failure).toMatchObject({
+      responseStatus: 502, upstreamStatus: 403, upstreamDetail: 'Model listing is forbidden.',
+    });
+  });
+
   it('reads a body that would not parse as UNNAMED', async () => {
     // The server may well have written before this response was truncated.
     const failure = await failureFor(() => new Response('<html>502</html>', { status: 502 }));

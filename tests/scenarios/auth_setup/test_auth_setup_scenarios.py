@@ -4631,7 +4631,9 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
             presented.append(supplied)
             if supplied != right_key:
-                return web.json_response({"error": {"code": "invalid_api_key"}}, status=401)
+                return web.json_response({"error": {
+                    "code": "invalid_api_key", "message": "This key cannot list models.",
+                }}, status=401)
             return web.json_response({"data": [{"id": "relay-model-a"}, {"id": "relay-model-b"}]})
 
         upstream_app = web.Application()
@@ -4664,14 +4666,14 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
                 await service.refresh_source(h.source_id)
             assert refused.value.code == "discovery_failed"
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401}
+            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
             assert store.config.sources[0].state.status == "error"
 
         async def refused_replacement_keeps_the_key(h):
             with pytest.raises(ModelHubError) as refused:
                 await service.replace_credential(h.source_id, {"key": other_wrong_key})
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401}
+            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
             assert stored_key(h) == wrong_key
 
         async def right_replacement_lists_models(h):

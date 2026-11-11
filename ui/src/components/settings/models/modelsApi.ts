@@ -256,8 +256,10 @@ export class ApiCallError extends Error {
   responseStatus?: number;
   /** Safe, structured add-time observation returned with a rejected create. */
   observation?: SourceObservation;
-  /** The provider's 401/403 when a listing failed because it refused the key. */
+  /** The HTTP status returned by the provider, distinct from the API envelope's status. */
   upstreamStatus?: number;
+  /** Bounded and credential-redacted by the server. Render only as text. */
+  upstreamDetail?: string;
   constructor(
     code: string,
     detail?: string,
@@ -269,6 +271,7 @@ export class ApiCallError extends Error {
     observation?: SourceObservation,
     changed: Record<string, RouteHop[]> = {},
     upstreamStatus?: number,
+    upstreamDetail?: string,
   ) {
     super(detail || code);
     this.name = 'ApiCallError';
@@ -282,6 +285,7 @@ export class ApiCallError extends Error {
     this.responseStatus = responseStatus;
     this.observation = observation;
     this.upstreamStatus = upstreamStatus;
+    this.upstreamDetail = upstreamDetail;
   }
 }
 
@@ -445,6 +449,7 @@ export const apiFailure = (
   responseStatus?: number;
   observation?: SourceObservation;
   upstreamStatus?: number;
+  upstreamDetail?: string;
 } | null =>
   err instanceof ApiCallError
     ? {
@@ -458,6 +463,7 @@ export const apiFailure = (
         responseStatus: err.responseStatus,
         observation: err.observation,
         upstreamStatus: err.upstreamStatus,
+        upstreamDetail: err.upstreamDetail,
       }
     : null;
 
@@ -508,6 +514,7 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
               : undefined,
             changedSuppliers(envelope.changed),
             typeof envelope.upstream_status === 'number' ? envelope.upstream_status : undefined,
+            typeof envelope.upstream_detail === 'string' ? envelope.upstream_detail : undefined,
           );
         }
         return payload as T;

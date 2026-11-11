@@ -1006,7 +1006,8 @@ scenarios:
     reason: >-
       The closed loop carries one saved key through real credential custody and
       real model listing against a local upstream: saved unverified, checked and
-      refused with its 401, a refused replacement that keeps the stored key, the
+      refused with its 401 and bounded provider message (invalid or insufficient
+      permission, not proof of revocation), a refused replacement that keeps the stored key, the
       right key, a passing check and removal. The provider screen cases pin what
       the wizard shows for each answer against a controlled source API. Engine
       lifecycle stays simulated; the live journey was also run once in a
