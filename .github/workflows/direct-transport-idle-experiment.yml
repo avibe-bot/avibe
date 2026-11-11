@@ -1,0 +1,57 @@
+name: direct-transport-idle-experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiment/direct-transport-idle]
+    paths:
+      - direct-transport/**
+      - .github/workflows/direct-transport-idle-experiment.yml
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: 1.91.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  measure:
+    name: ${{ matrix.variant }} idle-${{ matrix.timing.idle }} keepalive-${{ matrix.timing.keepalive }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [stock, nat0]
+        timing:
+          - idle: 8000
+            keepalive: 2500
+          - idle: 4000
+            keepalive: 1250
+    env:
+      VARIANT: ${{ matrix.variant }}
+      IDLE_MS: ${{ matrix.timing.idle }}
+      KEEP_ALIVE_MS: ${{ matrix.timing.keepalive }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned compiler and isolated fault tools
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+          sudo apt-get update
+          sudo apt-get install --yes iproute2 iptables
+      - name: Check source formatting
+        working-directory: direct-transport
+        run: cargo fmt --check
+      - name: Measure immutable stock client against candidate sidecar
+        working-directory: direct-transport
+        run: bash scripts/idle-qualification/experiment.sh
+      - name: Keep evidence only, never binaries
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: idle-${{ matrix.variant }}-${{ matrix.timing.idle }}-${{ matrix.timing.keepalive }}-${{ github.sha }}
+          path: ${{ runner.temp }}/idle-experiment/evidence/
+          if-no-files-found: warn
+          retention-days: 30
