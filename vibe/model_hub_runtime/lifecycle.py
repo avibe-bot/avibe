@@ -556,7 +556,15 @@ class EngineLifecycle:
     def disable(self) -> None:
         """Stop without racing an owner transaction that captured run intent."""
         with self._owner_lock:
-            self.supervisor.disable()
+            with self.mutation():
+                value = self._load()
+                if value is not None and value["pending"] is not None:
+                    # An explicit stop is a fresh user decision. Do not let a
+                    # previously captured withdrawal intent restart a fallback
+                    # after this transaction has completed.
+                    value["pending"]["run_intent"] = False
+                    self._save(value)
+                self.supervisor.disable()
 
     def _recover_preflight(self, value: dict[str, Any]) -> None:
         from types import SimpleNamespace

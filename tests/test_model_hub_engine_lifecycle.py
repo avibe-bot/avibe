@@ -238,6 +238,10 @@ class RecordingSupervisor:
         self.running = None
         self.lifecycle.running_release = None
 
+    def disable(self):
+        self.events.append(("disable", self.running))
+
+
     def ensure_running(self):
         if not self.lifecycle.starting:
             return self.lifecycle.ensure_running()
@@ -422,6 +426,18 @@ def test_failed_real_config_candidate_is_quarantined_before_healthy_rollback(tmp
     assert owner.running_release == baseline["generation"]["asset_release_tag"]
     assert owner.status()["state"] == "rolled_back"
     assert owner.check(refresh=False).target is None
+
+
+def test_explicit_disable_clears_pending_withdrawal_run_intent(tmp_path, monkeypatch):
+    owner, supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
+    owner.ensure_running()
+    owner.pause_withdrawn()
+    assert owner.journal.load()["pending"]["run_intent"] is True
+
+    owner.disable()
+
+    assert owner.journal.load()["pending"]["run_intent"] is False
+    assert supervisor.running is None
 
 
 def test_lifecycle_provenance_does_not_reconstruct_lost_withdrawals_or_floor(tmp_path, monkeypatch):
