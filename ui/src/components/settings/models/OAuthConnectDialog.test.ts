@@ -12,7 +12,6 @@ import { ApiCallError, modelsApi, type OAuthResult } from './modelsApi';
 import {
   initialSubscriptionChannel,
   nativeSubscriptionSlotTaken,
-  recommendedSubscriptionChannel,
   subscriptionOptionOrder,
 } from './subscriptionOptions';
 import type { Source } from './types';
@@ -69,29 +68,24 @@ const deferred = <T,>() => {
 };
 
 describe('add-subscription channel choice', () => {
-  it.each(['anthropic', 'openai'])('AUTH-SETUP-126: setup starts %s only with Hub custody after explicit sign-in', async (vendor) => {
+  it.each(['anthropic', 'openai'])('AUTH-SETUP-126: setup starts %s with Hub custody straight from its sign-in button', async (vendor) => {
+    // The wizard's 「Sign in with …」 is the explicit choice; a one-option chooser in
+    // front of it asked the person to confirm the only thing there was.
     const start = vi.spyOn(modelsApi, 'startOAuth').mockImplementation(() => new Promise(() => {}));
     renderDialog({ vendor, hubOnly: true });
-    const options = screen.getAllByRole('radio');
-    expect(options).toHaveLength(1);
-    expect(options[0].getAttribute('aria-checked')).toBe('true');
-    expect(options[0].textContent).toContain(i18n.t('settings.models.addSub.opt.hub.label'));
-    expect(screen.queryByText(i18n.t('settings.models.addSub.hint.claude'))).toBeNull();
-    expect(start).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.models.addSub.signIn') }));
+    expect(screen.queryAllByRole('radio')).toHaveLength(0);
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(start.mock.calls[0].slice(0, 2)).toEqual([vendor, 'hub']);
   });
 
-  it('flips the recommendation and visible order by vendor', () => {
-    expect(recommendedSubscriptionChannel('anthropic')).toBe('native_cli');
-    expect(subscriptionOptionOrder('anthropic')).toEqual(['native_cli', 'hub']);
-    expect(recommendedSubscriptionChannel('openai')).toBe('hub');
+  it('offers Model Hub first for every vendor, and own login second only where a CLI can hold it', () => {
+    expect(subscriptionOptionOrder('anthropic')).toEqual(['hub', 'native_cli']);
     expect(subscriptionOptionOrder('openai')).toEqual(['hub']);
+    expect(subscriptionOptionOrder('gemini')).toEqual(['hub']);
   });
 
-  it('uses the recommended option while the native slot is free', () => {
-    expect(initialSubscriptionChannel('anthropic', [])).toBe('native_cli');
+  it('starts on Model Hub custody, the default for a Claude subscription too', () => {
+    expect(initialSubscriptionChannel('anthropic', [])).toBe('hub');
     expect(initialSubscriptionChannel('openai', [])).toBe('hub');
   });
 
@@ -131,7 +125,7 @@ describe('add-subscription start recovery', () => {
     await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
 
     await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
-    expect(start.mock.calls[0].slice(0, 2)).toEqual(['anthropic', 'native_cli']);
+    expect(start.mock.calls[0].slice(0, 2)).toEqual(['anthropic', 'hub']);
     expect(start.mock.calls[1]).toEqual(start.mock.calls[0]);
     expect(start.mock.calls[0][2]).toMatch(/^ofn_[a-z0-9]{16,64}$/);
   });

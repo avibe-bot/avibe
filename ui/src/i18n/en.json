@@ -1541,10 +1541,6 @@
           "gemini": "Gemini",
           "kimi": "Kimi",
           "xai": "xAI"
-        },
-        "recommendation": {
-          "native": "Own login recommended",
-          "gateway": "Managed recommended"
         }
       },
       "sources": {
@@ -2260,17 +2256,14 @@
           "hub": {
             "label": "Add as a Model Hub provider",
             "desc": {
-              "claude": "Hand this subscription to Model Hub so it can supply Codex, OpenCode and other Agents.",
+              "claude": "Model Hub manages this subscription, so Vibey, Codex, OpenCode and others can use it.",
               "chatgpt": "Model Hub supplies it to Codex and other Agents, with usage, quota and takeover all visible."
             }
           }
         },
-        "badge": {
-          "recommended": "Recommended",
-          "secondary": "Second choice"
-        },
         "tos": {
-          "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
+          "claude": "Anthropic's subscription terms cover only its own apps.",
+          "learnMore": "Learn more"
         },
         "hint": {
           "claude": "You can have both — add them one at a time."

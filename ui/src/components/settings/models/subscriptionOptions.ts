@@ -67,41 +67,25 @@ export const nativeSubscriptionSlotTaken = (vendor: string, sources: Source[]): 
       && source.vendor === vendor,
   );
 
-/** For a hub-held vendor the hub is not a fallback, it is the only custody there
- *  is — which is also what its start is posted with. */
-export const recommendedSubscriptionChannel = (vendor: string): SupplyChannel => {
-  if (!hasNativeSubscriptionCustody(vendor)) return 'hub';
-  return vendor === 'openai' ? 'hub' : 'native_cli';
-};
+/** Model Hub holds every subscription by default (owner decision, 2026-11-11, item 2:
+ *  Vibey is what Avibe offers, and only a Hub-held subscription can supply it). A
+ *  vendor with a sanctioned CLI still offers that CLI's own login, as the second
+ *  option rather than the first. For a hub-held vendor the hub is the only custody. */
+export const defaultSubscriptionChannel = (): SupplyChannel => 'hub';
 
 export const initialSubscriptionChannel = (vendor: string, sources: Source[]): SupplyChannel =>
-  nativeSubscriptionSlotTaken(vendor, sources) ? 'hub' : recommendedSubscriptionChannel(vendor);
+  nativeSubscriptionSlotTaken(vendor, sources) || !hasNativeSubscriptionCustody(vendor)
+    ? 'hub'
+    : defaultSubscriptionChannel();
 
-/** The channels the chooser offers, recommended first. A ChatGPT subscription is
- *  offered to the gateway only: Codex signing in natively is still honoured when it
- *  is already there (detection, reauth), it is just no longer a choice to make. */
+/** The channels the chooser offers, the default first. A ChatGPT subscription is
+ *  offered to Model Hub only: Codex signing in natively is still honoured when it is
+ *  already there (detection, reauth), it is just no longer a choice to make. */
 export const subscriptionOptionOrder = (vendor: string): SupplyChannel[] =>
-  vendor === 'openai'
-    ? ['hub']
-    : recommendedSubscriptionChannel(vendor) === 'hub'
-      ? ['hub', 'native_cli']
-      : ['native_cli', 'hub'];
+  vendor === 'openai' || !hasNativeSubscriptionCustody(vendor) ? ['hub'] : ['hub', 'native_cli'];
 
-/** Which channel the menu recommends, or `null` when the vendor has no native
- *  channel to recommend against. A hub-held row carries no badge: 网关推荐 over the
- *  only custody there is recommends nothing, and the menu draws a badge only where
- *  a row has a choice to rank. */
-export const subscriptionMenuRecommendation = (
-  vendor: SubscriptionVendor,
-): 'native' | 'gateway' | null => {
-  if (!hasNativeSubscriptionCustody(vendor)) return null;
-  return recommendedSubscriptionChannel(vendor) === 'hub' ? 'gateway' : 'native';
-};
-
-/** The menu's rows: every offered vendor with the badge it earns. Derived from the
- *  vocabulary above so a vendor added there appears here with its custody already
- *  decided, rather than needing a second list kept in the same order. */
-export const SUBSCRIPTION_MENU_ROWS = SUBSCRIPTION_VENDORS.map((vendor) => ({
-  vendor,
-  recommendation: subscriptionMenuRecommendation(vendor),
-})) as ReadonlyArray<{ vendor: SubscriptionVendor; recommendation: 'native' | 'gateway' | null }>;
+/** The menu's rows, in the menu's order. Derived from the vocabulary above so a
+ *  vendor added there appears here, rather than needing a second list kept in the
+ *  same order. No row carries a badge: with Model Hub the default everywhere there
+ *  is no choice for a badge to rank. */
+export const SUBSCRIPTION_MENU_ROWS = SUBSCRIPTION_VENDORS.map((vendor) => ({ vendor }));
