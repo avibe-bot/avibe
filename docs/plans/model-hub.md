@@ -1362,6 +1362,19 @@ checked mechanically against both `vibe/i18n` locale files. A new outcome, discr
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
 
+**Unlisted-model summary (owner product review, 2026-11-12).** The
+`turn.exhausted`, `turn.request_nonfallback`, `turn.streamed_fallback`, and
+`turn.no_candidate.blocked` rows also accept display-only `passthrough_model`:
+exact route inspection says the model was not listed by the providers, and the
+request received an upstream HTTP refusal (not merely a connection failure).
+Their registered `passthrough_model_key` selects
+`modelHub.launch.passthrough_model_unlisted` instead of the ordinary summary and
+upstream suffix: “The provider doesn't list {model}; try another model.” Source
+names, each attempted status, and safe upstream text remain in the existing
+collapsed failure details. This is inventory context, not proof of why the
+provider rejected the request. It changes no outcome, wire marker, retry,
+recovery window, Source state, or input holding.
+
 `upstream_detail` is display-only text. It is never read by classification and
 never written to resolution events or probes. Owner decision (2026-10-07): an upstream
 refusal that only says "server error" cannot be diagnosed, so persisted provenance keeps

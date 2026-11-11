@@ -241,7 +241,7 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
 async def test_upstream_refusal_text_reaches_reply_record_and_log(
     tmp_path, caplog, backend, endpoint, status, language, last_said, unlisted,
 ):
-    """Upstream facts survive short unlisted-model copy in the record and log."""
+    """MH-UPSTREAM-DETAIL-001: upstream facts survive short copy in the record and log."""
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
     if last_said == "connection":
         # The engine's own transport envelope: no upstream answered at all.

@@ -224,6 +224,9 @@ class TurnOutcomeRenderingRule:
     upstream_failure_key: str | None = None
     upstream_failure_without_status_key: str | None = None
     connection_failure_key: str | None = None
+    # Replaces the summary for an unlisted model's HTTP refusal; diagnostics
+    # remain in the existing provenance details rather than becoming a suffix.
+    passthrough_model_key: str | None = None
     # Only a Models change clears this refusal: the same input fails the same way until
     # then, so it waits for an explicit retry instead of the automatic startup retries.
     holds_input: bool = False
@@ -247,6 +250,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         upstream_failure_key="modelHub.launch.last_upstream_failure",
         upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
         connection_failure_key="modelHub.launch.last_connection_failure",
+        passthrough_model_key="modelHub.launch.passthrough_model_unlisted",
     ),
     "turn.request_nonfallback": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
@@ -255,6 +259,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("default", "modelHub.launch.request_incompatible"),
             ("upstream_detail", "modelHub.launch.request_incompatible_detail"),
         ),
+        passthrough_model_key="modelHub.launch.passthrough_model_unlisted",
     ),
     "turn.engine_down": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
@@ -276,6 +281,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         upstream_failure_key="modelHub.launch.last_upstream_failure",
         upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
         connection_failure_key="modelHub.launch.last_connection_failure",
+        passthrough_model_key="modelHub.launch.passthrough_model_unlisted",
     ),
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
         outcome="no_candidate",
@@ -300,6 +306,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         upstream_failure_key="modelHub.launch.last_upstream_failure",
         upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
         connection_failure_key="modelHub.launch.last_connection_failure",
+        passthrough_model_key="modelHub.launch.passthrough_model_unlisted",
     ),
     "turn.canceled": TurnOutcomeRenderingRule(
         outcome="canceled",
@@ -464,7 +471,8 @@ def produce_turn_outcome(
         ),
         passthrough_model=(
             resolution.requested_model
-            if resolution is not None and resolution.route_origin == "passthrough"
+            if rule.passthrough_model_key is not None
+            and resolution is not None and resolution.route_origin == "passthrough"
             and (
                 (last_upstream_failure is not None and not last_upstream_failure.connection_error)
                 or decision == "turn.request_nonfallback"
@@ -664,12 +672,11 @@ def render_turn_outcome_copy(
     copy = project_turn_outcome_copy(projection)
     if copy is None:
         return None
-    if projection.passthrough_model:
+    rule = _turn_outcome_rule(projection)
+    if projection.passthrough_model and rule.passthrough_model_key is not None:
         # The actionable summary stays short. Attempt statuses, source names and
         # safe upstream text remain in provenance for the existing failure details.
-        return i18n_t(
-            "modelHub.launch.passthrough_model_unlisted", language, model=projection.passthrough_model,
-        )
+        return i18n_t(rule.passthrough_model_key, language, model=projection.passthrough_model)
     params = dict(copy.params)
     blockers = params.get("blockers", ())
     if isinstance(blockers, tuple):
@@ -686,7 +693,6 @@ def render_turn_outcome_copy(
         params["backend"] = display_name_for_backend(params["backend"])
     text = i18n_t(copy.key, language, **params)
     failure = projection.last_upstream_failure
-    rule = _turn_outcome_rule(projection)
     suffix_key = (
         rule.connection_failure_key
         if failure is not None and failure.connection_error
