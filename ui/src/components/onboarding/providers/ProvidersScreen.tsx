@@ -28,6 +28,8 @@ import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
 import { requiredBackends } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
+import type { GuardPlan } from '@/components/settings/models/GuardImpact';
+import { confirmGuardPlan, sendAgreed, unansweredRefusal } from '@/components/settings/models/guardedWrite';
 import { apiFailure, modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { foldRegionRead } from '@/components/settings/models/regionRead';
 import {
@@ -590,30 +592,49 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
 
     // ── Key checks ──────────────────────────────────────────────────────────
 
+    // Read the inventory back after this screen changed it, and settle what the
+    // screen knows from that read. A readback can supersede a read the supply effect
+    // still has out, whose answer is then dropped as stale — so it has to settle the
+    // readiness that read would have, or the action waits on an answer never coming.
+    const readBack = React.useCallback(async () => {
+      try {
+        const read = await sourceReads.refresh();
+        if (read.kind === 'current') {
+          setSources(read.value);
+          setSourceRead('read');
+        }
+      } catch {
+        // A write may well have landed; what failed is the read that would show it.
+        // Keeping the old list silently would report a provider that exists as one
+        // that does not, so the screen says it could not read instead.
+        setSourceRead('unreadable');
+      }
+    }, [sourceReads]);
+
     // Saving a key does not ask the provider about it, so a refused key would look
     // exactly like a working one until the next screen came up empty. Listing its
     // models is free and answers that, so every staged key nothing has answered for
     // yet is listed once, as soon as the inventory says it is there.
-    const runCheck = React.useCallback(async (source: Source) => {
+    //
+    // `agreed` is a list change the person confirmed from the card: the listing is
+    // sent again with that plan, and a refusal the plan does not cover is asked again.
+    const runCheck = React.useCallback(async (source: Source, agreed: GuardPlan | null = null) => {
       const key = sourceCheckKey(source);
       checkedRef.current.add(key);
       setChecks((previous) => new Map(previous).set(key, { kind: 'checking' }));
       let result: SourceCheck;
       try {
-        const refreshed = await modelsApi.refreshSource(source.id);
+        const refreshed = await sendAgreed(agreed !== null, agreed, (plan) =>
+          modelsApi.refreshSource(source.id, plan ? confirmGuardPlan(plan) : undefined));
         result = { kind: 'connected', models: suppliedModelCount(refreshed.source) };
       } catch (error) {
-        result = sourceCheckFailure(apiFailure(error), source);
+        const plan = unansweredRefusal(error, agreed !== null, agreed);
+        result = plan ? { kind: 'changed', plan } : sourceCheckFailure(apiFailure(error));
       }
       setChecks((previous) => new Map(previous).set(key, result));
       // The listing rewrote the source's state either way; the stage reads it back.
-      try {
-        const read = await sourceReads.refresh();
-        if (read.kind === 'current') setSources(read.value);
-      } catch {
-        // The card already carries the answer; a failed re-read changes nothing it says.
-      }
-    }, [sourceReads]);
+      await readBack();
+    }, [readBack]);
 
     const checkable = active && hubAdmitted && sourceRead === 'read' && !verifying;
     React.useEffect(() => {
@@ -707,19 +728,9 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     const landSource = React.useCallback(async (created: SourceCreated | null, viaMore: boolean) => {
       setVerifying(true);
       try {
-        try {
-          const read = await sourceReads.refresh();
-          if (read.kind === 'current') {
-            setSources(read.value);
-            setSourceRead('read');
-          }
-        } catch {
-          // The write may well have landed; what failed is the read that would show
-          // it. The dialog swallows a rejection here to stay closable, so saying so
-          // is this screen's job — keeping the old list silently would report a
-          // provider that exists as one that does not.
-          setSourceRead('unreadable');
-        }
+        // The dialog swallows a rejection here to stay closable, so reporting a
+        // failed readback is this screen's job, and `readBack` does it.
+        await readBack();
         const id = created?.source.id;
         if (!viaMore || !id) return;
         setFlowState((previous) => (previous.addedThroughMore.includes(id)
@@ -728,7 +739,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
       } finally {
         setVerifying(false);
       }
-    }, [setFlowState, sourceReads]);
+    }, [setFlowState, readBack]);
 
     const changeSelection = React.useCallback((selectedBackends: AgentBackend[]) => {
       const newlySelected = selectedBackends.filter((backend) => !selection.selectedBackends.includes(backend));
@@ -896,9 +907,11 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
               await landSource(null, false);
             }}
             onChanged={() => landSource(null, false)}
-            onRecheck={() => {
+            onRecheck={(agreed) => {
+              // A check is a write: it rewrites the source's state.
+              if (!writeAdmitted) return;
               checkedRef.current.delete(sourceCheckKey(editingSource));
-              void runCheck(editingSource);
+              void runCheck(editingSource, agreed);
             }}
             onClose={() => setEditing(null)}
           />

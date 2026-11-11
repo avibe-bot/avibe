@@ -50,8 +50,9 @@ export const SourceKeyDialog: React.FC<{
   onReplaced: (source: Source, check: SourceCheck) => Promise<void>;
   /** The source is gone, or a write's outcome is unknown: re-read the inventory. */
   onChanged: () => Promise<void>;
-  /** Ask the provider about the current key again. */
-  onRecheck: () => void;
+  /** Ask the provider about the current key again, agreeing to `agreed` — the list
+   *  change the card asked about — when there is one. */
+  onRecheck: (agreed: GuardPlan | null) => void;
   onClose: () => void;
 }> = ({ source, label, check, writable, onReplaced, onChanged, onRecheck, onClose }) => {
   const { t } = useTranslation();
@@ -88,7 +89,7 @@ export const SourceKeyDialog: React.FC<{
         return;
       }
       const failure = apiFailure(error);
-      const verdict = sourceCheckFailure(failure, source);
+      const verdict = sourceCheckFailure(failure);
       setPhase({
         kind: 'failed',
         message: verdict.kind !== 'rejected'
@@ -173,16 +174,23 @@ export const SourceKeyDialog: React.FC<{
             >
               {status}
             </DialogPrimitive.Description>
-            {check?.kind === 'failed' && (
+            {check?.kind === 'changed' && (
+              <p className="setup-add-note">{t('onboarding.providers.editListChanged')}</p>
+            )}
+            {(check?.kind === 'failed' || check?.kind === 'changed') && (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="self-start"
-                disabled={busy}
-                onClick={() => { onRecheck(); onClose(); }}
+                // A check rewrites the source's state, so it is admitted like any write.
+                disabled={busy || !writable}
+                onClick={() => {
+                  onRecheck(check.kind === 'changed' ? check.plan : null);
+                  onClose();
+                }}
               >
-                {t('onboarding.providers.editRecheck')}
+                {t(check.kind === 'changed' ? 'onboarding.providers.editUpdateList' : 'onboarding.providers.editRecheck')}
               </Button>
             )}
           </header>

@@ -484,7 +484,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(cardFor('anthropic').querySelector('.lucide-check')).toBeNull();
     // Continuing now would leave the answer to the next screen.
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionChecking', busy: true });
-    expect(modelsApi.refreshSource).toHaveBeenCalledWith('src_good');
+    expect(modelsApi.refreshSource).toHaveBeenCalledWith('src_good', undefined);
 
     server.listing.src_good = Array.from({ length: 12 }, (_, index) => `claude-${index}`);
     await act(async () => { listing.resolve(await answered('src_good') as never); });
@@ -617,6 +617,78 @@ describe('ProvidersScreen — the stage', () => {
       key: 'narrow-key', force: true, would_remove_hops: [hop], would_interrupt: [gap],
     });
     await waitFor(() => expect(within(cardFor('anthropic')).getByText('Connected · 1 model')).toBeTruthy());
+  });
+
+  it('AUTH-SETUP-139 asks before a check that would drop routed models, and passes nothing until then', async () => {
+    serve({
+      sources: [savedKey('src_narrow', 'anthropic', { state: { status: 'error', detail_key: 'models.source.error.unclassified' }, models: [modelOf('claude-opus'), modelOf('claude-sonnet')] })],
+    });
+    const hop = { backend: 'vibey', menu_model: 'claude-opus', source_id: 'src_narrow', model_id: 'claude-opus', position: 1 };
+    const gap = { backend: 'vibey', model_id: 'claude-opus', agents: ['main'] };
+    const listing = vi.mocked(modelsApi.refreshSource);
+    listing.mockImplementation(async (id, confirmation) => {
+      const row = server.sources.find((item) => item.id === id)!;
+      if (!confirmation) {
+        throw new ApiCallError('source_in_route_chain', undefined, true, [gap] as never, [], [hop] as never, 409);
+      }
+      Object.assign(row, { state: { status: 'standby' }, models: [modelOf('claude-sonnet')] });
+      return { source: { ...row }, removed_hops: [hop] as never, interrupted: [gap] as never };
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    // The key works, but the cached two models are not what it supplies now.
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('changed'));
+    expect(within(cardFor('anthropic')).getByText('Model list changed · review')).toBeTruthy();
+    expect(summary()?.textContent).toBe('No provider passed the check, so assistants have no model yet.');
+
+    await user.click(cardFor('anthropic'));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/no longer lists some models your assistants use/)).toBeTruthy();
+    await user.click(within(dialog).getByRole('button', { name: 'Update list' }));
+
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('connected'));
+    expect(listing).toHaveBeenLastCalledWith('src_narrow', { force: true, would_remove_hops: [hop], would_interrupt: [gap] });
+    expect(within(cardFor('anthropic')).getByText('Connected · 1 model')).toBeTruthy();
+  });
+
+  it('AUTH-SETUP-139 does not check again once setup may no longer write to the Hub', async () => {
+    serve({ sources: [savedKey('src_flaky', 'anthropic')], listing: { src_flaky: new ApiCallError('engine_down', undefined, true, [], [], [], 503) } });
+    const { show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('failed'));
+
+    await user.click(cardFor('anthropic'));
+    const dialog = await screen.findByRole('dialog');
+    expect((within(dialog).getByRole('button', { name: 'Check again' }) as HTMLButtonElement).disabled).toBe(false);
+    await show({ gatewayEnabled: false });
+    expect((within(dialog).getByRole('button', { name: 'Check again' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(modelsApi.refreshSource).toHaveBeenCalledTimes(1);
+  });
+
+  it('AUTH-SETUP-139 settles the inventory when a check readback supersedes a read in flight', async () => {
+    const listing = deferred<{ source: Source; removed_hops: []; interrupted: [] }>();
+    serve({ sources: [savedKey('src_good', 'anthropic')] });
+    const answered = vi.mocked(modelsApi.refreshSource).getMockImplementation()!;
+    vi.mocked(modelsApi.refreshSource).mockImplementationOnce(() => listing.promise);
+    const { show } = renderScreen();
+    await settled();
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('checking'));
+
+    // Leave and come back while the check is out: the screen re-reads its inventory,
+    // and that read is still out when the check's own readback replaces it.
+    await show({ active: false });
+    const reentry = deferred<Source[]>();
+    vi.mocked(modelsApi.listSources).mockImplementationOnce(() => reentry.promise);
+    await show({ active: true });
+    server.listing.src_good = ['claude-opus'];
+    await act(async () => { listing.resolve(await answered('src_good') as never); });
+    await act(async () => { reentry.resolve(server.sources.map((row) => ({ ...row }))); });
+
+    await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('connected'));
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: false }));
   });
 
   it('AUTH-SETUP-139 removes a key from its card after a confirmation', async () => {

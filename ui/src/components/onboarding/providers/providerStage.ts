@@ -41,6 +41,7 @@ import {
 } from '@/components/settings/providers/providerIdentity';
 import type { TFunction } from 'i18next';
 
+import type { GuardPlan } from '@/components/settings/models/GuardImpact';
 import type { TranslationKey } from '@/i18n/types';
 import {
   setupCanAttemptInstall,
@@ -102,7 +103,13 @@ export type SourceCheck =
   /** The provider refused the key itself. `status` is its 401/403 when it said one. */
   | { kind: 'rejected'; status: number | null }
   /** The check could not reach an answer: network, engine, or an unnamed failure. */
-  | { kind: 'failed' };
+  | { kind: 'failed' }
+  /**
+   * The key works, but the provider no longer lists models a route uses, so the
+   * server held the new list back. `plan` is what updating it would remove; it is
+   * asked about, never applied on the person's behalf, and nothing passed until it is.
+   */
+  | { kind: 'changed'; plan: GuardPlan };
 
 /** The identity a check answers: the same source with a new key is a new question. */
 export const sourceCheckKey = (source: Pick<Source, 'id' | 'credential_generation'>): string =>
@@ -113,19 +120,15 @@ export const suppliedModelCount = (source: Source): number =>
   source.models.filter((model) => !model.retired).length;
 
 /**
- * The verdict a failed listing carries.
+ * The verdict a failed listing or replacement carries, once a guard refusal has been
+ * told apart (the caller does that: it is a question, not a verdict).
  *
  * A refusal of the credential is named only when the server named it — the detail
- * key and the provider's status travel together. A guard refusal means the listing
- * itself succeeded and only its consequences were held back, so the key works.
+ * key and the provider's status travel together.
  */
 export function sourceCheckFailure(
-  failure: { detail?: string; upstreamStatus?: number; wouldRemoveHops: readonly unknown[]; wouldInterrupt: readonly unknown[] } | null,
-  source: Source,
+  failure: { detail?: string; upstreamStatus?: number } | null,
 ): SourceCheck {
-  if (failure && (failure.wouldRemoveHops.length > 0 || failure.wouldInterrupt.length > 0)) {
-    return { kind: 'connected', models: suppliedModelCount(source) };
-  }
   if (failure?.detail === 'modelHub.errors.authentication_failed') {
     return { kind: 'rejected', status: failure.upstreamStatus ?? null };
   }
@@ -147,6 +150,8 @@ export const checkLine = (t: TFunction, check: SourceCheck | undefined): string 
         : t('onboarding.providers.cardRejectedStatus', { status: check.status });
     case 'failed':
       return t('onboarding.providers.cardCheckFailed');
+    case 'changed':
+      return t('onboarding.providers.cardListChanged');
     default:
       return null;
   }

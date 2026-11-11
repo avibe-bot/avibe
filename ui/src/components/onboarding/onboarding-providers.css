@@ -124,6 +124,7 @@
    denial edge the gateway card does when it fails. */
 .setup-provider-card[data-state='connected'][data-check='checking'],
 .setup-provider-card[data-state='connected'][data-check='failed'],
+.setup-provider-card[data-state='connected'][data-check='changed'],
 .setup-provider-card[data-state='connected'][data-check='rejected'] {
   border-color: var(--ob-card-border);
   background: var(--ob-card);
