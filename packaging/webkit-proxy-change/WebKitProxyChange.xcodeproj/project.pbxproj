@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 56;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -42,7 +42,7 @@
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		A80000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = {LastUpgradeCheck = 2600; TargetAttributes = {A50000000000000000000001 = {CreatedOnToolsVersion = 26.0;}; A50000000000000000000002 = {CreatedOnToolsVersion = 26.0; TestTargetID = A50000000000000000000001;};};}; buildConfigurationList = A60000000000000000000003; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A40000000000000000000005; productRefGroup = A40000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001, A50000000000000000000002); };
+		A80000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660; TargetAttributes = {A50000000000000000000001 = {CreatedOnToolsVersion = 26.6;}; A50000000000000000000002 = {CreatedOnToolsVersion = 26.6; TestTargetID = A50000000000000000000001;};};}; buildConfigurationList = A60000000000000000000003; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A40000000000000000000005; productRefGroup = A40000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001, A50000000000000000000002); };
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
