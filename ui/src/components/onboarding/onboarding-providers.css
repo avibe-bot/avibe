@@ -112,6 +112,32 @@
   border-color: var(--mint);
   box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
+/* A connected card opens its own key. Pressing it is an edit, not a decision, so hover
+   only lifts the edge it already wears. */
+.setup-provider-card[data-state='connected']:hover:not(:disabled),
+.setup-provider-card[data-state='connected']:focus-visible {
+  box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
+}
+/* The mint fill says a provider supplies models, which is exactly what is not known
+   while its key is being checked, or once the check could not answer: the card goes
+   back to the plain surface until it is. A key the provider refused wears the same
+   denial edge the gateway card does when it fails. */
+.setup-provider-card[data-state='connected'][data-check='checking'],
+.setup-provider-card[data-state='connected'][data-check='failed'],
+.setup-provider-card[data-state='connected'][data-check='changed'],
+.setup-provider-card[data-state='connected'][data-check='rejected'] {
+  border-color: var(--ob-card-border);
+  background: var(--ob-card);
+  box-shadow: none;
+}
+.setup-provider-card[data-state='connected'][data-check='rejected'] {
+  border-color: var(--destructive-ink);
+}
+.setup-provider-card[data-check='rejected'] .setup-provider-key { color: var(--destructive-ink); }
+.setup-provider-card[data-state='connected'][data-check]:hover:not(:disabled),
+.setup-provider-card[data-state='connected'][data-check]:focus-visible {
+  box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
+}
 /* Greying a card out and showing the no-entry cursor says the person is being kept
    from acting. A connected card is disabled for a purely mechanical reason — there is
    nothing left to press — and the reference draws it at full strength beside the rest.
@@ -211,6 +237,7 @@
   height: var(--obp-check);
 }
 .setup-provider-check { color: var(--mint-ink); }
+.setup-provider-check--busy { color: var(--muted); }
 /* The plus states an offer, not a decision, so it is drawn in the same quiet ink the
    third card's plus wears rather than in the mint the check owns. */
 .setup-provider-add-mark { color: var(--muted); }
@@ -455,6 +482,10 @@
   box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
 
+/* A frame about one key has one short question in it, so it is fitted to that
+   rather than held at the add dialog's height for a comparison it never offers. */
+.setup-add-dialog[data-size='compact'] { height: auto; }
+
 .setup-add-head {
   display: flex;
   flex: none;
@@ -478,6 +509,7 @@
   line-height: 1.5;
   color: var(--muted);
 }
+.setup-add-subtitle[data-tone='error'] { color: var(--destructive-ink); }
 
 /* The same segmented control `ApiKeySourceForm` uses for protocol, at this
    dialog's scale: one track, equal segments, the chosen one filled. */

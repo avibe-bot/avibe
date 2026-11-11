@@ -1040,7 +1040,7 @@ export type ApiContextType = {
     saved?: string[];
     name?: string;
     toolCount?: number;
-    added?: { name: string; toolCount?: number; auth?: McpServerSummary['auth'] }[];
+    added?: { name: string; toolCount?: number; auth?: McpServerSummary['auth']; state?: string; warning?: McpError }[];
     unchanged?: { name: string; auth?: McpServerSummary['auth'] }[];
     failed?: { name: string; error?: string; type?: string }[];
   }>;

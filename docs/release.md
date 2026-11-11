@@ -99,6 +99,28 @@ remain mandatory.
 
 ## Workflow ownership and artifacts
 
+The desktop packaging cache is intentionally separate from release correctness.
+`desktop-package.yml` has one writer: the unsigned `master` warm-up. It builds
+all three targets, caches only third-party Cargo output, and keys Rust entries
+by `Cargo.lock` checksums, rustc, Apple SDK, and target. First-party crates,
+version stamping, the private Runtime, final packaging, signing, notarization,
+and verification are rebuilt; release jobs restore only an exact key and visibly
+warn before rebuilding on a miss. The Cua Driver cache remains provenance- and
+input-verified. PR desktop-shell jobs are restore-only, and maintenance keeps
+one newest release entry per target, removes superseded entries and retired PR
+caches, reports total usage/headroom against the 10 GB repository budget, and
+retries a failed master warm-up once.
+
+A TEST RC deliberately builds Apple silicon macOS and Windows only. Stable
+still requires Apple silicon, Intel macOS, and Windows with the complete signed
+set. The unsigned master warm-up is the early Intel signal for desktop source,
+locked dependency, and release-helper changes plus nightly coverage; it catches
+Intel compile/SDK/smoke/DMG failures before stable. Intel-specific Developer ID
+signing, notarization, stapling, Gatekeeper, and updater-signature failures
+still first appear on the stable path. A real master run must confirm the
+Ubuntu lookup-only keep-alive refreshes `last_accessed_at` and can read macOS
+entries; warnings do not claim that unverified retention is guaranteed.
+
 The official workflows stage notes and release assets in one immutable tag/release.
 `Release (AI Notes)` generates notes and publishes the core/runtime assets for
 GitHub-only pre-releases; for official stable tags it leaves a Draft for

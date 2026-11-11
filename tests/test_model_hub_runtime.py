@@ -1585,6 +1585,50 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
 
 
+@pytest.mark.parametrize("lost", ["missing", "malformed"])
+def test_channel_state_loss_does_not_replace_installed_engine_integrity_checks(tmp_path: Path, lost: str) -> None:
+    """KEEP with unavailable channel history permits no install and cannot bless tampered bytes.
+
+    Channel-only tests cannot prove the disk engine remains independently
+    verifiable. Use a real installed fixture and the production manager's
+    pointer/metadata/binary validation, without starting a provider engine.
+    """
+    from tests.engine_channel_support import LocalVerifier, Signer
+    from vibe.model_hub_runtime.engine_channel import EngineChannel
+    from core.model_hub_engine_channel import ResolutionAction
+
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    installed = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest).ensure()
+    assert installed["ok"] is True
+    binary_path = Path(installed["path"])
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    signer = Signer()
+    fetches = []
+
+    def unavailable_fetch():
+        fetches.append(True)
+        raise OSError("test network unavailable")
+
+    channel = EngineChannel(manager, roots=signer.roots(), verifier=LocalVerifier(), fetch=unavailable_fetch)
+    if lost == "malformed":
+        channel.store.directory.mkdir(parents=True)
+        channel.store.state_path.write_bytes(b"{lost channel history")
+    assert channel.refresh().state == "offline"
+    assert fetches == []
+    kept = channel.resolve(current="model-hub-engine-v7.2.95-1")
+    assert (kept.action, kept.target, kept.download_authorized) == (ResolutionAction.KEEP, None, False)
+    assert kept.reason == ("no_index" if lost == "missing" else "state_unreadable")
+    assert manager.resolve_engine_path() == binary_path
+    assert manager.status()["installed"] is True
+
+    # The same restrictive channel KEEP is not proof of independent integrity.
+    binary_path.write_bytes(binary_path.read_bytes() + b"\n# test tampering\n")
+    assert channel.resolve(current="model-hub-engine-v7.2.95-1").action is ResolutionAction.KEEP
+    assert manager.resolve_engine_path() is None
+    assert manager.status()["installed"] is False
+
+
 def test_engine_status_rehashes_binary_only_after_file_identity_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3640,6 +3684,49 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
 
     with _models_endpoint() as (base_url, handler):
         asyncio.run(run(base_url, handler))
+
+
+@pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (500, None)))
+def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected) -> None:
+    """A listing the provider refused for the key carries that status; nothing else does."""
+
+    class Refusing(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"error": {"message": "refused"}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore) -> None:
+            self.state_store = store
+
+    server = HTTPServer(("127.0.0.1", 0), Refusing)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        credential_ref = await adapter.provision_credential("custom", "openai_chat", "wrong-key", base_url)
+        with pytest.raises(ModelDiscoveryError) as raised:
+            await adapter.discover_models("custom", "openai_chat", base_url, credential_ref)
+        assert raised.value.rejected_status == rejected
+
+    try:
+        asyncio.run(run())
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def _served_handle(source, model_id):

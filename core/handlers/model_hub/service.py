@@ -1842,7 +1842,16 @@ class ModelHubService:
             return await awaitable
         except OriginNotAllowedError:
             raise ModelHubError("mode_switch_blocked", status=409) from None
-        except ModelDiscoveryError:
+        except ModelDiscoveryError as exc:
+            if exc.rejected_status is not None:
+                # The provider refused the credential itself: name that, and the
+                # status it answered with, rather than an unexplained failure.
+                raise ModelHubError(
+                    "discovery_failed",
+                    status=502,
+                    detail="modelHub.errors.authentication_failed",
+                    data={"upstream_status": exc.rejected_status},
+                ) from None
             raise ModelHubError("discovery_failed", status=502) from None
         except RuntimePlatformUnsupportedError:
             raise ModelHubError("runtime_platform_unsupported", status=422) from None

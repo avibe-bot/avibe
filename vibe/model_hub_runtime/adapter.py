@@ -2789,7 +2789,14 @@ class CLIProxyEngineAdapter:
                 **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
             )
         except EngineClientError as exc:
-            raise ModelDiscoveryError("model discovery failed") from exc
+            raise ModelDiscoveryError(
+                "model discovery failed",
+                rejected_status=(
+                    exc.status_code
+                    if exc.status_code in _AUTHENTICATION_ERROR_STATUSES
+                    else None
+                ),
+            ) from exc
 
     async def observe_source(
         self,
