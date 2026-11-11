@@ -7162,6 +7162,7 @@
     "addSubtitle": "Once added, every Agent can call it.",
     "unchangedCount": "{{count}} already present.",
     "succeededCount": "{{count}} succeeded",
+    "savedNotConnected": "Saved, but could not connect: {{reason}}. Refresh, configure, or remove it from the list.",
     "failedCount": "{{count}} failed:",
     "failedLine": "{{name}} — {{error}}",
     "callHint": "vibe mcp {{name}} <tool>",
@@ -7192,6 +7193,7 @@
       "cwd": "Working directory",
       "issues": {
         "invalidUrl": "This URL is not valid.",
+        "missingScheme": "This looks like a URL. Add https:// at the start.",
         "unclosedQuote": "A quote is not closed.",
         "shellOperator": "Shell operators such as | && ; > are not supported. Use Import JSON.",
         "windowsPath": "Windows paths are ambiguous here. Use Import JSON."

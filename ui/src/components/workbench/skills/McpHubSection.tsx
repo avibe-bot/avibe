@@ -835,8 +835,12 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
           error: item.type ? t(`mcpHub.errors.${item.type}`, { defaultValue: item.error || '', message: item.error || '', name: item.name }) : (item.error || ''),
         }),
       );
+      const warnings = added.flatMap((item) => item.warning ? [
+        t('mcpHub.savedNotConnected', { reason: item.warning.message || item.warning.type || t('mcpHub.failed') }),
+      ] : []);
       const inline = [
         t('mcpHub.succeededCount', { count: succeeded }),
+        ...warnings,
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
         ...failedLines,
       ].filter(Boolean).join('\n');
@@ -850,7 +854,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
         .map((item) => item.name);
       const action = mcpAddOauthAction({
         names,
-        failedCount: failed.length,
+        failedCount: failed.length + warnings.length,
         oauthMode,
         desktopShell: isDesktopShell(),
       });
@@ -862,7 +866,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
       if (failed.length) {
         showToast(inline, 'error', { label: t('common.close'), onClick: () => undefined });
       } else {
-        showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
+        showToast(warnings.length ? warnings.join('\n') : t('mcpHub.succeededCount', { count: succeeded }), warnings.length ? 'warning' : 'success');
       }
       if (action.kind === 'list') {
         setAddResult({ names: action.names, failedLines });

@@ -57,13 +57,15 @@ def _localize_errors(body: dict[str, Any]) -> dict[str, Any]:
     from vibe.i18n import t
 
     error = body.get("error")
-    rows = [*(body.get("failed") or []), *(body.get("results") or [])]
+    rows = [*(body.get("failed") or []), *(body.get("added") or []), *(body.get("results") or [])]
     keyed = [row for row in rows if row.get("messageKey")]
     if not keyed and not (isinstance(error, dict) and error.get("messageKey")):
         return body
     language = settings.load_config_or_default().language
     for row in keyed:
         row["error"] = t(row["messageKey"], language)
+        if row.get("warning") and row["warning"].get("messageKey"):
+            row["warning"]["message"] = t(row["warning"]["messageKey"], language)
     if isinstance(error, dict):
         if error.get("messageKey"):
             error["message"] = t(error["messageKey"], language)

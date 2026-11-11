@@ -114,6 +114,8 @@ export function McpAddForm({ value, onChange }: { value: McpAddFormState; onChan
         />
         {target.kind === 'error' ? (
           <span className="text-[11px] text-destructive-ink">{t(`mcpHub.form.issues.${target.issue}`)}</span>
+        ) : target.kind === 'stdio' && target.hint === 'missingScheme' ? (
+          <span className="text-[11px] text-muted">{t('mcpHub.form.issues.missingScheme')}</span>
         ) : null}
       </label>
       <div className="flex flex-col gap-1.5">

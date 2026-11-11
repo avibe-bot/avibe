@@ -91,8 +91,9 @@ def test_batch_add_registers_neighbors_and_keeps_failed_definition_manageable(ru
     names = {item["name"] for item in result["added"]}
     failed = {item["name"]: item["error"] for item in result["failed"]}
     assert result["ok"] is True
-    assert names == {"echo", "zeta"}
-    assert "github" in failed and failed["github"]
+    assert names == {"echo", "github", "zeta"}
+    assert next(item for item in result["added"] if item["name"] == "github")["warning"]
+    assert not failed
     assert repository.read_avibe_definition("github") is not None
     assert repository.summarize("github")["state"] == "not_generated"
     assert repository.read_published("echo") is not None
@@ -110,11 +111,23 @@ def test_refresh_keeps_one_published_snapshot(generated):
 
 def test_failed_replace_keeps_new_definition_without_old_publication(generated):
     result = _run(generated, "add", {"servers": [_server("/nonexistent/mcp-server")], "replace": True})
-    assert result["ok"] is False
-    assert result["failed"][0]["name"] == "echo"
+    assert result["ok"] is True
+    assert result["added"][0]["name"] == "echo"
+    assert result["added"][0]["warning"]
     assert repository.read_published("echo") is None
     assert repository.read_definition("echo")["transport"]["command"] == "/nonexistent/mcp-server"
     assert repository.summarize("echo")["state"] == "not_generated"
+
+
+def test_identical_saved_definition_retries_discovery_without_rewrite(runtime):
+    item = {"name": "retry", "server": {"command": "/nonexistent/mcp-retry"}}
+    first = _run(runtime, "add", {"servers": [item]})
+    assert first["ok"] is True and first["added"][0]["warning"]
+    second = _run(runtime, "add", {"servers": [item]})
+    assert second["ok"] is True
+    assert second["added"][0]["name"] == "retry"
+    assert second["added"][0]["warning"]
+    assert repository.summarize("retry")["state"] == "not_generated"
 
 
 def test_malformed_existing_definition_does_not_abort_batch_add(runtime):
@@ -137,7 +150,8 @@ def test_failed_readd_of_hidden_native_keeps_owned_definition_visible(runtime):
     }}))
     repository.hide_name("echo")  # hidden by a released version's native delete
     result = _run(runtime, "add", {"servers": [{"name": "echo", "server": {"command": "/nonexistent/mcp-echo"}}]})
-    assert result["ok"] is False
+    assert result["ok"] is True
+    assert result["added"][0]["warning"]
     assert "echo" not in repository.hidden_names()
     assert repository.read_published("echo") is None
     assert repository.summarize("echo")["state"] == "not_generated"
