@@ -2941,6 +2941,16 @@ scenarios:
       - tests/test_model_hub_engine_channel_producer.py::test_a_sequence_is_only_ever_signed_over_the_payload_it_was_committed_with
       - tests/test_model_hub_engine_channel_producer.py::test_resuming_publishes_the_same_envelope_again_byte_for_byte
       - tests/test_model_hub_engine_channel_producer.py::test_concurrent_signers_are_serialized_into_distinct_increasing_sequences
+  - id: MH-ENGINE-CHANNEL-013
+    name: A signed index does not expire and is never renewed; one accepted long ago still decides selection, the same index is accepted again at any time, and a machine that has not received a later index, a withdrawal included, keeps following the one it has
+    status: partial
+    kind: selection
+    layer: unit
+    missing_layer: e2e
+    test:
+      - tests/test_model_hub_engine_channel.py::test_an_index_is_accepted_and_keeps_deciding_whenever_it_was_issued
+      - tests/test_model_hub_engine_channel_client.py::test_the_recorded_index_keeps_deciding_when_no_newer_one_can_be_fetched
+      - tests/test_model_hub_engine_channel_client.py::test_a_machine_that_never_receives_a_withdrawal_keeps_following_the_index_it_has
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
@@ -2954,3 +2964,4 @@ next_priority:
   - MH-ENGINE-CHANNEL-004
   - MH-ENGINE-CHANNEL-006
   - MH-ENGINE-CHANNEL-010
+  - MH-ENGINE-CHANNEL-013

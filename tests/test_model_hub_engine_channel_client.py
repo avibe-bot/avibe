@@ -2,7 +2,8 @@
 
 What this protects: an Avibe release with no shipped key has no channel at
 all; an engine manifest override or offline mode keeps the channel from
-choosing an engine; and reading the channel never installs, selects, or
+choosing an engine; the recorded index keeps deciding for as long as it is the
+newest this machine has; and reading the channel never installs, selects, or
 starts anything.
 """
 
@@ -12,7 +13,7 @@ import http.server
 import json
 import os
 import threading
-from datetime import timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,6 @@ import pytest
 from core.dependency_network import DependencyNetworkError
 from core.model_hub_engine_channel import ChannelError, ResolutionAction, TrustRoots
 from tests.engine_channel_support import (
-    NOW,
     LocalVerifier,
     Signer,
     manifest_bytes,
@@ -55,20 +55,19 @@ def _channel(tmp_path, signer: Signer | None, body: bytes | Exception = b"", **o
     fetch = Fetch(body)
     manager = options.pop("manager", None) or EngineRuntimeManager(runtime_dir=tmp_path / "engine")
     options.setdefault("verifier", LocalVerifier())
-    options.setdefault("clock", lambda: NOW)
     options.setdefault("avibe_version", "3.2.6")
     if signer is not None:
         options.setdefault("roots", signer.roots())
     return EngineChannel(manager, fetch=fetch, **options), fetch
 
 
-def _index(signer: Signer, sequence: int = 1, *, revoked: list | None = None) -> bytes:
+def _index(signer: Signer, sequence: int = 1, *, revoked: list | None = None, **fields) -> bytes:
     releases = [
         release_entry(manifest_bytes(VERSION, int(BUILD) - 1 or 1)) if int(BUILD) > 1 else None,
         release_entry(manifest_bytes(VERSION, int(BUILD) + 1)),
         release_entry(manifest_bytes(VERSION, int(BUILD) + 2)),
     ]
-    return signed(signer, sequence, releases=[item for item in releases if item], revoked=revoked)
+    return signed(signer, sequence, releases=[item for item in releases if item], revoked=revoked, **fields)
 
 
 def test_this_avibe_ships_no_channel_key_so_the_channel_is_off(tmp_path) -> None:
@@ -110,7 +109,6 @@ def test_a_refresh_records_the_index_and_resolves_without_touching_the_installed
 
     assert (first.state, first.sequence, first.changed) == ("accepted", 4, True)
     assert (second.state, second.changed) == ("accepted", False)
-    assert first.expires_at == "2026-11-17T06:00:00Z"
     resolution = channel.resolve(current=BUNDLED)
     assert resolution.action is ResolutionAction.ADOPT
     assert resolution.target.asset_release_tag == f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
@@ -167,7 +165,7 @@ def test_offline_mode_uses_no_network_and_keeps_recorded_withdrawals_in_force(tm
     assert offline.refresh().state == "offline" and fetch.calls == 0
     assert (offline.resolve(current=BUNDLED).action, offline.resolve(current=BUNDLED).reason) == (
         ResolutionAction.KEEP,
-        "index_stale",
+        "offline",
     )
     withdrawn = offline.resolve(current=NEWER)
     assert withdrawn.action is ResolutionAction.WITHDRAW and withdrawn.download_authorized is False
@@ -203,8 +201,6 @@ def test_an_index_another_key_signed_or_an_older_one_is_rejected(tmp_path) -> No
 
     assert _channel(tmp_path, signer, _index(Signer(), 6))[0].refresh().reason == "signature_invalid"
     assert _channel(tmp_path, signer, _index(signer, 4))[0].refresh().reason == "replayed"
-    expired, _ = _channel(tmp_path, signer, _index(signer, 6), clock=lambda: NOW + timedelta(days=8))
-    assert expired.refresh().reason == "expired"
     assert channel.snapshot().payload.sequence == 5
 
 
@@ -218,10 +214,78 @@ def test_an_avibe_upgrade_that_raises_the_floor_stops_adoption_from_the_older_re
     upgraded, _ = _channel(tmp_path, signer, roots=signer.roots(floor=100))
 
     resolution = upgraded.resolve(current=BUNDLED)
-    assert (resolution.action, resolution.reason) == (ResolutionAction.KEEP, "index_stale")
+    assert (resolution.action, resolution.reason) == (ResolutionAction.KEEP, "index_below_floor")
     # The recorded withdrawal still applies; it authorizes no download.
     withdrawn = upgraded.resolve(current=NEWER)
     assert withdrawn.action is ResolutionAction.WITHDRAW and withdrawn.download_authorized is False
+    # Offline is a different reason for the same restraint, and is the one named when both apply.
+    offline_manager = EngineRuntimeManager(runtime_dir=tmp_path / "engine", offline=True)
+    both, _ = _channel(tmp_path, signer, manager=offline_manager, roots=signer.roots(floor=100))
+    assert (both.resolve(current=BUNDLED).action, both.resolve(current=BUNDLED).reason) == (
+        ResolutionAction.KEEP,
+        "offline",
+    )
+
+
+LONG_AGO = datetime(2001, 1, 1, tzinfo=timezone.utc)
+
+
+def test_the_recorded_index_keeps_deciding_when_no_newer_one_can_be_fetched(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-013: an index accepted once is this machine's index until a higher sequence arrives."""
+
+    signer = Signer()
+    newest = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    # Issued long before any clock this test could run under.
+    old = _index(signer, 5, issued_at=LONG_AGO)
+    assert _channel(tmp_path, signer, old)[0].refresh().state == "accepted"
+    recorded = (tmp_path / "engine" / "channel" / "state.json").read_bytes()
+
+    unreachable, fetch = _channel(tmp_path, signer, OSError("connection reset"))
+    assert unreachable.refresh().state == "unavailable" and fetch.calls == 1
+    resolution = unreachable.resolve(current=BUNDLED)
+
+    # Nothing aged out: the same index still selects, and may still be downloaded from.
+    assert (resolution.action, resolution.target.asset_release_tag) == (ResolutionAction.ADOPT, newest)
+    assert resolution.download_authorized is True
+    assert unreachable.snapshot().payload.issued_at == LONG_AGO
+    # The same bytes offered again are accepted as what the machine already has.
+    again, _ = _channel(tmp_path, signer, old)
+    status = again.refresh()
+    assert (status.state, status.sequence, status.changed) == ("accepted", 5, False)
+    assert (tmp_path / "engine" / "channel" / "state.json").read_bytes() == recorded
+
+
+def test_a_machine_that_never_receives_a_withdrawal_keeps_following_the_index_it_has(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-013: the limit of having no expiry, stated as behaviour.
+
+    The signature shows an index was authorized and the sequence stops a
+    machine going back from one it has seen. Neither shows that a newer index
+    was received.
+    """
+
+    signer = Signer()
+    engine_b = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    ten = _index(signer, 10, issued_at=LONG_AGO)
+    eleven = _index(signer, 11, revoked=[tombstone(engine_b, NEWER)])
+    # This machine saw sequence 10, which lists B, and can no longer reach the index.
+    behind, _ = _channel(tmp_path / "behind", signer, ten)
+    assert behind.refresh().state == "accepted"
+    cut_off, _ = _channel(tmp_path / "behind", signer, OSError("no route to host"))
+    assert cut_off.refresh().state == "unavailable"
+
+    still_adopts = cut_off.resolve(current=BUNDLED)
+
+    # It may newly install B, which sequence 11 withdrew, however much later.
+    assert (still_adopts.action, still_adopts.target.asset_release_tag) == (ResolutionAction.ADOPT, engine_b)
+    assert still_adopts.download_authorized is True
+    # A machine that did receive 11 does not, moves off B if it runs it, and refuses to go back to 10.
+    current, _ = _channel(tmp_path / "current", signer, eleven)
+    assert current.refresh().state == "accepted"
+    informed = current.resolve(current=BUNDLED)
+    assert (informed.action, informed.target.asset_release_tag) == (ResolutionAction.ADOPT, NEWER)
+    assert current.resolve(current=engine_b).action is ResolutionAction.WITHDRAW
+    assert _channel(tmp_path / "current", signer, ten)[0].refresh().reason == "replayed"
+    assert current.snapshot().payload.sequence == 11
 
 
 class _Unavailable:
@@ -415,9 +479,7 @@ exit 70
         monkeypatch.setattr(api, name, forbidden)
     signer = Signer()
     fetch = Fetch(_index(signer, 2))
-    channel = EngineChannel(
-        EngineRuntimeManager(runtime_dir=tmp_path / "engine"), roots=signer.roots(), fetch=fetch, clock=lambda: NOW
-    )
+    channel = EngineChannel(EngineRuntimeManager(runtime_dir=tmp_path / "engine"), roots=signer.roots(), fetch=fetch)
 
     assert channel.refresh().state == "accepted"
     assert calls.read_text().splitlines() == ["version", "verify"]

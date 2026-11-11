@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -22,7 +22,8 @@ from core import model_hub_engine_channel as channel
 from core.model_hub_engine_manifest import EXPECTED_PLATFORMS, OWNED_RELEASE_ROOT, UPSTREAM_PLATFORM_NAMES
 
 _ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-NOW = datetime(2026, 11, 10, 6, 0, 0, tzinfo=timezone.utc)
+#: The ``issued_at`` these builders write. A fixed date, since nothing reads a clock.
+ISSUED = datetime(2026, 11, 10, 6, 0, 0, tzinfo=timezone.utc)
 KEY_ID = "test-channel-key"
 
 
@@ -113,15 +114,13 @@ def payload_document(
     *,
     releases: list[dict] | None = None,
     revoked: list[dict] | None = None,
-    issued_at: datetime = NOW,
-    lifetime: timedelta = timedelta(days=7),
+    issued_at: datetime = ISSUED,
 ) -> dict:
     return {
         "repository": channel.CHANNEL_REPOSITORY,
         "channel": channel.CHANNEL_NAME,
         "sequence": sequence,
         "issued_at": channel.format_timestamp(issued_at),
-        "expires_at": channel.format_timestamp(issued_at + lifetime),
         "releases": [release_entry(manifest_bytes())] if releases is None else releases,
         "revoked": revoked or [],
     }
