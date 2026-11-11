@@ -110,7 +110,7 @@ curl --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.js
 device_type=$(xcrun simctl list devicetypes -j | python3 -c '
 import json, sys
 items=json.load(sys.stdin).get("devicetypes", [])
-for preferred in ("iPhone 16", "iPhone 15", "iPhone 14"):
+for preferred in ("iPhone 15", "iPhone 14", "iPhone 16"):
     for item in items:
         if item.get("name") == preferred:
             print(item["identifier"]); raise SystemExit
