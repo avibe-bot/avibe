@@ -39,7 +39,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     static func foregroundPresentationOptions(
         for content: UNNotificationContent
     ) -> UNNotificationPresentationOptions {
-        content.threadIdentifier == testNotificationThread
+        !content.threadIdentifier.isEmpty
             ? [.banner, .list, .sound]
             : []
     }
