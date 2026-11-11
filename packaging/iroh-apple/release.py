@@ -71,6 +71,14 @@ def support_bundle(source: Path, output: Path, lockfile: Path, targets: list[str
         notices = Path(temporary) / "LICENSES"
         result = collect_notices(lockfile, targets, pins()["RUST_VERSION"], "iroh-ffi",
                                  HERE / "license-sources.json", notices)
+        qualified = set()
+        for target in targets:
+            graph = (output / f"feature-graph-{target}.txt").read_text()
+            coordinates = set(re.findall(r"(?:^|[\s─├└│])([A-Za-z0-9_-]+) v([^\s]+)", graph, re.M))
+            require(bool(coordinates), f"missing qualified package graph: {target}")
+            qualified.update(coordinates)
+        require({(p["name"], p["version"]) for p in result["packages"]} == qualified,
+                "notice inventory differs from qualified target graphs")
         binding_sources = [p for p in result["mpl_sources"] if p["name"] == "uniffi_bindgen"]
         require(len(binding_sources) == 1, "generated binding requires one exact UniFFI source pointer")
         binding = binding_sources[0]

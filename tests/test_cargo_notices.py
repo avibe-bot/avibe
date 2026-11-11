@@ -48,22 +48,50 @@ def fixture(tmp_path):
     return dependency, package, policy, collect
 
 
-def test_target_graph_traverses_all_kinds_but_not_unreachable_workspace_or_platform_packages(tmp_path):
+def test_target_graph_uses_feature_aware_tree_not_overapproximated_metadata(tmp_path):
+    # Real CI reached asn1-rs-impl through metadata even though the qualified
+    # root/target cargo-tree graph did not include it. Keep that extra reachable
+    # metadata edge: only testing unreachable workspace nodes missed this bug.
     lockfile = tmp_path / "Cargo.lock"
     lockfile.write_text("unchanged lock")
-    packages = [{"id": x, "name": x, "version": "1.0.0"} for x in ["root", "normal", "macro", "dev", "sim", "android", "node"]]
-    def metadata(command, **kwargs):
-        target = command[-1]
-        dependencies = ["normal", "macro", "dev"] + (["sim"] if target == "simulator" else [])
+    names = ["root", "normal", "macro", "dev", "sim", "android", "node", "asn1-rs-impl"]
+    packages = [{"id": x, "name": x, "version": "1.0.0"} for x in names]
+
+    def cargo_output(command, **kwargs):
+        if command[2] == "tree":
+            target = command[command.index("--target") + 1]
+            text = "root v1.0.0 (/workspace)\nnormal v1.0.0\n[build-dependencies]\nmacro v1.0.0 (proc-macro)\n"
+            text += "[dev-dependencies]\ndev v1.0.0\nnormal v1.0.0 (*)\n"
+            return text + ("sim v1.0.0\n" if target == "simulator" else "")
         nodes = [{"id": p["id"], "deps": []} for p in packages]
-        nodes[0]["deps"] = [{"pkg": x} for x in dependencies]
-        nodes[-1]["deps"] = [{"pkg": "android"}]
+        nodes[0]["deps"] = [{"pkg": x} for x in ["normal", "macro", "dev", "asn1-rs-impl"]]
+        nodes[-2]["deps"] = [{"pkg": "android"}]
         return json.dumps({"packages": packages, "workspace_members": ["root", "node"], "resolve": {"nodes": nodes}})
-    with patch.object(notices.subprocess, "check_output", side_effect=metadata) as cargo:
+
+    with patch.object(notices.subprocess, "check_output", side_effect=cargo_output) as cargo:
         result = notices.resolved_packages(lockfile, ["device", "simulator"], "1.91.0", "root")
     assert {p["name"] for p in result} == {"root", "normal", "macro", "dev", "sim"}
-    assert cargo.call_count == 2
-    assert all("--locked" in c.args[0] and "--filter-platform" in c.args[0] for c in cargo.call_args_list)
+    assert cargo.call_count == 4
+    trees = [c.args[0] for c in cargo.call_args_list if c.args[0][2] == "tree"]
+    assert all("--locked" in c and c[c.index("--edges") + 1] == "normal,build,dev"
+               and c[c.index("--package") + 1] == "root" for c in trees)
+
+
+@pytest.mark.parametrize("tree,extra", [
+    ("unexpected output", []),
+    ("root v1.0.0\nmissing v1.0.0", []),
+    ("root v1.0.0", [{"id": "other-source", "name": "root", "version": "1.0.0"}]),
+    ("", []),
+])
+def test_unrecognized_or_ambiguous_tree_refuses_incomplete_inventory(tmp_path, tree, extra):
+    lockfile = tmp_path / "Cargo.lock"
+    lockfile.write_text("unchanged lock")
+    metadata = {"workspace_members": ["root"], "packages": [
+        {"id": "root", "name": "root", "version": "1.0.0"}, *extra,
+    ]}
+    with patch.object(notices.subprocess, "check_output", side_effect=[json.dumps(metadata), tree]):
+        with pytest.raises(ValueError):
+            notices.resolved_packages(lockfile, ["device"], "1.91.0", "root")
 
 
 def test_bundled_notices_and_workspace_root_are_preserved(fixture):

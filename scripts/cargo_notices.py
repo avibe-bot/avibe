@@ -52,17 +52,27 @@ def resolved_packages(lockfile: Path, targets: list[str], toolchain: str, packag
         packages = {p["id"]: p for p in metadata["packages"]}
         roots = [p for p in metadata["workspace_members"] if packages[p]["name"] == package]
         require(len(roots) == 1, f"expected one workspace root package: {package}")
-        nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-        pending, seen = list(roots), set()
-        while pending:
-            identity = pending.pop()
-            if identity in seen:
+        tree = subprocess.check_output([
+            "cargo", f"+{toolchain}", "tree", "--locked", "--manifest-path", str(lockfile.with_name("Cargo.toml")),
+            "--target", target, "--package", package, "--edges", "normal,build,dev",
+            "--prefix", "none", "--format", "{p}", "--color", "never",
+        ], cwd=lockfile.parent, text=True)
+        # metadata's resolve graph unifies workspace features and can retain
+        # inactive edges even after --filter-platform (e.g. asn1-rs-impl here).
+        # Use the same package-scoped, feature-aware tree as qualification;
+        # metadata supplies identities, manifests and authors, not membership.
+        identities = set()
+        for line in tree.splitlines():
+            if not line.strip() or line in {"[build-dependencies]", "[dev-dependencies]"}:
                 continue
-            seen.add(identity)
+            match = re.fullmatch(r"([A-Za-z0-9_-]+) v([^\s]+)(?: .*)?", line)
+            require(match is not None, f"unrecognized Cargo tree package: {line}")
+            matches = [p for p in packages.values() if (p["name"], p["version"]) == match.groups()]
+            require(len(matches) == 1, f"ambiguous or missing Cargo metadata identity: {line}")
+            identities.add(matches[0]["id"])
+        require(roots[0] in identities, f"Cargo tree omitted selected root: {package}")
+        for identity in identities:
             selected[identity] = packages[identity]
-            # Cargo filters the target edges; retain every dependency kind,
-            # including build/proc-macro and dev dependencies, not all packages.
-            pending.extend(dep["pkg"] for dep in nodes[identity]["deps"])
     require(lockfile.read_bytes() == before, "Cargo.lock changed during notice collection")
     return sorted(selected.values(), key=lambda p: (p["name"], p["version"], p["id"]))
 

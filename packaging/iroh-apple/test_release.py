@@ -149,6 +149,8 @@ class ReleaseTests(unittest.TestCase):
         for name in ("licenses/Apache-2.0.txt", "licenses/MIT.txt", "licenses/LLVM-exception.txt",
                      "COPYRIGHT.html", "COPYRIGHT-library.html"):
             (rust_notices / name).write_text("Rust distribution notice fixture")
+        for target in release.IOS_TARGETS:
+            (self.directory / f"feature-graph-{target}.txt").write_text("uniffi_bindgen v0.31.2\n")
         binding_source = {"name": "uniffi_bindgen", "version": "0.31.2",
                           "registry_url": "https://example.test/uniffi_bindgen-0.31.2.crate",
                           "upstream_url": "https://example.test/tree/exact-commit"}
@@ -159,7 +161,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(package, "iroh-ffi")
             output.mkdir(parents=True)
             (output / "NOTICE.md").write_text("MPL covered sources\n")
-            return {"counts": {"upstream": 1}, "mpl_sources": [binding_source]}
+            return {"counts": {"upstream": 1}, "mpl_sources": [binding_source],
+                    "packages": [{"name": "uniffi_bindgen", "version": "0.31.2"}]}
 
         with patch.object(release, "collect_notices", side_effect=collect), \
              patch.object(release.subprocess, "check_output", return_value=str(self.directory)):
@@ -173,6 +176,11 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn(binding_source["registry_url"], notice)
             self.assertIn(binding_source["upstream_url"], notice)
             self.assertIn("Generated IrohLib.swift binding", notice)
+        (self.directory / f"feature-graph-{release.IOS_TARGETS[0]}.txt").write_text("other v1.0.0\n")
+        with patch.object(release, "collect_notices", side_effect=collect), \
+             patch.object(release.subprocess, "check_output", return_value=str(self.directory)):
+            with self.assertRaisesRegex(ValueError, "differs from qualified"):
+                release.support_bundle(source, self.directory, source / "Cargo.lock", list(release.IOS_TARGETS))
 
     def test_missing_mpl_pointer_or_wrong_notice_scope_refuses_candidate(self):
         # Package license text alone must not replace the source-obtainment

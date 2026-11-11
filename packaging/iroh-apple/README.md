@@ -181,9 +181,13 @@ the pin; no new mirror guard or backup infrastructure is added.
 `--package`, `--toolchain`, `--policy` and an empty `--output` directory. It is
 shared tooling for binary packagers, not an Apple-only dependency scanner.
 Configure Cargo's locked vendor source first, as this gate does; it verifies
-vendor package checksums against the supplied lockfile. It traverses the selected
-workspace root through `cargo metadata --locked --filter-platform` for each
-target, rather than treating every entry in metadata or Cargo.lock as shipped.
+vendor package checksums against the supplied lockfile. Membership comes from
+`cargo tree --locked --target … --package … --edges normal,build,dev`, the
+feature-aware root/target graph used by qualification. Cargo metadata supplies
+package identities, manifests and authors only: even its platform-filtered
+resolve graph can retain edges outside the qualified tree. Unrecognized tree
+output or ambiguous metadata identities fail closed; support packaging also
+requires exact package-set equality with the captured qualification graphs.
 
 `license-sources.json` owns the reviewed expression-to-selected-license allowlist
 and per-crate/version/checksum supplemental sources. Collection refuses unknown
