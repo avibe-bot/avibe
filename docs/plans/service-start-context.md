@@ -136,5 +136,8 @@ mechanism:
 - [x] Step 4, replacement at the next desktop login: `vibe autostart` (#3515)
       for CLI installs, the app's launch for the desktop app.
 - [ ] Step 4 verified by a real log-out and log-in.
-- [ ] Update the stale-session guidance in the `use-avibe` playbook and the
-      Doctor action text once step 4 repairs a stale service at login.
+- [x] The `use-avibe` playbook's operations reference: the upgrade restart,
+      a restart over SSH, `vibe autostart`, and the repair for
+      `outside_gui_session` and `stale_login_session`.
+- [ ] The Doctor action text, once step 4 is verified to repair a stale
+      service at login.
