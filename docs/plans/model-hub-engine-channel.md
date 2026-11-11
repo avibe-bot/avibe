@@ -157,8 +157,10 @@ authority remains a release compromise.
 
 There is one current signed index. A device follows the highest sequence it
 has accepted for as long as that is the highest it has. A repeated identical
-payload is accepted at any time. No clock takes part in acceptance, in
-selection, or in signing: `issued_at` is an audit record.
+payload is accepted at any time. No time-based check decides whether an index
+is accepted, which of two indexes is newer, or what may be selected. The
+signer does write its clock into `issued_at` when it allocates a payload;
+that value is a record and is compared with nothing.
 
 **What this means, plainly.** A device has only seen sequence 10, which
 permits engine B. Sequence 11 withdraws B, but the device cannot get 11 while
@@ -172,8 +174,8 @@ installed engine".
 
 This indefinite freeze is intentional and was chosen by the owner. It must
 not be "fixed" with a new time gate, a far-future expiry, an optional expiry
-field, or any other freshness check. What shortens it is the device reaching
-the index again, or a later Avibe release that ships a higher sequence floor.
+field, or any other freshness check. It ends for a device when that device
+receives a newer index, and not before.
 
 What is kept, and the result each piece protects:
 
@@ -181,7 +183,7 @@ What is kept, and the result each piece protects:
 | --- | --- |
 | A signature over the exact payload, by a key shipped in Avibe | Only an index the channel key signed is acted on. Whoever controls the mirror cannot change a download and its expected hash together. |
 | The recorded highest sequence and payload digest | A device never goes back from an index it accepted, and two different indexes cannot share a sequence. |
-| The shipped sequence floor | A new Avibe release can retire every index below a number. That ends a freeze on the devices that install the release, and only on those. |
+| The shipped sequence floor | A device that installs an Avibe release with a higher floor accepts no index below it and adopts nothing new from a recorded index below it. The floor does not deliver a newer index, does not reveal a withdrawal the device has not received, and does not stop an engine that is already installed and that the device's record does not show as withdrawn. |
 | Permanent tombstones and remembered release identities | A withdrawal a device has seen cannot be dropped later, and a promoted release cannot return with other bytes. |
 | Explicit offline mode | No network request and nothing adopted, while withdrawals the device already recorded still apply. |
 | Regular metadata checks (section 3; arrives with step 3) | A device learns of a withdrawal the first time it can reach the index. |
