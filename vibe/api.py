@@ -3580,7 +3580,13 @@ def _attach_signed_sign_operation_context(
             if meta.get("protection") == "protected":
                 signing_key = vault_service.get_signing_public_key(conn, persisted_name)
                 if exact_message:
-                    public_key = vault_solana.require_public_key(signing_key)
+                    # Check the immutable request key against the current record before
+                    # signing the release; caller metadata is never a binding source.
+                    vault_service.validate_sign_request(
+                        conn, request_id, name=persisted_name, scheme=persisted_scheme,
+                        message_hex=persisted_message, signing_context=signing_context,
+                    )
+                    public_key = delivery["signing_key"]["public_key"]
                 else:
                     public_key = vault_service.require_compressed_signing_public_key(signing_key)
                 if not isinstance(signing_context, dict):
@@ -3734,22 +3740,44 @@ def _sealed_from_payload(payload: dict):
 
 
 def _vault_solana_keypair_spec(payload: dict, *, kind: str, protection: str, public_meta: dict | None) -> dict | None:
-    """Validate a request for an avault-created Solana key; ``None`` for every other create.
+    """Validate standard avault creation or protected sandbox-record ingestion.
 
-    avault generates or imports the Ed25519 seed and reports the public key, so the
-    caller supplies neither. Protected Solana keys are refused until the sandbox
-    can show what such a key signs.
+    Standard keys are still generated/imported only by avault. A protected Solana
+    record arrives as an opaque sandbox envelope plus its record-derived public key;
+    Python never accepts a keypair spec, blind box, seed, or other fallback for it.
     """
     from storage import vault_solana
 
     spec = payload.get("keypair")
     client_key = (public_meta or {}).get("signing_public_key")
+    if protection == "protected":
+        if spec is not None:
+            raise VaultApiError(
+                "protected Solana records do not accept keypair specs; use the sandbox envelope and public metadata",
+                code="invalid_keypair", message_key="vault.signing.invalidProtectedSolanaRecord",
+            )
+        if not vault_solana.is_ed25519_key(client_key):
+            return None
+        if kind != "keypair":
+            raise VaultApiError(
+                "protected Solana records require kind 'keypair'", code="invalid_keypair",
+                message_key="vault.signing.invalidProtectedSolanaRecord",
+            )
+        if payload.get("blind_box") is not None:
+            raise VaultApiError(
+                "protected Solana records do not accept a blind_box",
+                code="invalid_keypair", message_key="vault.signing.invalidProtectedSolanaRecord",
+            )
+        try:
+            vault_solana.require_public_key(client_key)
+        except vault_solana.SolanaSigningError as exc:
+            raise VaultApiError(
+                str(exc), code="invalid_keypair", message_key="vault.signing.invalidProtectedSolanaRecord",
+            ) from exc
+        return {"source": "protected-record"}
+
     if spec is None and not vault_solana.is_ed25519_key(client_key):
         return None
-    if protection != "standard":
-        raise VaultApiError(
-            "protected Solana keys are not supported yet", code="protected_solana_unsupported", status=409,
-        )
 
     def invalid(message: str) -> VaultApiError:
         return VaultApiError(message, code="invalid_keypair")
@@ -3877,7 +3905,7 @@ def create_vault_secret(
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
 
-    if solana_keypair is not None:
+    if solana_keypair is not None and solana_keypair["source"] != "protected-record":
         try:
             if solana_keypair["source"] == "generate":
                 created = avault_keypair_generate(name)
@@ -3972,6 +4000,10 @@ def create_vault_secret(
         raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidSigningKeyError as exc:
+        raise VaultApiError(
+            str(exc), code="invalid_keypair", status=409, message_key="vault.signing.invalidProtectedSolanaRecord",
+        ) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     _publish_vaults_updated(
@@ -4541,8 +4573,9 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
                 payload,
                 digest=digest,
                 message_hex=message_hex,
-                # Protected Solana signing is refused below with its own reason, context or not.
-                required=meta.get("protection") == "protected" and message_hex is None,
+                # Protected Solana always requires its typed exact-message context;
+                # the service performs the same check before persisting the request.
+                required=meta.get("protection") == "protected",
             )
             request = vault_service.create_sign_request(
                 conn,
@@ -5694,9 +5727,29 @@ def _verify_protected_taproot_signature(
     )
 
 
-def _verify_protected_browser_signature(meta: dict, *, digest: str, scheme: str, signature: dict[str, Any]) -> None:
+def _verify_protected_browser_signature(
+    meta: dict,
+    *,
+    digest: str | None,
+    scheme: str,
+    signature: dict[str, Any],
+    message_hex: str | None = None,
+) -> None:
+    from storage import vault_solana
+
+    if scheme == vault_solana.SCHEME:
+        signing_key = meta.get("signing_public_key")
+        try:
+            vault_solana.verify_signature(
+                vault_solana.require_public_key(signing_key),
+                message_hex or "",
+                signature.get("signature"),
+            )
+        except vault_solana.SolanaSigningError as exc:
+            raise _protected_sign_invalid(str(exc)) from exc
+        return
     public_key_bytes = _protected_signing_public_key_bytes(meta)
-    digest_bytes = bytes.fromhex(digest)
+    digest_bytes = bytes.fromhex(digest or "")
     if scheme in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}:
         _verify_protected_ecdsa_signature(
             public_key_bytes=public_key_bytes,
@@ -5783,7 +5836,7 @@ def revoke_vault_grant(grant_id: str) -> dict:
 
 
 def vault_sign(payload: dict) -> dict:
-    """Sign a digest without returning private key material to Python.
+    """Sign a digest or exact message without returning private key material to Python.
 
     Standard-tier local keypairs are relayed to ``avault sign``. Protected-tier keypairs
     are browser-signed; the daemon accepts and audits the public signature object only.
@@ -5799,18 +5852,21 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     signing_context = _verifiable_signing_context_from_payload(payload, digest=digest, message_hex=message_hex)
     ed25519_unavailable: AvaultError | None = None
-    if message_hex is not None:
-        # Probed outside the transaction and raised below, before a request is
-        # created or claimed: an avault without Ed25519 leaves an approval pending.
-        try:
-            _require_avault_ed25519_surface("ed25519 signing")
-        except AvaultError as exc:
-            ed25519_unavailable = exc
     engine = _vault_engine()
     protected_response: dict | None = None
     protected_event: dict | None = None
     approval_required_request: dict | None = None
     try:
+        if message_hex is not None:
+            # Probe only standard custody, outside the request write transaction.
+            # Protected requests never call avault, including version discovery.
+            with engine.connect() as conn:
+                standard = vault_service.get_secret_meta(conn, name).get("protection") == "standard"
+            if standard:
+                try:
+                    _require_avault_ed25519_surface("ed25519 signing")
+                except AvaultError as exc:
+                    ed25519_unavailable = exc
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
             signing_public_key = vault_service.get_signing_public_key(conn, name)
@@ -5835,11 +5891,17 @@ def vault_sign(payload: dict) -> dict:
             if meta.get("protection") == "protected":
                 signature = payload.get("signature")
                 if not isinstance(signature, dict):
-                    signing_context = _verifiable_signing_context_from_payload(payload, digest=digest, required=True)
+                    signing_context = _verifiable_signing_context_from_payload(
+                        payload,
+                        digest=digest,
+                        message_hex=message_hex,
+                        required=True,
+                    )
                     request = vault_service.create_sign_request(
                         conn,
                         name,
                         digest=digest,
+                        message_hex=message_hex,
                         scheme=scheme,
                         signing_context=signing_context,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
@@ -5856,9 +5918,21 @@ def vault_sign(payload: dict) -> dict:
                     request_id = str(payload.get("request_id") or "")
                     if not request_id:
                         raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
-                    sign_request = vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                    sign_request = vault_service.validate_sign_request(
+                        conn,
+                        request_id,
+                        name=name,
+                        digest=digest,
+                        scheme=scheme,
+                        message_hex=message_hex,
+                        signing_context=signing_context,
+                    )
                     delivery = sign_request.get("delivery") if isinstance(sign_request.get("delivery"), dict) else {}
-                    if not isinstance(delivery.get("signing_context"), dict):
+                    persisted_scheme = delivery.get("scheme")
+                    persisted_digest = delivery.get("digest")
+                    persisted_message_hex = delivery.get("message_hex")
+                    persisted_context = delivery.get("signing_context")
+                    if not isinstance(persisted_scheme, str) or not isinstance(persisted_context, dict):
                         raise VaultApiError(
                             "protected signing request is missing a verifiable signing_context",
                             code="missing_signing_context",
@@ -5868,14 +5942,22 @@ def vault_sign(payload: dict) -> dict:
                     # `meta` is the masked payload (derived addresses only, no raw key); source
                     # the pinned public key from storage for server-side verification.
                     verify_meta = {**meta, "signing_public_key": vault_service.get_signing_public_key(conn, name)}
-                    _verify_protected_browser_signature(verify_meta, digest=digest, scheme=scheme, signature=signature)
+                    _verify_protected_browser_signature(
+                        verify_meta,
+                        digest=persisted_digest,
+                        scheme=persisted_scheme,
+                        message_hex=persisted_message_hex,
+                        signature=signature,
+                    )
                     request = vault_service.complete_sign_request(
                         conn,
                         request_id,
                         name=name,
-                        digest=digest,
-                        scheme=scheme,
+                        digest=persisted_digest,
+                        scheme=persisted_scheme,
                         signature=signature,
+                        message_hex=persisted_message_hex,
+                        signing_context=persisted_context,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                         browser_signed=True,
                     )
