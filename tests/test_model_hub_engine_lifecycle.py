@@ -141,7 +141,7 @@ def fixture_manifest(root: Path, *, version: str = "v8.0.63", build: int = 2) ->
         "release_tag": version, "asset_release_tag": f"model-hub-engine-{version}-{build}",
         "source_sha": "a" * 40, "license": "MIT", "assets": [{
             "platform": platform,
-            "url": archive.as_uri(), "size_bytes": archive.stat().st_size,
+            "url": archive.as_uri(), "format": "zip" if windows else "tar.gz", "size_bytes": archive.stat().st_size,
             "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
             "binary_sha256": hashlib.sha256(binary).hexdigest(), "bin_path": bin_path,
         }],

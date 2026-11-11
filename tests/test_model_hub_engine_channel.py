@@ -475,7 +475,24 @@ def test_damaged_state_is_replaced_only_by_an_authenticated_fetch(tmp_path, sign
     assert "history" in caplog.text and "withdrawal" in caplog.text
 
 
-def test_a_failed_recovery_write_preserves_the_damaged_file(tmp_path, signer, monkeypatch) -> None:
+def test_rejected_authenticated_payload_does_not_leave_a_volatile_withdrawal_gate(tmp_path, signer, monkeypatch):
+    from types import SimpleNamespace
+    from vibe.model_hub_runtime.engine_channel import EngineChannel
+
+    payload = signed(signer, 11)
+    manager = SimpleNamespace(
+        runtime_dir=tmp_path, manifest_path=None, manifest_url=None, offline=False,
+    )
+    engine_channel = EngineChannel(
+        manager, roots=signer.roots(), verifier=LocalVerifier(), fetch=lambda: payload, avibe_version="3.2.6",
+    )
+    monkeypatch.setattr(engine_channel.store, "accept", lambda *_args, **_kwargs: (_ for _ in ()).throw(ChannelError("replayed")))
+
+    status = engine_channel.refresh()
+    assert status.state == "rejected" and status.reason == "replayed"
+    assert engine_channel._restrictive_payload is None
+
+
     """The real atomic publisher must preserve damaged bytes if replacement fails."""
     from config import atomic_io
 

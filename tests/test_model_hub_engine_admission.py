@@ -150,6 +150,35 @@ async def test_routine_drain_upgrades_to_learned_withdrawal_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_successful_activation_rollback_reopens_routine_admission(tmp_path, monkeypatch):
+    from tests.test_model_hub_engine_lifecycle import owner_fixture, signed_candidate
+
+    owner, supervisor, _baseline = owner_fixture(tmp_path, monkeypatch)
+    owner.ensure_running()
+    candidate, _signer, _manifest, _envelope = signed_candidate(owner, tmp_path)
+    supervisor.fail_tag = candidate.asset_release_tag
+    adapter_owner = CLIProxyEngineAdapter(supervisor=supervisor, state_store=object())
+    adapter_owner.lifecycle = owner
+    try:
+        with pytest.raises(EngineUnavailableError):
+            await adapter_owner._select_staged(candidate)
+        assert owner._ready
+        assert adapter_owner._engine_admission.reason is None
+    finally:
+        adapter_owner._engine_admission.reopen()
+
+
+@pytest.mark.asyncio
+async def test_engine_free_search_and_fetch_bypass_cpa_admission():
+    owner = adapter()
+    owner._engine_admission.close("engine_withdrawn")
+    search = await owner.search("source", "unknown", "service", None, {})
+    fetch = await owner.fetch("source", "unknown", "service", None, {})
+    assert search.error == "invalid_endpoint"
+    assert fetch.error == "invalid_endpoint"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream_started", [False, True])
 async def test_withdrawal_outcome_is_explicit_terminal_and_never_fallback(stream_started):
     outcome = RawCallOutcome(

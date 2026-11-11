@@ -1711,6 +1711,13 @@ class CLIProxyEngineAdapter:
             if not withdrawal:
                 self._reopen_routine_admission_if_ready()
             raise
+        except Exception:
+            # Activation can fail after rolling back to a healthy previous
+            # generation. Restore routine admission on that exceptional path;
+            # the helper still refuses to erase a withdrawal fence.
+            if not withdrawal:
+                self._reopen_routine_admission_if_ready()
+            raise
         finally:
             if activated and self.lifecycle.recovered and self.lifecycle._ready:
                 if not self.lifecycle.withdrawn_current:
@@ -2142,15 +2149,17 @@ class CLIProxyEngineAdapter:
             return await self.status()
 
     async def stop_runtime(self) -> EngineStatus:
-        async with self._installation_lock:
-            status = await self.status()
-            if status.health is EngineHealth.INSTALLING:
-                return status
-            start_after_install_task = self._start_after_install_task
-            if start_after_install_task is not None and not start_after_install_task.done():
-                start_after_install_task.cancel()
-            await run_owned_in_thread(self.supervisor.disable)
-            return await self.status()
+        async with self._engine_update_lock:
+            async with self._installation_lock:
+                status = await self.status()
+                if status.health is EngineHealth.INSTALLING:
+                    return status
+                start_after_install_task = self._start_after_install_task
+                if start_after_install_task is not None and not start_after_install_task.done():
+                    start_after_install_task.cancel()
+                disable = self.lifecycle.disable if self.lifecycle is not None else self.supervisor.disable
+                await run_owned_in_thread(disable)
+                return await self.status()
 
     async def stop(self) -> None:
         async with self._installation_lock:
@@ -2511,7 +2520,6 @@ class CLIProxyEngineAdapter:
                 response_received_at=response_received_at,
             )
 
-    @engine_operation
     async def check_search_credential(
         self,
         credential_ref: str,
@@ -2570,7 +2578,6 @@ class CLIProxyEngineAdapter:
             self._keyless_clients[service_id] = KeylessMcpClient(service)
         return self._keyless_clients[service_id]
 
-    @engine_operation
     async def search(
         self,
         source_id: str,
@@ -2602,11 +2609,9 @@ class CLIProxyEngineAdapter:
             on_sent=on_sent,
         )
 
-    @engine_operation
     async def revoke_search_credential(self, credential_ref: str) -> None:
         await run_owned_in_thread(self.state_store.revoke_search_credential, credential_ref)
 
-    @engine_operation
     async def fetch(
         self,
         source_id: str,

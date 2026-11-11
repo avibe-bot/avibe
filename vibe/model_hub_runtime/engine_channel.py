@@ -214,6 +214,9 @@ class EngineChannel:
             changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
             self._restrictive_payload = None
         except ChannelError as exc:
+            # A signed payload rejected by acceptance validation never became
+            # authoritative, so it cannot remain a volatile withdrawal gate.
+            self._restrictive_payload = None
             logger.warning("Model Hub engine channel index rejected: %s", exc)
             return ChannelStatus("rejected", exc.reason, exc.detail)
         except Exception as exc:  # noqa: BLE001 - a refresh reports, it does not raise
