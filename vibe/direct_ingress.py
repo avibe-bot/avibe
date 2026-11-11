@@ -27,6 +27,7 @@ import re
 import socket
 import ssl
 import stat
+from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 import h11
@@ -58,6 +59,14 @@ _REQUEST_HEAD_LIMIT_BYTES = 64 * 1024
 # an idle connection (see ``_UI_KEEPALIVE_TIMEOUT_SECONDS`` in ui_server).
 _KEEPALIVE_TIMEOUT_SECONDS = 120
 _GRACEFUL_SHUTDOWN_SECONDS = 5
+
+
+@dataclass(frozen=True)
+class _PreparedStart:
+    certificate_context: ssl.SSLContext
+    config: Any
+    server_type: Any
+
 
 _HOSTNAME_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _PEER_LABEL_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
@@ -299,6 +308,9 @@ class DirectIngress:
         self._address: tuple[str, int] | None = None
         # Local port of each relay connection to the listener -> transport peer.
         self._relay_peers: dict[int, str] = {}
+        self._listener_socket: socket.socket | None = None
+        self._preparation_task: asyncio.Task | None = None
+        self._start_generation = 0
 
     @property
     def address(self) -> tuple[str, int]:
@@ -313,15 +325,36 @@ class DirectIngress:
     async def start(self) -> None:
         if self.running:
             return
+        generation = self._start_generation
+        # Retain a cancelled caller's preparation until its worker actually
+        # finishes. Repeated starts cannot accumulate filesystem workers.
+        while self._preparation_task is not None:
+            pending = self._preparation_task
+            with contextlib.suppress(Exception):
+                await asyncio.shield(pending)
+            if pending is self._preparation_task:
+                self._preparation_task = None
+        if generation != self._start_generation:
+            return
+        pending = asyncio.create_task(asyncio.to_thread(self._prepare_start))
+        self._preparation_task = pending
+        pending.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+        prepared = await asyncio.shield(pending)
+        if self._preparation_task is pending:
+            self._preparation_task = None
+        if generation == self._start_generation:
+            await self._start_prepared(prepared)
+
+    def _prepare_start(self) -> _PreparedStart:
         import uvicorn
 
-        self._certificate_context = _load_certificate_context(self._certfile, self._keyfile)
+        certificate_context = _load_certificate_context(self._certfile, self._keyfile)
         listener_context = _load_certificate_context(self._certfile, self._keyfile)
         listener_context.sni_callback = self._select_certificate
 
         class _EmbeddedServer(uvicorn.Server):
-            # The main UI server owns process signals; this listener is
-            # stopped through ``DirectIngress.stop``.
+            # The main UI server owns process signals; this listener is stopped
+            # through ``DirectIngress.stop``.
             @contextlib.contextmanager
             def capture_signals(self):
                 yield
@@ -348,42 +381,59 @@ class DirectIngress:
         )
         config.load()
         config.ssl = listener_context
+        return _PreparedStart(certificate_context, config, _EmbeddedServer)
 
+    async def _start_prepared(self, prepared: _PreparedStart) -> None:
+        """Loop-only commit; the lifecycle fences the result before calling."""
+        self._certificate_context = prepared.certificate_context
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener_socket = sock
         try:
             sock.bind(("127.0.0.1", 0))
-        except OSError:
-            sock.close()
+            self._address = ("127.0.0.1", sock.getsockname()[1])
+            server = prepared.server_type(prepared.config)
+            self._server = server
+            self._serve_task = asyncio.create_task(server.serve(sockets=[sock]), name="direct-ingress-listener")
+            while not server.started:
+                if self._serve_task.done():
+                    self._serve_task.result()
+                    raise DirectIngressError("direct ingress listener exited during startup")
+                await asyncio.sleep(0.01)
+        except BaseException:
+            await self.stop()
             raise
-        self._address = ("127.0.0.1", sock.getsockname()[1])
-        self._server = _EmbeddedServer(config)
-        self._serve_task = asyncio.create_task(self._server.serve(sockets=[sock]), name="direct-ingress-listener")
-        while not self._server.started:
-            if self._serve_task.done():
-                self._address = None
-                sock.close()
-                self._serve_task.result()
-                raise DirectIngressError("direct ingress listener exited during startup")
-            await asyncio.sleep(0.01)
+
+    def _prepare_certificate_reload(self, certfile: str, keyfile: str) -> ssl.SSLContext:
+        return _load_certificate_context(certfile, keyfile)
+
+    def _apply_certificate_reload(self, context: ssl.SSLContext, certfile: str, keyfile: str) -> None:
+        self._certificate_context = context
+        self._certfile = certfile
+        self._keyfile = keyfile
 
     async def stop(self) -> None:
+        self._start_generation += 1
         task, self._serve_task = self._serve_task, None
         server, self._server = self._server, None
+        sock, self._listener_socket = self._listener_socket, None
         self._address = None
-        if server is not None:
-            server.should_exit = True
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        try:
+            if server is not None:
+                server.should_exit = True
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            if sock is not None:
+                sock.close()
 
     def reload_certificate(self, certfile: str | None = None, keyfile: str | None = None) -> None:
-        """Present a renewed certificate to handshakes that start from now on."""
+        """Prepare and apply a renewed certificate for existing callers."""
 
         certfile = certfile or self._certfile
         keyfile = keyfile or self._keyfile
-        self._certificate_context = _load_certificate_context(certfile, keyfile)
-        self._certfile = certfile
-        self._keyfile = keyfile
+        context = self._prepare_certificate_reload(certfile, keyfile)
+        self._apply_certificate_reload(context, certfile, keyfile)
 
     def _select_certificate(self, ssl_object: Any, server_name: str | None, _context: Any) -> int | None:
         if server_name is None or server_name.lower() != self.hostname:

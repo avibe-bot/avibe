@@ -719,9 +719,20 @@ def _is_mutation_guard_exempt() -> bool:
         or _is_cli_session_activity_request()
     ):
         return True
+    if _is_cli_direct_suspend_request():
+        return True
     return (
         request.path == "/e2e/simulate-interaction"
         and os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes")
+    )
+
+
+def _is_cli_direct_suspend_request() -> bool:
+    return (
+        request.path == "/api/remote-access/direct/suspend"
+        and _is_direct_loopback_connection()
+        and not _is_direct_ingress_request()
+        and _cli_local_event_token_ok()
     )
 
 
@@ -1561,6 +1572,7 @@ _REMOTE_ACCESS_STATUS_PUBLIC_FIELDS = (
     "pid_state",
     "transport_protocol",
     "settings",
+    "direct",
     "tunnel_quality",
     "network_path",
 )
@@ -7834,6 +7846,12 @@ async def config_post():
     if should_reconcile_remote_access:
         remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
     await asyncio.to_thread(_ensure_remote_access_monitoring, config)
+    try:
+        from vibe import direct_lifecycle
+
+        direct_lifecycle.notify_config_changed(config)
+    except Exception:
+        logger.debug("Direct lifecycle config handoff failed")
     activity_streaming_runtime = None
     if should_reconcile_activity_streaming:
         try:
@@ -7930,6 +7948,19 @@ async def config_post():
     if agent_backend_runtime is not None:
         response_payload["agent_backend_runtime"] = agent_backend_runtime
     return jsonify(response_payload)
+
+
+@app.route("/api/remote-access/direct/suspend", methods=["POST"])
+def remote_access_direct_suspend():
+    """Stop the UI-owned direct path before another process discards its certs."""
+
+    if not _is_cli_direct_suspend_request():
+        return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
+    from vibe import direct_lifecycle
+
+    if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
+        return jsonify({"ok": True, "stopped": True})
+    return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
 
 
 @app.route("/api/remote-access/status", methods=["GET"])
@@ -18728,6 +18759,29 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
 _inbox_bridge_task: "asyncio.Task | None" = None
 _startup_dependency_reconcile_task: "asyncio.Task | None" = None
 _terminal_service: TerminalService | None = None
+_direct_lifecycle: Any | None = None
+
+
+async def _start_direct_lifecycle() -> None:
+    global _direct_lifecycle
+    from vibe.direct_lifecycle import DirectAccessLifecycle, register_active_lifecycle
+
+    if _direct_lifecycle is None:
+        try:
+            lifecycle = DirectAccessLifecycle(app)
+            await lifecycle.start()
+            _direct_lifecycle = lifecycle
+            register_active_lifecycle(lifecycle)
+        except Exception:
+            # Optional direct access never prevents the ordinary Web UI/tunnel.
+            logger.warning("Direct access lifecycle startup failed")
+
+
+async def _stop_direct_lifecycle() -> None:
+    global _direct_lifecycle
+    lifecycle, _direct_lifecycle = _direct_lifecycle, None
+    if lifecycle is not None:
+        await lifecycle.stop()
 
 
 async def _start_inbox_bridge() -> None:
@@ -18751,6 +18805,8 @@ async def _stop_inbox_bridge() -> None:
             logger.debug("inbox bridge shutdown raised", exc_info=True)
 
 
+app.add_event_handler("startup", _start_direct_lifecycle)
+app.add_event_handler("shutdown", _stop_direct_lifecycle)
 app.add_event_handler("startup", _start_inbox_bridge)
 app.add_event_handler("shutdown", _stop_inbox_bridge)
 

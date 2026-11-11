@@ -18,6 +18,7 @@ import os
 import socket
 import ssl
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -327,6 +328,42 @@ async def _call_guard(scope: dict) -> tuple[list[dict], list[dict]]:
     return seen, sent
 
 
+@pytest.mark.asyncio
+async def test_start_prepares_tls_off_loop_and_cancellation_drops_late_result(tmp_path, monkeypatch):
+    certificate = _issue_certificate(tmp_path, HOSTNAME)
+    ingress = DirectIngress(
+        object(),
+        hostname=HOSTNAME,
+        certfile=certificate.certfile,
+        keyfile=certificate.keyfile,
+    )
+    original = direct_ingress._load_certificate_context
+    entered = threading.Event()
+
+    def slow_load(certfile, keyfile):
+        entered.set()
+        time.sleep(0.15)
+        return original(certfile, keyfile)
+
+    monkeypatch.setattr(direct_ingress, "_load_certificate_context", slow_load)
+    task = asyncio.create_task(ingress.start())
+    await asyncio.to_thread(entered.wait, 1.0)
+    await asyncio.sleep(0)
+    # The event loop remains responsive while both TLS contexts are prepared.
+    await asyncio.wait_for(asyncio.sleep(0), timeout=0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await ingress.stop()
+    async with asyncio.timeout(2):
+        while not ingress._preparation_task.done():
+            await asyncio.sleep(0.01)
+    assert ingress.running is False
+    with pytest.raises(DirectIngressError):
+        _ = ingress.address
+
+
+@pytest.mark.asyncio
 async def test_guard_removes_forwarding_metadata_and_replaces_the_peer():
     forged = [
         (b"host", f"{HOSTNAME}:443".upper().encode()),
@@ -553,6 +590,19 @@ async def test_reloaded_certificate_serves_the_next_handshake(tmp_path):
 
     assert before == harness.certificate.serial
     assert after == renewed.serial
+
+
+async def test_failed_certificate_preparation_keeps_previous_context(tmp_path, monkeypatch):
+    async with _running(_Probe(), tmp_path) as harness:
+        previous = harness.ingress._certificate_context
+
+        def fail_prepare(certfile, keyfile):
+            raise ValueError("synthetic invalid replacement")
+
+        monkeypatch.setattr(direct_ingress, "_load_certificate_context", fail_prepare)
+        with pytest.raises(ValueError):
+            harness.ingress.reload_certificate("bad-cert", "bad-key")
+    assert harness.ingress._certificate_context is previous
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")

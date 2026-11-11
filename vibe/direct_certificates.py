@@ -373,6 +373,34 @@ def _clean_unreferenced(state: _State) -> None:
             entry.unlink()
 
 
+def _caller_authorization_error(
+    config: V2Config,
+    expected_pairing_fingerprint: str | None,
+    permission_deadline: float | None,
+) -> CertificateResult | None:
+    """Worker preflight; invoked only under the caller's config file lock.
+
+    The deadline is process-local monotonic authority, never persisted. Legacy
+    callers omit both parameters; I3 supplies both on every invocation.
+    """
+    if expected_pairing_fingerprint is None and permission_deadline is None:
+        return None
+    cloud = config.remote_access.vibe_cloud
+    if expected_pairing_fingerprint is not None:
+        fingerprint = remote_access._pairing_identity_fingerprint(remote_access._pairing_identity_from_cloud(cloud))
+        if fingerprint != expected_pairing_fingerprint:
+            return CertificateResult("pairing_changed", last_error_code="pairing_changed")
+    if not cloud.direct:
+        return CertificateResult("disabled", last_error_code="direct_paths_disabled")
+    if permission_deadline is not None and (
+        type(permission_deadline) not in (int, float)
+        or not math.isfinite(permission_deadline)
+        or time.monotonic() >= permission_deadline
+    ):
+        return CertificateResult("disabled", last_error_code="permission_expired")
+    return None
+
+
 class DirectCertificateClient:
     """One bounded request per poll; construction has no side effects.
 
@@ -381,26 +409,62 @@ class DirectCertificateClient:
     is the caller's explicit fresh-policy notification. ``retry=True`` retries
     a terminal failed order, and ``rotate_key=True`` requests a new key while
     retaining the active pair. These are commands, not recurring settings.
+
+    Optional ``expected_pairing_fingerprint`` and ``permission_deadline`` fence
+    the caller's authorization under the initial config lock, before request
+    dispatch, and before response publication. I3 always supplies both; deadline
+    is an ephemeral monotonic timestamp. Persisted owner opt-in is checked too.
+    Already-admitted HTTP is not atomic with a later config write.
     """
 
     def __init__(self) -> None:
         self._local_retry_at = 0.0
 
-    def poll(self, *, allowed: bool, resume: bool = False, retry: bool = False, rotate_key: bool = False) -> CertificateResult:
+    def poll(
+        self,
+        *,
+        allowed: bool,
+        resume: bool = False,
+        retry: bool = False,
+        rotate_key: bool = False,
+        expected_pairing_fingerprint: str | None = None,
+        permission_deadline: float | None = None,
+    ) -> CertificateResult:
         now = time.time()
         if now < self._local_retry_at:
             return CertificateResult("unavailable", next_poll_at=self._local_retry_at, last_error_code="local_state_unavailable")
         try:
-            return self._poll(now, allowed=allowed, resume=resume, retry=retry, rotate_key=rotate_key)
+            return self._poll(
+                now,
+                allowed=allowed,
+                resume=resume,
+                retry=retry,
+                rotate_key=rotate_key,
+                expected_pairing_fingerprint=expected_pairing_fingerprint,
+                permission_deadline=permission_deadline,
+            )
         except Exception:
             # Do not stringify exceptions: HTTP/crypto/filesystem errors can
             # contain credentials or attacker-controlled response material.
             self._local_retry_at = time.time() + 60
             return CertificateResult("unavailable", next_poll_at=self._local_retry_at, last_error_code="local_state_unavailable")
 
-    def _poll(self, now: float, *, allowed: bool, resume: bool, retry: bool, rotate_key: bool) -> CertificateResult:
+    def _poll(
+        self,
+        now: float,
+        *,
+        allowed: bool,
+        resume: bool,
+        retry: bool,
+        rotate_key: bool,
+        expected_pairing_fingerprint: str | None,
+        permission_deadline: float | None,
+    ) -> CertificateResult:
         with config_file_lock():
             config = V2Config.load()
+            refusal = _caller_authorization_error(config, expected_pairing_fingerprint, permission_deadline)
+            if refusal is not None:
+                return refusal
             state = _load()
             identity = remote_access._pairing_identity_from_cloud(config.remote_access.vibe_cloud)
             if state and state.pairing_fingerprint != remote_access._pairing_identity_fingerprint(identity):
@@ -469,6 +533,15 @@ class DirectCertificateClient:
             _save(state)
             request_id = state.request_id
 
+        # Crypto/preparation can outlive opt-in or the grant. Re-read immediately
+        # before admitting HTTP, then RELEASE the lock for the request. A later
+        # setting change may race already-admitted work; the post-HTTP fence
+        # refuses publication and the lifecycle independently stops serving.
+        with config_file_lock():
+            refusal = _caller_authorization_error(V2Config.load(), expected_pairing_fingerprint, permission_deadline)
+            if refusal is not None:
+                return refusal
+
         response, error, http_status = None, None, 0
         try:
             response = remote_access._device_json_request(config, method, suffix, payload, timeout=8.0)
@@ -481,7 +554,11 @@ class DirectCertificateClient:
         # not against a timestamp captured before the request.
         now = time.time()
         with config_file_lock():
-            if _binding(V2Config.load()) != binding:
+            live_config = V2Config.load()
+            refusal = _caller_authorization_error(live_config, expected_pairing_fingerprint, permission_deadline)
+            if refusal is not None:
+                return refusal
+            if _binding(live_config) != binding:
                 # Pairing's hook retires the old generation. Never remove a new
                 # pairing's files or recreate an unpaired directory on late HTTP.
                 return CertificateResult("pairing_changed")

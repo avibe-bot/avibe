@@ -18,9 +18,65 @@ from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, 
 from storage.db import create_sqlite_engine
 from storage.models import remote_access_authorizations
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
-from vibe import api, remote_access, ui_server
+from vibe import api, direct_lifecycle, remote_access, ui_server
 from vibe import runtime
 from vibe.ui_compat import g, jsonify
+
+
+def test_direct_suspend_route_requires_local_cli_token(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(ui_server, "show_cli_event_token", lambda: "test-cli-token")
+    monkeypatch.setattr(ui_server, "_is_direct_loopback_connection", lambda: True)
+    monkeypatch.setattr(ui_server, "_is_direct_ingress_request", lambda: False)
+    monkeypatch.setattr(
+        direct_lifecycle,
+        "stop_for_pairing_change",
+        lambda timeout_seconds=10.0: stopped.append(timeout_seconds) or True,
+    )
+
+    response = ui_server.app.test_client().post(
+        "/api/remote-access/direct/suspend",
+        headers={
+            "X-Vibe-Show-Client": "cli",
+            "X-Vibe-Show-Cli-Token": "test-cli-token",
+        },
+        base_url="http://127.0.0.1",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "stopped": True}
+    assert stopped == [10.0]
+
+
+def test_pairing_discard_fences_ui_lifecycle_from_cli_process(monkeypatch):
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "device-secret"
+    calls = []
+
+    monkeypatch.setattr(direct_lifecycle, "active_lifecycle", lambda: None)
+    monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: False)
+    monkeypatch.setattr("core.show_pages.show_cli_event_token", lambda: "test-cli-token")
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True, "stopped": True}
+
+    def post(client, url, **kwargs):
+        assert client.trust_env is False
+        assert kwargs["allow_redirects"] is False
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr(remote_access.requests.Session, "post", post)
+    remote_access._stop_direct_lifecycle_before_pairing_discard(config)
+
+    assert calls and calls[0][0].endswith("/api/remote-access/direct/suspend")
+    assert calls[0][1]["headers"]["X-Vibe-Show-Cli-Token"] == "test-cli-token"
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +90,7 @@ def _finish_status_reports_before_restoring_test_mocks(monkeypatch):
     with remote_access._STATUS_REPORT_LOCK:
         assert not any(thread.is_alive() for thread in remote_access._STATUS_REPORT_THREADS)
         assert remote_access._STATUS_REPORT_PENDING is None
+        assert not remote_access._DIRECT_STATUS_REPORT_PENDING
 
 
 @pytest.fixture(autouse=True)
@@ -207,6 +264,14 @@ def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monk
             "optimization_profile": "balanced",
             "edge_ip_version": "4",
             "edge_bind_address": "192.168.1.5",
+        },
+        "direct": {
+            "enabled": False,
+            "state": "disabled",
+            "reason": "setting_off",
+            "certificate_not_after": None,
+            "transport_running": False,
+            "direct_access_allowed": None,
         },
         "tunnel_quality": {"sampled_at": "2026-08-10T10:00:00Z", "grade": "good"},
         "network_path": {
@@ -1590,6 +1655,17 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert "192.0.2.99" not in json.dumps(payload)
 
 
+def test_runtime_status_payload_reports_direct_choice(monkeypatch):
+    config = _config()
+    config.remote_access.vibe_cloud.direct = True
+    monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": False, "binary_found": False})
+    monkeypatch.setattr(remote_access, "_local_ui_healthy", lambda config: True)
+
+    payload = remote_access.runtime_status_payload(config, event="direct_paths_enabled")
+
+    assert payload["direct_paths_enabled"] is True
+
+
 def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, tmp_path) -> None:
     """RA-TQ-014: Local and cloud surfaces consume the bounded V2 aggregate."""
 
@@ -1622,6 +1698,8 @@ def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, 
 
     assert payload["tunnel_quality"]["schema_version"] == 2
     assert payload["tunnel_quality"]["request_path"]["latency_ms"]["p95"] == 1100
+
+
 def test_runtime_status_payload_omits_unknown_observed_origin(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
@@ -1691,6 +1769,7 @@ def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
                 "tunnel_running": False,
                 "cloudflared_found": True,
                 "expected_origin_service": "http://127.0.0.1:5123",
+                "direct_paths_enabled": False,
                 "observed_origin_service": "http://127.0.0.1:5123",
             },
             5.0,
@@ -2505,6 +2584,107 @@ def test_lifecycle_status_report_does_not_block_stop(monkeypatch, tmp_path) -> N
     remote_access.drain_runtime_status_reports(timeout_seconds=1.0)
 
 
+@pytest.mark.parametrize("kind", ["missing", "wrong", "forwarded", "direct-ingress"])
+def test_direct_suspend_route_cannot_bypass_remote_or_csrf_boundary(monkeypatch, kind):
+    _config().save()
+    stopped = []
+    monkeypatch.setattr(ui_server, "show_cli_event_token", lambda: "test-cli-token")
+    monkeypatch.setattr(direct_lifecycle, "stop_for_pairing_change", lambda **kw: stopped.append(True))
+    headers = {"X-Vibe-Show-Client": "cli", "X-Vibe-Show-Cli-Token": "test-cli-token"}
+    with ui_server.app.test_request_context(
+        "/api/remote-access/direct/suspend", method="POST", headers=headers, base_url="http://127.0.0.1",
+    ) as request:
+        request._request.scope["client"] = ("127.0.0.1", 51234)
+        assert ui_server._is_cli_direct_suspend_request()
+    if kind == "missing":
+        headers.pop("X-Vibe-Show-Cli-Token")
+    elif kind == "wrong":
+        headers["X-Vibe-Show-Cli-Token"] = "wrong"
+    elif kind == "forwarded":
+        headers["X-Forwarded-For"] = "192.0.2.1"
+    else:
+        monkeypatch.setattr(ui_server, "_is_direct_ingress_request", lambda: True)
+    with ui_server.app.test_request_context(
+        "/api/remote-access/direct/suspend", method="POST", headers=headers, base_url="http://127.0.0.1",
+    ) as request:
+        request._request.scope["client"] = ("127.0.0.1", 51234)
+        assert not ui_server._is_cli_direct_suspend_request()
+        assert not ui_server._is_mutation_guard_exempt()
+        _, status = ui_server.remote_access_direct_suspend()
+        assert status == 403
+    assert stopped == []
+
+
+@pytest.mark.parametrize("last_choice", [False, True])
+def test_transition_reports_survive_heartbeat_coalescing_and_aba(monkeypatch, last_choice):
+    started, release = threading.Event(), threading.Event()
+    reports = []
+    persisted = _config()
+    persisted.remote_access.vibe_cloud.direct = last_choice
+    monkeypatch.setattr(V2Config, "load", lambda: persisted)
+
+    def blocked(config=None, event="heartbeat", **kw):
+        config = config or V2Config.load()
+        reports.append((event, config.remote_access.vibe_cloud.direct))
+        if event == "heartbeat":
+            started.set()
+            assert release.wait(3)
+        return {"ok": True}
+    monkeypatch.setattr(remote_access, "report_runtime_status", blocked)
+    remote_access._report_runtime_status_async(event="heartbeat")
+    assert started.wait(1)
+    try:
+        stale = _config()
+        stale.remote_access.vibe_cloud.direct = not last_choice
+        remote_access._report_runtime_status_async(stale, event="quality-latest")
+        for direct in (last_choice, not last_choice, last_choice):
+            config = _config()
+            config.remote_access.vibe_cloud.direct = direct
+            remote_access._report_runtime_status_async(
+                config, event="direct_paths_enabled" if direct else "direct_paths_disabled",
+            )
+        assert len(reports) == 1
+    finally:
+        release.set()
+        remote_access.drain_runtime_status_reports(3)
+    assert reports == [
+        ("heartbeat", last_choice),
+        ("direct_paths_enabled" if last_choice else "direct_paths_disabled", last_choice),
+        ("direct_paths_disabled" if last_choice else "direct_paths_enabled", not last_choice),
+        ("direct_paths_enabled" if last_choice else "direct_paths_disabled", last_choice),
+        ("quality-latest", last_choice),
+    ]
+
+
+@pytest.mark.parametrize("status", [301, 403, 500])
+def test_cross_process_suspend_does_not_retire_on_unconfirmed_response(monkeypatch, status):
+    config = _config()
+    config.remote_access.vibe_cloud.backend_url = "https://backend.test"
+    config.remote_access.vibe_cloud.instance_secret = "test-secret"
+    monkeypatch.setattr(direct_lifecycle, "active_lifecycle", lambda: None)
+    monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: False)
+    monkeypatch.setattr("core.show_pages.show_cli_event_token", lambda: "test-token")
+    def post(client, url, **kw):
+        assert not client.trust_env and kw["allow_redirects"] is False
+        return SimpleNamespace(status_code=status)
+    monkeypatch.setattr(remote_access.requests.Session, "post", post)
+    with pytest.raises(remote_access._PairingRevocationUnavailable):
+        remote_access._stop_direct_lifecycle_before_pairing_discard(config)
+
+
+def test_live_direct_status_reads_ui_without_proxy_or_redirect(monkeypatch):
+    config = _config()
+    config.remote_access.vibe_cloud.direct = True
+    monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: False)
+    direct = {"enabled": True, "state": "running", "transport_running": True}
+    def get(client, url, **kw):
+        assert not client.trust_env and kw["allow_redirects"] is False
+        assert url == "http://127.0.0.1:5123/api/remote-access/status"
+        return SimpleNamespace(status_code=200, json=lambda: {"direct": direct})
+    monkeypatch.setattr(remote_access.requests.Session, "get", get)
+    assert remote_access.live_direct_status(config) == direct
+
+
 def test_async_runtime_status_reporter_serializes_and_coalesces(monkeypatch) -> None:
     started = threading.Event()
     release = threading.Event()
@@ -2924,17 +3104,20 @@ def test_stop_loads_config_before_connector_lock(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     load_lock_states = []
+    caller_thread = threading.get_ident()
 
     def load_config():
-        load_lock_states.append(remote_access._CONNECTOR_LOCK._is_owned())
+        load_lock_states.append((threading.get_ident(), remote_access._CONNECTOR_LOCK._is_owned()))
         return config
 
     monkeypatch.setattr(remote_access.V2Config, "load", load_config)
 
     result = remote_access.stop()
+    remote_access.drain_runtime_status_reports(3)
 
     assert result["ok"] is True
-    assert load_lock_states == [False]
+    assert [owned for thread, owned in load_lock_states if thread == caller_thread] == [False]
+    assert all(not owned for _, owned in load_lock_states)
 
 
 def test_reconcile_stops_when_remote_access_is_disabled(monkeypatch, tmp_path) -> None:
