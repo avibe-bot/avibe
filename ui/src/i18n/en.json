@@ -7100,6 +7100,7 @@
     "transportHttp": "http",
     "toolMeta": "{{count}} tools · {{transport}}",
     "tools": "Tools",
+    "toolsToggle": "Tools · {{count}}",
     "generatedAt": "last refreshed {{time}}",
     "generatedAtWithVersion": "last refreshed {{time}} · server v{{version}}",
     "serverVersion": "server v{{version}}",
