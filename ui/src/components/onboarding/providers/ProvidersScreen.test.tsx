@@ -470,7 +470,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
   });
 
-  it('AUTH-SETUP-139 checks a saved key and writes the answer on its card, checking then connected with its count', async () => {
+  it('AUTH-SETUP-164 checks a saved key and writes the answer on its card, checking then connected with its count', async () => {
     const listing = deferred<{ source: Source; removed_hops: []; interrupted: [] }>();
     serve({ sources: [savedKey('src_good', 'anthropic')] });
     // Held open, so the checking state is observable rather than a frame.
@@ -499,7 +499,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(modelsApi.refreshSource).toHaveBeenCalledTimes(1);
   });
 
-  it('AUTH-SETUP-139 names a rejected key on its card, keeps it pressable, and says nothing passed beside Continue', async () => {
+  it('AUTH-SETUP-164 names a rejected key on its card, keeps it pressable, and says nothing passed beside Continue', async () => {
     serve({
       sources: [savedKey('src_wrong', 'anthropic')],
       listing: { src_wrong: rejectedListing(401) },
@@ -519,7 +519,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: false });
   });
 
-  it('AUTH-SETUP-139 says nothing passed in Chinese, and stays quiet once any key passes', async () => {
+  it('AUTH-SETUP-164 says nothing passed in Chinese, and stays quiet once any key passes', async () => {
     await i18n.changeLanguage('zh');
     serve({
       sources: [savedKey('src_wrong', 'anthropic'), savedKey('src_good', 'openai', { masked_credential: 'sk-…1111' })],
@@ -542,7 +542,7 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(summary()?.textContent).toBe('还没有供应商通过检查，助手暂时没有可用的模型'));
   });
 
-  it('AUTH-SETUP-139 replaces a rejected key from its card, and the card reports the key that passed', async () => {
+  it('AUTH-SETUP-164 replaces a rejected key from its card, and the card reports the key that passed', async () => {
     serve({
       sources: [savedKey('src_wrong', 'anthropic')],
       listing: { src_wrong: rejectedListing(401) },
@@ -587,7 +587,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(summary()?.textContent).toBe('1 provider added: Anthropic');
   });
 
-  it('AUTH-SETUP-139 asks before a replacement key that would leave assistants without a model', async () => {
+  it('AUTH-SETUP-164 asks before a replacement key that would leave assistants without a model', async () => {
     serve({ sources: [savedKey('src_used', 'anthropic')], listing: { src_used: ['claude-opus', 'claude-sonnet'] } });
     const hop = { backend: 'vibey', menu_model: 'claude-opus', source_id: 'src_used', model_id: 'claude-opus', position: 1 };
     const gap = { backend: 'vibey', model_id: 'claude-opus', agents: ['main'] };
@@ -619,7 +619,7 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(within(cardFor('anthropic')).getByText('Connected · 1 model')).toBeTruthy());
   });
 
-  it('AUTH-SETUP-139 asks before a check that would drop routed models, and still counts the working key', async () => {
+  it('AUTH-SETUP-164 asks before a check that would drop routed models, and still counts the working key', async () => {
     serve({
       sources: [savedKey('src_narrow', 'anthropic', { models: [modelOf('claude-opus'), modelOf('claude-sonnet')] })],
     });
@@ -655,7 +655,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(within(cardFor('anthropic')).getByText('Connected · 1 model')).toBeTruthy();
   });
 
-  it('AUTH-SETUP-139 does not check again once setup may no longer write to the Hub', async () => {
+  it('AUTH-SETUP-164 does not check again once setup may no longer write to the Hub', async () => {
     serve({ sources: [savedKey('src_flaky', 'anthropic')], listing: { src_flaky: new ApiCallError('engine_down', undefined, true, [], [], [], 503) } });
     const { show } = renderScreen();
     await settled();
@@ -670,7 +670,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(modelsApi.refreshSource).toHaveBeenCalledTimes(1);
   });
 
-  it('AUTH-SETUP-139 settles the inventory when a check readback supersedes a read in flight', async () => {
+  it('AUTH-SETUP-164 settles the inventory when a check readback supersedes a read in flight', async () => {
     const listing = deferred<{ source: Source; removed_hops: []; interrupted: [] }>();
     serve({ sources: [savedKey('src_good', 'anthropic')] });
     const answered = vi.mocked(modelsApi.refreshSource).getMockImplementation()!;
@@ -693,7 +693,7 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: false }));
   });
 
-  it('AUTH-SETUP-139 opens the key that failed when a provider holds two keys', async () => {
+  it('AUTH-SETUP-164 opens the key that failed when a provider holds two keys', async () => {
     serve({
       sources: [
         source({ id: 'src_works', vendor: 'openai', masked_credential: 'sk-…1111' }),
@@ -713,7 +713,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(summary()?.textContent).toBe('1 provider added: OpenAI');
   });
 
-  it('AUTH-SETUP-139 removes a key from its card after a confirmation', async () => {
+  it('AUTH-SETUP-164 removes a key from its card after a confirmation', async () => {
     serve({
       sources: [savedKey('src_wrong', 'anthropic')],
       listing: { src_wrong: rejectedListing(401) },
@@ -740,7 +740,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionAdd' });
   });
 
-  it('AUTH-SETUP-139 asks once more before removing a key assistants still route to', async () => {
+  it('AUTH-SETUP-164 asks once more before removing a key assistants still route to', async () => {
     serve({ sources: [savedKey('src_used', 'anthropic')], listing: { src_used: ['claude-opus'] } });
     const hop = { backend: 'vibey', menu_model: 'claude-opus', source_id: 'src_used', model_id: 'claude-opus', position: 1 };
     const gap = { backend: 'vibey', model_id: 'claude-opus', agents: ['main'] };

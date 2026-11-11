@@ -4600,7 +4600,7 @@ def test_api_key_setup_does_not_schedule_a_model(
 
 
 def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-139
+    """Scenario: AUTH-SETUP-164
 
     The wizard's key, carried through real credential custody and real model
     listing: saved unverified, checked and refused with the provider's 401,
