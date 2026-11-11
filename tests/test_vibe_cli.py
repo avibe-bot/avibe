@@ -4607,6 +4607,16 @@ def test_remote_parser_allows_guided_setup_without_subcommand():
     assert args.remote_command is None
 
 
+def test_remote_parser_accepts_direct_toggle_json():
+    parser = cli.build_parser()
+    args = parser.parse_args(["remote", "direct", "on", "--json"])
+
+    assert args.command == "remote"
+    assert args.remote_command == "direct"
+    assert args.direct_command == "on"
+    assert args.json is True
+
+
 def test_remote_parser_accepts_status_json():
     parser = cli.build_parser()
     args = parser.parse_args(["remote", "status", "--json"])
@@ -4614,6 +4624,53 @@ def test_remote_parser_accepts_status_json():
     assert args.command == "remote"
     assert args.remote_command == "status"
     assert args.json is True
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_cmd_remote_direct_on_writes_setting_without_restart(monkeypatch, capsys, json_output):
+    import config.v2_config as v2_config
+
+    saved = []
+    config = SimpleNamespace(remote_access=SimpleNamespace(vibe_cloud=SimpleNamespace(direct=False)))
+
+    def fake_update(mutator):
+        mutator(config)
+        saved.append(config.remote_access.vibe_cloud.direct)
+        return config
+
+    monkeypatch.setattr(v2_config, "update_config_fields", fake_update)
+    monkeypatch.setattr(remote_access, "live_direct_status", lambda *args, **kw: None)
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kw: None)
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda config=None: {
+            "ok": True,
+            "public_url": "https://private-name-app.avibe.bot",
+            "cloudflared_path": "/private/transport/path",
+            "direct": {
+                "enabled": True,
+                "state": "transport-not-installed",
+                "reason": "transport_not_installed",
+                "certificate_not_after": None,
+                "transport_running": False,
+            },
+        },
+    )
+
+    result = cli.cmd_remote_direct(SimpleNamespace(direct_command="on", json=json_output))
+
+    assert result == 0
+    assert saved == [True]
+    output = capsys.readouterr().out
+    assert "private-name" not in output and "/private/transport/path" not in output
+    if json_output:
+        payload = json.loads(output)
+        assert payload["direct"]["state"] == "transport-not-installed"
+        assert payload["direct_setting_changed"] is True
+        assert "public_url" not in payload and "cloudflared_path" not in payload
+    else:
+        assert "Direct paths enabled." in output
 
 
 def test_cmd_remote_pair_prompts_and_reports_success(monkeypatch, capsys):
