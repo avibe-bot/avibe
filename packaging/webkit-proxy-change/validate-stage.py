@@ -4,10 +4,13 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import signal
 import subprocess
 import sys
 from pathlib import Path
+
+from evidence import analyze_matrix, inventory, operation
 
 
 def require(condition: bool, message: str) -> None:
@@ -15,7 +18,7 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def validate_bundle(app: Path, settings_path: Path) -> None:
+def validate_bundle(app: Path, build_log: Path) -> None:
     app = app.resolve()
     test = app / "PlugIns/WebKitProxyChangeTests.xctest"
     for bundle, identifier, package in (
@@ -42,12 +45,22 @@ def validate_bundle(app: Path, settings_path: Path) -> None:
                 require((bundle / name).is_file(), f"{bundle.name}: missing {name}")
         print(json.dumps({"bundle": bundle.name, "executable": executable, "valid": True}))
 
-    settings = json.loads(settings_path.read_text())
-    tests = next(row["buildSettings"] for row in settings if row["target"] == "WebKitProxyChangeTests")
+    # Use the command that actually linked this bundle, not a new Xcode
+    # settings query. Paths are rooted at the recorded app so downloaded CI
+    # artifacts can be checked without recreating the runner's directory.
     host_info = plistlib.loads((app / "Info.plist").read_bytes())
-    for key in ("TEST_HOST", "BUNDLE_LOADER"):
-        require(Path(tests[key]).resolve() == app / host_info["CFBundleExecutable"],
-                f"{key} does not resolve to the built host executable")
+    test_info = plistlib.loads((test / "Info.plist").read_bytes())
+    expected_relative_output = Path("PlugIns/WebKitProxyChangeTests.xctest") / test_info["CFBundleExecutable"]
+    links = [shlex.split(line) for line in build_log.read_text().splitlines() if " -bundle_loader " in line]
+    require(len(links) == 1, f"expected one XCTest link command, found {len(links)}")
+    command = links[0]
+    output = Path(command[command.index("-o") + 1])
+    recorded_app = output.parents[2]
+    require(recorded_app.name == app.name and output.relative_to(recorded_app) == expected_relative_output,
+            "link command does not produce the built XCTest bundle")
+    loader = Path(command[command.index("-bundle_loader") + 1])
+    require(loader == recorded_app / host_info["CFBundleExecutable"],
+            "BUNDLE_LOADER does not resolve to the built host executable")
     products = app.parent.parent
     runs = list(products.glob("*.xctestrun"))
     require(len(runs) == 1, f"expected one xctestrun, found {len(runs)}")
@@ -70,6 +83,14 @@ def validate_bundle(app: Path, settings_path: Path) -> None:
 def validate_evidence(stage: str, out: Path, matrix_path: Path) -> None:
     methods = {"test-launch": "testHostLaunch", "direct-minimal": "testDirectTLSMinimal",
                "cold-minimal": "testColdMinimal", "full-matrix": "testMatrix"}
+    cases = json.loads(matrix_path.read_text())
+    inventory(cases)
+    events = [json.loads(line) for line in (out / "cert/fixture.jsonl").read_text().splitlines()]
+    if stage == "full-matrix":
+        report = analyze_matrix(cases, events)
+        (out / "matrix-observations.json").write_text(json.dumps(report, indent=2, sort_keys=True))
+        require(report["observedCases"] == report["expectedCases"],
+                f"matrix coverage: {report['observedCases']}/{report['expectedCases']} observed; see matrix-observations.json")
     log = (out / f"{stage}.log").read_text()
     counts = re.findall(r"Executed (\d+) tests?, with (\d+) failures?", log)
     require(bool(counts) and all(count == "1" and failures == "0" for count, failures in counts),
@@ -78,27 +99,17 @@ def validate_evidence(stage: str, out: Path, matrix_path: Path) -> None:
             f"{stage}: expected test method did not pass")
     if stage == "test-launch":
         return
-    events = [json.loads(line) for line in (out / "cert/fixture.jsonl").read_text().splitlines()]
-    cases = json.loads(matrix_path.read_text())
-    if stage == "full-matrix":
-        for case in cases:
-            require(any(e.get("event") == "client" and e.get("case") == case["id"]
-                        and e.get("step") == "case_complete" for e in events),
-                    f"{case['id']}: no completed case evidence")
-    else:
+    if stage != "full-matrix":
         direct = stage == "direct-minimal"
         action = "coldBeforeFirstRequest" if direct else "coldBeforeWebView"
         case = next(c for c in cases if c["action"] == action and c["origin"] == "h1")
-        case_id = case["id"]
-        route = "origin" if direct else "proxy-backend"
-        suffixes = ("direct-minimal", "direct-minimal-fetch") if direct else ("minimal", "minimal-fetch")
-        for suffix in suffixes:
-            require(any(e.get("event") == "request" and e.get("id") == f"{case_id}-{suffix}"
-                        and e.get("route") == route and e.get("protocol") == "1.1" for e in events),
-                    f"{stage}: missing authoritative {route} request {case_id}-{suffix}")
-        if not direct:
-            require(any(e.get("event") == "proxy_connect" and e.get("case") == case_id for e in events),
-                    f"{stage}: missing CONNECT evidence")
+        route = "origin-direct" if direct else "proxy-backend"
+        steps = (("direct-minimal-page", "direct-minimal", "/page"), ("direct-minimal-fetch", "direct-minimal-fetch", "/fetch")) if direct else (
+            ("minimal-page", "minimal", "/page"), ("minimal-fetch", "minimal-fetch", "/fetch"))
+        observations = [operation(case, step, suffix, path, events) for step, suffix, path in steps]
+        (out / f"{stage}-observations.json").write_text(json.dumps(observations, indent=2, sort_keys=True))
+        require(all(o["outcome"] == "routed" and o["route"]["path"] == route and o["route"]["protocol"] == "1.1" for o in observations),
+                f"{stage}: missing correlated client/server/TLS/CONNECT route evidence")
     print(json.dumps({"stage": stage, "expectedTestCount": 1, "positiveExecutionEvidence": True}))
 
 

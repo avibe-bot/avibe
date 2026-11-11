@@ -16,7 +16,7 @@ import json, sys
 p, stages_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = json.load(open(p))
 stages = [json.loads(line) for line in open(stages_path)]
-names = ("build-for-testing", "product-validation", "install", "test-launch", "direct-minimal", "cold-minimal", "full-matrix")
+names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "direct-minimal", "cold-minimal", "full-matrix")
 if not stages:
     cause = data.get("reason", "setup failed before build")
     stages = [{"stage": name, "status": "skipped", "verdict": "unmeasured", "exit": None, "cause": cause} for name in names]
@@ -29,17 +29,19 @@ print(json.dumps(data, sort_keys=True))
 PY
 }
 trap 'finalize_summary "$?"' EXIT
+bounded() { python3 "$probe_dir/validate-stage.py" timeout "$@"; }
+git -C "$repo_root" rev-parse HEAD > "$out/commit.txt"
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode_26.6.app/Contents/Developer}"
 
 echo "label=$label"
 echo "developer_dir=$DEVELOPER_DIR"
-xcodebuild -version || true
-xcrun simctl list runtimes available || true
+bounded 30 xcodebuild -version | tee "$out/xcode-version.txt"
+bounded 30 xcrun simctl list runtimes available | tee "$out/runtime-inventory.txt"
 
 select_runtime() {
   local selector=$1
-  xcrun simctl list runtimes available -j | python3 -c '
+  bounded 30 xcrun simctl list runtimes available -j | python3 -c '
 import json, sys
 selector = sys.argv[1]
 runtimes = []
@@ -88,12 +90,20 @@ runtime_id=${runtime#*|}
 printf '%s\n' "$runtime" | tee "$out/runtime.txt"
 printf '{"status":"running","label":"%s","runtimeVersion":"%s","runtimeID":"%s"}\n' "$label" "$runtime_version" "$runtime_id" > "$out/summary.json"
 
+bounded 30 xcrun simctl list runtimes available -j > "$out/runtime-inventory.json"
+python3 - "$out/runtime-inventory.json" "$runtime_id" "$out/summary.json" <<'PY'
+import json, sys
+runtime = next(r for r in json.load(open(sys.argv[1]))["runtimes"] if r["identifier"] == sys.argv[2])
+data = json.load(open(sys.argv[3])); data["runtimeBuild"] = runtime.get("buildversion", "unknown")
+json.dump(data, open(sys.argv[3], "w"))
+PY
+
 # Use loopback aliases plus test-only hosts. The fixture and the browser never
 # leave the runner; the names are unique to this matrix and have no public DNS.
 marker="# avibe-webkit-proxy-change-${GITHUB_RUN_ID:-local}"
 cleanup_hosts() {
-  sudo -n sed -i '' "\\|$marker|d" /etc/hosts || true
-  sudo -n ifconfig lo0 -alias 127.0.0.2 || true
+  bounded 10 sudo -n sed -i '' "\\|$marker|d" /etc/hosts || true
+  bounded 10 sudo -n ifconfig lo0 -alias 127.0.0.2 || true
 }
 trap 'finalize_summary "$?"; cleanup_hosts' EXIT
 sudo -n ifconfig lo0 alias 127.0.0.2 255.0.0.0
@@ -113,9 +123,9 @@ cp "$out/cert/Anchor.der" "$probe_dir/generated/Anchor.der"
 fixture_pid=""
 cleanup_fixture() {
   if [[ -n "$fixture_pid" ]] && kill -0 "$fixture_pid" 2>/dev/null; then
-    sudo -n kill -TERM "$fixture_pid" || true
+    bounded 5 sudo -n kill -TERM "$fixture_pid" || true
     for _ in {1..20}; do kill -0 "$fixture_pid" 2>/dev/null || break; sleep 0.1; done
-    sudo -n kill -KILL "$fixture_pid" 2>/dev/null || true
+    bounded 5 sudo -n kill -KILL "$fixture_pid" 2>/dev/null || true
   fi
 }
 trap 'finalize_summary "$?"; cleanup_fixture; cleanup_hosts' EXIT
@@ -123,13 +133,24 @@ sudo -n env PATH="$PATH" node "$probe_dir/fixture.mjs" "$out/cert" >"$out/fixtur
 fixture_pid=$!
 echo "$fixture_pid" > "$out/fixture.pid"
 for _ in {1..100}; do
-  if curl --silent --fail http://127.0.0.1:18090/health >/dev/null; then break; fi
+  if curl --max-time 1 --silent --fail http://127.0.0.1:18090/health > "$out/fixture-health.json" && \
+    python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("ok") is True else 1)' "$out/fixture-health.json"; then break; fi
   sleep 0.1
 done
-curl --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
+curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+bounded 20 python3 - "$probe_dir/matrix.json" <<'PY'
+import json, socket, sys
+for row in json.load(open(sys.argv[1])):
+    host = row["id"] + ".webkit-proxy.test"
+    expected = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
+    actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}
+    assert actual == {expected}, (host, expected, actual)
+print("Runner host mappings verified (simulator visibility still requires real requests)")
+PY
 
 # Choose a stable simulator device type available in the pinned Xcode.
-device_type=$(xcrun simctl list devicetypes -j | python3 -c '
+device_type=$(bounded 30 xcrun simctl list devicetypes -j | python3 -c '
 import json, sys
 items=json.load(sys.stdin).get("devicetypes", [])
 for preferred in ("iPhone 15", "iPhone 14", "iPhone 16"):
@@ -138,19 +159,17 @@ for preferred in ("iPhone 15", "iPhone 14", "iPhone 16"):
             print(item["identifier"]); raise SystemExit
 raise SystemExit("no supported iPhone device type")
 ')
-device_id=$(xcrun simctl create "WebKit Proxy Change ${GITHUB_RUN_ID:-local} ${label}" "$device_type" "$runtime_id")
+device_id=$(bounded 30 xcrun simctl create "WebKit Proxy Change ${GITHUB_RUN_ID:-local} ${label}" "$device_type" "$runtime_id")
 echo "$device_id" | tee "$out/device.txt"
 cleanup_device() {
-  xcrun simctl shutdown "$device_id" >/dev/null 2>&1 || true
-  xcrun simctl delete "$device_id" >/dev/null 2>&1 || true
+  bounded 20 xcrun simctl shutdown "$device_id" >/dev/null 2>&1 || true
+  bounded 20 xcrun simctl delete "$device_id" >/dev/null 2>&1 || true
 }
 trap 'finalize_summary "$?"; cleanup_device; cleanup_fixture; cleanup_hosts' EXIT
-xcrun simctl boot "$device_id"
-# Exact 17.0 first boot took 381s in the preceding run; bound it without
-# rejecting that observed healthy migration. Newest boot took 101s.
+bounded 120 xcrun simctl boot "$device_id"
+# Migrate while compiling; readiness remains a strict gate before installation.
 boot_timeout=180
 [[ "$label" == "17.0" ]] && boot_timeout=480
-python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
 
 project="$probe_dir/WebKitProxyChange.xcodeproj"
 app="$out/derived-data/Build/Products/Debug-iphonesimulator/ProbeHost.app"
@@ -169,11 +188,12 @@ run_stage() {
   "$@" 2>&1 | tee "$out/$stage.log"
   local status=${PIPESTATUS[0]}
   set -e
-  if [[ "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal || "$stage" == "full-matrix" ) ]]; then
+  if [[ "$stage" == "full-matrix" || ( "$status" -eq 0 && ( "$stage" == "test-launch" || "$stage" == *minimal ) ) ]]; then
     set +e
     python3 "$probe_dir/validate-stage.py" "$stage" "$out" "$probe_dir/matrix.json" 2>&1 | tee "$out/$stage-evidence.log"
-    status=${PIPESTATUS[0]}
+    local evidence_status=${PIPESTATUS[0]}
     set -e
+    if [[ "$status" -eq 0 ]]; then status=$evidence_status; fi
   fi
   if [[ "$status" -ne 0 ]]; then
     blocked_by=$stage
@@ -185,11 +205,7 @@ run_stage() {
 }
 
 validate_products() {
-  python3 "$probe_dir/validate-stage.py" timeout 60 xcodebuild -showBuildSettings -json \
-    -project "$project" -scheme WebKitProxyChange -configuration Debug \
-    -destination "platform=iOS Simulator,id=$device_id" \
-    -derivedDataPath "$out/derived-data" CODE_SIGNING_ALLOWED=NO > "$out/build-settings.json" || return $?
-  python3 "$probe_dir/validate-stage.py" bundle "$app" "$out/build-settings.json"
+  python3 "$probe_dir/validate-stage.py" bundle "$app" "$out/build-for-testing.log"
 }
 
 test_method() {
@@ -209,6 +225,7 @@ run_stage build-for-testing python3 "$probe_dir/validate-stage.py" timeout 600 \
   -destination "platform=iOS Simulator,id=$device_id" \
   -derivedDataPath "$out/derived-data" CODE_SIGNING_ALLOWED=NO
 run_stage product-validation validate_products
+run_stage simulator-ready python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
 run_stage install python3 "$probe_dir/validate-stage.py" timeout 60 xcrun simctl install "$device_id" "$app"
 run_stage test-launch test_method test-launch testHostLaunch 150
 run_stage direct-minimal test_method direct-minimal testDirectTLSMinimal 120

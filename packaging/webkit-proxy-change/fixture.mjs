@@ -20,12 +20,15 @@ let connectionID = 0;
 const proxyConnections = new Map();
 const originConnections = new Map();
 const proxyModes = new Map();
+const upstreamConnections = new Map();
+const listening = new Set();
 const stalledClients = new Set();
 const recordedProcesses = new Set();
 
 function log(event, fields = {}) {
   const entry = { sequence: ++sequence, time: new Date().toISOString(), event, ...fields };
   events.push(entry);
+  if (event.endsWith('listening')) listening.add(fields.port);
   fs.appendFileSync(`${out}/fixture.jsonl`, JSON.stringify(entry) + '\n');
   console.log(JSON.stringify(entry));
   return entry;
@@ -49,13 +52,16 @@ window.probe = {
   },
   openEvents(id) {
     return new Promise(resolve => {
-      const item = { events: [], errors: 0, source: new EventSource('/events?id=' + encodeURIComponent(id)) };
+      const item = { events: [], errors: 0, first: null, identities: {}, source: new EventSource('/events?id=' + encodeURIComponent(id)) };
       this.streams[id] = item;
       let answered = false;
       const finish = value => { if (!answered) { answered = true; clearTimeout(timer); resolve(value); } };
       const timer = setTimeout(() => finish({ok:false, id, error:'SSE first-event timeout'}), 10000);
       item.source.onmessage = event => {
         const value = JSON.parse(event.data);
+        item.first ??= value;
+        const identity = value.connection + ':' + value.stream;
+        item.identities[identity] = (item.identities[identity] ?? 0) + 1;
         item.events.push(value);
         finish({ok:true, ...value});
       };
@@ -65,7 +71,9 @@ window.probe = {
   closeEvents(id) { this.streams[id]?.source.close(); return this.streamSnapshot(id); },
   streamSnapshot(id) {
     const item = this.streams[id];
-    return item ? {ok:true, id, count:item.events.length, errors:item.errors, last:item.events.slice(-3)} : {ok:false, id};
+    return item ? {ok:true, id, count:item.events.length, errors:item.errors, first:item.first,
+      originalCount:item.first ? (item.identities[item.first.connection + ':' + item.first.stream] ?? 0) : 0,
+      identities:item.identities, last:item.events.slice(-3)} : {ok:false, id, error:'stream missing'};
   },
   webSocket(id) {
     return new Promise(resolve => {
@@ -90,6 +98,7 @@ function makeOrigin(route, protocol, host, port) {
     : https.createServer({ key, cert });
   const sockets = new WeakMap();
   const sessions = new WeakMap();
+  const socketIDs = new Map();
   const idFor = (object, kind) => {
     const map = kind === 'session' ? sessions : sockets;
     if (!map.has(object)) map.set(object, `${route}-${protocol}-${++connectionID}`);
@@ -97,6 +106,9 @@ function makeOrigin(route, protocol, host, port) {
   };
   server.on('secureConnection', socket => {
     const connection = idFor(socket, 'socket');
+    const socketKey = `${socket.remotePort}:${socket.localPort}`;
+    socketIDs.set(socketKey, connection);
+    socket.on('close', () => socketIDs.delete(socketKey));
     if (route === 'origin' && socket.servername) {
       const connections = originConnections.get(socket.servername) ?? new Set();
       connections.add(socket);
@@ -106,7 +118,8 @@ function makeOrigin(route, protocol, host, port) {
         if (connections.size === 0) originConnections.delete(socket.servername);
       });
     }
-    log('tls_open', {route, protocol, connection, alpn:socket.alpnProtocol, sni:socket.servername, port});
+    log('tls_open', {route, protocol, connection, alpn:socket.alpnProtocol, sni:socket.servername, port,
+      peerPort:socket.remotePort, proxyConnection:upstreamConnections.get(socketKey) ?? null});
     socket.on('error', error => log('tls_error', {route, connection, error:String(error)}));
     socket.on('close', () => log('tls_close', {route, connection}));
   });
@@ -122,7 +135,10 @@ function makeOrigin(route, protocol, host, port) {
     const fixture = byHost.get(hostName);
     const connection = req.httpVersionMajor === 2
       ? idFor(req.stream.session, 'session') : idFor(req.socket, 'socket');
+    const socketKey = `${req.socket.remotePort}:${req.socket.localPort}`;
     return {route, protocol:req.httpVersion, alpn:req.socket.alpnProtocol, connection,
+      tcpConnection:socketIDs.get(socketKey) ?? idFor(req.socket, 'socket'),
+      proxyConnection:upstreamConnections.get(socketKey) ?? null,
       stream:req.stream?.id ?? null, case:fixture?.id ?? null, host:hostName,
       path:url.pathname, id:url.searchParams.get('id') ?? '', method:req.method};
   }
@@ -138,7 +154,11 @@ function makeOrigin(route, protocol, host, port) {
       res.setHeader('content-type', 'text/event-stream');
       res.writeHead(200);
       let tick = 0;
-      const send = () => res.write(`data: ${JSON.stringify({...details, tick:++tick})}\n\n`);
+      const send = () => {
+        const value = {...details, tick:++tick};
+        log('sse_tick', value);
+        res.write(`data: ${JSON.stringify(value)}\n\n`);
+      };
       send();
       const timer = setInterval(send, 250);
       res.on('close', () => clearInterval(timer));
@@ -206,26 +226,42 @@ proxy.on('connect', (req, client, head) => {
   client.on('close', () => { upstream.destroy(); proxyConnections.delete(connection); log('proxy_close',{connection, host}); });
   upstream.on('close', () => client.destroy());
   upstream.once('connect', () => {
+    const key = `${upstream.localPort}:${upstreamPort}`;
+    upstreamConnections.set(key, connection);
+    log('proxy_upstream_connected', {case:c.id, connection, sourcePort:upstream.localPort, upstreamHost, upstreamPort});
+    upstream.once('close', () => upstreamConnections.delete(key));
     client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     if (head.length) upstream.write(head);
     client.pipe(upstream); upstream.pipe(client);
   });
 });
 proxy.listen(18080, '127.0.0.1', () => log('proxy_listening', {port:18080}));
-const refuseProxy = net.createServer(client => {
-  log('proxy_refuse_accept', {port:18082});
-  client.once('data', () => {
-    client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
-    log('proxy_refused', {port:18082});
+function failureListener(kind, port) {
+  return net.createServer(client => {
+    const connection = `${kind}-${++connectionID}`;
+    stalledClients.add(client);
+    log(`proxy_${kind}_accept`, {port, connection});
+    let header = '';
+    client.on('data', chunk => {
+      if (header === null) return;
+      header += chunk.toString('ascii');
+      if (header.length > 8192) { client.destroy(); return; }
+      if (!header.includes('\r\n')) return;
+      const target = /^CONNECT ([^ ]+) HTTP\/1\.[01]\r\n/.exec(header)?.[1];
+      header = null;
+      const host = target?.endsWith(':443') ? target.slice(0, -4) : '';
+      const c = byHost.get(host);
+      if (!c) { client.destroy(); return; }
+      log(kind === 'refuse' ? 'proxy_refused' : 'proxy_stall_connect', {port, connection, case:c.id, host, target});
+      if (kind === 'refuse') client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    });
+    client.on('close', () => { stalledClients.delete(client); log('failure_listener_close', {connection}); });
+    client.on('error', () => stalledClients.delete(client));
   });
-});
+}
+const refuseProxy = failureListener('refuse', 18082);
 refuseProxy.listen(18082, '127.0.0.1', () => log('proxy_refuse_listening', {port:18082}));
-const stallProxy = net.createServer(client => {
-  stalledClients.add(client);
-  log('proxy_stall_accept', {port:18083});
-  client.on('close', () => stalledClients.delete(client));
-  client.on('error', () => stalledClients.delete(client));
-});
+const stallProxy = failureListener('stall', 18083);
 stallProxy.listen(18083, '127.0.0.1', () => log('proxy_stall_listening', {port:18083}));
 const control = http.createServer(async (req,res) => {
   try {
@@ -238,15 +274,30 @@ const control = http.createServer(async (req,res) => {
       result = {ok:true, requests:events.filter(e => (e.event === 'request' || e.event === 'websocket')
         && e.id === url.searchParams.get('id'))};
     } else if (url.pathname === '/close-proxy') {
-      const host = url.searchParams.get('host'); let closed = 0;
-      for (const entry of proxyConnections.values()) if (entry.host === host) {
-        entry.client.destroy(); entry.upstream.destroy(); closed++;
+      const host = url.searchParams.get('host'); const connections = [];
+      for (const [id, entry] of proxyConnections) if (entry.host === host) {
+        connections.push(id); entry.client.destroy(); entry.upstream.destroy();
       }
-      log('proxy_forced_close', {host, closed}); result = {ok:true, closed};
+      result = log('proxy_forced_close', {ok:true, host, closed:connections.length, connections});
     } else if (url.pathname === '/close-origin') {
-      const host = url.searchParams.get('host'); let closed = 0;
-      for (const socket of originConnections.get(host) ?? []) { socket.destroy(); closed++; }
-      log('origin_forced_close', {host, closed}); result = {ok:true, closed};
+      const host = url.searchParams.get('host'); const connections = [];
+      for (const socket of originConnections.get(host) ?? []) {
+        const opened = events.findLast(e => e.event === 'tls_open' && e.route === 'origin' && e.sni === host && e.peerPort === socket.remotePort);
+        if (opened) connections.push(opened.connection);
+        socket.destroy();
+      }
+      result = log('origin_forced_close', {ok:true, host, closed:connections.length, connections});
+    } else if (url.pathname === '/absent-check') {
+      const host = url.searchParams.get('host'); const c = byHost.get(host);
+      if (!c) throw new Error('invalid absent-check host');
+      const state = await new Promise(resolve => {
+        const socket = net.connect({host:'127.0.0.1', port:18081});
+        const done = value => { socket.destroy(); resolve(value); };
+        socket.setTimeout(1000, () => done('timeout'));
+        socket.on('connect', () => done('listening'));
+        socket.on('error', error => done(error.code === 'ECONNREFUSED' ? 'refused' : String(error)));
+      });
+      result = log('absent_listener_check', {ok:state === 'refused', host, case:c.id, port:18081, state});
     } else if (url.pathname === '/proxy-mode') {
       const host = url.searchParams.get('host'); const mode = url.searchParams.get('mode');
       if (!byHost.has(host) || !['origin','transport'].includes(mode)) throw new Error('invalid mode');
@@ -254,7 +305,7 @@ const control = http.createServer(async (req,res) => {
     } else if (url.pathname === '/restart-network') {
       const pid = Number(url.searchParams.get('pid'));
       if (!Number.isInteger(pid) || pid < 2) throw new Error('invalid PID');
-      const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {encoding:'utf8'}).trim();
+      const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {encoding:'utf8', timeout:2000}).trim();
       if (!command.includes('com.apple.WebKit.Networking') ||
           (!command.includes('Simulator') && !command.includes('CoreSimulator'))) {
         throw new Error('refuse non-simulator NetworkProcess: ' + command);
@@ -264,7 +315,9 @@ const control = http.createServer(async (req,res) => {
       process.kill(pid, 'SIGKILL');
       result = {ok:true, pid, command};
     } else if (url.pathname === '/health') {
-      result = {ok:true, cases:cases.length};
+      const ports = [443,18443,18444,18080,18082,18083,18090];
+      result = {ok:servers.every(server => server.listening) && ports.every(port => listening.has(port)),
+        cases:cases.length, listening:[...listening].sort(), originAddresses:['127.0.0.1:443','127.0.0.2:443']};
     } else { throw new Error('unknown control operation'); }
     res.setHeader('content-type','application/json'); res.end(JSON.stringify(result));
   } catch (error) {

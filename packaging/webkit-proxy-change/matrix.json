@@ -18,9 +18,12 @@
   {"id":"restart-empty-h2","origin":"h2","proxy":"h2","action":"restartEmpty"},
   {"id":"restart-placeholder-h1","origin":"h1","proxy":"h1","action":"restartPlaceholder"},
   {"id":"restart-placeholder-h2","origin":"h2","proxy":"h2","action":"restartPlaceholder"},
-  {"id":"failover-absent-h1","origin":"h1","proxy":"h1","action":"failoverAbsent"},
-  {"id":"refuse-h1","origin":"h1","proxy":"h1","action":"refuse"},
-  {"id":"stall-h1","origin":"h1","proxy":"h1","action":"stall"},
+  {"id":"failover-absent-true-h1","origin":"h1","proxy":"h1","action":"failure","listener":"absent","allowFailover":true},
+  {"id":"failover-absent-false-h1","origin":"h1","proxy":"h1","action":"failure","listener":"absent","allowFailover":false},
+  {"id":"failover-refuse-true-h1","origin":"h1","proxy":"h1","action":"failure","listener":"refuse","allowFailover":true},
+  {"id":"failover-refuse-false-h1","origin":"h1","proxy":"h1","action":"failure","listener":"refuse","allowFailover":false},
+  {"id":"failover-stall-true-h1","origin":"h1","proxy":"h1","action":"failure","listener":"stall","allowFailover":true},
+  {"id":"failover-stall-false-h1","origin":"h1","proxy":"h1","action":"failure","listener":"stall","allowFailover":false},
   {"id":"constant-proxy-h2","origin":"h2","proxy":"h2","action":"constantProxy"},
   {"id":"constant-proxy-surviving-h2","origin":"h2","proxy":"h2","action":"constantProxySurviving"}
 ]
