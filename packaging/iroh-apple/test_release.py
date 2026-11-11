@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -153,6 +154,39 @@ class ReleaseTests(unittest.TestCase):
             (package / "LICENSE").unlink()
             with self.assertRaisesRegex(ValueError, "no redistribution license"):
                 release.support_bundle(source, self.directory)
+
+    def test_publication_commands_require_backstop_but_pr_dry_run_does_not(self):
+        # A healthy Apple artifact is insufficient if its master backstop fails.
+        # Test the actual CLI wiring: helper proof tests cannot catch a bypass here.
+        env = {**self.env, "GITHUB_SHA": self.sha, "GITHUB_RUN_ID": "123"}
+        for command, explicit_tag in (("prepare", False), ("prepare", True), ("preflight", True)):
+            for proof_succeeds in (False, True):
+                with self.subTest(command=command, explicit_tag=explicit_tag, proof_succeeds=proof_succeeds):
+                    self.fixture()
+                    release.prepare(self.directory, self.tag, self.sha, "123")
+                    argv = ["release.py", command, "--directory", str(self.directory)]
+                    if explicit_tag:
+                        argv += ["--tag", self.tag]
+                    failure = None if proof_succeeds else subprocess.CalledProcessError(1, "backstop")
+                    with patch.dict(release.os.environ, env, clear=True), \
+                         patch.object(sys, "argv", argv), \
+                         patch.object(release, "gh_json", return_value=[[]]), \
+                         patch.object(release.subprocess, "run", side_effect=failure) as backstop:
+                        if explicit_tag and not proof_succeeds:
+                            with self.assertRaises(subprocess.CalledProcessError):
+                                release.main()
+                        else:
+                            release.main()
+                    if explicit_tag:
+                        backstop.assert_called_once_with([
+                            sys.executable,
+                            str(Path(__file__).resolve().parents[2] / "scripts/ci_release_backstop.py"),
+                            "--repository", "avibe-bot/avibe", "--source-sha", self.sha,
+                        ], check=True)
+                    else:
+                        backstop.assert_not_called()
+                    state = release.read_json(self.directory / release.RELEASE_NAME)["release_state"]
+                    self.assertEqual(state, "published" if command == "preflight" and proof_succeeds else "pending")
 
     def test_auxiliary_tag_is_not_an_official_product_version(self):
         # Exercise the existing release selector, not a duplicated tag regex.

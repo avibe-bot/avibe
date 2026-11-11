@@ -16,6 +16,7 @@ on:
     paths:
       - .github/workflows/iroh-apple-gate.yml
       - packaging/iroh-apple/**
+      - scripts/ci_release_backstop.py
 
 permissions:
   contents: read
@@ -147,6 +148,9 @@ jobs:
     name: Publication manifest (read-only dry run)
     needs: gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -182,6 +186,7 @@ jobs:
     # environment reviewer lock; repository writers can dispatch this workflow.
     permissions:
       contents: write
+      actions: read
     concurrency:
       group: iroh-apple-publication
       cancel-in-progress: false
@@ -201,7 +206,7 @@ jobs:
         with:
           name: iroh-apple-release-candidate-${{ github.sha }}
           path: dist
-      - name: Refuse mismatched provenance, runtime, or existing tag/release
+      - name: Require exact-SHA master backstop and refuse mismatched or existing release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}

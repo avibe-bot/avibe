@@ -130,6 +130,70 @@ def test_prove_backstop_accepts_explicit_full_manual_master_run() -> None:
     assert proof.event == "workflow_dispatch"
 
 
+@pytest.mark.parametrize(
+    "runs,jobs,expected",
+    [
+        ([_run()], {1: [_job()]}, 0),
+        ([_run(event="workflow_dispatch")], {1: [_job()]}, 0),
+        ([], {}, 1),
+        ([_run(status="in_progress", conclusion=None)], {1: [_job()]}, 1),
+        ([_run(conclusion="failure")], {1: [_job()]}, 1),
+        ([_run(conclusion="cancelled")], {1: [_job()]}, 1),
+        ([_run(conclusion="skipped")], {1: [_job()]}, 1),
+        ([_run(sha="c" * 40)], {1: [_job()]}, 1),
+        ([_run(branch="topic")], {1: [_job()]}, 1),
+        ([_run(event="pull_request")], {1: [_job()]}, 1),
+        ([{**_run(), "path": ".github/workflows/other.yml"}], {1: [_job()]}, 1),
+        ([_run()], {}, 1),
+        ([_run()], {1: [_job(name="unit-tests")]}, 1),
+        ([_run()], {1: [_job(conclusion="skipped")]}, 1),
+        ([_run()], {1: [_job(status="in_progress", conclusion=None)]}, 1),
+        ([_run()], {1: [_job(conclusion="failure")]}, 1),
+    ],
+    ids=["push", "dispatch", "missing", "running", "failed", "cancelled", "skipped",
+         "wrong-sha", "wrong-branch", "wrong-event", "wrong-workflow", "empty-jobs",
+         "missing-terminal", "coalesced", "terminal-running", "terminal-failed"],
+)
+def test_source_sha_cli_requires_exact_full_proof_without_a_tag(monkeypatch, runs, jobs, expected) -> None:
+    # The old tag-only CLI cannot certify a source before publication creates a
+    # tag; this boundary must enforce the same full proof without a ref lookup.
+    api = FakeApi(runs=runs, jobs=jobs)
+    monkeypatch.setattr(gate, "GitHubApi", lambda *_args: api)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    assert gate.main(["--repository", "avibe-bot/avibe", "--source-sha", SOURCE_SHA]) == expected
+    assert api.calls
+    assert all(not path.startswith("git/") for path, _query in api.calls)
+    assert all(query["head_sha"] == SOURCE_SHA for path, query in api.calls if path.endswith("/runs"))
+
+
+@pytest.mark.parametrize("sha", ["", "a" * 39, "g" * 40, "master"])
+def test_source_sha_rejects_invalid_commit_before_api_access(sha) -> None:
+    api = FakeApi(runs=[_run()], jobs={1: [_job()]})
+    with pytest.raises(gate.ReleaseBackstopError, match="invalid source SHA"):
+        gate.prove_backstop_sha(api, source_sha=sha)
+    assert not api.calls
+
+
+def test_source_sha_cli_api_errors_fail_closed(monkeypatch) -> None:
+    api = FakeApi(runs=[], jobs={})
+
+    def unavailable(*_args, **_kwargs):
+        raise gate.ReleaseBackstopError("GitHub API request failed (HTTP 403)")
+
+    monkeypatch.setattr(api, "get", unavailable)
+    monkeypatch.setattr(gate, "GitHubApi", lambda *_args: api)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    assert gate.main(["--repository", "avibe-bot/avibe", "--source-sha", SOURCE_SHA]) == 1
+
+
+@pytest.mark.parametrize("args", [[], ["--tag", TAG, "--source-sha", SOURCE_SHA]])
+def test_backstop_cli_requires_exactly_one_source(args) -> None:
+    with pytest.raises(SystemExit) as error:
+        gate._parser().parse_args(args)
+    assert error.value.code == 2
+
+
 def test_workflow_run_pagination_is_followed() -> None:
     api = FakeApi(
         runs=[_run(run_id=index, conclusion="failure") for index in range(1, 101)],

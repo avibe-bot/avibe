@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -205,6 +206,15 @@ def publication_context(env: dict[str, str], tag: str) -> None:
     require(env.get("GITHUB_REF") == "refs/heads/master", "publication requires master")
 
 
+def publication_backstop(source_sha: str) -> None:
+    # Reuse the repository-wide proof, but before the tag exists. The helper
+    # inherits GH_TOKEN and fails closed on missing/failed proof or API errors.
+    subprocess.run([
+        sys.executable, str(HERE.parents[1] / "scripts/ci_release_backstop.py"),
+        "--repository", REPOSITORY, "--source-sha", source_sha,
+    ], check=True)
+
+
 def publication_evidence(manifest: dict) -> None:
     require(manifest["tested_runtime"] == manifest["deployment_target"],
             "publication requires tested runtime equal to deployment target")
@@ -228,6 +238,7 @@ def main() -> None:
         fresh = prepare(args.directory, tag, os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"])
         require(existing == fresh, "release candidate differs from the same-run manifest")
         publication_evidence(fresh)
+        publication_backstop(os.environ["GITHUB_SHA"])
         refuse_existing_tag(tag)
         # Visible only if the following release action succeeds. Repository pin
         # stays pending until an independently verified promotion PR is merged.
@@ -236,6 +247,7 @@ def main() -> None:
     else:
         if args.tag:
             publication_context(dict(os.environ), tag)
+            publication_backstop(os.environ["GITHUB_SHA"])
             refuse_existing_tag(tag)
         candidate = prepare(args.directory, tag, os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"])
         if args.tag:

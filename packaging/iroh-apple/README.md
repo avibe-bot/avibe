@@ -122,6 +122,16 @@ lookup failures are not absence. Publication is serialized, targets the tested
 source SHA and never overwrites assets. A failure after creating a release is
 not automatically repaired: diagnose it and use a new reviewed revision.
 
+Both an explicitly tagged dry run and publication preflight require the
+repository's full master `lint.yml` backstop to have passed at the **exact
+source SHA**, including its successful `master-full-backstop` terminal job.
+They reuse `scripts/ci_release_backstop.py --source-sha` before creating any tag.
+Missing, running, failed, skipped/coalesced or unreadable proof blocks the
+release; a green run for another SHA or a PR is insufficient. Wait for or rerun
+the full backstop at that SHA, then dispatch again. The no-tag PR dry run does
+not require master certification of a PR commit. Proof queries have only
+`actions: read`, and the helper's verified run ID is recorded in the job log.
+
 **Owner approval is procedural, not a technical reviewer lock.** No protected
 environment is created here; a repository writer can dispatch with dry run off.
 Merging this mechanism does not approve its first use or publish anything.
@@ -138,8 +148,9 @@ Release assets and layout:
   wrapper by itself.
 - `IrohLib-support.zip` contains the matching `IrohLib.swift`, upstream
   `LICENSE-APACHE` and `LICENSE-MIT` under `LICENSES/iroh-ffi/`, and license/NOTICE
-  texts from locked dependencies indexed by `LICENSES/packages.json`. This
-  deliberately includes build/host dependencies too. Consumers must obtain
+  texts from locked dependencies indexed by `LICENSES/packages.json`, plus the
+  Rust distribution's copyright notices and installed `licenses/` directory.
+  This deliberately includes build/host dependencies too. Consumers must obtain
   and preserve this bundle's notices with the redistributed binary and wrapper.
   The binding is also published as `IrohLib.swift`; both forms are checksummed.
 - `iroh-apple-release.json` records tag, binary URL/checksum, upstream commit,
