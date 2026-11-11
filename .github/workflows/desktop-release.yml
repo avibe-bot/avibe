@@ -58,6 +58,9 @@ jobs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
+      # The channel's signed set, decided by the release tooling alone: an RC
+      # leaves out the Intel Mac, a stable release builds every target.
+      targets: ${{ steps.resolve.outputs.targets }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -99,6 +102,7 @@ jobs:
       source_sha: ${{ needs.resolve-desktop-release.outputs.source_sha }}
       version: ${{ needs.resolve-desktop-release.outputs.version }}
       release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
+      targets: ${{ needs.resolve-desktop-release.outputs.targets }}
       updater_enabled: ${{ needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
     # A called job's Environment secrets resolve empty unless the caller inherits
     # (actions/runner#4453). The callee reads the updater pair and, on macOS, the

@@ -3877,6 +3877,9 @@ class VibeCloudRemoteAccessConfig:
     edge_ip_version: str = "4"
     edge_bind_address: str = ""
     dev_login_hint: str = ""
+    # Optional direct iOS path. Additive and intentionally off by default;
+    # this is configuration/CLI state until the later settings-page change.
+    direct: bool = False
 
     def __post_init__(self) -> None:
         """Refuse a value that is not the kind this class declares.

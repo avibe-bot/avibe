@@ -2104,7 +2104,7 @@ describe('SettingsModelsPage surface branches', () => {
     const freshSources = empty ? [] : [echoed, sources[1]];
     const freshAgents = empty ? [directAgent('codex')] : [takeoverAgent];
     const sourceRefresh = vi.spyOn(modelsApi, 'refreshSource')
-      .mockResolvedValue({ source: echoed, discovered: 0 });
+      .mockResolvedValue({ source: echoed, removed_hops: [], interrupted: [] });
     const fullSources = deferred<Source[]>();
     const fullAgents = deferred<AgentSupply[]>();
     vi.mocked(modelsApi.listSources)
@@ -2403,7 +2403,7 @@ describe('SettingsModelsPage surface branches', () => {
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
       .mockRejectedValueOnce(new TypeError('supply unread'));
-    vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
+    vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, removed_hops: [], interrupted: [] });
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
@@ -2438,7 +2438,7 @@ describe('SettingsModelsPage surface branches', () => {
     const runtimeRead = vi.spyOn(modelsApi, 'getRuntimeStatus')
       .mockResolvedValueOnce(runtime)
       .mockRejectedValueOnce(new TypeError('runtime unread'));
-    vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
+    vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, removed_hops: [], interrupted: [] });
     vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
 

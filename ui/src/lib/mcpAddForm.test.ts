@@ -19,6 +19,9 @@ describe('parseMcpTarget', () => {
     ['https://exa mple.com/mcp', { kind: 'error', issue: 'invalidUrl' }],
     ['http://', { kind: 'error', issue: 'invalidUrl' }],
     ['https://example.com/sse', { kind: 'http', url: 'https://example.com/sse' }],
+    ['mcp.linear.app/mcp', { kind: 'stdio', command: 'mcp.linear.app/mcp', args: [], hint: 'missingScheme' }],
+    ['venv.3/bin/mcp-server', { kind: 'stdio', command: 'venv.3/bin/mcp-server', args: [] }],
+    ['mcp.tools/server', { kind: 'stdio', command: 'mcp.tools/server', args: [] }],
     ['   ', { kind: 'empty' }],
   ])('%s', (input, expected) => {
     expect(parseMcpTarget(input)).toEqual(expected);

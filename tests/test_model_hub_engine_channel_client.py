@@ -438,12 +438,12 @@ def test_a_damaged_record_authorizes_no_channel_change_and_is_kept_as_it_is(tmp_
     state_path = tmp_path / "engine" / "channel" / "state.json"
     damaged = state_path.read_bytes()[:-40]
     state_path.write_bytes(damaged)
-    # A newer index that would be accepted on a machine with an intact record.
-    channel, fetch = _channel(tmp_path, signer, _index(signer, 6))
+    # No authenticated fetch is available to replace the lost history.
+    channel, fetch = _channel(tmp_path, signer, OSError("no route to host"))
 
     status = channel.refresh()
 
-    assert (status.state, status.reason) == ("rejected", "state_unreadable") and fetch.calls == 1
+    assert (status.state, status.reason) == ("unavailable", "network") and fetch.calls == 1
     assert state_path.read_bytes() == damaged
     with pytest.raises(ChannelError) as unreadable:
         channel.snapshot()
@@ -461,6 +461,113 @@ def test_a_damaged_record_authorizes_no_channel_change_and_is_kept_as_it_is(tmp_
                 None,
             )
     assert state_path.read_bytes() == damaged
+
+
+@pytest.mark.parametrize("lost", ["missing", "malformed", "read_denied"])
+def test_lost_history_waits_for_a_signed_fetch_and_can_then_reopen_a_withdrawal(tmp_path, monkeypatch, lost) -> None:
+    """Simple state-loss trade-off: no adoption before fetch; lost recalls may reopen.
+
+    The old client could recover a missing record but permanently refused a
+    malformed/unreadable one. Exercise refresh/resolve, not a fabricated store.
+    """
+    signer = Signer()
+    newest = f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"
+    ten = _index(signer, 10)
+    eleven = _index(signer, 11, revoked=[tombstone(newest, NEWER)])
+    channel, _ = _channel(tmp_path, signer, eleven)
+    assert channel.refresh().state == "accepted"
+    assert channel.resolve(current=newest).action is ResolutionAction.WITHDRAW
+    state = channel.store.state_path
+    read_bytes = Path.read_bytes
+    if lost == "missing":
+        state.unlink()
+    elif lost == "malformed":
+        state.write_bytes(b"{lost history")
+    else:
+        def deny_state_read(path):
+            if path == state:
+                raise PermissionError("test-owned channel state is unreadable")
+            return read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", deny_state_read)
+
+    # Neither a failed request nor offline inspection can invent a floor,
+    # tombstone or adoption. KEEP is not an installed-integrity/health verdict.
+    unavailable, fetch = _channel(tmp_path, signer, OSError("network unavailable"))
+    assert unavailable.refresh().state == "unavailable" and fetch.calls == 1
+    kept = unavailable.resolve(current=newest)
+    assert (kept.action, kept.target, kept.tombstone, kept.download_authorized) == (
+        ResolutionAction.KEEP, None, None, False,
+    )
+    assert kept.reason == ("no_index" if lost == "missing" else "state_unreadable")
+    offline, offline_fetch = _channel(
+        tmp_path, signer, ten,
+        manager=EngineRuntimeManager(runtime_dir=tmp_path / "engine", offline=True),
+    )
+    assert offline.refresh().state == "offline" and offline_fetch.calls == 0
+    assert offline.resolve(current=newest).action is ResolutionAction.KEEP
+
+    # A correctly signed lower index meets the shipped floor, and becomes
+    # the only local history. Nothing reconstructs 11 or its lost withdrawal.
+    recovered, recovered_fetch = _channel(tmp_path, signer, ten, roots=signer.roots(floor=10))
+    status = recovered.refresh()
+    assert (status.state, status.sequence, status.changed) == ("accepted", 10, True)
+    assert recovered_fetch.calls == 1
+    if lost == "read_denied":
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert recovered.snapshot().payload.sequence == 10
+    assert recovered.resolve(current=newest).action is ResolutionAction.KEEP
+    reopened = recovered.resolve(current=BUNDLED)
+    assert (reopened.action, reopened.target.asset_release_tag) == (ResolutionAction.ADOPT, newest)
+    # No expiry/renewal fixes the gap: only receiving the withdrawal again does.
+    again, _ = _channel(tmp_path, signer, eleven)
+    assert again.refresh().state == "accepted"
+    assert again.resolve(current=newest).action is ResolutionAction.WITHDRAW
+
+
+@pytest.mark.parametrize("lost", ["missing", "malformed"])
+@pytest.mark.parametrize("invalid", ["signature", "floor", "manifest"])
+def test_a_fetch_after_state_loss_still_has_to_pass_authentication_floor_and_manifest_checks(tmp_path, lost, invalid) -> None:
+    """Recovery must not be an unsigned/floor/schema bypass when the file is lost."""
+    signer = Signer()
+    channel, _ = _channel(tmp_path, signer, _index(signer, 11))
+    assert channel.refresh().state == "accepted"
+    path = channel.store.state_path
+    if lost == "missing":
+        path.unlink()
+        before = None
+    else:
+        before = b"{lost history"
+        path.write_bytes(before)
+    roots = signer.roots()
+    if invalid == "signature":
+        raw, reason = _index(Signer(), 10), "signature_invalid"
+    elif invalid == "floor":
+        roots = signer.roots(floor=11)
+        raw, reason = _index(signer, 10), "replayed"
+    else:
+        entry = release_entry(manifest_bytes(VERSION, int(BUILD) + 2))
+        entry["manifest_sha256"] = "0" * 64
+        raw, reason = signed(signer, 10, releases=[entry]), "payload_invalid"
+    recovering, _ = _channel(tmp_path, signer, raw, roots=roots)
+    assert recovering.refresh().reason == reason
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert recovering.resolve(current=BUNDLED).action is ResolutionAction.KEEP
+
+
+def test_a_recovered_signed_list_does_not_bypass_minimum_or_quarantine_checks(tmp_path) -> None:
+    """Authentication/recovery does not itself qualify a candidate for this runtime."""
+    signer = Signer()
+    raw = signed(signer, 10, releases=[release_entry(manifest_bytes(VERSION, int(BUILD) + 3), "99.0.0")])
+    channel, _ = _channel(tmp_path, signer, raw)
+    assert channel.refresh().state == "accepted"
+    assert channel.resolve(current=BUNDLED).action is ResolutionAction.KEEP
+    eligible, _ = _channel(tmp_path, signer, _index(signer, 11))
+    assert eligible.refresh().state == "accepted"
+    assert eligible.resolve(
+        current=BUNDLED,
+        quarantined=frozenset({NEWER, f"model-hub-engine-{VERSION}-{int(BUILD) + 2}"}),
+    ).action is ResolutionAction.KEEP
 
 
 def test_a_withdrawal_applies_whatever_else_would_stop_adoption(tmp_path, monkeypatch) -> None:

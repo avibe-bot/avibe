@@ -647,14 +647,32 @@ sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
 build unit for `.github/workflows/release_ai.yml`. Its signing policy is
 described above. Release builds restore the Rust dependency cache and the
-prepared Cua Driver but never save caches, because only reruns of the same tag
-could read them. The workflow's unsigned cache warm-up on `master` (daily, and on
-pushes that change a Rust cache input) is the writer they read from; it signs and
-uploads nothing. A restored Cua Driver is kept only when its provenance names the
-pinned inputs and it passes the checks a fresh build passes; otherwise it is
-rebuilt. Native packaging and a real
-installation on each supported architecture remain separate acceptance gates
-from unit/contract tests.
+prepared Cua Driver but never save caches; the master warm-up is the sole
+release-cache writer. It builds every target without signing or uploading, and
+caches only third-party Cargo output: the Rust cache key binds `Cargo.lock`,
+rustc, Apple SDK, and target, while first-party crates, version stamping,
+private Runtime, packaging, signing, notarization, and verification are rebuilt.
+Restore is exact-key only; a miss is safe but visible and rebuilds from source.
+PR shell jobs are restore-only, and post-warm-up maintenance deletes superseded
+target entries and retired PR caches within the 10 GB repository budget. A
+failed push or scheduled warm-up gets one automatic retry; a release still
+proceeds correctly on a miss. A restored Cua Driver is kept only when its
+provenance names the pinned inputs and it passes the checks a fresh build
+passes. Native packaging and a real installation on each supported architecture
+remain separate acceptance gates from unit/contract tests.
+
+For a TEST RC, the release resolver selects Apple silicon macOS and Windows;
+Intel macOS is deliberately not built by the RC. Stable releases still require
+all three targets and their complete signed asset sets. The unsigned master
+warm-up is also the early Intel signal: pushes changing `desktop/**` (excluding
+Markdown), `uv.lock`, or release helpers, plus a nightly run, build Intel on
+master. This catches Intel compile, SDK, launch-smoke, and DMG regressions before
+stable, but Intel-specific Developer ID signing, notarization, stapling,
+Gatekeeper, and updater-signature failures still first appear on a stable
+release. The first real master run must confirm that the Ubuntu lookup-only
+keep-alive refreshes `last_accessed_at` and can read the macOS entries; the
+workflow reports missing, unreadable, or unrefreshed entries without claiming
+that unverified retention is guaranteed.
 
 A separate manual workflow, `.github/workflows/desktop-signpath-test.yml`, runs
 the SignPath TEST-signing integration test with `signpath_test=true` and a

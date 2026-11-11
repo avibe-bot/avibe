@@ -7405,6 +7405,42 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         assert body["error"] == error
 
 
+@pytest.mark.parametrize(("rejected_status", "detail"), (
+    (401, "modelHub.errors.authentication_failed"),
+    (None, "modelHub.errors.discovery_failed"),
+))
+def test_refresh_names_a_rejected_key_and_its_status(monkeypatch, tmp_path, rejected_status, detail):
+    """Setup reports a refused key as such; any other listing failure stays unexplained."""
+
+    service, store, adapter = _service(tmp_path)
+    store.config.sources.append(ModelHubSourceConfig(
+        id="src_wrongkey01", kind="api_key", vendor="anthropic", display_name="Anthropic",
+        protocol="anthropic", supply_channel="hub", billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"), models=[],
+        credential_ref="cred_wrongkey01",
+    ))
+
+    async def refuse(*_args, **_kwargs):
+        raise ModelDiscoveryError("refused", rejected_status=rejected_status)
+
+    adapter.discover_models = refuse
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    response = client.post(
+        "/api/models/sources/src_wrongkey01/refresh", json={},
+        headers=csrf_headers(client, base_url), base_url=base_url,
+    )
+
+    assert response.status_code == 502
+    body = response.get_json()
+    _assert_envelope(body, ok=False)
+    assert body["error"] == "discovery_failed"
+    assert body["detail"] == detail
+    assert body.get("upstream_status") == rejected_status
+    assert store.config.sources[0].state.status == "error"
+
+
 @pytest.mark.parametrize("mode", ["hub", "direct"])
 def test_refresh_empty_inventory_returns_success_without_route_removal_confirmation(monkeypatch, tmp_path, mode):
     service, store, adapter = _service(tmp_path)

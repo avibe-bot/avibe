@@ -39,6 +39,9 @@ import {
   providerVendorId,
   setupPrimaryRank,
 } from '@/components/settings/providers/providerIdentity';
+import type { TFunction } from 'i18next';
+
+import type { GuardPlan } from '@/components/settings/models/GuardImpact';
 import type { TranslationKey } from '@/i18n/types';
 import {
   setupCanAttemptInstall,
@@ -63,6 +66,153 @@ export const PROVIDER_SLOT_COUNT = 2;
 export const usableSource = (source: Source): boolean =>
   source.supply_channel === 'hub'
   && (source.state.status === 'active' || source.state.status === 'standby');
+
+/**
+ * Whether a source earns a card on the stage.
+ *
+ * Everything `usableSource` admits, plus a Hub source whose last check failed. That
+ * one is still a credential the person added, and the card is where they change or
+ * remove it: dropping it from the stage the moment its check failed would put an
+ * empty 「not added yet」 offer where the key they just typed is, and invite a second
+ * copy of it instead of a fix.
+ */
+export const stagedSource = (source: Source): boolean =>
+  usableSource(source)
+  || (source.supply_channel === 'hub' && source.state.status === 'error');
+
+/**
+ * Whether setup checks this source's key by listing its models.
+ *
+ * A listing is free, and it is the only answer the save gives no sign of: the key
+ * form saves without verification, so a key the provider refuses is stored exactly
+ * like one it accepts. A source already proven, or one in a state a listing cannot
+ * clear honestly — cooldown, needs_action — is left alone: a successful listing
+ * resets a source to standby, and that would erase a verdict it did not answer.
+ */
+export const sourceNeedsCheck = (source: Source): boolean =>
+  source.supply_channel === 'hub'
+  && source.protocol !== 'search'
+  && (source.state.status === 'error'
+    || (source.state.status === 'standby' && Boolean(source.verification_pending)));
+
+/** What setup's check found for one source, as long as the screen holds it. */
+export type SourceCheck =
+  | { kind: 'checking' }
+  /** The provider listed models for this key. */
+  | { kind: 'connected'; models: number }
+  /** The provider refused the key itself. `status` is its 401/403 when it said one. */
+  | { kind: 'rejected'; status: number | null }
+  /** The check could not reach an answer: network, engine, or an unnamed failure. */
+  | { kind: 'failed' }
+  /**
+   * The key works, but the provider no longer lists models a route uses, so the
+   * server held the new list back. `plan` is what updating it would remove; it is
+   * asked about, never applied on the person's behalf, and nothing passed until it is.
+   */
+  | { kind: 'changed'; plan: GuardPlan };
+
+/** The identity a check answers: the same source with a new key is a new question. */
+export const sourceCheckKey = (source: Pick<Source, 'id' | 'credential_generation'>): string =>
+  `${source.id}:${source.credential_generation ?? ''}`;
+
+/** Models a source can supply now: retired rows stay listed but are not callable. */
+export const suppliedModelCount = (source: Source): number =>
+  source.models.filter((model) => !model.retired).length;
+
+/**
+ * The verdict a failed listing or replacement carries, once a guard refusal has been
+ * told apart (the caller does that: it is a question, not a verdict).
+ *
+ * A refusal of the credential is named only when the server named it — the detail
+ * key and the provider's status travel together.
+ */
+export function sourceCheckFailure(
+  failure: { detail?: string; upstreamStatus?: number } | null,
+): SourceCheck {
+  if (failure?.detail === 'modelHub.errors.authentication_failed') {
+    return { kind: 'rejected', status: failure.upstreamStatus ?? null };
+  }
+  return { kind: 'failed' };
+}
+
+/** What a connected card's second line says about its check, or `null` when no check
+ *  stands for it and the line keeps describing the key. Shared with the edit dialog,
+ *  so the card and the frame it opens give one answer. */
+export const checkLine = (t: TFunction, check: SourceCheck | undefined): string | null => {
+  switch (check?.kind) {
+    case 'checking':
+      return t('onboarding.providers.cardChecking');
+    case 'connected':
+      return t('onboarding.providers.cardConnected', { count: check.models });
+    case 'rejected':
+      return check.status === null
+        ? t('onboarding.providers.cardRejected')
+        : t('onboarding.providers.cardRejectedStatus', { status: check.status });
+    case 'failed':
+      return t('onboarding.providers.cardCheckFailed');
+    case 'changed':
+      return t('onboarding.providers.cardListChanged');
+    default:
+      return null;
+  }
+};
+
+/**
+ * The sources in the order the stage should spend a provider's one card on them.
+ *
+ * The stage draws one card per provider, and every key behind it is checked. A key
+ * whose check needs the person — refused, unanswered, a list change to confirm, or
+ * still being asked — comes first, so the card that opens a key opens the one that
+ * failed rather than a working one beside it. Otherwise the order is the server's.
+ */
+export function byCheckAttention(
+  sources: readonly Source[],
+  checks: ReadonlyMap<string, SourceCheck>,
+): Source[] {
+  const rank = (source: Source): number => {
+    const kind = checks.get(sourceCheckKey(source))?.kind;
+    return kind === 'rejected' || kind === 'failed' || kind === 'changed' ? 0 : kind === 'checking' ? 1 : 2;
+  };
+  return [...sources].sort((left, right) => rank(left) - rank(right));
+}
+
+/**
+ * Whether the line beside Continue has to say that nothing passed.
+ *
+ * Only once every check on the stage has answered, and only when none of the staged
+ * sources can supply a model: one proven before this visit (nothing to check), one
+ * whose listing came back with models, or a working key whose new list is waiting
+ * on the person while the list it supplies still stands. A listing with no models passes nothing — the
+ * next screen picks a model per assistant, and there would be none to pick.
+ */
+export function nothingPassed(
+  sources: readonly Source[],
+  checks: ReadonlyMap<string, SourceCheck>,
+): boolean {
+  const staged = sources.filter(stagedSource);
+  if (staged.length === 0) return false;
+  let answered = true;
+  for (const source of staged) {
+    // A check this visit made is the answer, whatever state its readback left the
+    // source in: a listing that answered with no models leaves a usable standby
+    // source behind, and that source still supplies nothing.
+    const check = checks.get(sourceCheckKey(source));
+    if (check && check.kind !== 'checking') {
+      if (check.kind === 'connected' && check.models > 0) return false;
+      // The key works and the list it already supplies stands until the person
+      // updates it: the card leads to that question, and saying here that nothing
+      // passed would be false.
+      if (check.kind === 'changed' && usableSource(source) && suppliedModelCount(source) > 0) return false;
+      continue;
+    }
+    if (sourceNeedsCheck(source)) {
+      answered = false;
+      continue;
+    }
+    if (usableSource(source)) return false;
+  }
+  return answered;
+}
 
 /**
  * How many of the sources added through Add more are still there.
@@ -95,6 +245,9 @@ export type ProviderSlot = {
    * credential and still needs one slot of its own.
    */
   vendor: string;
+  /** The source a connected card stands for, which is what pressing it edits.
+   *  Absent on every other kind. */
+  source?: Source;
   /**
    * The catalog brand whose mark and name this card wears, `null` for a detected
    * credential the server named no provider for. Distinct from `vendor` for exactly
@@ -268,12 +421,13 @@ export function providerSlots(input: {
   const seen = new Set<string>();
   const slots: ProviderSlot[] = [];
 
-  for (const source of input.sources.filter(usableSource)) {
+  for (const source of input.sources.filter(stagedSource)) {
     const vendor = providerVendorId(source.vendor);
     if (seen.has(vendor)) continue;
     seen.add(vendor);
     slots.push({
       vendor,
+      source,
       brand: vendor,
       label: providerBrandLabel(source.vendor, source.display_name),
       kind: 'connected',
@@ -501,7 +655,7 @@ export function providerSummary(input: {
 }): ProviderSummary {
   if (input.failed) return { kind: 'error' };
   const added = new Map<string, string>();
-  for (const source of input.sources.filter(usableSource)) {
+  for (const source of input.sources.filter(stagedSource)) {
     const vendor = providerVendorId(source.vendor);
     if (!added.has(vendor)) added.set(vendor, providerBrandLabel(source.vendor, source.display_name));
   }
@@ -724,9 +878,12 @@ export function providerAction(input: {
   hubAdmitted: boolean;
   /** A source was written and its connection is being read back. */
   verifying: boolean;
+  /** A key on the stage is being checked against its provider. Continuing before it
+   *  answers would leave the person to find the answer on the next screen. */
+  checking?: boolean;
 }): ProviderActionState {
   if (input.gatewayBusy) return { kind: 'connecting', count: 0 };
-  if (input.verifying) return { kind: 'checking', count: 0 };
+  if (input.verifying || input.checking) return { kind: 'checking', count: 0 };
   if (input.pendingCount > 0) {
     // Ahead of the inventory on purpose: a scan that arrived is an answer of its
     // own, and taking over a key it found does not depend on knowing what else is

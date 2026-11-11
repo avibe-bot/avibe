@@ -47,7 +47,7 @@ modelsApi.probeSource = async (id, model) => {
   if (protocol === 'search') throw new Error('Search services are not model-probed');
   return { source_id: id, model_id: model, protocol, reachable: true, latency_ms: 123, error: null };
 };
-modelsApi.refreshSource = async () => { calls.push('refetch'); return { source: saved, discovered: saved.models.length }; };
+modelsApi.refreshSource = async () => { calls.push('refetch'); return { source: saved, removed_hops: [], interrupted: [] }; };
 modelsApi.addCustomModel = async (_id, draft) => {
   calls.push('manual');
   saved = { ...saved, models: [...saved.models, {

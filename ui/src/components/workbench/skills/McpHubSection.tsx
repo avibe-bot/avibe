@@ -138,6 +138,9 @@ function McpToolCard({
   );
 }
 
+/** Tool cards the detail panel shows before the rest fold behind a disclosure. */
+const TOOL_PREVIEW_COUNT = 5;
+
 export interface McpServerDetailProps {
   server: McpServerSummary;
   /** The Avibe project of the view, kept on its login link. */
@@ -175,6 +178,7 @@ export function McpServerDetail({
 }: McpServerDetailProps) {
   const { t } = useTranslation();
   const [toolsOpen, setToolsOpen] = useState(false);
+  const tools = current.tools ?? [];
   const projectRow = Boolean(current.scope?.startsWith('project:'));
   const owned = projectRow || current.source === 'avibe';
   const state = current.state ?? 'ok';
@@ -220,16 +224,10 @@ export function McpServerDetail({
       {usable ? (
       <>
       <div className="flex flex-col gap-1.5">
-        <button
-          type="button"
-          className="flex items-center gap-1 self-start font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted hover:text-foreground"
-          aria-expanded={toolsOpen}
-          onClick={() => setToolsOpen((open) => !open)}
-        >
-          {toolsOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-          {t('mcpHub.toolsToggle', { count: current.tools?.length ?? 0 })}
-        </button>
-        {toolsOpen ? (current.tools ?? []).map((tool) => (
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
+          {t('mcpHub.toolsHeader', { count: tools.length })}
+        </span>
+        {(toolsOpen ? tools : tools.slice(0, TOOL_PREVIEW_COUNT)).map((tool) => (
           <McpToolCard
             key={tool.name}
             name={tool.name}
@@ -237,7 +235,20 @@ export function McpServerDetail({
             expanded={Boolean(expandedTools[tool.name])}
             onToggle={() => onToggleTool(tool.name)}
           />
-        )) : null}
+        ))}
+        {tools.length > TOOL_PREVIEW_COUNT ? (
+          <button
+            type="button"
+            className="flex items-center gap-1 self-start text-[11px] text-muted hover:text-foreground"
+            aria-expanded={toolsOpen}
+            onClick={() => setToolsOpen((open) => !open)}
+          >
+            {toolsOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            {toolsOpen
+              ? t('mcpHub.toolsShowLess')
+              : t('mcpHub.toolsShowMore', { count: tools.length - TOOL_PREVIEW_COUNT })}
+          </button>
+        ) : null}
       </div>
       <div className="rounded-[10px] border border-edge bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted shadow-elevation-0">
         {t('mcpHub.callHint', { name: current.name })}
@@ -835,8 +846,12 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
           error: item.type ? t(`mcpHub.errors.${item.type}`, { defaultValue: item.error || '', message: item.error || '', name: item.name }) : (item.error || ''),
         }),
       );
+      const warnings = added.flatMap((item) => item.warning ? [
+        t('mcpHub.savedNotConnected', { reason: item.warning.message || item.warning.type || t('mcpHub.failed') }),
+      ] : []);
       const inline = [
         t('mcpHub.succeededCount', { count: succeeded }),
+        ...warnings,
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
         ...failedLines,
       ].filter(Boolean).join('\n');
@@ -850,7 +865,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
         .map((item) => item.name);
       const action = mcpAddOauthAction({
         names,
-        failedCount: failed.length,
+        failedCount: failed.length + warnings.length,
         oauthMode,
         desktopShell: isDesktopShell(),
       });
@@ -862,7 +877,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
       if (failed.length) {
         showToast(inline, 'error', { label: t('common.close'), onClick: () => undefined });
       } else {
-        showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
+        showToast(warnings.length ? warnings.join('\n') : t('mcpHub.succeededCount', { count: succeeded }), warnings.length ? 'warning' : 'success');
       }
       if (action.kind === 'list') {
         setAddResult({ names: action.names, failedLines });

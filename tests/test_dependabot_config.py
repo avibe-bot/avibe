@@ -30,14 +30,15 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
         ("npm", "/ui"),
         ("npm", "/desktop"),
         ("cargo", "/desktop"),
+        ("cargo", "/direct-transport"),
         ("uv", "/"),
     ]
 
-    # One weekday per ecosystem keeps the weekly PRs from saturating the hosted
-    # runner slots together.
+    # Preserve existing weekdays; the separately reviewed Rust runtime shares
+    # the Rust maintenance day rather than moving another ecosystem's schedule.
     days = [item["schedule"]["day"] for item in updates]
-    assert days == ["monday", "wednesday", "thursday", "friday", "tuesday"]
-    assert len(set(days)) == len(updates)
+    assert days == ["monday", "wednesday", "thursday", "friday", "friday", "tuesday"]
+    assert len(set(days)) == 5
     for item in updates:
         assert item["schedule"] == {
             "interval": "weekly",
@@ -61,6 +62,24 @@ def test_dependabot_covers_ordinary_ecosystems_with_reviewable_update_policy() -
     assert uv["package-ecosystem"] == "uv"
     assert uv["versioning-strategy"] == "increase"
     assert uv["ignore"] == [{"dependency-name": "claude-agent-sdk"}]
+
+
+def test_direct_transport_iroh_pin_is_not_an_automatic_group_update() -> None:
+    update = next(item for item in _updates() if item["directory"] == "/direct-transport")
+    assert update["package-ecosystem"] == "cargo"
+    assert update["ignore"] == [{"dependency-name": "iroh"}]
+    pins = dict(line.split("=", 1) for line in
+                (ROOT / "packaging/iroh-apple/versions.env").read_text().splitlines() if "=" in line)
+    crate = tomllib.loads((ROOT / "direct-transport/Cargo.toml").read_text())
+    assert crate["dependencies"]["iroh"] == {
+        "version": f"={pins['IROH_CORE_VERSION']}",
+        "default-features": False,
+        "features": ["tls-ring"],
+    }
+    lock = tomllib.loads((ROOT / "direct-transport/Cargo.lock").read_text())
+    assert [package["version"] for package in lock["package"] if package["name"] == "iroh"] == [
+        pins["IROH_CORE_VERSION"]
+    ]
 
 
 def test_ui_refresh_hold_preserves_the_established_export_contract() -> None:
