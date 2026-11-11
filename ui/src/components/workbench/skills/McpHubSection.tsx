@@ -853,7 +853,7 @@ export const McpHubSection: React.FC<McpHubSectionProps> = ({ project = null, se
         .map((item) => item.name);
       const action = mcpAddOauthAction({
         names,
-        failedCount: failed.length,
+        failedCount: failed.length + warnings.length,
         oauthMode,
         desktopShell: isDesktopShell(),
       });

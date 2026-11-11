@@ -11,7 +11,7 @@ export type McpTargetIssue = 'invalidUrl' | 'missingScheme' | 'unclosedQuote' | 
 export type McpTarget =
   | { kind: 'empty' }
   | { kind: 'http'; url: string }
-  | { kind: 'stdio'; command: string; args: string[] }
+  | { kind: 'stdio'; command: string; args: string[]; hint?: 'missingScheme' }
   | { kind: 'error'; issue: McpTargetIssue };
 
 export type McpAddTab = 'json' | 'form';
@@ -47,6 +47,7 @@ export function parseMcpTarget(input: string): McpTarget {
   if (!/\s/.test(text) && /^(?=[^/:]+\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+|\/)/.test(text)) {
     return { kind: 'error', issue: 'missingScheme' };
   }
+  const looksLikeUrl = !/\s/.test(text) && /^(?=[^/:]+\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\:\d+|\/)/.test(text);
   const tokens: string[] = [];
   let current: string | null = null;
   let quote: '"' | "'" | null = null;
@@ -97,7 +98,7 @@ export function parseMcpTarget(input: string): McpTarget {
   if (current !== null) tokens.push(current);
   if (windowsPath || tokens.some((token) => WINDOWS_PATH.test(token))) return { kind: 'error', issue: 'windowsPath' };
   const [command, ...args] = tokens;
-  return { kind: 'stdio', command, args };
+  return { kind: 'stdio', command, args, ...(looksLikeUrl ? { hint: 'missingScheme' as const } : {}) };
 }
 
 /** The map a key/value editor holds: rows with a key, keys trimmed, values exactly as typed. */
