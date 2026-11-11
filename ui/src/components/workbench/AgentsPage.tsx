@@ -2110,7 +2110,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
     }
   };
 
-  const chooseModel = (next: string) => {
+  const chooseModel = (next: string, catalogReasoning = reasoningOptions) => {
     const value = next.trim();
     // Choosing the current model again is no edit: nothing to write, and a
     // refused saved effort stays what it is.
@@ -2122,7 +2122,7 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
     // If the new model can't use the current effort, fall back to a
     // valid one and persist it in the same patch — otherwise the record
     // keeps an effort the model can't run (Codex P2).
-    const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
+    const opts = resolveEffortOptions(agent.backend, value, catalogReasoning);
     if (effort && !opts.includes(effort)) {
       const fallback = compatibleEffort(effort, opts);
       markFieldEdit('effort');
@@ -2135,7 +2135,11 @@ export const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canE
     );
   };
   // Added in place, the new model is the one chosen.
-  const addModel = useAddModelDialog(agent.backend, canEdit, (modelId) => chooseModel(modelId));
+  // The list the add left decides the new model's efforts, and is the catalog now.
+  const addModel = useAddModelDialog(agent.backend, canEdit, (modelId, catalog) => {
+    if (catalog) applyModelCatalog(agent.backend, catalog);
+    chooseModel(modelId, catalog?.reasoningOptions ?? reasoningOptions);
+  });
   return (
     <div className="flex flex-col gap-4">
       {isBot ? (

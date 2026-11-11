@@ -2,12 +2,13 @@ import { useState, type ReactNode } from 'react';
 
 import { AddModelsDialog } from '../components/settings/models/AddModelsDialog';
 import type { AgentBackend } from '../components/settings/models/types';
-import { useAddModelAvailable } from './backendModels';
+import { hubCatalogModels, useAddModelAvailable, type BackendModels } from './backendModels';
 
 /**
  * A model picker's "Add model" exit, opened in place: the add dialog over the
  * picker's own surface, saving at once, and handing back the first model it
- * added so the picker can select it. `open` is null when no exit is shown
+ * added — with the list the write left, so the picker judges the new model's
+ * efforts by what was just saved — so the picker can select it. `open` is null when no exit is shown
  * (`useAddModelAvailable`); the dialog, once opened, outlives the menu that
  * opened it — closing the menu is how a picker makes room for it.
  *
@@ -16,7 +17,7 @@ import { useAddModelAvailable } from './backendModels';
 export function useAddModelDialog(
   backend: string,
   enabled: boolean,
-  onAdded: (modelId: string) => void,
+  onAdded: (modelId: string, catalog: BackendModels | null) => void,
 ): { open: (() => void) | null; dialog: ReactNode } {
   const available = useAddModelAvailable(backend, enabled);
   const [adding, setAdding] = useState<AgentBackend | null>(null);
@@ -27,9 +28,9 @@ export function useAddModelDialog(
         open
         backend={adding}
         onClose={() => setAdding(null)}
-        onAdded={(ids) => {
+        onAdded={(ids, agent) => {
           setAdding(null);
-          if (ids[0]) onAdded(ids[0]);
+          if (ids[0]) onAdded(ids[0], hubCatalogModels(agent, adding));
         }}
       />
     ),

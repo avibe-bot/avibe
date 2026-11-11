@@ -227,13 +227,20 @@ describe('AgentRoutePicker', () => {
     const onNavigateAway = vi.fn();
     const onChange = vi.fn();
     const supply = { backend: 'claude', mode: 'hub', menu_kind: 'fixed', cli_present: true, catalog_models: [] };
+    // The list the add leaves: the new model takes `high` only, so the route's `low` cannot stay.
+    const added = { ...supply, catalog_models: [{
+      id: 'opus-x', display_name: null, origin: 'provider', models_dev_id: null, context_window: null, max_output_tokens: null,
+      input_modalities: ['text'], output_modalities: ['text'], supports_tools: true, supports_reasoning: true,
+      reasoning_efforts: ['high'], locked: false, routeable: true,
+    }] };
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(supply as never);
     vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({
       builtin: [], in_list: [],
       providers: [{ id: 'opus-x', display_name: null, reasoning_efforts: [], origin: 'provider', suppliers: [{ source_id: 'src_a', source_name: 'Relay', model_id: 'opus-x' }] }],
     });
     vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([]);
-    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(supply as never);
+    let land!: (value: unknown) => void;
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockReturnValue(new Promise((resolve) => { land = resolve; }) as never);
     render(<ToastContext.Provider value={{ showToast: vi.fn() }}><HubPicker role="owner" onNavigateAway={onNavigateAway} onChange={onChange} /></ToastContext.Provider>);
     await openMenu(user);
 
@@ -247,9 +254,14 @@ describe('AgentRoutePicker', () => {
     expect(screen.queryByText('chat.picker.model')).toBeNull();
     await user.click(await dialog.findByRole('checkbox', { name: /opus-x/ }));
     await user.click(dialog.getByRole('button', { name: 'settings.models.gateway.picker.confirm' }));
+    // While the write is out the dialog cannot be walked away from: its answer would
+    // otherwise pick a model for a route the user has since moved on from.
+    await vi.waitFor(() => expect((dialog.getByRole('button', { name: 'settings.models.gateway.catalog.cancel' }) as HTMLButtonElement).disabled).toBe(true));
+    await act(async () => land(added));
 
-    // Saved at once, with the suppliers the row showed, then picked.
-    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus-x' })));
+    // Saved at once, with the suppliers the row showed, then picked — judged by
+    // the efforts the new row states, not the list from before the add.
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith({ model: 'opus-x', reasoning_effort: null }));
     expect(write).toHaveBeenCalledWith('claude', expect.objectContaining({
       expected_suppliers: { 'opus-x': [{ source_id: 'src_a', model_id: 'opus-x' }] },
     }));

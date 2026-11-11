@@ -410,22 +410,30 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       model: agent.model ?? null,
       reasoning_effort: agent.reasoning_effort ?? null,
     });
-  const pickModel = (model: string) => {
+  const pickModel = (model: string, reasoning = backendReasoning) => {
     const patch: AgentRoutePatch = { model };
     // Switching to a model whose effort set no longer includes
     // the current effort: clear it in the same patch so the displayed
     // route matches what dispatches. Choosing the current model
     // again changes nothing, a refused saved effort included.
-    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, backendReasoning)) {
+    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, reasoning)) {
       patch.reasoning_effort = null;
     }
     applyPatch(patch);
   };
   // Added in place, the new model is the one picked; the next open reads the
   // list again, as every Hub open does.
-  const addModel = useAddModelDialog(backend, open, (model) => {
+  const addModel = useAddModelDialog(backend, open, (model, catalog) => {
     loadedModelBackendsRef.current.delete(backend);
-    pickModel(model);
+    // The list the add left is the catalog now: the new model's efforts decide
+    // whether the current effort survives the pick.
+    if (catalog) {
+      setModelsByBackend((prev) => ({ ...prev, [backend]: catalog.models }));
+      setModelLabelsByBackend((prev) => ({ ...prev, [backend]: catalog.modelLabels ?? {} }));
+      setReasoningByBackend((prev) => ({ ...prev, [backend]: catalog.reasoningOptions ?? {} }));
+      setEffortMenusByBackend((prev) => ({ ...prev, [backend]: catalog.effortMenus ?? {} }));
+    }
+    pickModel(model, catalog?.reasoningOptions ?? backendReasoning);
   });
   const openNewAgent = () => {
     setOpen(false);

@@ -47,7 +47,7 @@ export function modelOptionLabel(model: string, labels?: Record<string, string>)
 const isHubAgent = (agent: PickerAgentCatalog | null, backend: string): agent is PickerAgentCatalog =>
   agent !== null && agent.backend === backend && agent.mode === 'hub';
 
-const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): BackendModels | null => {
+export const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): BackendModels | null => {
   if (!isHubAgent(agent, backend)) return null;
   const catalog = agent.catalog_models ?? null;
   if (!catalog) return null;

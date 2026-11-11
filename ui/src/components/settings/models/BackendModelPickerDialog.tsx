@@ -357,6 +357,7 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="ghost"
               className="model-hub-catalog-control shrink-0 rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground max-sm:w-full"
+              disabled={busy}
               onClick={() => onCustom('')}
             >
               <Plus aria-hidden="true" />
@@ -368,6 +369,7 @@ export const BackendModelPickerDialog: React.FC<{
               type="button"
               variant="outline"
               className="model-hub-catalog-control flex-1 rounded-md px-5 text-[12.5px] font-semibold sm:flex-none"
+              disabled={busy}
               onClick={onCancel}
             >
               {t('settings.models.gateway.catalog.cancel')}

@@ -71,7 +71,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   }, [backend, open]);
   const [editorOpen, setEditorOpen] = useState(false);
   // Added in place, the new model is the one the Agent will use.
-  const addModel = useAddModelDialog(backend, open, setModel);
+  const addModel = useAddModelDialog(backend, open, (modelId) => setModel(modelId));
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {

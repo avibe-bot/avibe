@@ -83,7 +83,12 @@ export const AddModelsDialog: React.FC<{
         backend={backend}
         listedIds={listed}
         busy={busy}
-        onCancel={() => { setEditing(null); onClose(); }}
+        onCancel={() => {
+          // A write in flight belongs to this dialog: it cannot be walked away from.
+          if (busy) return;
+          setEditing(null);
+          onClose();
+        }}
         onAdd={add}
         onCustom={(seedId) => setEditing({ seedId })}
       />
