@@ -814,6 +814,22 @@ scenarios:
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/e2e/onboarding-fidelity/lineup.spec.ts
+  - id: AUTH-SETUP-161
+    name: A Hub-owned CLI assistant's Default model card picks a model that makes its Agent runnable, and setup completes
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes_setup
+    # The scenario owns the server boundary the card's model picker calls for a CLI
+    # backend: the candidates read, the catalog write, the Agent's model, the runnable
+    # named route and completion. The browser side — the card opening the picker rather
+    # than the route editor, the write order, and a failed pick holding entry — is the
+    # supporting tests, against controlled responses.
+    supporting_tests:
+      - ui/src/components/onboarding/AssistantSetup.test.tsx
+      - ui/src/components/onboarding/useSetupModelChoice.test.ts
+      - ui/e2e/onboarding-fidelity/pm-main-flow.spec.ts
   - id: AUTH-SETUP-132
     name: A new install starts on Vibey, and setup completes without writing a default
     status: covered
