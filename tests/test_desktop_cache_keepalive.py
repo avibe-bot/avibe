@@ -174,8 +174,9 @@ def test_a_release_cache_miss_is_a_warning_on_the_run(tmp_path, tag, runner_os, 
 def test_keepalive_can_read_master_entries_and_change_nothing():
     """The keep-alive runs on every landing, so it must be unable to alter release input."""
     document = workflow("desktop-cache-keepalive.yml")
-    assert set(document["on"]) == {"push", "workflow_dispatch"}
+    assert set(document["on"]) == {"push", "schedule", "workflow_dispatch"}
     assert document["on"]["push"] == {"branches": ["master"]}
+    assert document["on"]["schedule"] == [{"cron": "41 18 */5 * *"}]
     assert document["permissions"] == {"actions": "read"}
     assert document["concurrency"] == {"group": "desktop-cache-keepalive", "cancel-in-progress": False}
     assert set(document["jobs"]) == {"touch"}
@@ -278,6 +279,7 @@ def test_keepalive_reports_every_entry_a_release_could_not_rely_on(tmp_path):
         assert seen == f"${{{{ steps.keys.outputs.{name}_seen }}}}"
         assert hit == f"${{{{ steps.{name}.outputs.cache-hit }}}}"
     assert len(report["env"]["ENTRIES"].splitlines()) == 4
+    assert "Run the next desktop warm-up" in report["run"]
 
 
 def test_warmup_maintenance_retries_failures_and_prunes_only_owned_namespaces():

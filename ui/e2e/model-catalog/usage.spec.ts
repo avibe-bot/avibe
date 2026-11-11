@@ -245,7 +245,7 @@ test.describe('hermetic UsageTab', () => {
       const groups = page.getByRole('group', { name: 'Group' });
       const rowNames = page.locator('.model-hub-usage-details tbody .model-hub-usage-row-name');
 
-      for (const group of ['Model', 'Source']) {
+      for (const group of ['Model', 'Provider']) {
         await groups.getByRole('button', { name: group, exact: true }).click();
         await expect(legendItems.last()).toContainText('Removed providers');
         await expect(legendItems.filter({ hasText: 'Removed providers' })).toHaveCount(1);
@@ -264,11 +264,11 @@ test.describe('hermetic UsageTab', () => {
 
       await expect(rowNames.last()).toHaveText('Removed providers');
       await expect(page.locator('.model-hub-usage-details')).toContainText('Same supplier · glm-4.6-air');
-      await page.getByRole('button', { name: 'By source' }).click();
+      await page.getByRole('button', { name: 'By provider' }).click();
       await expect(rowNames.last()).toHaveText('Removed providers');
       await expect(rowNames.filter({ hasText: 'Removed providers' })).toHaveCount(1);
 
-      await page.getByRole('button', { name: 'All Source' }).click();
+      await page.getByRole('button', { name: 'All Provider' }).click();
       await expect(page.getByRole('option', { name: /Removed providers/ })).toBeVisible();
       await expect(body).not.toContainText('src_');
       await expect(body).not.toContainText('Unknown model');

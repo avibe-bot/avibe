@@ -109,17 +109,21 @@ warn before rebuilding on a miss. The Cua Driver cache remains provenance- and
 input-verified. PR desktop-shell jobs are restore-only, and maintenance keeps
 one newest release entry per target, removes superseded entries and retired PR
 caches, reports total usage/headroom against the 10 GB repository budget, and
-retries a failed master warm-up once.
+retries a failed master warm-up once. The existing master warm-up remains the
+cache writer for changed desktop inputs and its existing schedule; no additional
+five-day warm-up was added. Instead, `desktop-cache-keepalive.yml` is the
+retention mechanism and runs lookup-only on master pushes and every five days.
+A missing, unreadable, or unrefreshed entry emits an explicit instruction to run
+the next warm-up; it never silently dispatches one.
 
 A TEST RC deliberately builds Apple silicon macOS and Windows only. Stable
 still requires Apple silicon, Intel macOS, and Windows with the complete signed
 set. The unsigned master warm-up is the early Intel signal for desktop source,
-locked dependency, and release-helper changes plus nightly coverage; it catches
-Intel compile/SDK/smoke/DMG failures before stable. Intel-specific Developer ID
-signing, notarization, stapling, Gatekeeper, and updater-signature failures
-still first appear on the stable path. A real master run must confirm the
-Ubuntu lookup-only keep-alive refreshes `last_accessed_at` and can read macOS
-entries; warnings do not claim that unverified retention is guaranteed.
+locked dependency, and release-helper changes plus its existing schedule; it
+catches Intel compile/SDK/smoke/DMG failures before stable. Intel-specific
+Developer ID signing, notarization, stapling, Gatekeeper, and updater-signature
+failures still first appear on the stable path. The keepalive's lookup-only
+behavior is an observation with warnings, not a release correctness gate.
 
 The official workflows stage notes and release assets in one immutable tag/release.
 `Release (AI Notes)` generates notes and publishes the core/runtime assets for

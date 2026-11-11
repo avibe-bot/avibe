@@ -11,7 +11,7 @@
 // that. State is the host's too — it is what setup preserves when a tab is
 // switched away from and back.
 import * as React from 'react';
-import { Eye, EyeOff } from 'lucide-react';
+import { CircleCheck, Eye, EyeOff, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -20,8 +20,11 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
-import { API_KEY_VENDOR_PRESETS, modelApiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
+import { localizedApiKeyVendorOptions, modelApiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import {
+  applyDetectedProtocol,
+  detectableEndpoint,
+  draftDefaultName,
   draftNameValid,
   draftProtocol,
   selectVendor,
@@ -30,6 +33,7 @@ import {
 import { Field } from './dialogFields';
 import { ProtocolGlyph } from './protocolGlyph';
 import { SELECTABLE_SOURCE_PROTOCOLS, type SourceProtocol } from './types';
+import { useProtocolDetection, type ProtocolDetection } from './useProtocolDetection';
 import { VendorGlyph } from './vendorGlyph';
 
 // The form's own dressing travels with the form. Every class below is declared
@@ -74,15 +78,14 @@ const ProtocolSegments: React.FC<{
 };
 
 /**
- * The 服务商 field's rows: the shipped catalog in the order the file ships, then
- * the one entry that is not a vendor at all, each carrying its mark.
+ * The 供应商 field's rows: the shipped catalog in the order the file ships —
+ * regrouped for the Chinese UI by `localizedApiKeyVendorOptions` — then the one
+ * entry that is not a vendor at all, each carrying its mark.
  *
  * File order because that order is a curated ranking, not an accident of how the
  * rows were appended: the vendors most users are here to add sit at the top, and
  * a name is only what you scan for once the list is long enough to have lost you.
- * Re-sorting here would put the ranking in a second place and make the catalog's
- * own order unobservable — so this reads the file verbatim, and moving a vendor
- * up the list is an edit to `vibe/data/api_key_vendors.json` and to nothing else.
+ * Moving a vendor up the list is an edit to `vibe/data/api_key_vendors.json`.
  * 自定义 ranks nowhere: it is the absence of a vendor, so it sits after all of
  * them rather than inside them, while staying the value the field opens on.
  *
@@ -95,11 +98,37 @@ const ProtocolSegments: React.FC<{
  * for the two to diverge.
  */
 const useVendorOptions = (): ComboboxOption[] => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const language = i18n.language ?? 'en';
   return React.useMemo(() => ([
-    ...API_KEY_VENDOR_PRESETS.map((preset) => ({ value: preset.id, label: preset.label })),
+    ...localizedApiKeyVendorOptions(language),
     { value: CUSTOM_VENDOR, label: t('settings.models.addKey.field.vendor.custom') },
-  ].map((option) => ({ ...option, icon: <VendorGlyph vendor={option.value} /> }))), [t]);
+  ].map((option) => ({ ...option, icon: <VendorGlyph vendor={option.value} /> }))), [language, t]);
+};
+
+/** What detection has said about a custom endpoint's format. Every state reads
+ *  as information, never as a step: saving is open in all of them. */
+const DetectionNote: React.FC<{ detection: ProtocolDetection }> = ({ detection }) => {
+  const { t } = useTranslation();
+  const [icon, text] = detection.kind === 'detecting'
+    ? [<LoaderCircle key="icon" className="size-3 shrink-0 motion-safe:animate-spin" aria-hidden="true" />,
+      t('settings.models.addKey.protocol.detecting')]
+    : detection.kind === 'detected'
+      ? [<CircleCheck key="icon" className="model-hub-ink-mint size-3 shrink-0" aria-hidden="true" />,
+        t('settings.models.addKey.protocol.detected', { format: t(PROTOCOL_COPY_KEYS[detection.protocol]) })]
+      : detection.kind === 'unrecognised'
+        ? [null, t(detection.rejected
+          ? 'settings.models.addKey.protocol.unrecognisedRejected'
+          : 'settings.models.addKey.protocol.unrecognised', {
+          format: t(PROTOCOL_COPY_KEYS.openai_chat),
+        })]
+        : [null, t('settings.models.addKey.protocol.idleHint')];
+  return (
+    <p className="model-hub-add-key-hint model-hub-add-key-protocol-note" role="status" aria-live="polite" data-detection={detection.kind}>
+      {icon}
+      <span>{text}</span>
+    </p>
+  );
 };
 
 /**
@@ -181,6 +210,16 @@ export const ApiKeySourceForm: React.FC<{
   const vendorOptions = useVendorOptions();
   const vendorPreset = modelApiKeyVendorPreset(draft.vendor);
   const nameValid = draftNameValid(draft);
+  const detection = useProtocolDetection(detectableEndpoint(draft), draft.apiKey, disabled);
+
+  // A settled detection moves the format until the person picks one. It never
+  // waits on anything: the field holds the default meanwhile, and Save sends
+  // whatever the field shows at the moment it is pressed.
+  React.useEffect(() => {
+    if (detection.kind !== 'detected' && detection.kind !== 'unrecognised') return;
+    const next = applyDetectedProtocol(draft, detection.kind === 'detected' ? detection.protocol : null);
+    if (next !== draft) onChange(next, 'protocol');
+  }, [detection, draft, onChange]);
 
   return (
     <>
@@ -218,7 +257,7 @@ export const ApiKeySourceForm: React.FC<{
         )}
       </Field>
       <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
-        {(id) => <Input id={id} value={draft.displayName} disabled={disabled} aria-invalid={!nameValid} onChange={(event) => onChange({ ...draft, displayName: event.target.value }, 'displayName')} className="model-hub-add-key-input" />}
+        {(id) => <Input id={id} value={draft.displayName} placeholder={draftDefaultName(draft) ?? undefined} disabled={disabled} aria-invalid={!nameValid} onChange={(event) => onChange({ ...draft, displayName: event.target.value }, 'displayName')} className="model-hub-add-key-input" />}
       </Field>
       <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
         {(id) => <Input id={id} value={draft.baseUrl} disabled={disabled} autoComplete="url" spellCheck={false} onChange={(event) => onChange({ ...draft, baseUrl: event.target.value }, 'baseUrl')} className="model-hub-add-key-input font-mono" />}
@@ -246,10 +285,12 @@ export const ApiKeySourceForm: React.FC<{
           <ProtocolSegments
             disabled={disabled}
             selection={draft.protocol}
-            onSelect={(value) => onChange({ ...draft, protocol: value }, 'protocol')}
+            onSelect={(value) => onChange({ ...draft, protocol: value, protocolChosen: true }, 'protocol')}
           />
         )}
-        <p className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.saveFirstHint')}</p>
+        {vendorPreset || draft.protocolChosen
+          ? <p className="model-hub-add-key-hint">{t('settings.models.addKey.protocol.saveFirstHint')}</p>
+          : <DetectionNote detection={detection} />}
       </div>
     </>
   );

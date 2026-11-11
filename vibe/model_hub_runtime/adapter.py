@@ -902,7 +902,7 @@ async def _probe_protocol_response(
     if taxonomy is None:
         raise EngineClientError("unsupported source protocol")
     try:
-        url = upstream_api_url(root, taxonomy.request_path)
+        url = upstream_api_url(root, taxonomy.request_path, protocol)
         credential = anthropic_api_key_header(root, secret) if protocol == "anthropic" else {
             "Authorization": f"Bearer {secret}",
         }
@@ -3119,6 +3119,8 @@ class CLIProxyEngineAdapter:
                     if exc.status_code in _AUTHENTICATION_ERROR_STATUSES
                     else None
                 ),
+                upstream_status=exc.status_code,
+                upstream_detail=exc.upstream_detail,
             ) from exc
 
     @engine_operation

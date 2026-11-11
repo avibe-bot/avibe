@@ -203,6 +203,7 @@ def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
             rule.upstream_failure_key,
             rule.upstream_failure_without_status_key,
             rule.connection_failure_key,
+            rule.passthrough_model_key,
         )
         if key is not None
     }
@@ -453,6 +454,7 @@ def _terminal_resolution_facts(
         backend="claude",
         requested_model=model,
         target_model=model,
+        route_origin="manual",
         matching_sources=tuple(config.sources),
         inspected_hops=inspections,
         candidate_hops=candidates,

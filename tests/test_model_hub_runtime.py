@@ -3093,6 +3093,53 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
 
 
 @pytest.mark.parametrize(
+    ("base_url", "engine_root"),
+    [
+        # The Anthropic SDK spelling, and the OpenCode/models.dev spelling of the same root.
+        ("https://relay.example.test/anthropic", "https://relay.example.test/anthropic"),
+        ("https://relay.example.test/anthropic/v1", "https://relay.example.test/anthropic"),
+        ("https://relay.example.test/anthropic/v1/", "https://relay.example.test/anthropic"),
+        ("https://relay.example.test", "https://relay.example.test"),
+        ("https://relay.example.test/v1", "https://relay.example.test"),
+        # The version is removed once, never twice.
+        ("https://relay.example.test/v1/v1", "https://relay.example.test/v1"),
+    ],
+)
+def test_anthropic_engine_and_probes_reach_the_same_messages_url(
+    tmp_path: Path,
+    base_url: str,
+    engine_root: str,
+) -> None:
+    """The engine appends ``/v1/messages`` to its base URL; a saved ``…/v1`` root reached ``…/v1/v1/messages``.
+
+    Probes and model discovery must reach the URL every engine call does, so a
+    Source that looks healthy when added is not one that fails on every call.
+    """
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    credential_ref = store.store_api_key(
+        "secret", vendor="custom", protocol="anthropic", base_url=base_url,
+    )
+    store.sync_sources(
+        [_binding(credential_ref, source_id="src_anthro12", vendor="custom", protocol="anthropic", base_url=base_url)]
+    )
+    config_path = instance_dir / "config.yaml"
+    write_engine_config(
+        config_path, host="127.0.0.1", port=18231, auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets, sources=store.list_sources(), state_store=store,
+    )
+
+    (entry,) = yaml.safe_load(config_path.read_text(encoding="utf-8"))["claude-api-key"]
+    assert entry["base-url"] == engine_root
+    # CLIProxyAPI's Claude executor: fmt.Sprintf("%s/v1/messages?beta=true", baseURL).
+    engine_messages = f"{entry['base-url']}/v1/messages"
+    taxonomy = runtime_adapter_module._PROTOCOL_OBSERVATION_TAXONOMY["anthropic"]
+    assert client_module.upstream_api_url(base_url, taxonomy.request_path, "anthropic") == engine_messages
+    assert client_module.upstream_api_url(base_url, "/v1/models", "anthropic") == f"{engine_root}/v1/models"
+
+
+@pytest.mark.parametrize(
     ("official_base_url", "protocol"),
     [
         pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
@@ -3116,7 +3163,7 @@ def test_catalog_official_base_url_composes_one_probe_endpoint(
     """
 
     taxonomy = runtime_adapter_module._PROTOCOL_OBSERVATION_TAXONOMY[protocol]
-    composed = client_module.upstream_api_url(official_base_url, taxonomy.request_path)
+    composed = client_module.upstream_api_url(official_base_url, taxonomy.request_path, protocol)
 
     # The root is carried verbatim — nothing rewritten, nothing dropped.
     assert composed.startswith(f"{official_base_url}/")
@@ -3692,16 +3739,23 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
-@pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (500, None)))
-def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected) -> None:
-    """A listing the provider refused for the key carries that status; nothing else does."""
+@pytest.mark.parametrize('encoding', ['plain', 'escaped_slash', 'unicode_escape', 'long'])
+@pytest.mark.parametrize("protocol", ["openai_chat", "anthropic", "google"])
+@pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (503, None)))
+def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected, protocol, encoding) -> None:
+    """Listings retain status and provider prose, never the credential, across protocols."""
+    secret = 'opaque/' + 'z' * 5000 if encoding == 'long' else 'relay/9adf08382a1c7654'
 
     class Refusing(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
-            body = json.dumps({"error": {"message": "refused"}}).encode()
+            body = json.dumps({"error": {"message": f"Access denied for {secret}. Check permissions."}}).encode()
+            if encoding == 'escaped_slash':
+                body = body.replace(b'/', b'\\/')
+            elif encoding == 'unicode_escape':
+                body = body.replace(secret.encode(), ''.join(f'\\u{ord(char):04x}' for char in secret).encode())
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -3723,10 +3777,13 @@ def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, statu
             supervisor=Supervisor(store),  # type: ignore[arg-type]
             state_store=store,
         )
-        credential_ref = await adapter.provision_credential("custom", "openai_chat", "wrong-key", base_url)
+        credential_ref = await adapter.provision_credential("custom", protocol, secret, base_url)
         with pytest.raises(ModelDiscoveryError) as raised:
-            await adapter.discover_models("custom", "openai_chat", base_url, credential_ref)
+            await adapter.discover_models("custom", protocol, base_url, credential_ref)
         assert raised.value.rejected_status == rejected
+        assert raised.value.upstream_status == status
+        assert raised.value.upstream_detail == "Access denied for [redacted]. Check permissions."
+        assert secret not in str(raised.value)
 
     try:
         asyncio.run(run())

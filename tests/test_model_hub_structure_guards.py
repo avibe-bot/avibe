@@ -575,7 +575,7 @@ def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
             assert any(
                 isinstance(node, ast.Call)
                 and _call_name(node) == "on_admitted"
-                and [ast.unparse(arg) for arg in node.args] == ["generation"]
+                and [ast.unparse(arg) for arg in node.args] == ["generation", "candidate.inventory_member"]
                 for node in ast.walk(admitted)
             )
 

@@ -59,6 +59,8 @@ export type BotEmojiAvatarInput = { emoji: string; hue: number };
  *  Bots' namespace alone (D2). Whether a Bot still owns the id is the list's call. */
 export const BOT_SESSION_ID_PREFIX = 'ses_';
 export const MAIN_BOT_SESSION_ID = 'ses_main';
+/** The main Bot's handle (D9): its Agent is the built-in Bot with this handle. */
+export const MAIN_BOT_HANDLE = 'main';
 
 export function isBotSessionId(sessionId: string | null | undefined): boolean {
   return typeof sessionId === 'string' && sessionId.startsWith(BOT_SESSION_ID_PREFIX);

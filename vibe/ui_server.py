@@ -7373,8 +7373,8 @@ def web_push_unsubscribe():
 
 @app.route("/api/web-push/test", methods=["POST"])
 def web_push_test():
+    from core import web_push_notifications
     from core.web_push import send_web_push
-    from core.web_push_notifications import _badge_count_for_user_key
     from storage import web_push_service
 
     payload = request.json or {}
@@ -7385,49 +7385,55 @@ def web_push_test():
     engine = _projects_engine()
     sent = 0
     failed = 0
-    with engine.connect() as conn:
-        subscription = web_push_service.get_enabled_by_endpoint(
-            conn,
-            endpoint=endpoint,
-            user_key=user_key,
-        )
-        context = _request_authorization_context()
-        contexts = (
-            {user_key: context}
-            if user_key != "local" and context is not None
-            else {}
-        )
-        badge_count = _badge_count_for_user_key(
-            conn,
-            user_key=user_key,
-            contexts=contexts,
-        )
-    if not subscription:
-        return jsonify({"ok": False, "error": "no_subscription"}), 404
-    notification = {
-        "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
-        "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
-        "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
-        # The iOS App shows a notification while it is in front only for this
-        # tag (AvibeAppDelegate.testNotificationThread).
-        "tag": "web-push-test",
-        "badge_count": badge_count,
-    }
-    try:
-        send_web_push(subscription=subscription, payload=notification)
-        with engine.begin() as conn:
-            web_push_service.mark_send_success(conn, endpoint=subscription["endpoint"])
-        sent += 1
-    except Exception as exc:
-        logger.warning("web push: test send failed", exc_info=True)
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        with engine.begin() as conn:
-            web_push_service.mark_send_failure(
+    context = _request_authorization_context()
+    contexts = (
+        {user_key: context}
+        if user_key != "local" and context is not None
+        else {}
+    )
+    with web_push_notifications._owner_delivery_lock(user_key):
+        with engine.connect() as conn:
+            subscription = web_push_service.get_enabled_by_endpoint(
                 conn,
-                endpoint=subscription["endpoint"],
-                disable=status_code in {404, 410},
+                endpoint=endpoint,
+                user_key=user_key,
             )
-        failed += 1
+            if subscription:
+                badge_count = web_push_notifications._badge_count_for_user_key(
+                    conn,
+                    user_key=user_key,
+                    contexts=contexts,
+                )
+        if not subscription:
+            return jsonify({"ok": False, "error": "no_subscription"}), 404
+        notification = {
+            "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
+            "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
+            "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
+            # The iOS App shows a notification while it is in front only for this
+            # tag (AvibeAppDelegate.testNotificationThread).
+            "tag": "web-push-test",
+            "badge_count": badge_count,
+        }
+        try:
+            send_web_push(subscription=subscription, payload=notification)
+            with engine.begin() as conn:
+                web_push_service.mark_send_success(
+                    conn,
+                    endpoint=subscription["endpoint"],
+                    badge_count=badge_count,
+                )
+            sent += 1
+        except Exception as exc:
+            logger.warning("web push: test send failed", exc_info=True)
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            with engine.begin() as conn:
+                web_push_service.mark_send_failure(
+                    conn,
+                    endpoint=subscription["endpoint"],
+                    disable=status_code in {404, 410},
+                )
+            failed += 1
     return jsonify(
         {
             "ok": failed == 0,
@@ -13881,6 +13887,7 @@ def sessions_mark_read(session_id: str):
         get_notification_preferences,
     )
     from core.services import sessions as workbench_sessions_service
+    from core import web_push_notifications
     from storage import messages_service
     from vibe.sse_broker import broker
 
@@ -13891,16 +13898,32 @@ def sessions_mark_read(session_id: str):
     try:
         with engine.begin() as conn:
             authorization_context = getattr(g, "authorization_context", None)
+            user_key = _web_push_user_key()
+            preferences = get_notification_preferences(user_key)
             session = workbench_sessions_service.get_session(
                 conn,
                 session_id,
                 authorization_context=authorization_context,
             )
+            accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+            hidden_session_ids = _hidden_bot_session_ids(conn, authorization_context)
+            previous_unread_by_session = messages_service.unread_counts_by_session(
+                conn,
+                platform="avibe",
+                scope_ids=accessible_scope_ids,
+                hidden_session_ids=hidden_session_ids,
+            )
+            previous_unread_by_category = split_unread_counts(
+                previous_unread_by_session,
+                bot_session_ids=current_bot_session_ids(conn),
+            )
+            previous_badge_total = notification_badge_total(
+                previous_unread_by_category,
+                preferences,
+            )
             updated = messages_service.mark_session_read(
                 conn, session_id, until_message_id=until_message_id
             )
-            accessible_scope_ids = _request_accessible_project_scope_ids(conn)
-            hidden_session_ids = _hidden_bot_session_ids(conn, authorization_context)
             unread_counts = messages_service.unread_counts(
                 conn,
                 platform="avibe",
@@ -13919,7 +13942,7 @@ def sessions_mark_read(session_id: str):
             )
             current_badge_total = notification_badge_total(
                 unread_by_category,
-                get_notification_preferences(_web_push_user_key()),
+                preferences,
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -13936,6 +13959,17 @@ def sessions_mark_read(session_id: str):
                 "badge_total": current_badge_total,
             },
         )
+        if previous_badge_total != current_badge_total:
+            try:
+                web_push_notifications.schedule_badge_reconciliation(
+                    user_key,
+                    authorization_context,
+                )
+            except Exception:
+                logger.warning(
+                    "web push badge: could not schedule post-read reconciliation",
+                    exc_info=True,
+                )
     return jsonify(
         {
             "updated": updated,

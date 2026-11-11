@@ -4,6 +4,24 @@ Status: Approved for implementation on September 9, 2026. Runtime changes are
 not deployed by approval. The defaults below are the implementation target,
 not claims about deployed behavior.
 
+## Owner decision — November 12, 2026
+
+Web chat keeps its existing thinking indicator during recovery: no visible
+“waiting to retry” notice. This overrides the September 9 visible live-wait
+copy and presentation requirements below for Web only. IM behavior is unchanged
+and outside this change.
+
+Do not shorten or cap the existing wait to make failures appear sooner. A
+provider's definite credential or model rejection remains terminal; HTTP 503
+continues retrying under today's policy, including when the provider does not
+list the requested model. The final error may explain that inventory mismatch
+as context, never as proof that it caused a transient refusal. Isolating an
+unlisted model's shared cooldown must not make that request fail sooner. For a
+literal HTTP 503 classified as `server_error` where the admitted upstream model
+is absent from the Hub Source inventory, Part 3 keeps the same wait privately
+inside that request by Source id; listed-model 503s and all other shared
+blockers retain today's behavior.
+
 ## Start with the reported case
 
 `gpt-6-astra` had one configured supplier, `relay-gpt`, and that relay was
@@ -172,6 +190,11 @@ preflight availability and terminal rendering participate in this proposal.
 
 ### Backoff and cooldown
 
+The exception is request-private and has no model-level or persisted state.
+Inventory membership is frozen at transport admission, so a later inventory
+refresh cannot change settlement scope. HTTP 200 buffered overload remains
+under its exact existing shared policy.
+
 Count consecutive eligible failed attempts for the same Source identity.
 Do not count waiters, native error notifications, elapsed timers, or failures
 whose settlement generation is stale.
@@ -179,7 +202,7 @@ whose settlement generation is stale.
 | Classified failure | Approved local delay, before upstream advice | Storage / action |
 | --- | --- | --- |
 | Unclassified pre-output connection failure | 1, 2, 4, 8, 16, 30 seconds; cap 30 | Reuse contracted live Source-scoped backoff; no Source/config write. |
-| Retryable server/overload | 30, 60, 120 seconds; cap 120 | Keep existing shaped-error Source cooldown; streak is live state. |
+| Retryable server/overload | 30, 60, 120 seconds; cap 120 | Keep existing shaped-error Source cooldown; streak is live state. A literal HTTP 503 classified as `server_error` for a model absent from the admitted Hub Source inventory is the Part 3 exception: shared health stays unchanged and that request carries the same timing privately by Source id. |
 | Recoverable rate limit | 60, 120, 240, 300 seconds; cap 300 | Keep existing cooldown classification. |
 | Recoverable quota exhaustion | 300 seconds | Keep existing cooldown; normally beyond the automatic window. |
 | Refreshable credential rejection | Existing same-Source retry once | No independent retry loop; a second rejection follows the existing terminal rule. |

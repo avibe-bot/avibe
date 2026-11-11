@@ -23,6 +23,7 @@ import { chosenCandidate, EMPTY_PICKER_GROUPS, pickerGroups } from './backendCat
 import type { ChosenCandidate, PickerGroups } from './backendCatalog';
 import { modelSearchMatches } from './modelSearch';
 import { modelsApi } from './modelsApi';
+import { RadioDot } from './RadioDot';
 import type { AgentBackend, BackendModelCandidates, ModelCandidate } from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
@@ -330,7 +331,9 @@ const PickerRow: React.FC<{
         supplied && 'model-hub-picker-row--suppliers',
       )}
     >
-      <Checkbox presentational checked={checked} disabled={listed} />
+      {single
+        ? <RadioDot selected={checked} />
+        : <Checkbox presentational checked={checked} disabled={listed} />}
       {/* The label and the strip share a box so the checkbox stays centred on
         * the pair however the pair is arranged, and so the narrow layout can
         * stack them without the row itself having to wrap. */}

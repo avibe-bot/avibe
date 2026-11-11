@@ -89,6 +89,7 @@ const designFrames = frames([
   }),
   screen('gateway-failed', '设置向导 · 模型供应商 · 模型网关未能启动', { health: 'down' }),
   screen('phone', '设置向导 · 模型供应商 · 手机（一屏放下，操作栏固定在底部）', {}, { width: 390, height: 844 }),
+  screen('empty-phone', '设置向导 · 模型供应商 · 还没有供应商（手机，可稍后再配）', { sources: [] }, { width: 390, height: 844 }),
   screen('key-checking', '设置向导 · 模型供应商 · 刚保存的 Key 正在检查', saved({ [check]: UNANSWERED })),
   screen('key-connected', '设置向导 · 模型供应商 · Key 已连接，列出模型数', saved(listed)),
   screen('key-rejected', '设置向导 · 模型供应商 · Key 被拒绝，继续旁提示没有供应商通过', saved(refused)),

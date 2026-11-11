@@ -814,6 +814,22 @@ scenarios:
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/e2e/onboarding-fidelity/lineup.spec.ts
+  - id: AUTH-SETUP-163
+    name: A Hub-owned CLI assistant's Default model card picks a model that makes its Agent runnable, and setup completes
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes_setup
+    # The scenario owns the server boundary the card's model picker calls for a CLI
+    # backend: the candidates read, the catalog write, the Agent's model, the runnable
+    # named route and completion. The browser side — the card opening the picker rather
+    # than the route editor, the write order, and a failed pick holding entry — is the
+    # supporting tests, against controlled responses.
+    supporting_tests:
+      - ui/src/components/onboarding/AssistantSetup.test.tsx
+      - ui/src/components/onboarding/useSetupModelChoice.test.ts
+      - ui/e2e/onboarding-fidelity/pm-main-flow.spec.ts
   - id: AUTH-SETUP-132
     name: A new install starts on Vibey, and setup completes without writing a default
     status: covered
@@ -984,29 +1000,30 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mcp_hub_same_name_oauth_logins_stay_in_their_scope
-  - id: AUTH-SETUP-139
+  - id: AUTH-SETUP-164
     name: Setup checks a saved key against its provider, names a rejected key on its card, and lets it be replaced or removed there
     status: covered
     kind: historical_regression
     layer: contract
     backend: web
     test:
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 checks a saved key and writes the answer on its card, checking then connected with its count
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 names a rejected key on its card, keeps it pressable, and says nothing passed beside Continue
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 says nothing passed in Chinese, and stays quiet once any key passes
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 replaces a rejected key from its card, and the card reports the key that passed
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 checks a saved key and writes the answer on its card, checking then connected with its count
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 names a rejected key on its card, keeps it pressable, and says nothing passed beside Continue
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 says nothing passed in Chinese, and stays quiet once any key passes
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 replaces a rejected key from its card, and the card reports the key that passed
       - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 asks before a replacement key that would leave assistants without a model
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 asks before a check that would drop routed models, and still counts the working key
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 does not check again once setup may no longer write to the Hub
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 settles the inventory when a check readback supersedes a read in flight
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 opens the key that failed when a provider holds two keys
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 removes a key from its card after a confirmation
-      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-139 asks once more before removing a key assistants still route to
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 asks before a replacement key that would leave assistants without a model
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 asks before a check that would drop routed models, and still counts the working key
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 does not check again once setup may no longer write to the Hub
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 settles the inventory when a check readback supersedes a read in flight
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 opens the key that failed when a provider holds two keys
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 removes a key from its card after a confirmation
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 asks once more before removing a key assistants still route to
     reason: >-
       The closed loop carries one saved key through real credential custody and
       real model listing against a local upstream: saved unverified, checked and
-      refused with its 401, a refused replacement that keeps the stored key, the
+      refused with its 401 and bounded provider message (invalid or insufficient
+      permission, not proof of revocation), a refused replacement that keeps the stored key, the
       right key, a passing check and removal. The provider screen cases pin what
       the wizard shows for each answer against a controlled source API. Engine
       lifecycle stays simulated; the live journey was also run once in a
@@ -1015,4 +1032,72 @@ scenarios:
       - tests/test_model_hub_api.py::test_refresh_names_a_rejected_key_and_its_status
       - tests/test_model_hub_runtime.py::test_adapter_discovery_names_only_a_credential_refusal
       - ui/src/components/onboarding/providers/providerStage.test.ts
+  - id: AUTH-SETUP-161
+    name: Setup can finish without a provider (Set up later) and the home leads back to adding a model
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_finishes_without_a_provider_closed_loop
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 finishes setup without a provider and lands home, choosing nothing about supply
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 stays in setup and says so when the finish cannot be confirmed
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 is not offered once a provider is there to continue with
+    reason: >-
+      The closed loop sends the Wizard's one write to a fresh install with no
+      source through the real config API and reads back what the shell and the home
+      read: setup_state.needs_setup false and the main Bot's backend connection
+      reporting auth none, which the home shows as its model card. The Wizard cases
+      pin the browser half against controlled APIs: offered only with nothing to
+      continue with, believed only on readback, no entry gate or default Agent. The
+      HomeGuide case pins the card itself; the live journey was run once in a
+      fresh-install Incus environment.
+    supporting_tests:
+      - ui/src/components/home/HomeGuide.test.tsx
+  - id: AUTH-SETUP-162
+    name: The model picked for Vibey in setup is the main Bot's too while it still follows Vibey, and setup suggests current flagships first
+    status: covered
+    kind: historical_regression
+    layer: contract
+    backend: web
+    test:
+      - "ui/src/components/onboarding/useSetupModelChoice.test.ts::AUTH-SETUP-162 the main Bot on the model Vibey had takes the model picked for Vibey"
+      - "ui/src/components/onboarding/useSetupModelChoice.test.ts::AUTH-SETUP-162 the main Bot given one while Vibey had none takes the model picked for Vibey"
+      - "ui/src/components/onboarding/useSetupModelChoice.test.ts::AUTH-SETUP-162 the main Bot with no model of its own yet takes the model picked for Vibey"
+      - ui/src/components/onboarding/useSetupModelChoice.test.ts::AUTH-SETUP-162 leaves a main Bot someone set to another model alone
+      - ui/src/components/onboarding/useSetupModelChoice.test.ts::AUTH-SETUP-162 holds the choice for Retry when the main Bot did not take it
+      - ui/src/components/onboarding/useSetupModelChoice.test.ts::AUTH-SETUP-162 carries the main Bot into another pick after a half-done choice
+    reason: >-
+      Covered is bounded to the setup choice owner against a fake server that
+      reproduces the controller's fill of an Agent with no model. The flagship
+      order is pinned at the server by MH-VIBEY-007's ordering case; the live
+      journey (pick for Vibey, the main Bot's model after entry) was run once in a
+      fresh-install Incus environment.
+    supporting_tests:
+      - tests/test_model_hub_vibey_consumer.py::test_vibey_offers_and_starts_on_the_flagship_rather_than_a_listings_first_row
+      - ui/src/components/onboarding/BuiltinAssistant.test.tsx
+  - id: AUTH-SETUP-165
+    name: A subscription sign-in offers its page as a button and a copyable link, and a loopback callback continues without a paste
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_loopback_callback_signs_in_without_a_paste
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 offers the sign-in page as a button and a copyable link, never the raw URL as text
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 folds the paste for a loopback redirect, and opens it on request with the real address and what to expect
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 opens the paste once the person is back with the link used and nothing has arrived for 10 s
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 keeps the paste open on a page reached from another device
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 keeps the paste open where nothing can arrive by itself
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 leaves a pasted-code sign-in as it was, apart from the link
+    reason: >-
+      The closed loop starts a Hub sign-in through the real adapter, lets the
+      engine receive the grant the way its loopback forwarder hands it over, and
+      shows the status poll alone materializing the subscription Source with no
+      paste. The dialog cases pin what it shows against controlled responses. The
+      forwarder itself is the engine's (AUTH-SETUP-130 pins it on loopback); it
+      was also verified live in a
+      fresh-install Incus environment by sending a simulated redirect with a test
+      code to localhost:1455 inside the instance, which the forwarder handed to the
+      engine and the flow ended on the provider's refusal of that code, no paste.
 next_priority: []

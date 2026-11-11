@@ -435,6 +435,19 @@
   text-align: center;
 }
 .setup-provider-summary[data-tone='error'] { color: var(--destructive-ink); }
+.setup-provider-summary > .setup-summary-actions { display: inline-flex; align-items: center; gap: 10px; }
+/* With the way out in it, the line takes the assistants step's hint shape: the
+   sentence centred on the action's axis, its controls in the flanking column beside
+   it, both columns free to give their width back on a narrow screen. */
+.setup-provider-summary[data-later] {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+}
+.setup-provider-summary[data-later] > span:first-child { grid-column: 2; }
+.setup-provider-summary[data-later] > .setup-summary-actions { grid-column: 3; justify-self: start; }
+.setup-provider-summary[data-later] .setup-summary-retry { margin-inline-start: 0; }
+.setup-summary-later { font-size: var(--ob-cap-fs); }
 /* The summary rests on the stage's floor, the line the welcome's return wire and the
    assistants hint share, even at a tier where another screen is the tallest and this
    diagram is shorter than its stage. The stage fills that room and splits the slack
@@ -465,7 +478,7 @@
  * two dialogs asking for a key must look like the same question. */
 .setup-add-dialog {
   --obs-dialog-w: 568px;
-  --obs-dialog-h: 632px;
+  --obs-dialog-h: 720px;
   --obs-pad: 24px;
   --obs-gap: 20px;
   --obs-row-h: 56px;
@@ -638,12 +651,15 @@
   color: var(--muted);
 }
 
+/* The body scrolls under a ruled footer, so a long form reads as continuing
+   rather than as cut off by the buttons. */
 .setup-add-foot {
   display: flex;
   flex: none;
   align-items: center;
   gap: 10px;
-  padding: 0 var(--obs-pad) var(--obs-pad);
+  padding: 14px var(--obs-pad) var(--obs-pad);
+  border-top: 1px solid var(--border);
 }
 
 /* Reserved, not conditional: the strip holds its line whether or not there is

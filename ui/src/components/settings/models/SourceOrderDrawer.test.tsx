@@ -148,7 +148,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     const rows = [...document.querySelectorAll<HTMLElement>('.model-hub-order-row')];
     expect(rows).toHaveLength(3);
-    const labels = [['Move source up', 'Move source down', 'Remove from order'], ['Move source up', 'Move source down', 'Remove from order'], ['Add to order']];
+    const labels = [['Move provider up', 'Move provider down', 'Remove from order'], ['Move provider up', 'Move provider down', 'Remove from order'], ['Add to order']];
     rows.forEach((row, index) => {
       const actions = row.querySelector<HTMLElement>('.model-hub-order-row-actions');
       expect(actions).not.toBeNull();
@@ -164,26 +164,26 @@ describe('SourceOrderDrawer keyboard ordering', () => {
       }
       expect(row.querySelector('.model-hub-order-name')?.textContent).toBe(available[index].display_name);
     });
-    expect(within(rows[0]).getByRole('button', { name: 'Move source up' }).hasAttribute('disabled')).toBe(true);
-    expect(within(rows[0]).getByRole('button', { name: 'Move source down' }).hasAttribute('disabled')).toBe(false);
-    expect(within(rows[1]).getByRole('button', { name: 'Move source up' }).hasAttribute('disabled')).toBe(false);
-    expect(within(rows[1]).getByRole('button', { name: 'Move source down' }).hasAttribute('disabled')).toBe(true);
+    expect(within(rows[0]).getByRole('button', { name: 'Move provider up' }).hasAttribute('disabled')).toBe(true);
+    expect(within(rows[0]).getByRole('button', { name: 'Move provider down' }).hasAttribute('disabled')).toBe(false);
+    expect(within(rows[1]).getByRole('button', { name: 'Move provider up' }).hasAttribute('disabled')).toBe(false);
+    expect(within(rows[1]).getByRole('button', { name: 'Move provider down' }).hasAttribute('disabled')).toBe(true);
   });
 
   it('moves with arrow actions, preserves focus after membership changes, and saves the exact draft', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     renderDrawer();
-    await user.click((await screen.findAllByRole('button', { name: 'Move source down' }))[0]);
+    await user.click((await screen.findAllByRole('button', { name: 'Move provider down' }))[0]);
     await waitFor(() => expect(document.activeElement?.closest('li')?.textContent).toContain('Primary'));
-    expect(screen.getAllByRole('button', { name: 'Reorder source' })[1].closest('li')?.textContent).toContain('Primary');
-    await user.click(screen.getAllByRole('button', { name: 'Move source up' })[1]);
-    expect(screen.getAllByRole('button', { name: 'Reorder source' })[0].closest('li')?.textContent).toContain('Primary');
+    expect(screen.getAllByRole('button', { name: 'Reorder provider' })[1].closest('li')?.textContent).toContain('Primary');
+    await user.click(screen.getAllByRole('button', { name: 'Move provider up' })[1]);
+    expect(screen.getAllByRole('button', { name: 'Reorder provider' })[0].closest('li')?.textContent).toContain('Primary');
     await user.click(screen.getAllByRole('button', { name: 'Remove from order' })[0]);
     const include = await screen.findByRole('button', { name: 'Add to order' });
     await waitFor(() => expect(document.activeElement).toBe(include));
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole('button', { name: 'Reorder source' })[1]));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getAllByRole('button', { name: 'Reorder provider' })[1]));
     await user.click(screen.getByRole('button', { name: 'Save default routing' }));
     await waitFor(() => expect(modelsApi.putAgentSources).toHaveBeenCalledWith('claude', { order: ['src_b', 'src_a'] }));
   });
@@ -225,7 +225,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     await screen.findByRole('button', { name: 'Retry' });
     expect(put).toHaveBeenCalledTimes(2);
     expect(put).toHaveBeenLastCalledWith('claude', { order: ['src_b'], force: true, would_remove_hops: [], would_interrupt: gaps });
-    expect(screen.getByRole('button', { name: 'Reorder source' }).closest('li')?.textContent).toContain('Backup');
+    expect(screen.getByRole('button', { name: 'Reorder provider' }).closest('li')?.textContent).toContain('Backup');
     expect(screen.getByRole('button', { name: 'Add to order' })).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -265,7 +265,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     renderDrawer();
-    const handles = await screen.findAllByRole('button', { name: 'Reorder source' });
+    const handles = await screen.findAllByRole('button', { name: 'Reorder provider' });
     expect(screen.getByRole('heading', { name: 'Claude Code · Default routing' })).toBeTruthy();
     expect(screen.getByText('Applies to automatic and passthrough routes. Saved manual routes stay unchanged.')).toBeTruthy();
     expect(screen.getByText('Available for manual routes.')).toBeTruthy();
@@ -277,10 +277,10 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     await user.keyboard('[ArrowDown]');
     expect(screen.getByText('Moved Primary to position 2 of 2.')).toBeTruthy();
-    expect(document.activeElement).toBe(screen.getAllByRole('button', { name: 'Reorder source' })[1]);
+    expect(document.activeElement).toBe(screen.getAllByRole('button', { name: 'Reorder provider' })[1]);
 
     await user.keyboard('[Escape]');
-    const restored = screen.getAllByRole('button', { name: 'Reorder source' });
+    const restored = screen.getAllByRole('button', { name: 'Reorder provider' });
     expect(restored[0].getAttribute('aria-grabbed')).toBe('false');
     expect(restored[0].closest('li')?.textContent).toContain('Primary');
   });
@@ -289,7 +289,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
     renderDrawer();
-    const handles = await screen.findAllByRole('button', { name: 'Reorder source' });
+    const handles = await screen.findAllByRole('button', { name: 'Reorder provider' });
 
     handles[0].focus();
     await user.keyboard('[ArrowDown]');
@@ -310,7 +310,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     await screen.findByText('Could not confirm the saved default routing. Retry to check.');
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
-    expect(screen.getByText('This order is empty. Add a source from below.')).toBeTruthy();
+    expect(screen.getByText('This order is empty. Add a provider from below.')).toBeTruthy();
     expect(getAgentSources).toHaveBeenCalledWith('claude');
     expect(putAgentSources).toHaveBeenCalledWith('claude', { order: [] });
   });
@@ -356,10 +356,10 @@ describe('SourceOrderDrawer keyboard ordering', () => {
       .mockResolvedValueOnce(agent);
     renderDrawer();
 
-    await screen.findByText('The source list could not be read');
+    await screen.findByText('The provider list could not be read');
     await user.click(screen.getByRole('button', { name: 'Retry' }));
 
-    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Reorder source' })).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Reorder provider' })).toHaveLength(2));
     expect(read).toHaveBeenCalledTimes(2);
   });
 
@@ -374,7 +374,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(noEligible);
     renderDrawer({ agent: noEligible });
 
-    await screen.findByText('No source is available to this backend yet.');
+    await screen.findByText('No provider is available to this backend yet.');
     expect(screen.getByRole('button', { name: 'Save default routing' }).hasAttribute('disabled')).toBe(true);
   });
 
@@ -392,7 +392,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     renderDrawer();
 
     expect(await screen.findByText('Newest source')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Reorder source' })).toHaveLength(3);
+    expect(screen.getAllByRole('button', { name: 'Reorder provider' })).toHaveLength(3);
   });
 
   it('renders a composition hole and performs exactly one regroup read', async () => {
@@ -471,7 +471,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     renderDrawer();
 
-    expect(await screen.findByText('The source list could not be read')).toBeTruthy();
+    expect(await screen.findByText('The provider list could not be read')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     expect(agentRead).toHaveBeenCalledTimes(2);
   });
@@ -483,7 +483,7 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     renderDrawer();
 
-    expect(await screen.findByText('The source list could not be read')).toBeTruthy();
+    expect(await screen.findByText('The provider list could not be read')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     expect(agentRead).toHaveBeenCalledTimes(2);
   });

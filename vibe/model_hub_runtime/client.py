@@ -58,6 +58,7 @@ from core.handlers.model_hub.stream_wire import (
 )
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_key_header,
+    anthropic_api_root,
     google_api_base_url,
     official_api_key_base_urls,
     validate_api_key_auth_scheme,
@@ -234,9 +235,18 @@ def _allowed_claude_rate_limit_headers(
     return tuple(sorted(retained.items()))
 
 
-def upstream_api_url(root: str, path: str) -> str:
-    """Resolve a standard v1 endpoint from either an origin or an API root."""
+def upstream_api_url(root: str, path: str, protocol: str | None = None) -> str:
+    """Resolve a standard v1 endpoint from either an origin or an API root.
 
+    An Anthropic root is the one the engine calls (``anthropic_api_root``):
+    the endpoint keeps its ``/v1``, so a probe reaches the URL every later
+    call through the engine does.
+    """
+
+    if protocol == "anthropic":
+        resolved = normalize_model_hub_base_url(anthropic_api_root(root), append_path=path)
+        assert resolved is not None
+        return resolved
     normalized = normalize_model_hub_base_url(root)
     assert normalized is not None
     root_path = urllib.parse.urlsplit(normalized).path.rstrip("/")
@@ -256,8 +266,10 @@ class EngineClientError(RuntimeError):
         error_code: str | None = None,
         error_candidates: tuple[str, ...] = (),
         os_errno: int | None = None,
+        upstream_detail: str | None = None,
     ) -> None:
         super().__init__(message)
+        self.upstream_detail = upstream_detail
         self.status_code = status_code
         self.error_type = error_type
         self.error_code = error_code
@@ -1185,6 +1197,29 @@ class EngineClient:
         return url
 
 
+async def _model_discovery_http_error(response: aiohttp.ClientResponse, secret: str | None) -> EngineClientError:
+    """Read bounded provider context without exposing a credential or replacing its status."""
+
+    detail = None
+    try:
+        # A rejected listing does not need the unbounded inventory reader. Ignore
+        # oversized/partial bodies, and preserve the known status on read failure.
+        limit = 64 * 1024
+        try:
+            payload = await response.content.readexactly(limit + 1)
+        except asyncio.IncompleteReadError as exc:
+            payload = exc.partial
+        if len(payload) <= limit:
+            detail = _upstream_error_detail(payload, (("error",), ()), secret=secret)
+    except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+        pass
+    return EngineClientError(
+        f"model discovery returned HTTP {response.status}",
+        status_code=response.status,
+        upstream_detail=detail,
+    )
+
+
 async def probe_models(
     *,
     vendor: str,
@@ -1213,7 +1248,7 @@ async def probe_models(
             root, secret=secret, timeout=timeout, full_names=normalized_vendor == "gemini",
         )
     try:
-        url = upstream_api_url(root, "/v1/models")
+        url = upstream_api_url(root, "/v1/models", protocol)
         credential = {} if secret is None else (
             anthropic_api_key_header(root, secret) if protocol == "anthropic" else {"Authorization": f"Bearer {secret}"}
         )
@@ -1231,10 +1266,7 @@ async def probe_models(
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.get(url, headers=headers, allow_redirects=False) as response:
                 if response.status >= 300:
-                    raise EngineClientError(
-                        f"model discovery returned HTTP {response.status}",
-                        status_code=response.status,
-                    )
+                    raise await _model_discovery_http_error(response, secret)
                 with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as payload:
                     while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
                         await run_owned_in_thread(payload.write, chunk)
@@ -1342,9 +1374,7 @@ async def _probe_google_models(
                     allow_redirects=False, timeout=aiohttp.ClientTimeout(total=remaining),
                 ) as response:
                     if response.status >= 300:
-                        raise EngineClientError(
-                            f"model discovery returned HTTP {response.status}", status_code=response.status,
-                        )
+                        raise await _model_discovery_http_error(response, secret)
                     with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as body:
                         while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
                             await run_owned_in_thread(body.write, chunk)
@@ -2343,8 +2373,15 @@ def _raw_error_fields(
 def _upstream_error_detail(
     payload: bytes,
     envelope_paths: tuple[ErrorEnvelopePath, ...],
+    *,
+    secret: str | None = None,
 ) -> str | None:
-    """Project the first envelope's ``message`` as bounded, redacted display text."""
+    """Project the first envelope's ``message`` as bounded, redacted display text.
+
+    Credentialed discovery bounds the body before calling this with its exact
+    secret. Decode those messages losslessly so JSON escaping or truncation
+    cannot hide the credential from redaction, then apply the display bound.
+    """
 
     message_paths = tuple((*path, "message") for path in envelope_paths)
     values: dict[JSONPath, str] = {}
@@ -2360,10 +2397,16 @@ def _upstream_error_detail(
         elif event == "scalar" and isinstance(value, str):
             values[path] = value
 
-    if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
+    if not payload or not project_json_reader(
+        io.BytesIO(payload), message_paths, visit,
+        lossless_string_paths=message_paths if secret else (),
+    ):
         return None
     for path in message_paths:
-        text = bounded_diagnostic_detail(values.get(path, ""))
+        message = values.get(path, "")
+        if secret:
+            message = message.replace(secret, "[redacted]")
+        text = bounded_diagnostic_detail(message)
         if text:
             return text
     return None

@@ -257,7 +257,7 @@ describe('ToolsTab status lines', () => {
     const web = card('Web search');
     expect(within(web).getByText('Not supported on relay-gpt, OpenAI subscription')).toBeTruthy();
     expect(within(web).queryByRole('button', { name: /^Clear/ })).toBeNull();
-    expect(within(web).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Execution order: automatic · Status by Source');
+    expect(within(web).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Execution order: automatic · Status by provider');
 
     await openAdvanced(user, 'Web search');
     const rows = within(web).getAllByRole('listitem').filter((row) => row.hasAttribute('data-pair'));
@@ -300,7 +300,7 @@ describe('ToolsTab status lines', () => {
 
     const imageCard = card('Image generation');
     expect(within(imageCard).getByText('Not supported on relay-gpt, relay-claude')).toBeTruthy();
-    expect(within(imageCard).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Status by Source');
+    expect(within(imageCard).getByRole('button', { name: /^Advanced/ }).textContent).toContain('Status by provider');
     await openAdvanced(user, 'Image generation');
     // Only the clears live here: an image tool has no executor order.
     expect(within(imageCard).queryByText('Execution order')).toBeNull();

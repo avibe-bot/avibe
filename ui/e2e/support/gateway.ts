@@ -3,7 +3,7 @@
 // `hubSurface` — the page a spec lands on is not a constant. `modelsSurfaceKind`
 // sends `/settings/models` to the DIRECT HOME when every backend is on Direct
 // *and* the instance holds no sources, and that home has no source list and no
-// Add API key button: its only control is "Switch to gateway". A machine's very
+// Add API key button: its only control is "Let Model Hub manage". A machine's very
 // first source arrives by adopting the gateway, which is C6-direct-home's
 // subject. So every spec on this `test` gets one anchor source when the instance
 // has none, and the anchor leaves with the test that needed it. Without it a
