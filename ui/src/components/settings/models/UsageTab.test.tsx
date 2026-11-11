@@ -155,14 +155,14 @@ describe('UsageTab', () => {
     expect(names()).toEqual(['Live supplier · Live model', 'Removed providers']);
     expect(table().getByText('Usage kept after these providers were deleted')).toBeTruthy();
     expect(table().getByText('10')).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: 'By source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'By provider' }));
     expect(names()).toEqual(['Live supplier', 'Removed providers']);
     // The aggregate closes the table whichever way it is sorted.
     await userEvent.click(screen.getByRole('button', { name: /sorted descending/i }));
     expect(names()).toEqual(['Live supplier', 'Removed providers']);
     await userEvent.click(screen.getByRole('button', { name: 'Model' }));
     expect(container.querySelector('.model-hub-usage-legend')?.textContent).toContain('Removed providers');
-    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
     expect(screen.getByRole('option', { name: /Removed providers/ })).toBeTruthy();
     for (const hidden of ['src_vanished01', vanishedModelId, 'glm-5.3', 'Unknown model']) {
       expect(container.textContent).not.toContain(hidden);
@@ -188,10 +188,10 @@ describe('UsageTab', () => {
       buckets: [bucket('00', rows)],
     });
     const { container, rerender } = render(page(before));
-    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
     await userEvent.click(screen.getByRole('option', { name: /Doomed supplier/ }));
     await userEvent.keyboard('{Escape}');
-    await userEvent.click(screen.getByRole('button', { name: 'By source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'By provider' }));
     const names = () => [...container.querySelectorAll('tbody .model-hub-usage-row-name')].map((cell) => cell.textContent);
     expect(names()).toEqual(['Doomed supplier']);
 
@@ -215,20 +215,20 @@ describe('UsageTab', () => {
       buckets: [bucket('00', [row(), row({ source_id: 'src_gone01', model_id: 'model-g' })])],
     };
     const { container, rerender } = render(page(withRemoved));
-    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
     await userEvent.click(screen.getByRole('option', { name: /Removed providers/ }));
     await userEvent.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: 'Reset filters' })).toBeTruthy();
 
     rerender(page(live));
-    expect(screen.getByRole('button', { name: 'All Source' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'All Provider' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reset filters' })).toBeNull();
     expect(container.querySelector('.model-hub-usage-empty-state')).toBeNull();
     expect(within(screen.getByRole('table')).getAllByText('Shared label · Shared model').length).toBeGreaterThan(0);
 
     // Dropped means gone: a later report offering it again does not bring it back.
     rerender(page(withRemoved));
-    expect(screen.getByRole('button', { name: 'All Source' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'All Provider' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Reset filters' })).toBeNull();
   });
 
@@ -656,9 +656,9 @@ describe('UsageTab', () => {
     expect(details.queryByText(/Exa key|Removed providers/)).toBeNull();
     // Exports and the model filter are model usage only; a tool-only Source is a Source.
     expect(buildUsageCsv(value, { sourceIds: [], modelKeys: [] }, null, CSV_HEADERS, 'Unknown model')).not.toContain('search');
-    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All Provider' }));
     const options = (label: string) => within(screen.getByRole('listbox', { name: label })).getAllByRole('option').map((option) => option.textContent);
-    expect(options('Source')).toEqual(['All Source', 'Claude', 'Relay', 'Exa key', 'Removed providers']);
+    expect(options('Provider')).toEqual(['All Provider', 'Claude', 'Relay', 'Exa key', 'Removed providers']);
     await userEvent.keyboard('{Escape}');
     await userEvent.click(screen.getByRole('button', { name: 'All Model' }));
     expect(options('Model')).toEqual(['All Model', 'Claude · Opus', 'Relay · Relay model']);
@@ -675,7 +675,7 @@ describe('UsageTab', () => {
     expect(screen.queryByText('No usage in this window')).toBeNull();
     expect(only.container.querySelector('.model-hub-usage-stat-grid')!.textContent).toContain('Requests0');
     const countsOnly = within(screen.getByRole('region', { name: /^Search services/ })).getByRole('table');
-    expect([...countsOnly.querySelectorAll('thead th')].map((cell) => cell.textContent)).toEqual(['Source / service', 'Requests', 'Billable']);
+    expect([...countsOnly.querySelectorAll('thead th')].map((cell) => cell.textContent)).toEqual(['Provider / service', 'Requests', 'Billable']);
   });
 
   it('renders exact accounting and preserves source/model pair rows', () => {

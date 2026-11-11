@@ -5603,6 +5603,99 @@ def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp
         agents.close()
 
 
+def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes_setup(monkeypatch, tmp_path):
+    """AUTH-SETUP-163: CLI card's Default model -> candidates -> catalog write -> Agent model -> runnable route -> completion.
+
+    In the setup wizard a Hub-owned CLI assistant's Default model card opens the model
+    picker instead of the route editor. Its Agent starts on a model no provider supplies,
+    so its route is unconfigured; the pick reads the backend's candidates, adds the model
+    its catalog lacks with the suppliers it displayed, names it as the Agent's model, and
+    the Agent can then run and setup completes on it. Every step is the HTTP route the
+    card calls; the Hub service is wired to the real Agent store.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    config = V2Config.default()
+    config.agents.claude.enabled = True
+    config.save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_claude161",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Relay",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model, provenance="discovered") for model in ("relay-opus", "relay-sonnet")],
+        credential_ref="cred_claude161",
+    )
+    store.config.sources = [source]
+    store.config.agents["claude"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents?include_disabled=1").get_json()
+        claude = next(row for row in listed["agents"] if row["backend"] == "claude" and row["bot"] is None)
+        # The card's Agent sits on a model nothing supplies: its route has no hop yet.
+        unsupplied = client.patch(f"/api/agents/{claude['name']}", json={"model": "not-supplied"}, headers=headers)
+        assert unsupplied.status_code == 200, unsupplied.get_json()
+
+        def claude_supply():
+            rows = client.get("/api/models/agents").get_json()["agents"]
+            return next(row for row in rows if row["backend"] == "claude")
+
+        def claude_route():
+            return next(row for row in claude_supply()["named_agents"] if row["name"] == claude["name"])
+
+        assert claude_route()["supply_status"] not in {"ok", "degraded"}
+
+        candidates = client.get("/api/models/agents/claude/models/candidates").get_json()["candidates"]
+        pick = next(row for row in candidates["providers"] if row["id"] == "relay-sonnet")
+        suppliers = [{"source_id": row["source_id"], "model_id": row["model_id"]} for row in pick["suppliers"]]
+        assert suppliers == [{"source_id": source.id, "model_id": "relay-sonnet"}]
+
+        baseline = claude_supply()["catalog_models"]
+        added = {
+            "id": pick["id"], "display_name": pick["display_name"], "origin": pick["origin"],
+            "models_dev_id": None, "context_window": None, "max_output_tokens": None,
+            "input_modalities": [], "output_modalities": [], "supports_tools": None,
+            "supports_reasoning": None, "reasoning_efforts": list(pick["reasoning_efforts"]),
+            "locked": False, "routeable": True,
+        }
+        written = client.put(
+            "/api/models/agents/claude/models",
+            json={"baseline": baseline, "models": [*baseline, added], "expected_suppliers": {"relay-sonnet": suppliers}},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        assert "relay-sonnet" in [row["id"] for row in claude_supply()["catalog_models"]]
+
+        named = client.patch(f"/api/agents/{claude['name']}", json={"model": "relay-sonnet"}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        assert agents.require(claude["name"]).model == "relay-sonnet"
+        route = claude_route()
+        assert route["effective_model_id"] == "relay-sonnet"
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+    finally:
+        agents.close()
+
+
 def test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_without_a_pick(monkeypatch, tmp_path):
     """AUTH-SETUP-131: add source -> seed -> catalog change -> Agent model -> runnable route -> completion.
 

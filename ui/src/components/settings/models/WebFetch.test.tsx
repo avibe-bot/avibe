@@ -32,7 +32,7 @@ it('shows the numbered automatic order after search and saves only the field cha
   expect(rows.map((row) => row.getAttribute('data-executor'))).toEqual(['src_localfetch', 'src_tavily01', 'src_exakeyless', 'src_jinakeyless']);
   expect(card.textContent).toContain('最近一次由 本机');
   expect(card.textContent).toContain('可渲染 JS');
-  expect(card.textContent).toContain('密钥只保存在网关');
+  expect(card.textContent).toContain('密钥只保存在模型网关');
   // One line per price, in the row's price column; a list price opens the vendor's page.
   expect(within(rows[1]).getByRole('link', { name: '$1.60 / 千页' })).toBeTruthy();
   // The default order and where a read goes are the heading's ⓘ, not text under the list.

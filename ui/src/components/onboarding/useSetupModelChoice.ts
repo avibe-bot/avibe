@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import type { ApiContextType } from '../../context/ApiContext';
-import type { BuiltinBackend } from '@/lib/agentBackends';
+import type { AgentBackendId } from '@/lib/agentBackends';
 import { compatibleEffort } from '@/lib/effortOptions';
 import { MAIN_BOT_HANDLE } from '@/lib/bots';
 import { useLatestRef } from '@/lib/useLatestRef';
@@ -18,25 +18,25 @@ const CANDIDATES_CHANGED = 'candidate_suppliers_changed';
  * from are gone and today's are read. `failed` keeps it: the model the person chose is
  * still the one they asked for, and Retry applies it again.
  */
-export type BuiltinChoiceFailure = { model: string; kind: 'suppliersChanged' | 'failed' };
+export type SetupChoiceFailure = { model: string; kind: 'suppliersChanged' | 'failed' };
 
-type Choice = { pick: ChosenCandidate; writing: boolean; failure: BuiltinChoiceFailure | null };
+type Choice = { pick: ChosenCandidate; writing: boolean; failure: SetupChoiceFailure | null };
 type ShownOffer = BuiltinModelOffer & { epoch: number };
 
-export type BuiltinModelChoiceDeps = {
+export type SetupModelChoiceDeps = {
   api: Pick<ApiContextType, 'getVibeAgent' | 'updateVibeAgent' | 'listVibeAgents'>;
   models: Pick<ModelsApi, 'getAgentModelCandidates' | 'putAgentModels'>;
   agentReads?: CollectionReadAuthority<AgentSupply[]>;
   /** The showing of the screen: it moves every time the screen is activated. */
   epoch: () => number;
   /** The card's own Agent, by name, from the current route read. */
-  target: (backend: BuiltinBackend) => string | null | undefined;
+  target: (backend: AgentBackendId) => string | null | undefined;
   /** Redraw the card from the server once a choice has settled either way. */
-  onSettled: (backend: BuiltinBackend) => unknown;
+  onSettled: (backend: AgentBackendId) => unknown;
 };
 
 /**
- * A built-in assistant's one setup decision — which model it runs on — owned end to end:
+ * An assistant's one setup decision — which model it runs on — owned end to end:
  * reading the models it could run on, writing the person's choice, and the ways either
  * goes stale or half-done.
  *
@@ -58,12 +58,12 @@ export type BuiltinModelChoiceDeps = {
  *   main Bot on a different model was set that way by someone, and setup does not
  *   replace it. The choice stands only when both read as chosen.
  */
-export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
+export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
   const latest = useLatestRef(deps);
-  const [offers, setOffers] = useState<Partial<Record<BuiltinBackend, ShownOffer>>>({});
-  const [choices, setChoices] = useState<Partial<Record<BuiltinBackend, Choice>>>({});
-  const tokens = useRef<Partial<Record<BuiltinBackend, number>>>({});
-  const writing = useRef<Partial<Record<BuiltinBackend, boolean>>>({});
+  const [offers, setOffers] = useState<Partial<Record<AgentBackendId, ShownOffer>>>({});
+  const [choices, setChoices] = useState<Partial<Record<AgentBackendId, Choice>>>({});
+  const tokens = useRef<Partial<Record<AgentBackendId, number>>>({});
+  const writing = useRef<Partial<Record<AgentBackendId, boolean>>>({});
   /**
    * The main Bot's Agent a choice carries along, decided once, before the first write of
    * a choice that has not stood yet. A half-done choice leaves the main Bot off Vibey's
@@ -71,9 +71,9 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
    * row picked instead — would read it as set apart on purpose and leave it behind. Held
    * until a choice stands.
    */
-  const followers = useRef<Partial<Record<BuiltinBackend, string | null>>>({});
+  const followers = useRef<Partial<Record<AgentBackendId, string | null>>>({});
 
-  const read = useCallback(async (backend: BuiltinBackend) => {
+  const read = useCallback(async (backend: AgentBackendId) => {
     const token = (tokens.current[backend] ?? 0) + 1;
     tokens.current[backend] = token;
     const showing = latest.current.epoch();
@@ -90,7 +90,7 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     }
   }, [latest]);
 
-  const choose = useCallback(async (backend: BuiltinBackend, pick: ChosenCandidate) => {
+  const choose = useCallback(async (backend: AgentBackendId, pick: ChosenCandidate) => {
     const { api, models, agentReads, target: targetOf } = latest.current;
     const target = targetOf(backend);
     if (!target || !agentReads || writing.current[backend]) return;
@@ -144,7 +144,7 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
       .then((result) => !!result?.ok && result.agent.model === model
         && compatibleEffort(result.agent.reasoning_effort, efforts) === (result.agent.reasoning_effort ?? null), () => false);
     const confirmed = !refused && await stands(target) && (!follower || await stands(follower));
-    const failure: BuiltinChoiceFailure | null = refused ? { model, kind: 'suppliersChanged' }
+    const failure: SetupChoiceFailure | null = refused ? { model, kind: 'suppliersChanged' }
       : confirmed ? null : { model, kind: 'failed' };
     if (refused) {
       setOffers((current) => ({ ...current, [backend]: { kind: 'loading', epoch: latest.current.epoch() } }));
@@ -167,7 +167,7 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     }
   }, [latest, read]);
 
-  const shown = (backend: BuiltinBackend) => {
+  const shown = (backend: AgentBackendId) => {
     const offer = offers[backend];
     return offer && offer.epoch === deps.epoch() ? offer : undefined;
   };
@@ -175,17 +175,17 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     read,
     choose,
     /** Apply a choice that did not stand once more. */
-    retry: (backend: BuiltinBackend) => {
+    retry: (backend: AgentBackendId) => {
       const choice = choices[backend];
       if (choice?.failure?.kind === 'failed') void choose(backend, choice.pick);
     },
     /** The candidates this showing of the screen read. */
-    offer: (backend: BuiltinBackend): BuiltinModelOffer | undefined => shown(backend),
+    offer: (backend: AgentBackendId): BuiltinModelOffer | undefined => shown(backend),
     /** The model being written, if a choice is in flight. */
-    picking: (backend: BuiltinBackend) => (choices[backend]?.writing ? choices[backend].pick.candidate.id : null),
-    failure: (backend: BuiltinBackend) => (choices[backend]?.writing ? null : choices[backend]?.failure ?? null),
+    picking: (backend: AgentBackendId) => (choices[backend]?.writing ? choices[backend].pick.candidate.id : null),
+    failure: (backend: AgentBackendId) => (choices[backend]?.writing ? null : choices[backend]?.failure ?? null),
     /** A choice is in flight or has not stood yet: entry waits on it. */
-    holds: (backend: BuiltinBackend) => {
+    holds: (backend: AgentBackendId) => {
       const choice = choices[backend];
       return !!choice && (choice.writing || choice.failure?.kind === 'failed');
     },

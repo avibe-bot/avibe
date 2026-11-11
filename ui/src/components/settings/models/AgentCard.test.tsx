@@ -269,7 +269,7 @@ describe('AgentCard', () => {
     };
     render(<I18nextProvider i18n={localeInstance('zh')}><AgentCard agents={[agentWithRetainedRoute]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
-    expect(screen.getByText('网关 · 未配置模型')).toBeTruthy();
+    expect(screen.getByText('托管 · 未配置模型')).toBeTruthy();
     expect(screen.getByText('0 个模型')).toBeTruthy();
     // The card offers the catalog instead of reporting missing supply: an empty
     // list is something the user can fix from here, not a broken backend.
@@ -332,8 +332,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Unavailable'],
-    ['zh', '网关 · 路由不可用'],
+    ['en', 'Managed · Unavailable'],
+    ['zh', '托管 · 路由不可用'],
   ] as const)('summarizes unavailable model routes in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, model_supply: hubAgent.model_supply!.map((row) => ({ ...row, has_runnable_hop: false })), named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'waiting' }] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
@@ -341,8 +341,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Ready'],
-    ['zh', '网关 · 路由可用'],
+    ['en', 'Managed · Ready'],
+    ['zh', '托管 · 路由可用'],
   ] as const)('summarizes catalog routes without requiring a selected Agent model in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{
       ...hubAgent,
@@ -356,8 +356,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway · Ready'],
-    ['zh', '网关 · 路由可用'],
+    ['en', 'Managed · Ready'],
+    ['zh', '托管 · 路由可用'],
   ] as const)('keeps available routes independent of Agent usage in %s', (lng, copy) => {
     render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[{ ...hubAgent, named_agents: [] }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
@@ -423,8 +423,8 @@ describe('AgentCard', () => {
   });
 
   it.each([
-    ['en', 'Gateway', 'Backup source → routed-opus', 'Open claude-opus-4-6 route chain · Backup source → routed-opus'],
-    ['zh', '网关', 'Backup source → routed-opus', '打开 claude-opus-4-6 的路由 · Backup source → routed-opus'],
+    ['en', 'Managed', 'Backup source → routed-opus', 'Open claude-opus-4-6 route chain · Backup source → routed-opus'],
+    ['zh', '模型网关管理', 'Backup source → routed-opus', '打开 claude-opus-4-6 的路由 · Backup source → routed-opus'],
   ] as const)('renders and announces the %s source-to-model mapping', (lng, modeCopy, mappingCopy, accessibleName) => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     render(
@@ -493,14 +493,14 @@ describe('AgentCard', () => {
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
 
-    expect(screen.getByRole('button', { name: 'Switch to gateway' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Let Model Hub manage' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Manage models' })).toBeNull();
     expect(onOpenModels).not.toHaveBeenCalled();
   });
 
   it.each([
-    ['en', 'Default routing', 'Switch to direct', 'Switch to gateway'],
-    ['zh', '默认路由', '切到直连', '切换到模型网关'],
+    ['en', 'Default routing', 'Use own login', 'Let Model Hub manage'],
+    ['zh', '默认路由', '改为 Agent 管理', '交给模型网关管理'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,

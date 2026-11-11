@@ -22,17 +22,7 @@ import { connectOutcome, isSupplyWarning } from './sufficiency';
 import type { AgentBackend, AgentMode, AgentSupply, MigrationItem } from './types';
 // Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
 import './modelHubSurface.css';
-
-const RadioDot: React.FC<{ selected: boolean }> = ({ selected }) => (
-  <span
-    className={cn(
-      'mt-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-full border-2 transition-colors',
-      selected ? 'border-mint' : 'border-border-strong',
-    )}
-  >
-    {selected && <span className="size-2 rounded-full bg-mint" />}
-  </span>
-);
+import { RadioDot } from './RadioDot';
 
 const OptionCard: React.FC<{
   selected: boolean;
@@ -66,7 +56,7 @@ const OptionCard: React.FC<{
     )}
   >
     <div className="flex items-start gap-3">
-      <RadioDot selected={selected} />
+      <RadioDot selected={selected} className="mt-0.5" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">{title}</div>

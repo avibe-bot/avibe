@@ -478,7 +478,7 @@
  * two dialogs asking for a key must look like the same question. */
 .setup-add-dialog {
   --obs-dialog-w: 568px;
-  --obs-dialog-h: 632px;
+  --obs-dialog-h: 720px;
   --obs-pad: 24px;
   --obs-gap: 20px;
   --obs-row-h: 56px;
@@ -651,12 +651,15 @@
   color: var(--muted);
 }
 
+/* The body scrolls under a ruled footer, so a long form reads as continuing
+   rather than as cut off by the buttons. */
 .setup-add-foot {
   display: flex;
   flex: none;
   align-items: center;
   gap: 10px;
-  padding: 0 var(--obs-pad) var(--obs-pad);
+  padding: 14px var(--obs-pad) var(--obs-pad);
+  border-top: 1px solid var(--border);
 }
 
 /* Reserved, not conditional: the strip holds its line whether or not there is

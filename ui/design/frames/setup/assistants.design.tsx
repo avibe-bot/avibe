@@ -53,6 +53,10 @@ const designFrames = frames([
     assistants: { vibey: { model: null } },
     api: candidatesApi,
   }),
+  screen('model-picker', '设置向导 · AI 助手 · 点 Claude Code 的默认模型：选择模型', { assistants: ticked, api: candidatesApi }, {
+    click: [...toAssistants, '.onboarding-assistant[data-backend="claude"] .onboarding-model-choice'],
+    hover: undefined,
+  }),
   screen('mixed', '设置向导 · AI 助手 · 可升级、已停用、未安装', mixed),
   screen('update-details', '设置向导 · AI 助手 · Claude Code 的版本详情', mixed, {
     click: [...toAssistants, '.onboarding-assistant[data-backend="claude"] >> role=button[name="{t:backendLifecycle.statusUpdateAvailable}"]'],

@@ -1061,11 +1061,11 @@ describe('BackendModelCatalogDialog', () => {
           for (const hop of GUARDED.hops) {
             expect(within(asked).getByText(`${hop.model_id} · Order #${hop.position}`)).toBeTruthy();
           }
-          expect(within(asked).getByText('Models that will be left with no source')).toBeTruthy();
+          expect(within(asked).getByText('Models that will be left with no provider')).toBeTruthy();
           for (const gap of GUARDED.gaps) {
             expect(within(asked).getByText(`Agents pinned to it: ${gap.agents.join(', ')}`)).toBeTruthy();
           }
-          expect(asked.textContent).toContain('Some models will be left with no usable source.');
+          expect(asked.textContent).toContain('Some models will be left with no usable provider.');
           return asked;
         },
         answer: async (user) => {

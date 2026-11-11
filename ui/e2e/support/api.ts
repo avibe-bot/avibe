@@ -177,7 +177,7 @@ export type SurfaceKind = 'gateway' | 'direct-home' | 'direct-no-backend';
  * instance whose page is a different shape. `directEmpty` (no sources AND every
  * backend on Direct) chooses `DirectHome` over the gateway overview; `DirectHome`
  * then renders `.model-hub-direct-empty` — an install prompt with no backend
- * card and no "Switch to gateway" button — when `installedAgents` is empty.
+ * card and no "Let Model Hub manage" button — when `installedAgents` is empty.
  *
  * Stated as a kind rather than as a boolean because the third case is not a
  * degenerate second one: "no backend installed" and "already a gateway" send
