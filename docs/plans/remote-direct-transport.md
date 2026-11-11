@@ -76,6 +76,7 @@ Then it copies bytes in both directions until either side ends.
 
 - At most `max_connections` peers and `max_streams_per_connection` streams per peer; excess is refused by the transport's own flow control or closed. The ingress keeps its own limits as a second line.
 - A handshake that does not complete in a few seconds, and a connection with no stream for several minutes, are closed. Exact defaults are set in the implementation and recorded here when it lands.
+- The instance-side listener accepts at most 160 bytes for the header and waits at most 2 seconds for its newline. Control lines are capped at 4 KiB. On stop it gives the child 3 seconds before killing its recorded PID; failed generations restart after 250 ms, with exponential backoff capped at 5 seconds.
 - The sidecar never dials out, except to `stream_addr`.
 
 ## 6. Build and supply chain

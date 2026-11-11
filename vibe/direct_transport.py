@@ -116,7 +116,7 @@ class DirectTransportSupervisor:
         self._ingress = ingress
         self._rendezvous = rendezvous
         self._stop_grace_seconds = max(0.0, stop_grace_seconds)
-        self._restart_initial_delay = max(0.0, restart_initial_delay_seconds)
+        self._restart_initial_delay = max(0.01, restart_initial_delay_seconds)
         self._restart_max_delay = max(self._restart_initial_delay, restart_max_delay_seconds)
 
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -278,7 +278,7 @@ class DirectTransportSupervisor:
         if len(fields) != 3 or fields[0] != b"AVDT1":
             return False
         token = fields[1]
-        expected = self._token or b""
+        expected = self._token.hex().encode("ascii") if self._token is not None else b""
         token_matches = hmac.compare_digest(token, expected)
         # Keep the constant-time comparison above on every structurally valid
         # three-field line, then reject non-canonical token bytes as malformed.
@@ -390,6 +390,8 @@ class DirectTransportSupervisor:
                 line = await self._readline_or_stop(process.stdout)
             except (asyncio.LimitOverrunError, ValueError) as exc:
                 raise _ProtocolError("oversized_line") from exc
+            except asyncio.IncompleteReadError as exc:
+                raise _ProtocolError("invalid_line") from exc
             if not line:
                 return "sidecar_exited"
             if len(line) > CONTROL_LINE_LIMIT_BYTES or not line.endswith(b"\n"):
