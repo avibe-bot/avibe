@@ -43,11 +43,22 @@ def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path
         asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
     projection = raised.value.turn_outcome
     text = render_turn_outcome_copy(projection, language)
-    hint = "not in the providers' model lists" if language == 'en' else '供应商的模型列表中没有'
+    hint = "The provider doesn't list" if language == 'en' else '供应商的模型列表里没有'
     assert (hint in text) is not listed
+    detail = ('No available accounts' if status == 503 else 'Model does not exist') if has_detail else ''
     if not listed:
-        assert ('Try choosing another model' if language == 'en' else '请尝试选择其他模型') in text
-    assert (('No available accounts' if status == 503 else 'Model does not exist') in text) is has_detail
+        assert text == (
+            f"The provider doesn't list {MODEL}; try another model."
+            if language == 'en' else f'供应商的模型列表里没有 {MODEL}，换一个模型试试。'
+        )
+    else:
+        assert (('No available accounts' if status == 503 else 'Model does not exist') in text) is has_detail
+    # Shortening the summary must not discard the diagnostic projection.
+    if status == 503:
+        assert projection.last_upstream_failure.http_status == status
+        assert projection.last_upstream_failure.detail == detail
+    else:
+        assert (projection.upstream_detail or '') == detail
     assert 'None' not in text
     assert store.config.sources[0].state.status == ('cooldown' if status == 503 else 'standby')
     assert projection.outcome == ('exhausted' if status == 503 else 'failed_terminal')

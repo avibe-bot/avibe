@@ -664,6 +664,12 @@ def render_turn_outcome_copy(
     copy = project_turn_outcome_copy(projection)
     if copy is None:
         return None
+    if projection.passthrough_model:
+        # The actionable summary stays short. Attempt statuses, source names and
+        # safe upstream text remain in provenance for the existing failure details.
+        return i18n_t(
+            "modelHub.launch.passthrough_model_unlisted", language, model=projection.passthrough_model,
+        )
     params = dict(copy.params)
     blockers = params.get("blockers", ())
     if isinstance(blockers, tuple):
@@ -679,10 +685,6 @@ def render_turn_outcome_copy(
     if params.get("backend"):
         params["backend"] = display_name_for_backend(params["backend"])
     text = i18n_t(copy.key, language, **params)
-    if projection.passthrough_model:
-        text = " ".join((text, i18n_t(
-            "modelHub.launch.passthrough_model_unlisted", language, model=projection.passthrough_model,
-        )))
     failure = projection.last_upstream_failure
     rule = _turn_outcome_rule(projection)
     suffix_key = (

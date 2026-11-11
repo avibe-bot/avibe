@@ -1200,7 +1200,7 @@
       "last_upstream_failure": "上游最后一次报错（{source}，HTTP {status}）：{detail}",
       "last_upstream_failure_without_status": "上游最后一次报错（{source}）：{detail}",
       "last_connection_failure": "最后一次连接错误（{source}）：{detail}",
-      "passthrough_model_unlisted": "供应商的模型列表中没有 {model}，本次按原名透传。请尝试选择其他模型。",
+      "passthrough_model_unlisted": "供应商的模型列表里没有 {model}，换一个模型试试。",
       "model_unlisted": "模型 {model} 不在 {backend} 的模型列表中。请选择其他模型后继续。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
       "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"

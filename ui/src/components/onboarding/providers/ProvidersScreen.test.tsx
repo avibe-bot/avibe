@@ -511,7 +511,7 @@ describe('ProvidersScreen — the stage', () => {
     // Still the person's key, after the server marked it failed: the card stays, so
     // the fix is where the failure is, rather than an empty offer to add another.
     expect(cardFor('anthropic').dataset.state).toBe('connected');
-    expect(within(cardFor('anthropic')).getByText('Key invalid or no access (401)')).toBeTruthy();
+    expect(within(cardFor('anthropic')).getByText('Key rejected (401) · re-enter')).toBeTruthy();
     expect(cardFor('anthropic').querySelector('.setup-provider-check')).toBeNull();
     expect((cardFor('anthropic') as HTMLButtonElement).disabled).toBe(false);
     await waitFor(() => expect(summary()?.textContent).toBe('No provider passed the check, so assistants have no model yet.'));
@@ -529,7 +529,7 @@ describe('ProvidersScreen — the stage', () => {
     await settled();
 
     await waitFor(() => expect(cardFor('anthropic').dataset.check).toBe('rejected'));
-    expect(within(cardFor('anthropic')).getByText('Key 无效或无权限（403）')).toBeTruthy();
+    expect(within(cardFor('anthropic')).getByText('Key 被拒绝（403）· 重新填写')).toBeTruthy();
     await waitFor(() => expect(cardFor('openai').dataset.check).toBe('connected'));
     expect(within(cardFor('openai')).getByText('已连接 · 1 个模型')).toBeTruthy();
     expect(summary()?.textContent).not.toContain('通过检查');
@@ -567,7 +567,7 @@ describe('ProvidersScreen — the stage', () => {
 
     await user.click(cardFor('anthropic'));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('sk-ant-…0000 · Key invalid or no access (401)')).toBeTruthy();
+    expect(within(dialog).getByText('sk-ant-…0000 · Key rejected (401) · re-enter')).toBeTruthy();
 
     // Refused again: the dialog says so, and the card keeps the key it had.
     await user.type(within(dialog).getByLabelText('New API Key'), 'still-wrong');
@@ -708,7 +708,7 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(cardFor('openai').dataset.check).toBe('rejected'));
     await user.click(cardFor('openai'));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText('sk-…2222 · Key invalid or no access (401)')).toBeTruthy();
+    expect(within(dialog).getByText('sk-…2222 · Key rejected (401) · re-enter')).toBeTruthy();
     // The working key still supplies models, so nothing here says nothing passed.
     expect(summary()?.textContent).toBe('1 provider added: OpenAI');
   });

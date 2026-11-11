@@ -1200,7 +1200,7 @@
       "last_upstream_failure": "Last upstream error ({source}, HTTP {status}): {detail}",
       "last_upstream_failure_without_status": "Last upstream error ({source}): {detail}",
       "last_connection_failure": "Last connection error ({source}): {detail}",
-      "passthrough_model_unlisted": "Model {model} is not in the providers' model lists and was sent as-is. Try choosing another model.",
+      "passthrough_model_unlisted": "The provider doesn't list {model}; try another model.",
       "model_unlisted": "Model {model} is not in the {backend} model list. Choose another model to continue.",
       "request_incompatible": "This request is incompatible; switching Sources will not help.",
       "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"
