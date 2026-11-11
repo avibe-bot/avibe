@@ -8,15 +8,15 @@
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A50000000000000000000002"
-               BuildableName = "WebKitProxyChangeTests.xctest"
-               BlueprintName = "WebKitProxyChangeTests"
+               BlueprintIdentifier = "A50000000000000000000001"
+               BuildableName = "ProbeHost.app"
+               BlueprintName = "ProbeHost"
                ReferencedContainer = "container:WebKitProxyChange.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -30,7 +30,8 @@
       codeCoverageEnabled = "NO">
       <Testables>
          <TestableReference
-            skipped = "NO">
+            skipped = "NO"
+            parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A50000000000000000000002"
