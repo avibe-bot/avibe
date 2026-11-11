@@ -40,7 +40,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         for content: UNNotificationContent
     ) -> UNNotificationPresentationOptions {
         content.threadIdentifier == testNotificationThread
-            ? [.banner, .list, .sound]
+            ? []
             : []
     }
 
