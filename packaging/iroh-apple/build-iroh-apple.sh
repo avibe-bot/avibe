@@ -235,12 +235,22 @@ build_swift_for() {
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     DEVELOPMENT_TEAM= \
-    | tee "$OUTPUT_DIR/xcodebuild-${sdk}.log"
+    2>&1 | tee "$OUTPUT_DIR/xcodebuild-${sdk}.log"
+}
+
+assert_no_newer_deployment_warning() {
+  local log_path=$1
+  if grep -Eiq "was built for (a )?newer .*version .*than .*being linked|deployment target.{0,40}(higher|newer)" "$log_path"; then
+    echo "deployment-target qualification failed: newer-than-target warning in $log_path" >&2
+    exit 1
+  fi
 }
 
 cd "$SOURCE_DIR"
 build_swift_for 'generic/platform=iOS' iphoneos "$OUTPUT_DIR/derived-ios"
 build_swift_for 'generic/platform=iOS Simulator' iphonesimulator "$OUTPUT_DIR/derived-ios-simulator"
+assert_no_newer_deployment_warning "$OUTPUT_DIR/xcodebuild-iphoneos.log"
+assert_no_newer_deployment_warning "$OUTPUT_DIR/xcodebuild-iphonesimulator.log"
 
 bash "$SCRIPT_DIR/check-private-apple-datapath.sh" \
   "$XCFRAMEWORK" \

@@ -15,49 +15,62 @@ runtime_info() {
   xcrun simctl list runtimes available -j
 }
 
-find_runtime_id() {
-  local version=$1
+find_lowest_runtime() {
   python3 -c '
 import json
 import sys
 
-wanted = sys.argv[1]
-data = json.load(sys.stdin)
-for runtime in data.get("runtimes", []):
-    if not runtime.get("isAvailable"):
+
+def version_tuple(value):
+    try:
+        return tuple(int(part) for part in value.split("."))
+    except ValueError:
+        return None
+
+candidates = []
+for runtime in json.load(sys.stdin).get("runtimes", []):
+    if not runtime.get("isAvailable") or runtime.get("platform") != "iOS":
         continue
-    if runtime.get("platform") != "iOS":
+    version = runtime.get("version", "")
+    parsed = version_tuple(version)
+    if parsed is None or parsed < (17, 0) or parsed >= (17, 5):
         continue
-    if runtime.get("version") == wanted:
-        print(runtime["identifier"])
-        raise SystemExit(0)
+    identifier = runtime.get("identifier")
+    if identifier:
+        candidates.append((parsed, version, identifier))
+if candidates:
+    _, version, identifier = min(candidates)
+    print(f"{version}|{identifier}")
+    raise SystemExit(0)
 raise SystemExit(1)
-' "$version"
+'
 }
 
-for candidate in 17.0 17.1 17.2 17.3 17.4; do
-  runtime_id=""
-  if runtime_id=$(runtime_info | find_runtime_id "$candidate"); then
-    echo "found installed iOS $candidate runtime: $runtime_id" | tee -a "$RUNTIME_LOG"
-    {
-      echo "IROH_IOS_RUNTIME_VERSION=$candidate"
-      echo "IROH_IOS_RUNTIME_ID=$runtime_id"
-    } > "$OUTPUT_DIR/ios-runtime.env"
-    exit 0
-  fi
+write_runtime_env() {
+  local selected=$1
+  local version=${selected%%|*}
+  local identifier=${selected#*|}
+  echo "selected iOS $version runtime: $identifier" | tee -a "$RUNTIME_LOG"
+  {
+    echo "IROH_IOS_RUNTIME_VERSION=$version"
+    echo "IROH_IOS_RUNTIME_ID=$identifier"
+  } > "$OUTPUT_DIR/ios-runtime.env"
+}
 
+if selected=$(runtime_info | find_lowest_runtime); then
+  write_runtime_env "$selected"
+  exit 0
+fi
+
+for candidate in 17.0 17.1 17.2 17.3 17.4; do
   echo "attempting to download iOS $candidate runtime" | tee -a "$RUNTIME_LOG"
-  if xcodebuild -downloadPlatform iOS -buildVersion "$candidate" >> "$RUNTIME_LOG" 2>&1; then
-    if runtime_id=$(runtime_info | find_runtime_id "$candidate"); then
-      echo "downloaded iOS $candidate runtime: $runtime_id" | tee -a "$RUNTIME_LOG"
-      {
-        echo "IROH_IOS_RUNTIME_VERSION=$candidate"
-        echo "IROH_IOS_RUNTIME_ID=$runtime_id"
-      } > "$OUTPUT_DIR/ios-runtime.env"
-      exit 0
-    fi
-  else
+  if ! xcodebuild -downloadPlatform iOS -buildVersion "$candidate" >> "$RUNTIME_LOG" 2>&1; then
     echo "iOS $candidate runtime is not available from the pinned Xcode" | tee -a "$RUNTIME_LOG"
+    continue
+  fi
+  if selected=$(runtime_info | find_lowest_runtime); then
+    write_runtime_env "$selected"
+    exit 0
   fi
 done
 
