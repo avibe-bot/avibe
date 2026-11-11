@@ -4,7 +4,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -630,6 +634,85 @@ async def test_suspend_route_under_writer_config_lock_does_not_wait_for_worker(r
         response = await asyncio.wait_for(asyncio.to_thread(writer_request), 2)
         assert response.status_code == 200 and response.get_json()["stopped"]
         assert "supervisor_stop" in calls and "ingress_stop" in calls
+
+
+def test_suspend_cookie_guard_reads_config_while_another_process_holds_writer_lock():
+    """Exercise the real pre-exemption config read with non-reentrant contention.
+
+    The existing in-process owner test covers resource stop ordering. This
+    separate interpreter proves the global HTTP guard can read the persisted
+    pairing while a different process holds the shared writer file lock.
+    """
+    from config.v2_config import config_file_lock
+    from core.show_pages import show_cli_event_token
+
+    config = _config(direct=False)
+    config.save()
+    show_cli_event_token()  # Seed only the isolated test home's local CLI token.
+    script = textwrap.dedent("""\
+        import asyncio
+        import json
+        import os
+        import socket
+        import sys
+        import config.v2_config as config_module
+        from core.show_pages import show_cli_event_token
+        from vibe import direct_lifecycle, remote_access, ui_server
+
+        # Positive control: this interpreter really contends on the parent's
+        # persisted lock, rather than succeeding via same-process reentrancy.
+        config_module.CONFIG_FILE_LOCK_TIMEOUT_SECONDS = 0.1
+        try:
+            with config_module.config_file_lock():
+                raise AssertionError("writer lock was not held across processes")
+        except TimeoutError:
+            pass
+
+        def no_network(*args, **kwargs):
+            raise AssertionError("the local suspend path must not use a network dependency")
+        socket.socket.connect = no_network
+        remote_access._report_runtime_status_async = lambda *args, **kwargs: None
+        original_load = ui_server._load_remote_access_config
+        cookie_guard_loads = []
+        def observed_load():
+            config = original_load()
+            if sys._getframe(1).f_code is ui_server.enforce_remote_access_cookie.__code__:
+                # A swallowed lock timeout returning None must not pass merely
+                # because a loopback request can still become a local Owner.
+                assert config is not None
+                cookie_guard_loads.append(config.remote_access.vibe_cloud.instance_id)
+            return config
+        ui_server._load_remote_access_config = observed_load
+
+        async def exercise():
+            owner = direct_lifecycle.DirectAccessLifecycle(ui_server.app)
+            direct_lifecycle.register_active_lifecycle(owner)
+            await owner.start()
+            try:
+                async with asyncio.timeout(2):
+                    while owner._config is None:
+                        await asyncio.sleep(0.005)
+                def request_stop():
+                    return ui_server.app.test_client().post(
+                        "/api/remote-access/direct/suspend", base_url="http://127.0.0.1",
+                        headers={"X-Vibe-Show-Client": "cli",
+                                 "X-Vibe-Show-Cli-Token": show_cli_event_token()},
+                    )
+                response = await asyncio.wait_for(asyncio.to_thread(request_stop), 3)
+                assert response.status_code == 200, response.get_json()
+                assert response.get_json() == {"ok": True, "stopped": True}
+                assert owner._pairing_suspended
+                assert cookie_guard_loads == ["instance-one"]
+                print(json.dumps({"pid": os.getpid(), "read_under_foreign_lock": True}))
+            finally:
+                await owner.stop()
+        asyncio.run(exercise())
+    """)
+    with config_file_lock():
+        child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=15)
+    assert child.returncode == 0, child.stderr
+    result = json.loads(child.stdout)
+    assert result["pid"] != os.getpid() and result["read_under_foreign_lock"] is True
 
 
 async def test_status_running_only_after_publication_and_no_sensitive_material(reports):

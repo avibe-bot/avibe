@@ -99,8 +99,21 @@ local CLI token **and** a direct loopback connection, and refuses direct-ingress
 and forwarded/proxied requests. Normal Owner authorization remains; the exact
 local-token request is exempt from browser CSRF just like existing CLI routes.
 The client disables proxy inheritance and redirects. It sends no pairing
-credential and accepts only a confirmed stop. If the UI is gone, nothing can
-serve; a 404 is compatibility with a pre-I3 UI that has no lifecycle. Other
+credential and accepts only a confirmed stop. This bounded, same-host IPC is
+an explicit exception inside the existing config-file-lock transaction: it
+serializes stop and certificate retirement against other pairing writers.
+The handler takes no config lock, waits for no certificate worker and performs
+no external HTTP. Its global authentication guard still reads the persisted
+config before route admission; a separate-interpreter test proves that read
+and the stop complete while another process holds the writer file lock, with
+a failed lock-acquisition positive control to rule out reentrancy.
+
+The connect/read and owner-stop timeouts are not a hard end-to-end 12-second
+deadline. An unreachable or refusing UI owner can delay or fail a pairing save,
+including when the direct setting is off. This is pairing-writer serialization,
+not universal atomicity with every external event or already admitted HTTP.
+If the UI is gone, nothing can serve; a 404 is compatibility with a pre-I3 UI
+that has no lifecycle. Other
 unreachable or refused stops fail the pairing save closed. An old CLI or manual
 config-file edit cannot participate in this barrier; observation still
 converges, but the strict pre-discard order requires an I3-aware writer.
