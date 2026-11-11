@@ -63,6 +63,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ steps.candidate.outputs.go_version }}
+          cache: false
 
       # Strict mode: the rebuilt bytes must equal the digests the record pins.
       - name: Rebuild the pinned source and require the reviewed digests

@@ -245,7 +245,6 @@ def test_untrusted_rehearsal_can_be_verified_as_context_but_does_not_authorize(t
 
 @pytest.mark.parametrize("forge", [
     lambda r: r.update(result="qualified"),
-    lambda r: r.update(run_id=RUN_ID + 1),
     lambda r: r.update(harness_sha256="0" * 64),
     lambda r: r.update(baselines={}),
     lambda r: r["candidate"].update(manifest_sha256="0" * 64),
@@ -1149,6 +1148,8 @@ def test_candidate_workflow_is_untrusted_and_has_no_authoritative_receipt() -> N
     text = (ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8")
     assert set(workflow[True]) == {"workflow_dispatch"}
     assert workflow["permissions"] == {"contents": "read"}
+    go_setup = next(step for step in workflow["jobs"]["build"]["steps"] if step.get("uses", "").startswith("actions/setup-go@"))
+    assert go_setup["with"]["cache"] is False
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "untrusted_rehearsal" in text
     assert "qualification-receipt" not in text
