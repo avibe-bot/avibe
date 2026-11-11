@@ -1,19 +1,17 @@
 name: desktop-cache-keepalive
 
-# The repository's Actions cache sits at its size cap, and GitHub evicts the
-# entries read longest ago. The desktop warm-up's entries are read only by the
-# warm-up itself and by a release, so they were evicted within hours and a
-# release rebuilt the Cua Driver and every crate from source. Every release
-# commit is first a master landing, so each landing looks the macOS entries up
-# again, which counts as a read.
+# This workflow performs read-only lookups and reports whether they refresh
+# lastAccessedAt. It is an observation/retention attempt, not proof that GitHub
+# will preserve an entry: lookup-only behavior and cross-OS cache compatibility
+# still require a real master run to validate.
 #
 # This workflow reads and never writes. It checks out nothing, holds no secret,
-# and has no save step, so it cannot change what a release restores, and it
-# starts no build: an entry that is gone stays gone until desktop-package.yml's
-# warm-up saves it again, and is reported here before a release finds out.
-# Schedules are not used because this repository's run hours late. The Windows
-# entry is left alone: a lookup needs a Windows runner, and a cold Windows build
-# is still shorter than a warm macOS one.
+# and has no save step, so it cannot change what a release restores. An entry
+# that is gone stays gone until desktop-package.yml's warm-up saves it again,
+# and is reported here before a release finds out. Schedules are not used
+# because this repository's run hours late. The Windows entry is left alone: a
+# lookup needs a Windows runner, and a cold Windows build is still shorter than
+# a warm macOS one.
 on:
   push:
     branches: [master]

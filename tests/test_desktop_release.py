@@ -485,9 +485,7 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     runtime = work / "desktop/src-tauri/resources/runtime"
     runtime.parent.mkdir(parents=True)
     shutil.copytree(work / "runtime", runtime)
-    matrix = next(item for item in workflow("desktop-package.yml")["jobs"]["package"]["strategy"]["matrix"]["include"]
-                  if item["target"] == target)
-    installer = work / matrix["artifact_glob"].replace("*", "Avibe_fixture")
+    installer = work / "desktop/target/release/bundle/dmg/Avibe_fixture.dmg"
     installer.parent.mkdir(parents=True)
     shutil.copyfile(work / ("native installer" + release.TARGETS[target][2]), installer)
     if "darwin" in target:
@@ -499,11 +497,7 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     (binaries / "python").symlink_to(sys.executable)
     (binaries / "git").write_text(f"#!/bin/sh\nprintf '%s\\n' '{SOURCE}'\n")
     (binaries / "git").chmod(0o755)
-    command = (
-        step("Record artifact hashes")["run"]
-        .replace("${{ matrix.artifact_glob }}", matrix["artifact_glob"])
-        .replace("${{ matrix.target }}", target)
-    )
+    command = step("Record artifact hashes")["run"].replace("${{ matrix.target }}", target)
     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=work,
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                                  "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": TAG, "TARGET": target,
@@ -700,26 +694,21 @@ Load command 9
 
 def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
     package = workflow("desktop-package.yml")["jobs"]["package"]
-    package_macos = [
-        item
-        for item in package["strategy"]["matrix"]["include"]
-        if item["target"].endswith("apple-darwin")
-    ]
-    assert {(item["target"], item["os"]) for item in package_macos} == {
-        ("aarch64-apple-darwin", "macos-26"),
-        ("x86_64-apple-darwin", "macos-26-intel"),
+    runners = json.loads(re.fullmatch(r"\$\{\{ fromJSON\('(.*)'\)\[matrix.target\] \}\}", package["runs-on"])[1])
+    assert runners == {
+        "aarch64-apple-darwin": "macos-26",
+        "x86_64-apple-darwin": "macos-26-intel",
+        "x86_64-pc-windows-msvc": "windows-latest",
     }
-    for item in package_macos:
-        assert item["developer_dir"] == "/Applications/Xcode_26.6.app/Contents/Developer"
-        assert "macosx_deployment_target" not in item
-        assert item["cache_scope"] == "default-target-"
-    assert package["env"]["DEVELOPER_DIR"] == "${{ matrix.developer_dir }}"
+    assert package["env"]["DEVELOPER_DIR"] == (
+        "${{ contains(matrix.target, '-apple-') && '/Applications/Xcode_26.6.app/Contents/Developer' || '' }}"
+    )
     assert "MACOSX_DEPLOYMENT_TARGET" not in package["env"]
     cache = next(
         item for item in package["steps"] if item.get("name") == "Restore Rust build cache"
     )
     assert "steps.toolchain.outputs.apple" in cache["with"]["key"]
-    assert "matrix.cache_scope" in cache["with"]["key"]
+    assert "format('default-target-{0}-', steps.toolchain.outputs.apple)" in cache["with"]["key"]
 
     shell = workflow("desktop-shell.yml")["jobs"]["shell"]
     shell_macos = next(
@@ -775,7 +764,12 @@ def test_workflow_signs_every_macos_layer_before_recording():
     build = package["jobs"]["package"]
     steps = build["steps"]
     assert steps[0]["with"]["ref"] == "${{ inputs.source_sha || github.sha }}"
-    assert {entry["target"] for entry in build["strategy"]["matrix"]["include"]} == set(release.TARGETS)
+    matrix = build["strategy"]["matrix"]
+    assert set(matrix) == {"target"}  # No include entries can add Intel back to an RC.
+    default = re.fullmatch(r"\$\{\{ fromJSON\(inputs.targets \|\| '(.*)'\) \}\}", matrix["target"])[1]
+    assert json.loads(default) == list(release.TARGETS)
+    assert caller["with"]["targets"] == "${{ needs.resolve-desktop-release.outputs.targets }}"
+    assert jobs["resolve-desktop-release"]["outputs"]["targets"] == "${{ steps.resolve.outputs.targets }}"
     assert not any("continue-on-error" in item for item in steps)
     order = [
         "Prepare package version",

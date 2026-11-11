@@ -93,7 +93,8 @@ def test_only_the_master_warmup_saves_and_every_build_restores_an_exact_key():
     triggers = workflow("desktop-package.yml")["on"]
     assert triggers["push"]["branches"] == ["master"] and "tags" not in triggers["push"]
     warmup = workflow("desktop-package.yml")["jobs"]["package"]["env"]["DESKTOP_CACHE_WARMUP"]
-    assert warmup == "${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}"
+    assert warmup == ("${{ !inputs.release_tag && (github.event_name == 'push' || "
+                         "github.event_name == 'schedule') && github.ref == 'refs/heads/master' }}")
     # Restore and save name the same paths, or the saved entry is not the one a build looks up.
     for restore, save in (("Restore Rust build cache", "Save Rust build cache"),
                           ("Restore prepared Cua Driver", "Save prepared Cua Driver")):

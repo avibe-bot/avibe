@@ -10,14 +10,14 @@ name: desktop-self-contained-package
 # push that changes a desktop build input, and a daily run), builds every
 # target, and signs and uploads nothing. Release and manual builds restore its
 # default-branch entries by exact key and never save; a miss rebuilds from
-# source. desktop-cache-keepalive.yml keeps the macOS entries from being evicted
-# between a warm-up and a release.
+# source. desktop-cache-keepalive.yml looks up the macOS entries between warm-ups
+# and reports whether those lookups actually refresh their last-access times.
 #
 # The warm-up is also the only Intel Mac build between stable releases: an RC
 # builds the targets its caller names, which leave out x86_64-apple-darwin, and
 # pull request CI compiles the shell for Apple silicon and Windows only. Its
-# push paths therefore cover everything a target-specific break can come from:
-# the desktop sources and the Runtime's locked Python dependencies.
+# push paths cover native sources, packaging helpers and locked dependencies;
+# the nightly run also covers other changes and hosted toolchain updates.
 on:
   push:
     branches: [master]
@@ -25,6 +25,9 @@ on:
       - desktop/**
       - "!desktop/**/*.md"
       - uv.lock
+      - scripts/desktop_release.py
+      - scripts/desktop_updater.py
+      - scripts/release_package_version.py
       - .github/workflows/desktop-package.yml
   schedule:
     - cron: "41 18 * * *"
@@ -72,7 +75,7 @@ jobs:
     environment: desktop-updater
     env:
       # Never a release: a release build always carries its tag.
-      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
+      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/master' }}
       DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
       DEVELOPER_DIR: ${{ contains(matrix.target, '-apple-') && '/Applications/Xcode_26.6.app/Contents/Developer' || '' }}
       DESKTOP_BUNDLE: ${{ contains(matrix.target, '-apple-') && 'app' || 'nsis' }}
