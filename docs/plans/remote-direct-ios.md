@@ -1,6 +1,6 @@
 # Remote direct paths: the iOS App side
 
-Status: **Proposal, prepared for the iOS owner's review.** On 2026-11-11 the owner asked that the App side of remote direct paths be prepared as branches and pull requests instead of waiting for an answer on [#3222](https://github.com/avibe-bot/avibe/issues/3222). Nothing here merges without the iOS owner's review, and he can change or reject any of it. This work does not raise the App's minimum iOS version, adds no capability or entitlement, and does not touch signing, TestFlight, or the notification service extension.
+Status: **In progress.** On 2026-11-11 the owner asked us to go ahead with the App side of remote direct paths instead of waiting for an answer on [#3222](https://github.com/avibe-bot/avibe/issues/3222). The iOS owner's review is requested after the fact: we change what he asks for, and the open items in section 9 stay his. This work does not raise the App's minimum iOS version, adds no capability or entitlement, and does not touch signing, TestFlight, or the notification service extension.
 
 Parent plans: [`remote-direct-phase1.md`](remote-direct-phase1.md) (rows A2 to A5 and I4), [`remote-direct-ingress.md`](remote-direct-ingress.md) (stream framing), [`remote-direct-rendezvous.md`](remote-direct-rendezvous.md) (what a client must do). Bridge contract: [`ios-app.md`](ios-app.md) section 4.
 
@@ -134,8 +134,8 @@ On devices, in the Phase 1 matrix (A5): Local Network permission states, suspens
 
 | PR | Content | Needs |
 | --- | --- | --- |
-| #3530: this document and the bridge spec | Documentation only | iOS owner's review |
-| #3532: Web UI half (I4) | `ui/` only; inert without the capability | Ours; it waits for the capability's name to be accepted here |
-| #3537: listener, route, state, bridge (A3, A4) | Swift, inactive without a transport | iOS owner's review |
-| Transport (A1, A2) | iroh, rendezvous fetch, probing | The iOS 17.0 build question, then the iOS owner's review |
+| #3530: this document and the bridge spec | Documentation only | Merged at the owner's request; the iOS owner's review after the fact |
+| #3532: Web UI half (I4) | `ui/` only; inert without the capability | Ours; lands after #3530 and #3537 |
+| #3537: listener, route, state, bridge (A3, A4) | Swift, inactive without a transport | An independent review on our side, then merged at the owner's request; the iOS owner's review after the fact |
+| Transport (A1, A2) | iroh, rendezvous fetch, probing | The published iroh binary; the first build that uses a transport goes to the owner |
 | Device validation (A5) | The Phase 1 matrix and a TestFlight build | The iOS owner or the owner |
