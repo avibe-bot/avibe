@@ -67,6 +67,19 @@ def desktop_version_from_tag(tag: str) -> str:
     return package_version.replace("rc", "-rc.")
 
 
+def release_targets(tag: str) -> tuple[str, ...]:
+    """The complete publication set, not a caller-selectable subset.
+
+    RCs ship Apple silicon and Windows; stable must still ship Intel macOS too.
+    Installed shells discover candidates from their own complete signed asset
+    set, so an Intel shell skips an RC without Intel artifacts.
+    """
+    desktop_version_from_tag(tag)  # Reject noncanonical tags before selecting a policy.
+    if RC_TAG.fullmatch(tag):
+        return tuple(target for target in TARGETS if target != "x86_64-apple-darwin")
+    return tuple(TARGETS)
+
+
 def git_output(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
@@ -77,7 +90,8 @@ def resolve(tag: str, source_sha: str | None = None) -> dict[str, str]:
     if SHA.fullmatch(actual) is None or (source_sha is not None and actual != source_sha):
         raise ValueError("desktop release tag does not match the exact source SHA")
     return {"tag": tag, "source_sha": actual, "version": version,
-            "package_version": package_version_from_release_tag(tag)}
+            "package_version": package_version_from_release_tag(tag),
+            "targets": json.dumps(release_targets(tag), separators=(",", ":"))}
 
 
 def _numeric_version(value: str) -> tuple[int, ...]:
@@ -207,6 +221,8 @@ def prepare(
         raise ValueError("version must be valid SemVer")
     override = {"version": version}
     if tag:
+        if target is not None and target not in release_targets(tag):
+            raise ValueError("Desktop target is not published for this release channel")
         resolved = resolve(tag, source_sha)
         if git_output("rev-parse", "HEAD") != source_sha or version != resolved["version"]:
             raise ValueError("desktop checkout/version does not match the release tag")
@@ -376,6 +392,8 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
            driver_cdhash: str | None = None) -> None:
     if SHA.fullmatch(source_sha) is None:
         raise ValueError("Invalid source SHA")
+    if tag and target not in release_targets(tag):
+        raise ValueError("Desktop target is not published for this release channel")
     signature_text = signature(target, signing)
     if tag and not intermediate and (version != desktop_version_from_tag(tag) or signature_text != release_signature(target, tag)):
         raise ValueError("Release version/signature policy mismatch")
@@ -424,10 +442,11 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
     version = desktop_version_from_tag(tag)
     if SHA.fullmatch(source_sha) is None:
         raise ValueError("Invalid source SHA")
-    expected = {name for target in TARGETS for name in asset_names(version, target)}
+    targets = release_targets(tag)
+    expected = {name for target in targets for name in asset_names(version, target)}
     if updater_enabled:
         updater = run_path(str(Path(__file__).with_name("desktop_updater.py")))
-        for target in TARGETS:
+        for target in targets:
             expected.update(updater["names"](version, target))
         public = os.environ.get("AVIBE_DESKTOP_UPDATER_PUBLIC_KEY", "")
         if not public.strip():
@@ -437,8 +456,8 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
             key.write_text(public, encoding="utf-8")
             updater["verify"](directory, tag, source_sha, key)
     if {path.name for path in directory.iterdir()} != expected:
-        raise ValueError("Desktop asset set must contain exactly all three targets and their metadata")
-    for target in TARGETS:
+        raise ValueError("Desktop asset set must contain exactly the release channel's targets and their metadata")
+    for target in targets:
         names = asset_names(version, target)
         for name in names:
             path = directory / name

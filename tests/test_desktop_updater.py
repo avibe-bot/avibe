@@ -91,6 +91,7 @@ def test_resolver_appends_to_the_step_output_it_shares(tmp_path, monkeypatch):
     assert dict(line.split('=', 1) for line in output.read_text().splitlines()) == {
         'enabled': 'true', 'updater_enabled': 'false', 'tag': 'gh-v3.1.2rc15',
         'source_sha': source, 'version': '3.1.2-rc.15', 'package_version': '3.1.2rc15',
+        'targets': '["aarch64-apple-darwin","x86_64-pc-windows-msvc"]',
     }
 
 
@@ -163,6 +164,57 @@ def test_real_release_verifier_accepts_signed_fixtures_and_rejects_missing_or_ta
     signature.unlink()
     with pytest.raises(subprocess.CalledProcessError):
         desktop_updater.verify(tmp_path, tag, 'a' * 40, key, [target])
+
+
+@pytest.mark.parametrize('tag', ['gh-v3.1.2rc15', 'v3.1.2'])
+def test_default_signed_verifier_checks_each_required_channel_target(tmp_path, monkeypatch, tag):
+    commands = []
+    monkeypatch.setattr(desktop_updater.subprocess, 'run', lambda command, **_: commands.append(command))
+    desktop_updater.verify(tmp_path, tag, 'a' * 40, tmp_path / 'public-key')
+    assert [command[-2] for command in commands] == list(desktop_release.release_targets(tag))
+    assert all(command[:4] == ['cargo', 'run', '--locked', '--quiet'] for command in commands)
+
+
+@pytest.mark.parametrize('channel,tag,version', [
+    ('test', 'gh-v3.1.2rc15', '3.1.2-rc.15'), ('stable', 'v3.1.2', '3.1.2'),
+])
+def test_real_release_verifier_checks_complete_channel_set(tmp_path, monkeypatch, channel, tag, version):
+    import shutil
+    from tests.test_desktop_release import assemble_assets
+
+    executable = ROOT / 'desktop/target/debug/examples' / ('verify_update.exe' if os.name == 'nt' else 'verify_update')
+    if not executable.is_file():
+        pytest.skip('Build the Rust verifier first; desktop-shell CI also runs this contract')
+    run = subprocess.run
+    monkeypatch.setattr(desktop_updater.subprocess, 'run',
+                        lambda command, **kw: run([str(executable), *command[command.index('--') + 1:]], **kw))
+    directory = assemble_assets(tmp_path, tag=tag)
+    fixtures = ROOT / 'desktop/runtime-host/tests/fixtures/updater'
+    targets = desktop_release.release_targets(tag)
+    for target in targets:
+        for suffix in ('.json', '.json.sig'):
+            shutil.copyfile(fixtures / f'{channel}-{target}{suffix}', directory / f'desktop-update-{target}{suffix}')
+        extension = desktop_updater.TARGETS[target][1]
+        shutil.copyfile(fixtures / 'artifact.bin', directory / f'Avibe_{version}_{target}{extension}')
+        # The Windows installer is also the signed updater payload.
+        names = desktop_release.asset_names(version, target)
+        (directory / names[4]).write_text(''.join(
+            f'{desktop_release.digest(directory / name)}  {name}\n' for name in sorted(names[:4])
+        ))
+    monkeypatch.setenv('AVIBE_DESKTOP_UPDATER_PUBLIC_KEY', (fixtures / 'public-key.txt').read_text().strip())
+    desktop_release.verify(directory, tag, 'a' * 40, updater_enabled=True)
+    for target in targets:
+        for name in desktop_updater.names(version, target):
+            path = directory / name
+            original = path.read_bytes()
+            for replacement in (None, b'tampered'):
+                if replacement is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(replacement)
+                with pytest.raises(subprocess.CalledProcessError):
+                    desktop_release.verify(directory, tag, 'a' * 40, updater_enabled=True)
+                path.write_bytes(original)
 
 
 def test_remote_tag_rebinding_prevents_signed_publication(tmp_path, monkeypatch):

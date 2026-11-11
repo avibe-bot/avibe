@@ -68,11 +68,13 @@ def driver_provenance_payload(target, prepared_binary_sha256):
     }
 
 
-def assemble_assets(root, source=SOURCE):
+def assemble_assets(root, source=SOURCE, *, tag=TAG):
     """Use the real Runtime archive writer and desktop producer, then merge downloads."""
+    version = release.desktop_version_from_tag(tag)
     directory = root / "desktop-dist"
     directory.mkdir()
-    for target, (system, arch, suffix) in release.TARGETS.items():
+    for target in release.release_targets(tag):
+        system, arch, suffix = release.TARGETS[target]
         work = root / target
         payload = work / "payload"
         payload.mkdir(parents=True)
@@ -82,7 +84,7 @@ def assemble_assets(root, source=SOURCE):
         archive = runtime / "runtime.zip"
         size, count, tree = builder.create_runtime_zip(payload, archive)
         manifest = {
-            "schema_version": 2, "runtime_version": "3.1.2rc1", "os": system, "arch": arch,
+            "schema_version": 2, "runtime_version": release.package_version_from_release_tag(tag), "os": system, "arch": arch,
             "archive": archive.name, "archive_sha256": release.digest(archive),
             "archive_size": archive.stat().st_size, "unpacked_size": size,
             "entry_count": count, "tree_sha256": tree,
@@ -113,7 +115,7 @@ def assemble_assets(root, source=SOURCE):
                 "driver_provenance_path": provenance,
                 "driver_cdhash": "5" * 40,
             }
-        release.record(version=VERSION, target=target, tag=TAG, source_sha=source,
+        release.record(version=version, target=target, tag=tag, source_sha=source,
                        installer=installer, runtime=runtime, output=output,
                        signing=release.RELEASE_SIGNING_PROFILE[system], **driver_args)
         for path in output.iterdir():
@@ -152,7 +154,8 @@ def test_real_tag_resolution_and_prepare_pin_runtime_before_build(tmp_path, monk
         git(tmp_path, "tag", TAG)
     monkeypatch.chdir(tmp_path)
     assert release.resolve(TAG) == {"tag": TAG, "source_sha": source, "version": VERSION,
-                                    "package_version": "3.1.2rc1"}
+                                    "package_version": "3.1.2rc1",
+                                    "targets": '["aarch64-apple-darwin","x86_64-pc-windows-msvc"]'}
     config, environment = tmp_path / "config.json", tmp_path / "env"
     release.prepare(VERSION, TAG, source, config, environment)
     assert environment.read_text().splitlines() == [
@@ -190,6 +193,7 @@ def test_resolver_cli_enforces_backstop_sha_before_writing_outputs(tmp_path, tag
         assert result.returncode == 0, result.stderr
         fields = dict(line.split("=", 1) for line in output.read_text().splitlines())
         assert fields["source_sha"] == source and fields["tag"] == tag
+        assert json.loads(fields["targets"]) == list(release.release_targets(tag))
         assert fields["enabled"] == "true" and fields["updater_enabled"] == "false"
     else:
         assert result.returncode != 0 and "exact source SHA" in result.stderr
@@ -205,6 +209,8 @@ def test_malformed_test_tags_fail_before_git_or_publication(tag, monkeypatch):
     monkeypatch.setattr(release, "git_output", lambda *_: pytest.fail("invalid tag reached git"))
     with pytest.raises(ValueError, match="canonical"):
         release.resolve(tag)
+    with pytest.raises(ValueError, match="canonical"):
+        release.release_targets(tag)
 
 
 def test_manual_prepare_retains_optional_signing_and_native_version(tmp_path):
@@ -253,9 +259,9 @@ def test_prepare_packages_computer_use_assets_only_for_macos(tmp_path, target, e
 def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
     directory = assemble_assets(tmp_path)
     paths = release.verify(directory, TAG, SOURCE)
-    assert len(paths) == len({path.name for path in paths}) == 15
+    assert len(paths) == len({path.name for path in paths}) == 10
     assert {path.suffix for path in paths} >= {".dmg", ".exe"}
-    for target in release.TARGETS:
+    for target in release.release_targets(TAG):
         source = json.loads(
             (directory / release.asset_names(VERSION, target)[2]).read_text()
         )
@@ -271,10 +277,54 @@ def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
             assert signature == "installer-certum-authenticode-timestamped\n"
 
 
+@pytest.mark.parametrize(("tag", "targets"), [
+    (TAG, ("aarch64-apple-darwin", "x86_64-pc-windows-msvc")),
+    ("v3.1.2", tuple(release.TARGETS)),
+])
+def test_channel_targets_define_complete_publication_not_successful_job_subset(tmp_path, tag, targets):
+    assert release.release_targets(tag) == targets
+    directory = assemble_assets(tmp_path, tag=tag)
+    assert len(release.verify(directory, tag, SOURCE)) == 5 * len(targets)
+    # A missing platform cannot silently redefine the required set, stable Intel included.
+    version = release.desktop_version_from_tag(tag)
+    for target in targets:
+        removed = {name: (directory / name).read_bytes() for name in release.asset_names(version, target)}
+        for name in removed:
+            (directory / name).unlink()
+        with pytest.raises(ValueError, match="asset set"):
+            release.verify(directory, tag, SOURCE)
+        for name, content in removed.items():
+            (directory / name).write_bytes(content)
+
+
+def test_rc_verifier_refuses_unexpected_intel_assets(tmp_path):
+    directory = assemble_assets(tmp_path)
+    (directory / f"Avibe_{VERSION}_x86_64-apple-darwin.dmg").write_bytes(b"not an RC target")
+    with pytest.raises(ValueError, match="asset set"):
+        release.verify(directory, TAG, SOURCE)
+
+
+def test_rc_intel_producers_fail_before_build_or_signing(tmp_path, monkeypatch):
+    from scripts import desktop_updater
+
+    monkeypatch.setattr(release, "git_output", lambda *_: pytest.fail("unsupported target reached git"))
+    target = "x86_64-apple-darwin"
+    with pytest.raises(ValueError, match="not published"):
+        release.prepare(VERSION, TAG, SOURCE, tmp_path / "config", tmp_path / "env", target)
+    with pytest.raises(ValueError, match="not published"):
+        release.record(version=VERSION, target=target, tag=TAG, source_sha=SOURCE,
+                       installer=tmp_path / "absent.dmg", runtime=tmp_path, output=tmp_path / "output",
+                       signing="developer-id")
+    with pytest.raises(ValueError, match="not published"):
+        desktop_updater.produce(tmp_path, TAG, SOURCE, target, None)
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("schema", [1, 2])
 def test_verify_accepts_published_legacy_records_with_their_adhoc_layers(tmp_path, schema):
     directory = assemble_assets(tmp_path)
-    for target, (system, _arch, _suffix) in release.TARGETS.items():
+    for target in release.release_targets(TAG):
+        system = release.TARGETS[target][0]
         names = release.asset_names(VERSION, target)
         source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
         source["schema_version"] = schema
@@ -285,7 +335,7 @@ def test_verify_accepts_published_legacy_records_with_their_adhoc_layers(tmp_pat
             if system == "macos" else "installer-unsigned\n"
         )
         rewrite_record(directory, target, source=source, signature=legacy)
-    assert len(release.verify(directory, TAG, SOURCE)) == 15
+    assert len(release.verify(directory, TAG, SOURCE)) == 10
 
 
 def test_verify_requires_signed_macos_layers_on_current_records(tmp_path):
@@ -416,7 +466,7 @@ def test_driver_provenance_rejects_unbound_prepared_digest(
         )
 
 
-@pytest.mark.parametrize("target", release.TARGETS)
+@pytest.mark.parametrize("target", release.release_targets(TAG))
 def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     if target == "x86_64-pc-windows-msvc":
         pytest.skip("Windows metadata is created only after the isolated Certum job")
@@ -466,7 +516,7 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     assert result.returncode == 0, result.stderr
     for path in (work / "desktop-package").iterdir():
         shutil.copyfile(path, directory / path.name)
-    assert len(release.verify(directory, TAG, SOURCE)) == 15
+    assert len(release.verify(directory, TAG, SOURCE)) == 10
 
 
 @pytest.mark.parametrize("mutation", ["missing-target", "extra-file", "installer-bytes", "runtime-version",

@@ -44,7 +44,7 @@ def configure(config: Path, env_file: Path, enabled: bool) -> None:
 
 
 def verify(directory: Path, tag: str, source_sha: str, public_key: Path, targets=None) -> None:
-    for target in targets or TARGETS:
+    for target in release['release_targets'](tag) if targets is None else targets:
         subprocess.run([
             'cargo', 'run', '--locked', '--quiet', '--manifest-path', str(ROOT / 'desktop/Cargo.toml'),
             '-p', 'avibe-runtime-host', '--example', 'verify_update', '--',
@@ -53,6 +53,8 @@ def verify(directory: Path, tag: str, source_sha: str, public_key: Path, targets
 
 
 def produce(directory: Path, tag: str, source_sha: str, target: str, app: Path | None) -> None:
+    if target not in release['release_targets'](tag):
+        raise ValueError('Desktop target is not published for this release channel')
     public = os.environ.get('AVIBE_DESKTOP_UPDATER_PUBLIC_KEY', '')
     configuration(True, public, os.environ.get('TAURI_SIGNING_PRIVATE_KEY', ''))
     resolved = release['resolve'](tag, source_sha)
