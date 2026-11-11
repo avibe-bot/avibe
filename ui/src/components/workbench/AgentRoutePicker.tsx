@@ -714,6 +714,12 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               {refusedEffort && (
                 <EffortChip active refused label={effortLabel(refusedEffort)} onClick={() => setOpen(false)} />
               )}
+              <EffortChip
+                active={!currentEffort}
+                disabled={loadingModels}
+                label={t('chat.picker.effortDefault')}
+                onClick={() => applyPatch({ reasoning_effort: null })}
+              />
               {effortOptions.map((opt) => (
                 <EffortChip
                   key={opt}
@@ -870,6 +876,18 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   </span>
                 </RouteItem>
               )}
+              {/* No effort set is a state too: the model's own default runs, and
+                  the menu says so rather than showing no choice at all. */}
+              <RouteItem
+                active={!currentEffort}
+                disabled={loadingModels}
+                onClick={() => applyPatch({ reasoning_effort: null })}
+              >
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span>{t('chat.picker.effortDefault')}</span>
+                  <span className="text-[10px] leading-snug text-muted">{t('chat.picker.effortDefaultHint')}</span>
+                </span>
+              </RouteItem>
               {effortOptions.map((opt) => {
                 const notOn = notOnLabel(opt);
                 return (

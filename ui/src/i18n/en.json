@@ -5664,6 +5664,8 @@
       "sheetTitle": "Agent & model",
       "model": "Model",
       "effort": "Effort",
+      "effortDefault": "Default",
+      "effortDefaultHint": "The model's own setting",
       "effortNotOn": "Not on {{sources}}",
       "effortNotOnSome": "Not on some providers",
       "effortRefused": "No provider accepts it now · clear it under Models → Providers & routing",

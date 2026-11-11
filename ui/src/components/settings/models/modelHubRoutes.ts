@@ -21,3 +21,10 @@ export const MODEL_HUB_MANAGE_PARAM = 'manage';
 
 export const modelHubCatalogPath = (backend: string): string =>
   `${MODEL_HUB_SETTINGS_PATH}?${MODEL_HUB_MANAGE_PARAM}=${encodeURIComponent(backend)}`;
+
+// Opens the Model Hub with one Source's detail in front, so a failed turn's
+// 「Open Models」 lands on the Source that failed, where its key is replaced.
+export const MODEL_HUB_SOURCE_PARAM = 'source';
+
+export const modelHubSourcePath = (sourceId: string): string =>
+  `${MODEL_HUB_SETTINGS_PATH}?${MODEL_HUB_SOURCE_PARAM}=${encodeURIComponent(sourceId)}`;

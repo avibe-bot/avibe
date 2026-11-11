@@ -782,6 +782,13 @@ describe('AgentRoutePicker compact presentation', () => {
     await user.click(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }));
     expect(onWrite).toHaveBeenLastCalledWith({ reasoning_effort: 'high' });
     expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('aria-checked')).toBe('true');
+    // No effort set is a state the menu marks too: the model's own default runs.
+    const byDefault = () => effortGroup().getByRole('radio', { name: 'chat.picker.effortDefault' });
+    expect(byDefault().getAttribute('aria-checked')).toBe('false');
+    await user.click(byDefault());
+    expect(onWrite).toHaveBeenLastCalledWith({ reasoning_effort: null });
+    expect(byDefault().getAttribute('aria-checked')).toBe('true');
+    expect(effortGroup().getAllByRole('radio').filter((radio) => radio.getAttribute('aria-checked') === 'true')).toHaveLength(1);
 
     await user.click(screen.getByRole('button', { name: /^opus/ }));
     expect(onWrite).toHaveBeenLastCalledWith({ model: 'opus' });

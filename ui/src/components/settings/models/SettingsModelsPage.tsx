@@ -28,7 +28,7 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { agentUsesHubRuntime, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
-import { MODEL_HUB_MANAGE_PARAM } from './modelHubRoutes';
+import { MODEL_HUB_MANAGE_PARAM, MODEL_HUB_SOURCE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -336,8 +336,35 @@ type HubTab = 'sources' | 'tools' | 'quota' | 'usage' | 'logs';
 
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
   const { t } = useModelsTranslation();
+  // On a phone the strip is wider than the screen and scrolls sideways. Its open
+  // edges fade while there is more that way, so a cut-off tab reads as「more」
+  // rather than as a broken label, and the selected tab is kept in view.
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const [more, setMore] = React.useState<{ start: boolean; end: boolean }>({ start: false, end: false });
+  React.useEffect(() => {
+    const list = listRef.current;
+    if (!list) return undefined;
+    const measure = () => {
+      const start = list.scrollLeft > 1;
+      const end = list.scrollLeft + list.clientWidth < list.scrollWidth - 1;
+      setMore((current) => (current.start === start && current.end === end ? current : { start, end }));
+    };
+    measure();
+    list.addEventListener('scroll', measure, { passive: true });
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    observer?.observe(list);
+    return () => {
+      list.removeEventListener('scroll', measure);
+      observer?.disconnect();
+    };
+  }, []);
+  React.useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [tab]);
   return (
-    <div role="tablist" className="model-hub-tabs flex min-w-0 items-end gap-1 overflow-x-auto border-b border-border">
+    <div ref={listRef} role="tablist" data-more-start={more.start || undefined} data-more-end={more.end || undefined}
+      className="model-hub-tabs flex min-w-0 items-end gap-1 overflow-x-auto border-b border-border">
       {(['sources', 'tools', 'quota', 'usage', 'logs'] as const).map((id) => (
         <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] shrink-0 items-center gap-[7px] whitespace-nowrap border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
           {id === 'sources' ? <Route className="size-3.5" /> : id === 'tools' ? <Wrench className="size-3.5" /> : id === 'quota' ? <Gauge className="size-3.5" /> : id === 'usage' ? <Activity className="size-3.5" /> : <ScrollText className="size-3.5" />}
@@ -1171,6 +1198,21 @@ export const SettingsModelsPage: React.FC = () => {
   const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
     sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
   }, [applySourceDetailSelection, sourceIntentAuthority]);
+  // `?source=<id>` is a failed turn's 「Open Models」: the Source it names opens in
+  // front, with its repair (a replaced key, a sign-in) first in its actions. Once the
+  // Source read can say whether it still exists, open it (or nothing) and drop the
+  // parameter so a reload or Back does not open it again.
+  const requestedSourceId = searchParams.get(MODEL_HUB_SOURCE_PARAM);
+  const sourcesKnown = sourcesRead.kind === 'ready' || sourcesRead.kind === 'degraded';
+  React.useEffect(() => {
+    if (requestedSourceId === null || !sourcesKnown) return;
+    if (sources.some((source) => source.id === requestedSourceId)) {
+      selectSource({ sourceId: requestedSourceId, returnFocus: () => null });
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete(MODEL_HUB_SOURCE_PARAM);
+    setSearchParams(next, { replace: true, state: location.state });
+  }, [location.state, requestedSourceId, searchParams, selectSource, setSearchParams, sources, sourcesKnown]);
   /**
    * A committed delete leaves the detail dialog with no entity to render, so the
    * page closes it and returns the user to the list. It goes through

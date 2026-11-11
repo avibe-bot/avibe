@@ -396,12 +396,14 @@ async def emit_backend_failure(
     return alone is not enough to distinguish a delivered message from a lost one.
     """
 
+    from core.handlers.model_hub.provenance import turn_outcome_failing_source_id
     from core.message_context import resolve_context_platform
     from modules.agents.model_hub import (
         MODELS_NEXT_STEP,
         is_model_hub_refusal,
         models_next_step_text,
         refusal_fixed_in_models,
+        turn_refusal,
     )
 
     backend_name = str(backend or "backend").strip() or "backend"
@@ -426,7 +428,17 @@ async def emit_backend_failure(
             routed_delivery_context(context), fallback_platform=getattr(controller, "primary_platform", None),
         )
         if platform == "avibe":
-            terminal = replace(terminal, metadata={**terminal.metadata, "failure_next_step": MODELS_NEXT_STEP})
+            step: dict[str, Any] = {"failure_next_step": MODELS_NEXT_STEP}
+            # The Source the copy names, so the step opens it rather than all of Models.
+            refused = (
+                hub_failure[2]
+                if hub_failure is not None and hub_failure[0] is not None
+                else turn_refusal(cause)
+            )
+            source_id = turn_outcome_failing_source_id(refused) if refused is not None else None
+            if source_id:
+                step["failure_source_id"] = source_id
+            terminal = replace(terminal, metadata={**terminal.metadata, **step})
         else:
             visible = f"{visible}\n{models_next_step_text(controller)}"
     harness_run_id = harness_run_identity(context, request)

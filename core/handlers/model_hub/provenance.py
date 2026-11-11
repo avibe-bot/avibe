@@ -187,6 +187,8 @@ def exact_hop_blockers(
 class TurnSupplyBlocker:
     source: str
     reason: str
+    # The Source's id, so a surface can open the Source the copy names.
+    source_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,6 +214,8 @@ class TurnUpstreamFailure:
     # provider supplied a status but no readable diagnostic message.
     detail: str
     connection_error: bool = False
+    # The Source's id, so a surface can open the Source the copy names.
+    source_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -332,6 +336,21 @@ class TurnOutcomeProjectionInput:
     last_upstream_failure: TurnUpstreamFailure | None = None
     # Display-only inventory context; never a verdict about why upstream failed.
     passthrough_model: str | None = None
+
+
+def turn_outcome_failing_source_id(projection: TurnOutcomeProjectionInput) -> str | None:
+    """The Source a failed turn's copy names first, by id: the last upstream
+    refusal, else the first Source that blocked the route. ``None`` when the
+    failure names no Source."""
+
+    failure = projection.last_upstream_failure
+    if failure is not None and failure.source_id:
+        return failure.source_id
+    facts = projection.supply_facts
+    for blocker in facts.blockers if facts is not None else ():
+        if blocker.source_id:
+            return blocker.source_id
+    return None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -613,6 +632,7 @@ def turn_supply_facts(
                     else str(inspection.source_id or "")
                 ),
                 reason=reason,
+                source_id=str(inspection.source_id or ""),
             )
         )
     if supply_state == "interrupted" and not blockers:
