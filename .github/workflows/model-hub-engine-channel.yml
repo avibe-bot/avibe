@@ -3,7 +3,7 @@ name: Publish Model Hub engine channel
 # The only writer of https://dl.avibe.bot/index/model-hub-engine.json, the
 # signed index of engine releases installed Avibe may adopt (docs/release.md,
 # docs/plans/model-hub-engine-channel.md). One run makes one change: publish a
-# qualified engine release, promote it, withdraw a release, or publish again
+# owner-approved engine release, promote it, withdraw a release, or publish again
 # the index the signer last allocated. Only a promotion or a withdrawal
 # allocates a new index. An index does not expire, so nothing here renews one
 # and nothing runs on a schedule: the signer host only has to be up for a run
@@ -22,9 +22,9 @@ name: Publish Model Hub engine channel
 # Authority is split so that no job holds two:
 #   authorize  no secret, GitHub-hosted. Proves this is the reviewed workflow
 #              on the default branch and that both environments require review.
-#   qualify    no secret. Re-reads the qualification run from GitHub and checks
+#   prepare   no secret. Re-reads the untrusted rehearsal run from GitHub and checks
 #              that the release is published and mirrored byte for byte.
-#   release    the repository token only. Publishes the qualified assets as an
+#   release    the repository token only. Publishes the trusted-checked assets as an
 #              immutable release. It never rebuilds them.
 #   sign       the signing key, inside avault on the signer host, and the
 #              ledger. No bucket credential. Runs this checkout's scripts only.
@@ -43,15 +43,15 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "release: publish qualified assets. promote | revoke: change the index. resume: publish the last allocated index again."
+        description: "release: publish trusted-checked assets. promote | revoke: change the index. resume: publish the last allocated index again."
         required: true
         type: choice
         options: [release, promote, revoke, resume]
       asset_release_tag:
         description: "Engine release to publish, promote or withdraw"
         type: string
-      qualification_run_id:
-        description: "Qualification run whose receipt and assets qualify the release"
+      rehearsal_run_id:
+        description: "Untrusted rehearsal run to review before this owner-approved publication/promotion"
         type: string
       rollback_to:
         description: "Withdrawal only: the listed release that withdrawn machines move to"
@@ -108,8 +108,8 @@ jobs:
               fi ;;
           esac
 
-  qualify:
-    name: qualify
+  prepare:
+    name: trusted prepare
     needs: authorize
     if: inputs.operation == 'release' || inputs.operation == 'promote'
     runs-on: ubuntu-latest
@@ -118,38 +118,37 @@ jobs:
       contents: read
       actions: read
     outputs:
-      baselines: ${{ steps.receipt.outputs.baselines }}
+      baselines: ${{ steps.context.outputs.baselines }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Download the qualification run's receipt and assets
+      - name: Download the untrusted rehearsal and source data
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}
         run: |
           set -euo pipefail
-          if ! [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]]; then
-            echo "::error::a qualification run id is required"
+          if ! [[ "$REHEARSAL_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::a rehearsal run id is required"
             exit 1
           fi
-          gh run download "$QUALIFICATION_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name model-hub-engine-qualification-receipt --dir "$RUNNER_TEMP/receipt"
-          gh run download "$QUALIFICATION_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name model-hub-engine-candidate-assets --dir "$RUNNER_TEMP/candidate-assets"
-          gh run download "$QUALIFICATION_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'qualification-released-*' --dir "$RUNNER_TEMP/released"
-          test "$(jq -er .run_id "$RUNNER_TEMP/receipt/receipt.json")" = "$QUALIFICATION_RUN_ID"
+          gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name model-hub-engine-untrusted-rehearsal --dir "$RUNNER_TEMP/rehearsal"
+          gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name model-hub-engine-untrusted-assets --dir "$RUNNER_TEMP/untrusted-assets"
+          gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'qualification-released-*' --dir "$RUNNER_TEMP/released" || true
+          test "$(jq -er .run_id "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json")" = "$REHEARSAL_RUN_ID"
 
-      # The receipt is compared with what GitHub says about its run, with the
-      # reviewed record and harness in this checkout, with the Avibe wheels as
-      # published now, and with the baselines the published index lists now.
-      # Those baselines are handed to the signer, which checks them against its
-      # own ledger: the published index is evidence here, not authority.
-      - name: Verify the receipt against GitHub and this checkout
-        id: receipt
+      # This job is the trusted read/prepare boundary. It never imports,
+      # executes, extracts or runs candidate output. The rehearsal assertions
+      # remain explicitly untrusted; only current checkout code verifies the
+      # candidate record, manifest, archive bytes and run identity.
+      - name: Verify the rehearsal run and exact candidate context
+        id: context
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -160,17 +159,40 @@ jobs:
           args=(--avault "$avault" --output-dir "$RUNNER_TEMP/baselines")
           while IFS= read -r -d '' manifest; do
             args+=(--bundled "$manifest")
-          done < <(find "$RUNNER_TEMP/released" -name 'bundled-manifest-*.json' -print0)
+          done < <(find "$RUNNER_TEMP/released" -name 'bundled-manifest-*.json' -print0 2>/dev/null || true)
+          mkdir -p "$RUNNER_TEMP/baselines"
           python3 scripts/model_hub_engine_channel.py baselines "${args[@]}"
-          python3 scripts/model_hub_engine_qualification.py verify-receipt \
+          python3 scripts/model_hub_engine_qualification.py verify-untrusted-rehearsal \
             --candidate-dir "$candidate_dir" \
-            --receipt "$RUNNER_TEMP/receipt/receipt.json" \
+            --rehearsal "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json" \
             --baselines "$RUNNER_TEMP/baselines/baselines.json"
           python3 scripts/model_hub_engine_qualification.py evidence-build \
             --candidate-dir "$candidate_dir" \
-            --asset-dir "$RUNNER_TEMP/candidate-assets" \
+            --asset-dir "$RUNNER_TEMP/untrusted-assets" \
             --output "$RUNNER_TEMP/verified-assets.json"
           printf 'baselines=%s\n' "$(jq -c . "$RUNNER_TEMP/baselines/baselines.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Show the owner-facing rehearsal context
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          record="$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json"
+          {
+            echo '## Model Hub untrusted rehearsal'
+            echo
+            jq -r '"- rehearsal result: `" + .result + "`\n- run: `" + (.run_id|tostring) + "` attempt `" + (.run_attempt|tostring) + "`\n- upstream source: `" + .candidate.source.repository + "` `" + .candidate.source.release_tag + "`\n- source reference: " + .candidate.source.source_url + "\n- source SHA: `" + .candidate.source.source_sha + "`\n- manifest SHA-256: `" + .candidate.manifest_sha256 + "`\n- minimum Avibe: `" + .candidate.min_avibe_version + "`\n- exact archive digests: " + ([.candidate.assets[] | (.platform + "=" + .sha256)] | join(", "))' "$record"
+            echo
+            echo '### Untrusted observations'
+            jq -r 'if (.observations|length) == 0 then "- none recorded" else (.observations[] | "- " + .) end' "$record"
+            echo
+            echo '### Rehearsal job results'
+            gh run view "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" --json jobs \
+              --jq '.jobs[] | "- `" + .name + "`: " + (.conclusion // .status)' || echo '- unable to read job results'
+            echo
+            echo 'Runtime pass/fail assertions above are rehearsal data, not authenticated proof against a malicious candidate. Owner approval for this exact run and digest remains the promotion authority.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Availability before advertisement: a promotion needs every asset served,
       # byte for byte, by the release and by the mirror clients try first.
@@ -185,19 +207,19 @@ jobs:
             --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
             --work-dir "$RUNNER_TEMP/availability"
 
-      - name: Hand the qualified assets to the release job
+      - name: Hand the trusted-checked assets to the release job
         if: inputs.operation == 'release'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-qualified-assets
-          path: ${{ runner.temp }}/candidate-assets
+          name: model-hub-engine-trusted-assets
+          path: ${{ runner.temp }}/untrusted-assets
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
 
   release:
     name: release
-    needs: [authorize, qualify]
+    needs: [authorize, prepare]
     if: inputs.operation == 'release'
     runs-on: ubuntu-latest
     environment: model-hub-engine-channel-writer
@@ -219,12 +241,12 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-qualified-assets
+          name: model-hub-engine-trusted-assets
           path: ${{ runner.temp }}/candidate-assets
 
-      # The qualified bytes, never a rebuild. A release that already exists is
+      # The checked bytes are never rebuilt. A release that already exists is
       # only verified: published assets are never replaced.
-      - name: Publish the qualified assets as an immutable release
+      - name: Publish the trusted-checked assets as an immutable release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -242,7 +264,7 @@ jobs:
               --draft \
               --latest=false \
               --title "Avibe Model Hub engine $version" \
-              --notes "Avibe-managed patched CPA assets, qualified for the engine channel." \
+              --notes "Avibe-managed patched CPA assets, checked against the reviewed manifest; owner approval is required for publication." \
               "$asset_dir"/*
           fi
           if [ "$(gh release view "$ASSET_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
@@ -254,11 +276,11 @@ jobs:
 
   sign:
     name: sign
-    needs: [authorize, qualify]
+    needs: [authorize, prepare]
     if: >-
       always() && inputs.operation != 'release' && needs.authorize.result == 'success' &&
-      (needs.qualify.result == 'success' ||
-      (inputs.operation != 'promote' && needs.qualify.result == 'skipped'))
+      (needs.prepare.result == 'success' ||
+      (inputs.operation != 'promote' && needs.prepare.result == 'skipped'))
     # The runner group, not only a label: the group's policy decides which
     # workflows may run on the signer host.
     runs-on:
@@ -292,7 +314,7 @@ jobs:
         env:
           ROLLBACK_TO: ${{ inputs.rollback_to }}
           REASON: ${{ inputs.reason }}
-          QUALIFIED_BASELINES: ${{ needs.qualify.outputs.baselines }}
+          REHEARSAL_BASELINES: ${{ needs.prepare.outputs.baselines }}
           SIGNER_LEDGER: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_LEDGER }}
           SIGNER_AVAULT: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_AVAULT }}
           SIGNER_KEY_NAME: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_KEY_NAME }}
@@ -313,7 +335,7 @@ jobs:
               args+=(
                 --tag "$ASSET_RELEASE_TAG"
                 --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
-                --qualified-baselines "$QUALIFIED_BASELINES"
+                --rehearsal-baselines "$REHEARSAL_BASELINES"
               ) ;;
             revoke)
               args+=(--tag "$ASSET_RELEASE_TAG" --rollback-to "$ROLLBACK_TO" --reason "$REASON") ;;

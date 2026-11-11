@@ -1,52 +1,18 @@
 #!/usr/bin/env python3
-"""Qualify a Model Hub engine candidate, and check that qualification later.
+"""Run an untrusted Model Hub engine rehearsal and prepare it for review.
 
 A candidate is a reviewed record, separate from the engine Avibe packages:
 ``patches/model-hub-engine-candidates/<asset_release_tag>/`` holds the exact
-``model-hub-engine-manifest.json`` to publish and a ``candidate.json`` naming
-the minimum Avibe version that may run it. Reviewing the record does not
-schedule the engine for any Avibe release.
+manifest to publish and a ``candidate.json`` naming the minimum Avibe version.
+Running the candidate produces only the informational ``untrusted_rehearsal``
+result. It never authorizes publication or promotion.
 
-Qualification runs in ``.github/workflows/model-hub-engine-qualification.yml``
-on the default branch, with no secret. Each job writes one evidence document;
-the last job joins them into a receipt. A receipt is complete only when every
-evidence class below is present for these exact candidate bytes:
-
-- ``build``: the pinned source rebuilt to the reviewed digests;
-- ``platform_smoke``: each of the six archives started and passed Avibe's
-  health check on its own platform;
-- ``hosted_wire``: the hosted passthrough compared with every baseline engine;
-- ``released_avibe_e2e``: the full hermetic Model Hub E2E driven through the
-  released wheel of the minimum and of the current stable Avibe;
-- ``backward_state``: state written by the candidate read back by every
-  baseline engine;
-- ``lifecycle``: activation, rollback and recovery of the candidate.
-
-The last two have no producing job yet; they arrive with the engine lifecycle
-work. They are required all the same, so no complete receipt can exist until
-they do.
-
-Evidence counts only under the job that produces its class
-(``EVIDENCE_PRODUCERS``). ``receipt`` reads each class from the artifact
-named for its job, refuses any document that job does not produce, and
-records the job on what it accepts. A class with no producing job is
-therefore accepted from nowhere, whatever a job uploads, both when a receipt
-is made and when the finalizer checks one.
-
-That is an allowlist by artifact name and document shape. It is not proof of
-which job uploaded an artifact: the receipt does not authenticate the
-uploading job. Several jobs execute the candidate, as the user that writes
-their evidence and beside the run's artifact credential. A candidate that
-attacks its runner can make such a job say anything about itself and could
-replace an artifact another job uploaded. Containing candidate execution is
-unfinished qualification work, owed before every evidence class has a
-producer (docs/plans/model-hub-engine-channel.md).
-
-The finalizer does not take a receipt on trust. ``verify_receipt`` re-reads
-the producing run from GitHub: the workflow file, the default-branch commit,
-the attempt, and every job's conclusion. It then requires the receipt to name
-the reviewed candidate, the harness as it is reviewed now, the Avibe wheels as
-GitHub serves them now, and every baseline the index lists now.
+The candidate jobs run on disposable hosted runners without repository-write,
+OIDC or business secrets. Their reports and any candidate-built assets are
+untrusted source data. A separate workflow checks the exact run, candidate,
+manifest and archive digests from a fixed trusted checkout without executing
+candidate or uploaded code, then the existing protected owner approval remains
+the authority for publication or promotion.
 """
 
 from __future__ import annotations
@@ -86,82 +52,23 @@ PACKAGED_MANIFEST = "vibe/model_hub_runtime/cliproxyapi_manifest.json"
 WHEEL_SERVICE_ENTRY = "vibe/service_main.py"
 QUALIFICATION_WORKFLOW_PATH = ".github/workflows/model-hub-engine-qualification.yml"
 MIRROR_RELEASE_ROOT = "https://dl.avibe.bot/releases"
-RECEIPT_ARTIFACT = "model-hub-engine-qualification-receipt"
-ASSETS_ARTIFACT = "model-hub-engine-candidate-assets"
+UNTRUSTED_REHEARSAL_ARTIFACT = "model-hub-engine-untrusted-rehearsal"
+UNTRUSTED_ASSETS_ARTIFACT = "model-hub-engine-untrusted-assets"
+TRUSTED_ASSETS_ARTIFACT = "model-hub-engine-trusted-assets"
 AVIBE_ROLES = ("minimum", "current_stable")
 E2E_SELECTION = ["-m", "e2e_model_hub", "tests/e2e"]
-#: What a released-Avibe run records about itself: the commit its tests came
-#: from, the digest of that tests tree, the digest of its resolved dependency
-#: set, and its toolchain.
+#: What a released-Avibe run records about itself.
 E2E_PROVENANCE_FIELDS = ("tests_commit", "tests_sha256", "dependencies_sha256", "python", "node", "agent_clis")
 RELEASED_E2E_ACTION = ".github/actions/model-hub-released-e2e/action.yml"
 ORIGINS_MODULE = "scripts/model_hub_engine_qualification_origins.py"
-EVIDENCE_ARTIFACT_PREFIX = "qualification-evidence-"
+EVIDENCE_ARTIFACT_PREFIX = "untrusted-rehearsal-evidence-"
+MAX_EVIDENCE_ARTIFACTS = 64
+MAX_EVIDENCE_REPORTS = 256
+MAX_EVIDENCE_REPORT_BYTES = 512 * 1024
+RESULT_NAME = "untrusted_rehearsal"
+EVIDENCE_CLASSES = frozenset({"build", "platform_smoke", "hosted_wire", "released_avibe_e2e", "backward_state", "lifecycle"})
 
 
-@dataclass(frozen=True)
-class EvidenceProducer:
-    """The one job that may supply an evidence class, and the artifact it uploads."""
-
-    #: The job, by the name GitHub reports.
-    job: str
-    artifact: str
-    evidence_class: str
-    #: The field that tells one document of this class from another: the
-    #: platform, the role, or the baseline. ``None`` when the class has one document.
-    subject: str | None = None
-    #: The one value of that field this job writes. ``None`` when the job
-    #: writes one document for each value, as hosted-wire does per baseline.
-    value: str | None = None
-
-    @property
-    def single(self) -> bool:
-        return self.subject is None or self.value is not None
-
-    def produces(self, document: Mapping[str, Any]) -> bool:
-        """Whether ``document`` is of this job's class and about what this job is about."""
-
-        if document.get("class") != self.evidence_class:
-            return False
-        if self.subject is None:
-            return True
-        about = document.get(self.subject)
-        return isinstance(about, str) and bool(about) and (self.value is None or about == self.value)
-
-
-#: Who may say what. ``backward_state`` and ``lifecycle`` are absent: no job
-#: produces them yet, so no document of either class is accepted from anywhere.
-EVIDENCE_PRODUCERS: tuple[EvidenceProducer, ...] = (
-    EvidenceProducer("build", f"{EVIDENCE_ARTIFACT_PREFIX}build", "build"),
-    *(
-        EvidenceProducer(
-            f"platform-smoke ({platform})",
-            f"{EVIDENCE_ARTIFACT_PREFIX}platform-smoke-{platform}",
-            "platform_smoke",
-            "platform",
-            platform,
-        )
-        for platform in sorted(EXPECTED_PLATFORMS)
-    ),
-    *(
-        EvidenceProducer(
-            f"released-avibe-e2e ({role})",
-            f"{EVIDENCE_ARTIFACT_PREFIX}released-avibe-e2e-{role}",
-            "released_avibe_e2e",
-            "role",
-            role,
-        )
-        for role in AVIBE_ROLES
-    ),
-    EvidenceProducer("hosted-wire", f"{EVIDENCE_ARTIFACT_PREFIX}hosted-wire", "hosted_wire", "baseline_tag"),
-)
-#: Every job of the qualification workflow, by the name GitHub reports. All
-#: must have succeeded in the receipt's run attempt; none may be skipped.
-REQUIRED_JOBS = (*(producer.job for producer in EVIDENCE_PRODUCERS), "receipt")
-#: The code that decides whether a candidate qualifies. A receipt binds the
-#: digest of these files, so evidence from an older harness does not qualify
-#: under a newer one. Everything else a run used is bound by the commit and the
-#: release tag the receipt records.
 HARNESS_FILES = (
     QUALIFICATION_WORKFLOW_PATH,
     RELEASED_E2E_ACTION,
@@ -187,7 +94,7 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class QualificationError(RuntimeError):
-    """Raised when a candidate, its evidence, or its receipt cannot be accepted."""
+    """Raised when a candidate or untrusted rehearsal cannot be read safely."""
 
 
 def _sha256(path: Path) -> str:
@@ -219,9 +126,16 @@ class Candidate:
     hosted_wire_changes: Mapping[str, str]
 
     def identity(self) -> dict[str, Any]:
+        manifest = channel.strict_json(self.manifest_bytes)
         return {
             "asset_release_tag": self.asset_release_tag,
             "min_avibe_version": self.min_avibe_version,
+            "source": {
+                "repository": manifest["source"],
+                "release_tag": manifest["release_tag"],
+                "source_url": manifest["source_url"],
+                "source_sha": manifest["source_sha"],
+            },
             "manifest_sha256": self.manifest_sha256,
             "assets": [
                 {
@@ -589,7 +503,7 @@ def junit_summary(report: Path) -> dict[str, int]:
     return {"tests": len(cases), "failed": failed, "skipped": skipped}
 
 
-# ----- evidence and receipts -------------------------------------------------
+# ----- evidence and untrusted rehearsal results ------------------------------
 
 
 def evidence_problems(
@@ -599,43 +513,23 @@ def evidence_problems(
     baselines: Mapping[str, str],
     avibe: Mapping[str, ReleasedAvibe],
 ) -> list[str]:
-    """Everything that keeps ``evidence`` from qualifying ``candidate``.
+    """Describe concrete rehearsal observations without granting authority.
 
-    ``baselines`` maps each engine release the candidate must be compared with
-    to its manifest digest. ``avibe`` maps each role to the released Avibe it
-    must have been driven through.
+    This is reporting data, not a qualification gate. Missing, failed and
+    future lifecycle observations stay visible to the owner; only the trusted
+    finalizer independently checks the candidate record and exact bytes.
     """
 
     by_class: dict[str, list[dict[str, Any]]] = {}
     problems: list[str] = []
-    counted: set[tuple[str, Any]] = set()
     for item in evidence:
-        kind = item.get("class") if isinstance(item, dict) else None
-        if not isinstance(kind, str):
-            problems.append("evidence: a document names no class")
+        if not isinstance(item, dict):
+            problems.append("evidence: a document is not an object")
             continue
-        # A document counts only under the job that produces its class, and
-        # once for what it is about. What it is about is the one field its
-        # class is told apart by, never whichever field happens to be there.
-        if not any(producer.evidence_class == kind for producer in EVIDENCE_PRODUCERS):
-            problems.append(f"{kind}: no qualification job produces this evidence")
+        kind = item.get("class")
+        if not isinstance(kind, str) or kind not in EVIDENCE_CLASSES:
+            problems.append("evidence: an unrecognized document class was reported")
             continue
-        producer = next(
-            (
-                producer
-                for producer in EVIDENCE_PRODUCERS
-                if producer.produces(item) and producer.job == item.get("producer")
-            ),
-            None,
-        )
-        if producer is None:
-            problems.append(f"{kind}: a document is not recorded under the job that produces this evidence")
-            continue
-        about = item.get(producer.subject) if producer.subject is not None else None
-        if (kind, about) in counted:
-            problems.append(f"{kind}: more than one document about {about or 'the candidate'}")
-            continue
-        counted.add((kind, about))
         by_class.setdefault(kind, []).append(item)
 
     def bound(item: Mapping[str, Any]) -> bool:
@@ -645,7 +539,7 @@ def evidence_problems(
     if len(builds) != 1 or not bound(builds[0]) or builds[0].get("reproduced") is not True or (
         builds[0].get("assets") != candidate.identity()["assets"]
     ):
-        problems.append("build: no rebuild reproduced the reviewed manifest and its six assets")
+        problems.append("build: no report reproduced the reviewed manifest and its six assets")
 
     smokes = {item.get("platform"): item for item in by_class.get("platform_smoke", [])}
     for archive in candidate.spec.archives:
@@ -658,25 +552,16 @@ def evidence_problems(
             or item.get("reported_version") != candidate.spec.version
             or item.get("health") != "ok"
         ):
-            problems.append(f"platform_smoke: {archive.platform} did not start and pass health from the reviewed archive")
+            problems.append(f"platform_smoke: {archive.platform} did not report a passing health check from the reviewed archive")
 
     compared = {tag: digest for tag, digest in baselines.items() if tag != candidate.asset_release_tag}
     wires = {item.get("baseline_tag"): item for item in by_class.get("hosted_wire", [])}
-    states = {item.get("baseline_tag"): item for item in by_class.get("backward_state", [])}
     for tag, digest in sorted(compared.items()):
         wire = wires.get(tag)
         if wire is None or not bound(wire) or wire.get("baseline_manifest_sha256") != digest or not wire.get("cases"):
-            problems.append(f"hosted_wire: the candidate was not compared with {tag}")
+            problems.append(f"hosted_wire: no comparison report for {tag}")
         elif wire.get("differences") and tag not in candidate.hosted_wire_changes:
             problems.append(f"hosted_wire: the passthrough differs from {tag} and the record gives no reviewed reason")
-        state = states.get(tag)
-        if (
-            state is None
-            or not bound(state)
-            or state.get("baseline_manifest_sha256") != digest
-            or state.get("result") != "pass"
-        ):
-            problems.append(f"backward_state: state written by the candidate was not read back by {tag}")
 
     runs = {item.get("role"): item for item in by_class.get("released_avibe_e2e", [])}
     for role in AVIBE_ROLES:
@@ -699,20 +584,24 @@ def evidence_problems(
             or not junit.get("tests")
             or junit.get("failed") != 0
         ):
-            problems.append(
-                f"released_avibe_e2e: the Model Hub E2E did not pass through the released Avibe {released.version} wheel"
-            )
+            problems.append(f"released_avibe_e2e: the Model Hub E2E did not report a clean run through the released Avibe {released.version} wheel")
     if role_versions := {role: avibe[role].version for role in AVIBE_ROLES if role in avibe}:
         if role_versions.get("minimum") != candidate.min_avibe_version:
             problems.append("released_avibe_e2e: the minimum role is not the candidate's minimum Avibe")
 
-    lifecycles = by_class.get("lifecycle", [])
-    if len(lifecycles) != 1 or not bound(lifecycles[0]) or lifecycles[0].get("result") != "pass":
-        problems.append("lifecycle: activation, rollback and recovery of the candidate were not exercised")
+    # These are intentionally observations only. Their producers arrive with
+    # later lifecycle work; their absence cannot make the whole rehearsal an
+    # authoritative refusal, and their reported assertions remain untrusted.
+    for kind in ("backward_state", "lifecycle"):
+        for item in by_class.get(kind, []):
+            if not bound(item):
+                problems.append(f"{kind}: the report names different candidate bytes")
+            elif item.get("result") != "pass":
+                problems.append(f"{kind}: the report did not pass")
     return problems
 
 
-def build_receipt(
+def build_untrusted_rehearsal(
     candidate: Candidate,
     evidence: Sequence[Any],
     *,
@@ -722,12 +611,14 @@ def build_receipt(
     run_attempt: int,
     head_sha: str,
     harness_sha256: str,
+    jobs: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    problems = evidence_problems(candidate, evidence, baselines=baselines, avibe=avibe)
-    if problems:
-        raise QualificationError("the candidate is not qualified: " + "; ".join(problems))
+    """Build the owner-facing informational result without qualifying anything."""
+
+    observations = evidence_problems(candidate, evidence, baselines=baselines, avibe=avibe)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "result": RESULT_NAME,
         "repository": REPOSITORY,
         "workflow_path": QUALIFICATION_WORKFLOW_PATH,
         "run_id": run_id,
@@ -736,99 +627,93 @@ def build_receipt(
         "harness_sha256": harness_sha256,
         "candidate": candidate.identity(),
         "baselines": dict(sorted(baselines.items())),
-        "avibe": {role: avibe[role].identity() for role in AVIBE_ROLES},
+        "avibe": {role: avibe[role].identity() for role in AVIBE_ROLES if role in avibe},
         "evidence": list(evidence),
+        "observations": observations,
+        "jobs": [dict(job) for job in jobs],
     }
 
+def run_identity_problems(result: Mapping[str, Any], *, api: Callable[[str], Any]) -> list[str]:
+    """Check the rehearsal's run identity without treating job output as proof."""
 
-def run_identity_problems(receipt: Mapping[str, Any], *, api: Callable[[str], Any]) -> list[str]:
-    """Why GitHub does not confirm that the receipt's run produced a qualification.
-
-    Everything here is read from GitHub by run id. A receipt's own claims
-    about its run are only compared with that, never believed.
-    """
-
-    run_id, attempt = receipt.get("run_id"), receipt.get("run_attempt")
+    run_id, attempt = result.get("run_id"), result.get("run_attempt")
     if type(run_id) is not int or type(attempt) is not int:
-        return ["the receipt names no run"]
+        return ["the rehearsal names no run"]
     run = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}")
     if not isinstance(run, dict):
-        return ["GitHub has no such qualification run"]
-    head_sha = run.get("head_sha")
+        return ["GitHub has no such rehearsal run"]
     expected = {
         "id": run_id,
         "run_attempt": attempt,
         "path": QUALIFICATION_WORKFLOW_PATH,
         "event": "workflow_dispatch",
         "head_branch": DEFAULT_BRANCH,
-        "status": "completed",
-        "conclusion": "success",
-        "head_sha": receipt.get("head_sha"),
+        "head_sha": result.get("head_sha"),
     }
     problems = [
-        f"the run's {field} is {run.get(field)!r}, not {value!r}" for field, value in expected.items() if run.get(field) != value
+        f"the run's {field} is {run.get(field)!r}, not {value!r}"
+        for field, value in expected.items()
+        if run.get(field) != value
     ]
+    if run.get("status") != "completed":
+        problems.append(f"the rehearsal run is not complete: {run.get('status')!r}")
+    if run.get("conclusion") not in {"success", "failure"}:
+        problems.append(f"the rehearsal run has no usable conclusion: {run.get('conclusion')!r}")
     for field in ("repository", "head_repository"):
         if (run.get(field) or {}).get("full_name") != REPOSITORY:
             problems.append(f"the run's {field} is not {REPOSITORY}")
+    head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or _COMMIT_RE.fullmatch(head_sha) is None:
         return problems + ["the run names no commit"]
-
-    # A branch or tag may be named like the default branch; the commit decides.
     comparison = api(f"/repos/{REPOSITORY}/compare/{head_sha}...{DEFAULT_BRANCH}")
     if not isinstance(comparison, dict) or comparison.get("status") not in {"ahead", "identical"}:
         problems.append(f"the run's commit is not on {DEFAULT_BRANCH}")
-
     listing = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
     jobs = listing.get("jobs") if isinstance(listing, dict) else None
     if not isinstance(jobs, list) or not isinstance(listing.get("total_count"), int) or listing["total_count"] != len(jobs):
-        return problems + ["the run's jobs cannot be read completely"]
-    conclusions = {job.get("name"): job.get("conclusion") for job in jobs if isinstance(job, dict)}
-    for name in REQUIRED_JOBS:
-        if conclusions.get(name) != "success":
-            problems.append(f"job {name!r} concluded {conclusions.get(name)!r}, not 'success'")
-    for name, conclusion in sorted((str(name), conclusion) for name, conclusion in conclusions.items()):
-        if name not in REQUIRED_JOBS and conclusion != "success":
-            problems.append(f"job {name!r} concluded {conclusion!r}")
+        problems.append("the rehearsal's jobs cannot be read completely")
+    else:
+        for job in jobs:
+            if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+                problems.append("the rehearsal has an unreadable job result")
+                continue
+            if job.get("status") not in {None, "completed"}:
+                problems.append(f"job {job['name']!r} is not complete")
     return problems
 
 
-def verify_receipt(
-    receipt: Any,
+def verify_untrusted_rehearsal(
+    result: Any,
     *,
     candidate: Candidate,
     api: Callable[[str], Any],
     harness_sha256: str,
     baselines: Mapping[str, str],
 ) -> None:
-    """Stop unless ``receipt`` qualifies ``candidate`` for promotion right now.
+    """Validate trusted context and bytes; never authorize from rehearsal claims."""
 
-    ``baselines`` is what the index lists now, plus what the Avibe releases
-    bundle. The Avibe releases themselves are resolved again from GitHub, so a
-    receipt made against a wheel that has since changed, or before a newer
-    stable release, no longer qualifies.
-    """
-
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
-        raise QualificationError("the receipt has an unknown shape")
-    problems = run_identity_problems(receipt, api=api)
-    if receipt.get("repository") != REPOSITORY or receipt.get("workflow_path") != QUALIFICATION_WORKFLOW_PATH:
-        problems.append("the receipt is for another repository or workflow")
-    if receipt.get("candidate") != candidate.identity():
-        problems.append("the receipt is for other candidate bytes than the reviewed record")
-    if receipt.get("harness_sha256") != harness_sha256:
-        problems.append("the receipt was produced by a different qualification harness than the reviewed one")
-    avibe = {
-        "minimum": resolve_released_avibe(candidate.min_avibe_version, api),
-        "current_stable": resolve_released_avibe(current_stable_avibe(api), api),
-    }
-    evidence = receipt.get("evidence")
-    problems += evidence_problems(
-        candidate, evidence if isinstance(evidence, list) else [], baselines=baselines, avibe=avibe
-    )
+    if not isinstance(result, dict) or result.get("schema_version") != 2 or result.get("result") != RESULT_NAME:
+        raise QualificationError("the result is not an untrusted_rehearsal")
+    problems = run_identity_problems(result, api=api)
+    if result.get("repository") != REPOSITORY or result.get("workflow_path") != QUALIFICATION_WORKFLOW_PATH:
+        problems.append("the rehearsal is for another repository or workflow")
+    if result.get("candidate") != candidate.identity():
+        problems.append("the rehearsal is for other candidate bytes than the reviewed record")
+    if result.get("harness_sha256") != harness_sha256:
+        problems.append("the rehearsal used a different harness than the trusted checkout")
+    if result.get("baselines") != dict(sorted(baselines.items())):
+        problems.append("the rehearsal baseline context is stale or incomplete")
+    evidence = result.get("evidence")
+    if not isinstance(evidence, list):
+        problems.append("the rehearsal evidence is not a list")
+    else:
+        for item in evidence:
+            if not isinstance(item, dict):
+                problems.append("the rehearsal contains a non-object report")
+            elif "manifest_sha256" in item and item.get("manifest_sha256") != candidate.manifest_sha256:
+                problems.append("the rehearsal contains a report for different candidate bytes")
     if problems:
-        raise QualificationError("the receipt does not qualify the candidate: " + "; ".join(problems))
-
+        raise QualificationError("the untrusted rehearsal cannot be used: " + "; ".join(problems))
 
 # ----- evidence producers ----------------------------------------------------
 
@@ -1048,7 +933,7 @@ def rehearsal_record(
 
     A rehearsal exercises the harness against some published wheel, a release
     candidate included. Its record is not evidence: it has its own class, which
-    no receipt reads, so nothing rehearsed can qualify an engine.
+    an untrusted rehearsal result, so nothing rehearsed can authorize an engine.
     """
 
     recorded, processes, problems = _run_facts(
@@ -1115,39 +1000,75 @@ def _load_released(path: Path) -> ReleasedAvibe:
 
 
 def collect_evidence(directory: Path) -> list[dict[str, Any]]:
-    """Read each producing job's evidence from the artifact that job uploaded.
+    """Read bounded JSON reports as untrusted data, never as executable input.
 
-    ``directory`` holds one subdirectory per downloaded artifact, named after
-    it. Anything that is not a producer's artifact, and any document that the
-    artifact's job does not produce, stops the receipt: a run that holds
-    evidence for a class with no job, or one job's evidence in another job's
-    artifact, is not a run to believe. Each accepted document is recorded
-    with the job its artifact is named for. The name is all that ties an
-    artifact to a job; who uploaded it is not checked.
+    Artifact and producer names are not authentication. The trusted workflow
+    supplies the run identity and independently verifies candidate bytes; this
+    function only rejects unsafe paths, malformed JSON and oversized report
+    sets. Missing reports remain missing in the resulting rehearsal.
     """
 
-    by_artifact = {producer.artifact: producer for producer in EVIDENCE_PRODUCERS}
-    entries = sorted(directory.iterdir()) if directory.is_dir() else []
+    if not directory.is_dir():
+        return []
+    entries = sorted(directory.iterdir())
+    if len(entries) > MAX_EVIDENCE_ARTIFACTS:
+        raise QualificationError("the rehearsal contains too many evidence artifacts")
     evidence: list[dict[str, Any]] = []
     for entry in entries:
-        producer = by_artifact.get(entry.name)
-        if producer is None or entry.is_symlink() or not entry.is_dir():
-            raise QualificationError(f"{entry.name} is not the evidence of any qualification job")
+        if entry.is_symlink() or not entry.is_dir() or not entry.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
+            raise QualificationError(f"{entry.name} is not an untrusted rehearsal evidence artifact")
         files = sorted(entry.iterdir())
-        if any(path.is_symlink() or not path.is_file() or path.suffix != ".json" for path in files):
-            raise QualificationError(f"{producer.job} uploaded something that is not an evidence document")
-        documents = [_read_json(path) for path in files]
-        for document in documents:
-            if not isinstance(document, dict) or "producer" in document or not producer.produces(document):
-                raise QualificationError(f"{producer.job} uploaded evidence that it does not produce")
-        if producer.single and len(documents) != 1:
-            raise QualificationError(f"{producer.job} uploaded {len(documents)} evidence documents, not one")
-        about = [document[producer.subject] for document in documents] if producer.subject is not None else []
-        if len(set(about)) != len(about):
-            raise QualificationError(f"{producer.job} uploaded more than one document about the same {producer.subject}")
-        evidence += [{**document, "producer": producer.job} for document in documents]
+        if len(files) > MAX_EVIDENCE_REPORTS:
+            raise QualificationError(f"{entry.name} contains too many reports")
+        for path in files:
+            if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+                raise QualificationError(f"{entry.name} contains a non-JSON report")
+            if path.stat().st_size > MAX_EVIDENCE_REPORT_BYTES:
+                raise QualificationError(f"{path.name} is too large to parse safely")
+            document = _read_json(path)
+            if not isinstance(document, dict):
+                raise QualificationError(f"{path.name} is not a JSON report object")
+            # Keep the source location as diagnostic metadata. Never trust a
+            # candidate-provided producer/job field for authorization.
+            evidence.append({**document, "source_artifact": entry.name, "source_file": path.name})
     return evidence
 
+
+def _load_released_directory(directory: Path) -> dict[str, ReleasedAvibe]:
+    if not directory.is_dir():
+        return {}
+    result: dict[str, ReleasedAvibe] = {}
+    for path in sorted(directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            raise QualificationError(f"{path.name} is not a released Avibe record")
+        record = _load_released(path)
+        role = path.stem
+        if role in AVIBE_ROLES:
+            result[role] = record
+    return result
+
+
+def build_untrusted_from_directory(
+    candidate: Candidate,
+    *,
+    evidence_dir: Path,
+    released_dir: Path,
+    baselines: Mapping[str, str],
+    run_id: int,
+    run_attempt: int,
+    head_sha: str,
+    harness_sha256: str,
+) -> dict[str, Any]:
+    return build_untrusted_rehearsal(
+        candidate,
+        collect_evidence(evidence_dir),
+        baselines=baselines,
+        avibe=_load_released_directory(released_dir),
+        run_id=run_id,
+        run_attempt=run_attempt,
+        head_sha=head_sha,
+        harness_sha256=harness_sha256,
+    )
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1226,21 +1147,18 @@ def _build_parser() -> argparse.ArgumentParser:
     available = command("availability", "Require the release and its mirror to serve the candidate.")
     available.add_argument("--work-dir", type=Path, required=True)
 
-    for name, help_text in (
-        ("receipt", "Join a run's evidence into a receipt."),
-        ("verify-receipt", "Check a receipt against GitHub and the reviewed record."),
-    ):
-        sub = command(name, help_text)
-        sub.add_argument("--baselines", type=Path, required=True, help="JSON object: release tag to manifest SHA-256")
-        if name == "receipt":
-            sub.add_argument("--evidence-dir", type=Path, required=True)
-            sub.add_argument("--released-dir", type=Path, required=True)
-            sub.add_argument("--run-id", type=int, required=True)
-            sub.add_argument("--run-attempt", type=int, required=True)
-            sub.add_argument("--head-sha", required=True)
-            sub.add_argument("--output", type=Path, required=True)
-        else:
-            sub.add_argument("--receipt", type=Path, required=True)
+    rehearsal_result = command("untrusted-rehearsal", "Assemble an informational untrusted_rehearsal result.")
+    rehearsal_result.add_argument("--evidence-dir", type=Path, required=True)
+    rehearsal_result.add_argument("--released-dir", type=Path, required=True)
+    rehearsal_result.add_argument("--baselines", type=Path, required=True)
+    rehearsal_result.add_argument("--run-id", type=int, required=True)
+    rehearsal_result.add_argument("--run-attempt", type=int, required=True)
+    rehearsal_result.add_argument("--head-sha", required=True)
+    rehearsal_result.add_argument("--output", type=Path, required=True)
+
+    verify = command("verify-untrusted-rehearsal", "Check trusted run identity and bytes without authorizing promotion.")
+    verify.add_argument("--baselines", type=Path, required=True, help="JSON object: release tag to manifest SHA-256")
+    verify.add_argument("--rehearsal", type=Path, required=True)
     return parser
 
 
@@ -1306,32 +1224,32 @@ def main(argv: list[str] | None = None) -> int:
                 scenario_evidence_passed=args.scenario_evidence == "pass",
                 provenance=_read_json(args.provenance),
             )
-        elif args.command in {"receipt", "verify-receipt"}:
+        elif args.command in {"untrusted-rehearsal", "verify-untrusted-rehearsal"}:
             baselines = _read_json(args.baselines)
             if not isinstance(baselines, dict) or not all(
                 isinstance(tag, str) and isinstance(digest, str) for tag, digest in baselines.items()
             ):
                 raise QualificationError("baselines maps a release tag to a manifest SHA-256")
-            if args.command == "receipt":
-                result = build_receipt(
+            if args.command == "untrusted-rehearsal":
+                result = build_untrusted_from_directory(
                     candidate,
-                    collect_evidence(args.evidence_dir),
+                    evidence_dir=args.evidence_dir,
+                    released_dir=args.released_dir,
                     baselines=baselines,
-                    avibe={role: _load_released(args.released_dir / f"{role}.json") for role in AVIBE_ROLES},
                     run_id=args.run_id,
                     run_attempt=args.run_attempt,
                     head_sha=args.head_sha,
                     harness_sha256=harness_digest(),
                 )
             else:
-                verify_receipt(
-                    _read_json(args.receipt),
+                verify_untrusted_rehearsal(
+                    _read_json(args.rehearsal),
                     candidate=candidate,
                     api=_api(token),
                     harness_sha256=harness_digest(),
                     baselines=baselines,
                 )
-                result = {"ok": True, **candidate.identity()}
+                result = {"ok": True, "result": RESULT_NAME, **candidate.identity()}
         if getattr(args, "output", None) is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")

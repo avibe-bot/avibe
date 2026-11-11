@@ -1,9 +1,4 @@
-"""Engine candidate qualification (scripts/model_hub_engine_qualification.py).
-
-What this protects: only a reviewed candidate record is qualified; a receipt
-is complete only with every evidence class for those exact bytes; and the
-finalizer believes GitHub about the producing run, never the receipt.
-"""
+"""Model Hub untrusted rehearsal and trusted publication-boundary tests."""
 
 from __future__ import annotations
 
@@ -37,30 +32,18 @@ def _record(root: Path, *, tag: str = TAG, minimum: str = "3.2.6", **extra) -> P
     directory.mkdir(parents=True)
     manifest = manifest_bytes(build=int(tag.rsplit("-", 1)[1]))
     (directory / qualification.MANIFEST_FILE).write_bytes(manifest)
-    (directory / qualification.CANDIDATE_FILE).write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "asset_release_tag": tag,
-                "min_avibe_version": minimum,
-                "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
-                **extra,
-            }
-        )
-    )
+    (directory / qualification.CANDIDATE_FILE).write_text(json.dumps({
+        "schema_version": 1, "asset_release_tag": tag, "min_avibe_version": minimum,
+        "manifest_sha256": hashlib.sha256(manifest).hexdigest(), **extra,
+    }))
     return directory
 
 
 def _released(version: str) -> ReleasedAvibe:
     name = f"avibe_os-{version}-py3-none-any.whl"
-    return ReleasedAvibe(
-        version=version,
-        tag=f"v{version}",
-        wheel_name=name,
-        wheel_url=f"https://github.com/avibe-bot/avibe/releases/download/v{version}/{name}",
-        wheel_sha256=hashlib.sha256(version.encode()).hexdigest(),
-        wheel_size=14_000_000,
-    )
+    return ReleasedAvibe(version, f"v{version}", name,
+                         f"https://github.com/avibe-bot/avibe/releases/download/v{version}/{name}",
+                         hashlib.sha256(version.encode()).hexdigest(), 14_000_000)
 
 
 AVIBE = {"minimum": _released("3.2.6"), "current_stable": _released("3.2.7")}
@@ -71,85 +54,46 @@ PROVENANCE = {
 BASELINES = {BASELINE: BASELINE_DIGEST}
 
 
-# The two evidence classes the receipt requires and no job produces yet, as their jobs might be bound.
-FUTURE_PRODUCERS = (
-    qualification.EvidenceProducer(
-        "backward-state", "qualification-evidence-backward-state", "backward_state", "baseline_tag"
-    ),
-    qualification.EvidenceProducer("lifecycle", "qualification-evidence-lifecycle", "lifecycle"),
-)
-
-
-@pytest.fixture
-def every_class_has_a_producer(monkeypatch) -> None:
-    """The workflow as it will be once backward-state and lifecycle evidence have jobs.
-
-    For tests only. Production has no producer for either class, and nothing switches one on.
-    """
-
-    monkeypatch.setattr(
-        qualification, "EVIDENCE_PRODUCERS", (*qualification.EVIDENCE_PRODUCERS, *FUTURE_PRODUCERS)
-    )
-
-
-complete = pytest.mark.usefixtures("every_class_has_a_producer")
-
-
 def _evidence(candidate: qualification.Candidate) -> list[dict]:
-    """Passing evidence of every class, each document recorded with the job it came from."""
-
     bound = {"manifest_sha256": candidate.manifest_sha256}
-    documents = [
-        {"class": "build", **bound, "assets": candidate.identity()["assets"], "reproduced": True, "producer": "build"}
-    ]
+    documents = [{"class": "build", **bound, "assets": candidate.identity()["assets"], "reproduced": True}]
     for archive in candidate.spec.archives:
-        documents.append(
-            {
-                "class": "platform_smoke", **bound, "platform": archive.platform,
-                "producer": f"platform-smoke ({archive.platform})",
-                "archive_sha256": archive.sha256, "binary_sha256": archive.binary_sha256,
-                "reported_version": candidate.spec.version, "health": "ok",
-            }
-        )
-    documents.append(
-        {
-            "class": "hosted_wire", **bound, "baseline_tag": BASELINE, "baseline_manifest_sha256": BASELINE_DIGEST,
-            "cases": ["web_search"], "differences": {}, "producer": "hosted-wire",
-        }
-    )
-    documents.append(
-        {"class": "backward_state", **bound, "baseline_tag": BASELINE, "baseline_manifest_sha256": BASELINE_DIGEST,
-         "result": "pass", "producer": "backward-state"}
-    )
+        documents.append({"class": "platform_smoke", **bound, "platform": archive.platform,
+                          "archive_sha256": archive.sha256, "binary_sha256": archive.binary_sha256,
+                          "reported_version": candidate.spec.version, "health": "ok"})
+    documents.append({"class": "hosted_wire", **bound, "baseline_tag": BASELINE,
+                      "baseline_manifest_sha256": BASELINE_DIGEST, "cases": ["web_search"], "differences": {}})
     for role, released in AVIBE.items():
-        documents.append(
-            {
-                "class": "released_avibe_e2e", **bound, "role": role, "avibe": released.identity(),
-                "producer": f"released-avibe-e2e ({role})",
-                "imports_from_wheel": True, "selection": ["-m", "e2e_model_hub", "tests/e2e"],
-                "provenance": dict(PROVENANCE),
-                "junit": {"tests": 212, "failed": 0, "skipped": 0}, "scenario_evidence": "pass",
-            }
-        )
-    documents.append({"class": "lifecycle", **bound, "result": "pass", "producer": "lifecycle"})
+        documents.append({"class": "released_avibe_e2e", **bound, "role": role, "avibe": released.identity(),
+                          "imports_from_wheel": True, "selection": ["-m", "e2e_model_hub", "tests/e2e"],
+                          "provenance": dict(PROVENANCE), "junit": {"tests": 212, "failed": 0, "skipped": 0},
+                          "scenario_evidence": "pass"})
     return documents
 
 
-def _problems(candidate, evidence, **overrides) -> list[str]:
-    return qualification.evidence_problems(candidate, evidence, **{"baselines": BASELINES, "avibe": AVIBE, **overrides})
-
-
-# ----- the candidate record --------------------------------------------------
+# ----- candidate record -------------------------------------------------------
 
 
 def test_a_candidate_record_names_exact_manifest_bytes_and_a_minimum_avibe(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path, hosted_wire_changes={BASELINE: "upstream renamed a header"}))
-
     assert candidate.asset_release_tag == TAG and candidate.min_avibe_version == "3.2.6"
     assert candidate.manifest_bytes == manifest_bytes(build=2)
     assert candidate.manifest_sha256 == hashlib.sha256(manifest_bytes(build=2)).hexdigest()
     assert len(candidate.identity()["assets"]) == 6
     assert candidate.hosted_wire_changes == {BASELINE: "upstream renamed a header"}
+
+
+def _rewrite(directory: Path, **fields) -> None:
+    path = directory / qualification.CANDIDATE_FILE
+    path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
+
+
+def _relink(directory: Path) -> None:
+    manifest = directory / qualification.MANIFEST_FILE
+    elsewhere = directory.parent / "elsewhere.json"
+    elsewhere.write_bytes(manifest.read_bytes())
+    manifest.unlink()
+    manifest.symlink_to(elsewhere)
 
 
 @pytest.mark.parametrize(
@@ -167,300 +111,23 @@ def test_a_candidate_record_names_exact_manifest_bytes_and_a_minimum_avibe(tmp_p
         lambda d: _rewrite(d, asset_release_tag="model-hub-engine-v8.0.63-3"),
         lambda d: _rewrite(d, skip_qualification=True),
         lambda d: _rewrite(d, hosted_wire_changes={BASELINE: ""}),
-        pytest.param(
-            lambda d: _relink(d),
-            marks=pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows"),
-        ),
+        pytest.param(_relink, marks=pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")),
     ],
 )
 def test_anything_but_exactly_one_consistent_record_is_refused(tmp_path, damage) -> None:
     directory = _record(tmp_path)
     damage(directory)
     target = directory if directory.exists() else directory.with_name("model-hub-engine-v8.0.63-9")
-
     with pytest.raises(QualificationError):
         qualification.load_candidate(target)
 
 
-def _rewrite(directory: Path, **fields) -> None:
-    path = directory / qualification.CANDIDATE_FILE
-    path.write_text(json.dumps({**json.loads(path.read_text()), **fields}))
-
-
-def _relink(directory: Path) -> None:
-    manifest = directory / qualification.MANIFEST_FILE
-    elsewhere = directory.parent / "elsewhere.json"
-    elsewhere.write_bytes(manifest.read_bytes())
-    manifest.unlink()
-    manifest.symlink_to(elsewhere)
-
-
 def test_no_candidate_is_recorded_before_one_is_reviewed() -> None:
-    # The directory documents the record; it holds no engine of its own.
     assert sorted(path.name for path in qualification.CANDIDATES_DIR.iterdir()) == ["README.md"]
 
 
-# ----- evidence --------------------------------------------------------------
-
-
-@complete
-def test_complete_evidence_for_the_exact_bytes_makes_a_receipt(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path))
-
-    receipt = qualification.build_receipt(
-        candidate, _evidence(candidate), baselines=BASELINES, avibe=AVIBE,
-        run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
-    )
-
-    assert receipt["candidate"] == candidate.identity()
-    assert receipt["workflow_path"] == ".github/workflows/model-hub-engine-qualification.yml"
-    assert (receipt["run_id"], receipt["run_attempt"], receipt["head_sha"]) == (RUN_ID, ATTEMPT, HEAD)
-    assert receipt["avibe"]["minimum"]["wheel"]["sha256"] == AVIBE["minimum"].wheel_sha256
-
-
-def test_the_evidence_classes_without_a_producing_job_block_every_receipt_today(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path))
-    produced_today = [item for item in _evidence(candidate) if item["class"] not in {"backward_state", "lifecycle"}]
-
-    problems = _problems(candidate, produced_today)
-
-    assert [problem.split(":")[0] for problem in problems] == ["backward_state", "lifecycle"]
-    with pytest.raises(QualificationError, match="backward_state.*lifecycle"):
-        qualification.build_receipt(
-            candidate, produced_today, baselines=BASELINES, avibe=AVIBE,
-            run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
-        )
-
-
-def _drop(kind: str, **match):
-    def apply(evidence: list[dict]) -> None:
-        evidence[:] = [
-            item for item in evidence
-            if not (item["class"] == kind and all(item.get(key) == value for key, value in match.items()))
-        ]
-    return apply
-
-
-def _change(kind: str, match: dict, **fields):
-    def apply(evidence: list[dict]) -> None:
-        for item in evidence:
-            if item["class"] == kind and all(item.get(key) == value for key, value in match.items()):
-                item.update(fields)
-    return apply
-
-
-@pytest.mark.parametrize(
-    "claimed_by", [None, "platform-smoke (linux-amd64)", "hosted-wire", "lifecycle", "receipt"],
-)
-def test_no_job_can_supply_the_evidence_classes_that_have_no_producer(tmp_path, claimed_by) -> None:
-    """MH-ENGINE-CHANNEL-010: no job name makes a class count that has no producing job."""
-
-    candidate = qualification.load_candidate(_record(tmp_path))
-    evidence = _evidence(candidate)
-    # Passing documents for both missing classes, said to come from any job at all.
-    for item in evidence:
-        if item["class"] in {"backward_state", "lifecycle"}:
-            item.pop("producer")
-            if claimed_by is not None:
-                item["producer"] = claimed_by
-
-    problems = _problems(candidate, evidence)
-
-    assert sorted({problem.split(":")[0] for problem in problems}) == ["backward_state", "lifecycle"]
-    assert sum("no qualification job produces this evidence" in problem for problem in problems) == 2
-    with pytest.raises(QualificationError, match="not qualified"):
-        qualification.build_receipt(
-            candidate, evidence, baselines=BASELINES, avibe=AVIBE,
-            run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
-        )
-
-
-def _claim(kind: str, match: dict, producer: str | None):
-    def apply(evidence: list[dict]) -> None:
-        for item in evidence:
-            if item["class"] == kind and all(item.get(key) == value for key, value in match.items()):
-                item.pop("producer")
-                if producer is not None:
-                    item["producer"] = producer
-    return apply
-
-
-def _repeat(kind: str, match: dict, **fields):
-    def apply(evidence: list[dict]) -> None:
-        (item,) = [
-            item for item in evidence
-            if item["class"] == kind and all(item.get(key) == value for key, value in match.items())
-        ]
-        evidence.append({**item, **fields})
-    return apply
-
-
-@complete
-@pytest.mark.parametrize(
-    ("mutate", "refused"),
-    [
-        # A document that names no job, or a job that produces another class or another leg.
-        (_claim("build", {}, None), "build"),
-        (_claim("build", {}, "platform-smoke (linux-amd64)"), "build"),
-        (_claim("lifecycle", {}, "platform-smoke (linux-amd64)"), "lifecycle"),
-        (_claim("backward_state", {}, "hosted-wire"), "backward_state"),
-        (_claim("platform_smoke", {"platform": "windows-arm64"}, "platform-smoke (linux-amd64)"), "platform_smoke"),
-        (_claim("released_avibe_e2e", {"role": "current_stable"}, "released-avibe-e2e (minimum)"), "released_avibe_e2e"),
-        (_claim("hosted_wire", {}, "released-avibe-e2e (minimum)"), "hosted_wire"),
-        # A second document about the same thing never replaces the first.
-        (_repeat("platform_smoke", {"platform": "linux-amd64"}, health="ok"), "platform_smoke"),
-        (_repeat("released_avibe_e2e", {"role": "minimum"}, junit={"tests": 1, "failed": 0, "skipped": 0}), "released_avibe_e2e"),
-        (_repeat("hosted_wire", {}, differences={}), "hosted_wire"),
-        # What a document is about is its class's own field. Another field does not make it a different document.
-        (_repeat("hosted_wire", {}, platform="unused-extra-field"), "hosted_wire"),
-        (_repeat("platform_smoke", {"platform": "linux-amd64"}, role="minimum", baseline_tag=BASELINE), "platform_smoke"),
-        (_repeat("released_avibe_e2e", {"role": "minimum"}, platform="linux-amd64"), "released_avibe_e2e"),
-        (_repeat("build", {}, platform="linux-amd64"), "build"),
-        (_repeat("lifecycle", {}, role="minimum"), "lifecycle"),
-        # And a document that does not say what it is about is recorded under no job.
-        (_change("hosted_wire", {}, baseline_tag=None), "hosted_wire"),
-        (_change("hosted_wire", {}, baseline_tag=["model-hub-engine-v8.0.63-1"]), "hosted_wire"),
-    ],
-)
-def test_evidence_counts_only_under_the_job_that_produces_its_class_and_only_once(tmp_path, mutate, refused) -> None:
-    """MH-ENGINE-CHANNEL-010: evidence counts only under the job that produces its class."""
-
-    candidate = qualification.load_candidate(_record(tmp_path))
-    evidence = copy.deepcopy(_evidence(candidate))
-    assert _problems(candidate, evidence) == []
-
-    mutate(evidence)
-
-    assert {problem.split(":")[0] for problem in _problems(candidate, evidence)} == {refused}
-
-
-@complete
-def test_a_later_passing_report_cannot_replace_a_failing_one_about_the_same_baseline(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path))
-    evidence = _evidence(candidate)
-    _change("hosted_wire", {}, differences={"web_search": ["upstream header set"]})(evidence)
-    # The same baseline again, passing, and told apart only by a field hosted-wire evidence does not have.
-    _repeat("hosted_wire", {}, differences={}, platform="unused-extra-field")(evidence)
-
-    problems = _problems(candidate, evidence)
-
-    assert {problem.split(":")[0] for problem in problems} == {"hosted_wire"}
-    assert any("more than one document about" in problem for problem in problems)
-    assert any("differs from" in problem and "no reviewed reason" in problem for problem in problems)
-
-
-def test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked(
-    tmp_path, monkeypatch
-) -> None:
-    """MH-ENGINE-CHANNEL-010: no complete receipt exists today, whoever assembles one."""
-
-    candidate = qualification.load_candidate(_record(tmp_path))
-    with monkeypatch.context() as patch:
-        # A receipt as it could only be made once both missing classes have producers.
-        patch.setattr(qualification, "EVIDENCE_PRODUCERS", (*qualification.EVIDENCE_PRODUCERS, *FUTURE_PRODUCERS))
-        assembled = _receipt(candidate)
-        _verify(candidate, assembled, GitHub())
-
-    with pytest.raises(QualificationError, match="no qualification job produces this evidence"):
-        qualification.build_receipt(
-            candidate, assembled["evidence"], baselines=BASELINES, avibe=AVIBE,
-            run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
-        )
-    # The finalizer refuses it too, although GitHub confirms the run and every job in it.
-    with pytest.raises(QualificationError, match="backward_state: no qualification job produces this evidence"):
-        _verify(candidate, assembled, GitHub())
-
-
-def _artifacts(root: Path, candidate) -> Path:
-    """What the receipt job downloads: one directory per producing job's artifact."""
-
-    for item in _evidence(candidate):
-        (producer,) = [
-            producer for producer in qualification.EVIDENCE_PRODUCERS
-            if producer.job == item["producer"]
-        ] or [None]
-        if producer is None:
-            continue
-        directory = root / producer.artifact
-        directory.mkdir(parents=True, exist_ok=True)
-        name = item.get("platform") or item.get("role") or item.get("baseline_tag") or "build"
-        (directory / f"{name}.json").write_text(
-            json.dumps({key: value for key, value in item.items() if key != "producer"})
-        )
-    return root
-
-
-def test_the_receipt_reads_each_jobs_evidence_from_that_jobs_own_artifact(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path / "records"))
-    evidence = _artifacts(tmp_path / "evidence", candidate)
-
-    collected = qualification.collect_evidence(evidence)
-
-    today = [item for item in _evidence(candidate) if item["class"] not in {"backward_state", "lifecycle"}]
-    key = lambda item: json.dumps(item, sort_keys=True)  # noqa: E731
-    assert sorted(collected, key=key) == sorted(today, key=key)
-    # The hosted-wire job writes one document per baseline, or none when there is no baseline.
-    wire = evidence / "qualification-evidence-hosted-wire"
-    (wire / "other.json").write_text(
-        json.dumps({"class": "hosted_wire", "baseline_tag": "model-hub-engine-v8.0.60-4", "cases": ["web_search"]})
-    )
-    assert len(qualification.collect_evidence(evidence)) == len(today) + 1
-    for path in wire.iterdir():
-        path.unlink()
-    wire.rmdir()
-    assert len(qualification.collect_evidence(evidence)) == len(today) - 1
-    assert qualification.collect_evidence(tmp_path / "absent") == []
-
-
-def _smoke(evidence: Path) -> Path:
-    return evidence / "qualification-evidence-platform-smoke-linux-amd64"
-
-
-@pytest.mark.parametrize(
-    ("upload", "message"),
-    [
-        # A candidate under test writes passing documents for the classes no job produces, beside its own.
-        (lambda e: (_smoke(e) / "lifecycle.json").write_text(json.dumps({"class": "lifecycle", "result": "pass"})),
-         r"platform-smoke \(linux-amd64\) uploaded evidence that it does not produce"),
-        (lambda e: (_smoke(e) / "state.json").write_text(json.dumps({"class": "backward_state", "result": "pass"})),
-         "uploaded evidence that it does not produce"),
-        # Or for another job, another leg, or under a name it gives itself.
-        (lambda e: (_smoke(e) / "e2e.json").write_text(json.dumps({"class": "released_avibe_e2e", "role": "minimum"})),
-         "uploaded evidence that it does not produce"),
-        (lambda e: (_smoke(e) / "linux-amd64.json").write_text(
-            json.dumps({"class": "platform_smoke", "platform": "darwin-arm64", "health": "ok"})),
-         "uploaded evidence that it does not produce"),
-        (lambda e: (_smoke(e) / "linux-amd64.json").write_text(
-            json.dumps({"class": "platform_smoke", "platform": "linux-amd64", "producer": "build"})),
-         "uploaded evidence that it does not produce"),
-        (lambda e: (_smoke(e) / "again.json").write_text((_smoke(e) / "linux-amd64.json").read_text()),
-         "uploaded 2 evidence documents, not one"),
-        # A second hosted-wire report about a baseline it already reported on, whatever else it carries.
-        (lambda e: (e / "qualification-evidence-hosted-wire" / "again.json").write_text(
-            json.dumps({"class": "hosted_wire", "baseline_tag": BASELINE, "platform": "unused-extra-field"})),
-         "hosted-wire uploaded more than one document about the same baseline_tag"),
-        (lambda e: (e / "qualification-evidence-hosted-wire" / "nameless.json").write_text(
-            json.dumps({"class": "hosted_wire", "cases": ["web_search"]})),
-         "hosted-wire uploaded evidence that it does not produce"),
-        (lambda e: (_smoke(e) / "notes.txt").write_text("x"), "not an evidence document"),
-        (lambda e: (_smoke(e) / "nested").mkdir(), "not an evidence document"),
-        (lambda e: (_smoke(e) / "linux-amd64.json").write_text("[]"), "uploaded evidence that it does not produce"),
-        # An artifact named for no job.
-        (lambda e: _write(e / "qualification-evidence-lifecycle" / "lifecycle.json", {"class": "lifecycle"}),
-         "qualification-evidence-lifecycle is not the evidence of any qualification job"),
-        (lambda e: (e / "lifecycle.json").write_text(json.dumps({"class": "lifecycle"})),
-         "lifecycle.json is not the evidence of any qualification job"),
-    ],
-)
-def test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt(tmp_path, upload, message) -> None:
-    """MH-ENGINE-CHANNEL-010: an artifact may hold only the evidence of the job it is named for."""
-
-    candidate = qualification.load_candidate(_record(tmp_path / "records"))
-    evidence = _artifacts(tmp_path / "evidence", candidate)
-    upload(evidence)
-
-    with pytest.raises(QualificationError, match=message):
-        qualification.collect_evidence(evidence)
+def _problems(candidate, evidence, **overrides) -> list[str]:
+    return qualification.evidence_problems(candidate, evidence, **{"baselines": BASELINES, "avibe": AVIBE, **overrides})
 
 
 def _write(path: Path, document: dict) -> None:
@@ -468,95 +135,74 @@ def _write(path: Path, document: dict) -> None:
     path.write_text(json.dumps(document))
 
 
-@complete
-@pytest.mark.parametrize(
-    ("mutate", "blocked"),
-    [
-        (_drop("build"), "build"),
-        (_change("build", {}, reproduced=False), "build"),
-        (_change("build", {}, assets=[]), "build"),
-        (_change("build", {}, manifest_sha256="0" * 64), "build"),
-        (_drop("platform_smoke", platform="windows-arm64"), "platform_smoke"),
-        (_change("platform_smoke", {"platform": "linux-arm64"}, health="timeout"), "platform_smoke"),
-        (_change("platform_smoke", {"platform": "darwin-x64"}, binary_sha256="0" * 64), "platform_smoke"),
-        (_change("platform_smoke", {"platform": "darwin-arm64"}, reported_version="v8.0.62"), "platform_smoke"),
-        (_drop("hosted_wire"), "hosted_wire"),
-        (_change("hosted_wire", {}, baseline_manifest_sha256="0" * 64), "hosted_wire"),
-        (_change("hosted_wire", {}, cases=[]), "hosted_wire"),
-        (_change("hosted_wire", {}, differences={"web_search": ["upstream request bytes"]}), "hosted_wire"),
-        (_drop("released_avibe_e2e", role="minimum"), "released_avibe_e2e"),
-        (_drop("released_avibe_e2e", role="current_stable"), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, imports_from_wheel=False), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, junit={"tests": 212, "failed": 1, "skipped": 0}), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, junit={"tests": 0, "failed": 0, "skipped": 0}), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, selection=["tests/e2e/test_model_hub_engine_wire.py"]), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, scenario_evidence="fail"), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, provenance={**PROVENANCE, "dependencies_sha256": ""}), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "current_stable"}, provenance=None), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "current_stable"}, avibe=_released("3.2.6").identity()), "released_avibe_e2e"),
-        (_change("released_avibe_e2e", {"role": "minimum"}, avibe={**_released("3.2.6").identity(), "wheel": {"name": "x", "sha256": "0" * 64, "size_bytes": 1}}), "released_avibe_e2e"),
-        (_drop("backward_state"), "backward_state"),
-        (_change("backward_state", {}, result="fail"), "backward_state"),
-        (_drop("lifecycle"), "lifecycle"),
-        (_change("lifecycle", {}, result="skipped"), "lifecycle"),
-        (_change("lifecycle", {}, manifest_sha256="0" * 64), "lifecycle"),
-    ],
-)
-def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tmp_path, mutate, blocked) -> None:
-    """MH-ENGINE-CHANNEL-010: every evidence class must be present for the candidate's exact bytes."""
+# ----- candidate and untrusted observations ----------------------------------
 
+
+def test_candidate_identity_includes_upstream_reference_and_exact_archives(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
-    evidence = copy.deepcopy(_evidence(candidate))
-    assert _problems(candidate, evidence) == []
+    identity = candidate.identity()
+    assert identity["source"]["repository"] == "router-for-me/CLIProxyAPI"
+    assert identity["source"]["source_sha"]
+    assert len(identity["assets"]) == 6
+    assert identity["manifest_sha256"] == hashlib.sha256(candidate.manifest_bytes).hexdigest()
 
-    mutate(evidence)
 
-    assert {problem.split(":")[0] for problem in _problems(candidate, evidence)} == {blocked}
+def test_missing_future_producers_are_reported_as_observations_not_a_universal_gate(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path))
+    problems = _problems(candidate, _evidence(candidate))
+    assert problems == []
+    missing = [item for item in _evidence(candidate) if item["class"] != "hosted_wire"]
+    problems = _problems(candidate, missing)
+    assert any(problem.startswith("hosted_wire:") for problem in problems)
+    assert not any(problem.startswith("backward_state:") for problem in problems)
+    assert not any(problem.startswith("lifecycle:") for problem in problems)
 
 
-@complete
-def test_every_baseline_and_both_avibe_releases_must_be_covered(tmp_path) -> None:
+def test_untrusted_rehearsal_keeps_failed_and_missing_runtime_results(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
     evidence = _evidence(candidate)
-    other = "model-hub-engine-v8.0.60-4"
-
-    wider = _problems(candidate, evidence, baselines={**BASELINES, other: "1" * 64})
-    assert sorted(problem.split(":")[0] for problem in wider) == ["backward_state", "hosted_wire"]
-    assert all(other in problem for problem in wider)
-    # The candidate itself is never its own baseline.
-    assert _problems(candidate, evidence, baselines={**BASELINES, TAG: candidate.manifest_sha256}) == []
-    # A newer stable Avibe than the one the evidence used, or a minimum that is not the candidate's.
-    assert _problems(candidate, evidence, avibe={**AVIBE, "current_stable": _released("3.2.8")}) != []
-    assert _problems(candidate, evidence, avibe={"minimum": _released("3.2.7"), "current_stable": _released("3.2.7")}) != []
-    assert _problems(candidate, evidence, avibe={"minimum": AVIBE["minimum"]}) != []
-
-
-@complete
-def test_a_hosted_wire_difference_qualifies_only_with_a_reviewed_reason_in_the_record(tmp_path) -> None:
-    reviewed = qualification.load_candidate(
-        _record(tmp_path, hosted_wire_changes={BASELINE: "upstream now forwards the citation header"})
+    evidence[0]["reproduced"] = False
+    evidence.append({"class": "lifecycle", "manifest_sha256": candidate.manifest_sha256, "result": "fail"})
+    result = qualification.build_untrusted_rehearsal(
+        candidate, evidence, baselines=BASELINES, avibe=AVIBE, run_id=RUN_ID,
+        run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
     )
-    evidence = _evidence(reviewed)
-    _change("hosted_wire", {}, differences={"web_search": ["upstream header set"]})(evidence)
+    assert result["result"] == "untrusted_rehearsal"
+    assert any(item.startswith("build:") for item in result["observations"])
+    assert any(item.startswith("lifecycle:") for item in result["observations"])
+    assert result["candidate"]["source"]["source_sha"]
 
-    assert _problems(reviewed, evidence) == []
+
+def test_collect_evidence_does_not_use_candidate_producer_claims(tmp_path) -> None:
+    root = tmp_path / "evidence" / "untrusted-rehearsal-evidence-platform-smoke-linux-amd64"
+    _write(root / "report.json", {"class": "platform_smoke", "platform": "linux-amd64", "producer": "trusted"})
+    collected = qualification.collect_evidence(tmp_path / "evidence")
+    assert collected[0]["source_artifact"].startswith("untrusted-rehearsal-evidence-")
+    assert collected[0]["producer"] == "trusted"
 
 
-# ----- the producing run -----------------------------------------------------
+def test_collect_evidence_rejects_symlinks_and_non_json_paths(tmp_path) -> None:
+    root = tmp_path / "evidence" / "untrusted-rehearsal-evidence-build"
+    root.mkdir(parents=True)
+    (root / "notes.txt").write_text("not a report")
+    with pytest.raises(QualificationError, match="non-JSON"):
+        qualification.collect_evidence(tmp_path / "evidence")
+    (root / "notes.txt").unlink()
+    (root / "nested").mkdir()
+    with pytest.raises(QualificationError, match="non-JSON"):
+        qualification.collect_evidence(tmp_path / "evidence")
 
 
 class GitHub:
-    """What GitHub says about the run, the default branch and Avibe releases."""
-
     def __init__(self) -> None:
-        self.run = {
-            "id": RUN_ID, "run_attempt": ATTEMPT, "path": ".github/workflows/model-hub-engine-qualification.yml",
-            "event": "workflow_dispatch", "head_branch": "master", "status": "completed", "conclusion": "success",
-            "head_sha": HEAD, "repository": {"full_name": "avibe-bot/avibe"},
-            "head_repository": {"full_name": "avibe-bot/avibe"},
-        }
+        self.run = {"id": RUN_ID, "run_attempt": ATTEMPT,
+                    "path": qualification.QUALIFICATION_WORKFLOW_PATH, "event": "workflow_dispatch",
+                    "head_branch": "master", "status": "completed", "conclusion": "failure",
+                    "head_sha": HEAD, "repository": {"full_name": "avibe-bot/avibe"},
+                    "head_repository": {"full_name": "avibe-bot/avibe"}}
         self.comparison = {"status": "ahead"}
-        self.jobs = [{"name": name, "conclusion": "success"} for name in qualification.REQUIRED_JOBS]
+        self.jobs = [{"name": "build", "status": "completed", "conclusion": "failure"},
+                     {"name": "untrusted_rehearsal", "status": "completed", "conclusion": "success"}]
         self.total_jobs: int | None = None
         self.releases = {version: self._release(version) for version in ("3.2.6", "3.2.7")}
         self.listed = [{"tag_name": "v3.2.7"}, {"tag_name": "model-hub-engine-v8.0.63-1"}, {"tag_name": "v3.2.6"}]
@@ -564,24 +210,16 @@ class GitHub:
     @staticmethod
     def _release(version: str) -> dict:
         released = _released(version)
-        return {
-            "tag_name": released.tag, "draft": False, "prerelease": False,
-            "assets": [
-                {"name": released.wheel_name, "size": released.wheel_size,
-                 "digest": f"sha256:{released.wheel_sha256}", "browser_download_url": released.wheel_url},
-                {"name": f"avibe_os-{version}.tar.gz", "size": 1, "digest": "sha256:" + "0" * 64,
-                 "browser_download_url": "https://example.invalid/sdist"},
-            ],
-        }
+        return {"tag_name": released.tag, "draft": False, "prerelease": False,
+                "assets": [{"name": released.wheel_name, "size": released.wheel_size,
+                             "digest": f"sha256:{released.wheel_sha256}", "browser_download_url": released.wheel_url}]}
 
     def __call__(self, path: str):
         prefix = "/repos/avibe-bot/avibe"
-        if path == f"{prefix}/actions/runs/{RUN_ID}":
-            return self.run
-        if path.startswith(f"{prefix}/compare/") and path.endswith("...master"):
-            return self.comparison
+        if path == f"{prefix}/actions/runs/{RUN_ID}": return self.run
+        if path.startswith(f"{prefix}/compare/") and path.endswith("...master"): return self.comparison
         if path == f"{prefix}/actions/runs/{RUN_ID}/attempts/{ATTEMPT}/jobs?per_page=100":
-            total = len(self.jobs or []) if self.total_jobs is None else self.total_jobs
+            total = len(self.jobs) if self.total_jobs is None else self.total_jobs
             return {"total_count": total, "jobs": self.jobs}
         if path == f"{prefix}/releases?per_page=100":
             return [{"draft": False, "prerelease": False, **item} for item in self.listed]
@@ -590,122 +228,38 @@ class GitHub:
         return None
 
 
-def _receipt(candidate) -> dict:
-    return qualification.build_receipt(
-        candidate, _evidence(candidate), baselines=BASELINES, avibe=AVIBE,
-        run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
+def _result(candidate) -> dict:
+    return qualification.build_untrusted_rehearsal(
+        candidate, _evidence(candidate), baselines=BASELINES, avibe=AVIBE, run_id=RUN_ID,
+        run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
     )
 
 
-def _verify(candidate, receipt, github, **overrides) -> None:
-    qualification.verify_receipt(
-        receipt, candidate=candidate, api=github, **{"harness_sha256": HARNESS, "baselines": BASELINES, **overrides}
-    )
-
-
-@complete
-def test_a_receipt_is_accepted_when_github_confirms_its_run_and_nothing_has_moved_since(tmp_path) -> None:
+def test_untrusted_rehearsal_can_be_verified_as_context_but_does_not_authorize(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
-
-    _verify(candidate, _receipt(candidate), GitHub())
-
-
-def _job(name: str, conclusion: str | None):
-    def apply(github: GitHub) -> None:
-        github.jobs = [job for job in github.jobs if job["name"] != name]
-        if conclusion is not None:
-            github.jobs.append({"name": name, "conclusion": conclusion})
-    return apply
+    result = _result(candidate)
+    qualification.verify_untrusted_rehearsal(result, candidate=candidate, api=GitHub(),
+                                             harness_sha256=HARNESS, baselines=BASELINES)
 
 
-@complete
-@pytest.mark.parametrize(
-    "alter",
-    [
-        # Another workflow, or the same file dispatched from somewhere that was not reviewed.
-        lambda g: g.run.update(path=".github/workflows/lint.yml"),
-        lambda g: g.run.update(event="pull_request"),
-        lambda g: g.run.update(event="push"),
-        lambda g: g.run.update(head_branch="feature/fake-qualification"),
-        lambda g: g.run.update(head_repository={"full_name": "attacker/avibe"}),
-        lambda g: g.run.update(repository={"full_name": "attacker/avibe"}),
-        # A branch or tag named like the default branch whose commit is not on it.
-        lambda g: g.comparison.update(status="diverged"),
-        lambda g: g.comparison.update(status="behind"),
-        lambda g: setattr(g, "comparison", None),
-        # A run that did not finish green, another attempt, or another commit than the receipt claims.
-        lambda g: g.run.update(conclusion="failure"),
-        lambda g: g.run.update(conclusion="cancelled"),
-        lambda g: g.run.update(status="in_progress", conclusion=None),
-        lambda g: g.run.update(run_attempt=ATTEMPT + 1),
-        lambda g: g.run.update(head_sha="b" * 40),
-        lambda g: setattr(g, "run", None),
-        # A green run in which a required job did not actually succeed.
-        _job("platform-smoke (windows-arm64)", "skipped"),
-        _job("released-avibe-e2e (minimum)", "skipped"),
-        _job("hosted-wire", "failure"),
-        _job("receipt", "cancelled"),
-        _job("build", None),
-        _job("an extra job", "failure"),
-        lambda g: setattr(g, "total_jobs", 40),
-        lambda g: setattr(g, "jobs", None),
-        # The Avibe releases as GitHub serves them now.
-        lambda g: g.releases["3.2.6"]["assets"][0].update(digest="sha256:" + "f" * 64),
-        lambda g: g.releases["3.2.6"].update(draft=True),
-        lambda g: g.releases["3.2.7"].update(prerelease=True),
-        lambda g: g.listed.insert(0, {"tag_name": "v3.2.8"}),
-        lambda g: g.releases.pop("3.2.6"),
-    ],
-)
-def test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself(tmp_path, alter) -> None:
-    """MH-ENGINE-CHANNEL-010: a receipt qualifies only when GitHub confirms the run that produced it."""
-
+@pytest.mark.parametrize("forge", [
+    lambda r: r.update(result="qualified"),
+    lambda r: r.update(run_id=RUN_ID + 1),
+    lambda r: r.update(harness_sha256="0" * 64),
+    lambda r: r.update(baselines={}),
+    lambda r: r["candidate"].update(manifest_sha256="0" * 64),
+    lambda r: r["evidence"].append({"class": "build", "manifest_sha256": "0" * 64}),
+])
+def test_trusted_prepare_rejects_wrong_run_or_digest_context(tmp_path, forge) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
-    github = GitHub()
-    github.releases["3.2.8"] = github._release("3.2.8")
-    alter(github)
-
+    result = _result(candidate)
+    forge(result)
     with pytest.raises(QualificationError):
-        _verify(candidate, _receipt(candidate), github)
+        qualification.verify_untrusted_rehearsal(result, candidate=candidate, api=GitHub(),
+                                                 harness_sha256=HARNESS, baselines=BASELINES)
 
 
-@complete
-@pytest.mark.parametrize(
-    "forge",
-    [
-        lambda r: r.update(run_id=RUN_ID + 1),
-        lambda r: r.update(run_id=str(RUN_ID)),
-        lambda r: r.update(schema_version=2),
-        lambda r: r.update(workflow_path=".github/workflows/lint.yml"),
-        lambda r: r.update(harness_sha256="0" * 64),
-        lambda r: r["candidate"].update(min_avibe_version="3.2.7"),
-        lambda r: r["candidate"].update(manifest_sha256="0" * 64),
-        lambda r: r.update(evidence=[item for item in r["evidence"] if item["class"] != "lifecycle"]),
-        lambda r: r.update(evidence="all green"),
-    ],
-)
-def test_a_receipt_that_was_edited_or_fabricated_is_refused(tmp_path, forge) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path))
-    receipt = _receipt(candidate)
-    forge(receipt)
-
-    with pytest.raises(QualificationError):
-        _verify(candidate, receipt, GitHub())
-
-
-@complete
-def test_a_receipt_stops_qualifying_when_the_record_harness_or_baselines_change(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path / "reviewed"))
-    receipt = _receipt(candidate)
-    other = qualification.load_candidate(_record(tmp_path / "other", minimum="3.2.7"))
-
-    with pytest.raises(QualificationError, match="other candidate bytes"):
-        _verify(other, receipt, GitHub())
-    with pytest.raises(QualificationError, match="different qualification harness"):
-        _verify(candidate, receipt, GitHub(), harness_sha256="n" * 64)
-    with pytest.raises(QualificationError, match="model-hub-engine-v8.0.60-4"):
-        _verify(candidate, receipt, GitHub(), baselines={**BASELINES, "model-hub-engine-v8.0.60-4": "1" * 64})
-
+# ----- released Avibe artifacts ----------------------------------------------
 
 # ----- released Avibe artifacts ----------------------------------------------
 
@@ -932,10 +486,10 @@ def test_a_rehearsal_is_described_in_full_and_can_never_be_read_as_evidence(tmp_
     assert record["harness_sha256"] == qualification.harness_digest()
     assert record["provenance"] == run.provenance
     assert record["junit"] == {"tests": 2, "failed": 1, "skipped": 0} and record["failing"] == ["tests.e2e.b::b"]
-    # No receipt can be built from it, alone or dressed up: it binds no candidate and names no role.
+    # No trusted result can be built from it, alone or dressed up: it binds no candidate and names no role.
     assert "manifest_sha256" not in record and "role" not in record
     assert {problem.split(":")[0] for problem in _problems(candidate, [record])} == {
-        "rehearsal", "build", "platform_smoke", "hosted_wire", "backward_state", "released_avibe_e2e", "lifecycle",
+        "evidence", "build", "platform_smoke", "hosted_wire", "released_avibe_e2e",
     }
     disguised = {**record, "class": "released_avibe_e2e", "role": "minimum"}
     assert any(problem.startswith("released_avibe_e2e") for problem in _problems(candidate, [disguised]))
@@ -1369,71 +923,177 @@ def test_the_two_hosted_wire_modes_do_not_mix(arguments) -> None:
         gate.main(arguments)
 
 
-# ----- the workflow ----------------------------------------------------------
+
+def test_untrusted_rehearsal_cli_assembles_the_real_artifact_paths(tmp_path) -> None:
+    candidate_dir = _record(tmp_path / "records")
+    candidate = qualification.load_candidate(candidate_dir)
+    evidence_dir = tmp_path / "evidence"
+    for index, document in enumerate(_evidence(candidate)):
+        if document["class"] == "build":
+            artifact_dir = evidence_dir / "untrusted-rehearsal-evidence-build"
+        elif document["class"] == "platform_smoke":
+            artifact_dir = evidence_dir / f"untrusted-rehearsal-evidence-platform-smoke-{document['platform']}"
+        elif document["class"] == "hosted_wire":
+            artifact_dir = evidence_dir / "untrusted-rehearsal-evidence-hosted-wire"
+        else:
+            artifact_dir = evidence_dir / f"untrusted-rehearsal-evidence-released-avibe-e2e-{document['role']}"
+        _write(artifact_dir / f"{index}.json", document)
+    released_dir = tmp_path / "released"
+    for role, released in AVIBE.items():
+        _write(released_dir / f"{role}.json", released.__dict__)
+    baselines = tmp_path / "baselines.json"
+    baselines.write_text(json.dumps(BASELINES))
+    output = tmp_path / "untrusted_rehearsal.json"
+    assert qualification.main([
+        "untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
+        "--evidence-dir", str(evidence_dir), "--released-dir", str(released_dir),
+        "--baselines", str(baselines), "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
+        "--head-sha", HEAD, "--output", str(output),
+    ]) == 0
+    assert json.loads(output.read_text())["result"] == "untrusted_rehearsal"
 
 
-def _workflow() -> dict:
-    return yaml.safe_load((ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8"))
+def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: concrete failures remain observations, never approval."""
+    candidate = qualification.load_candidate(_record(tmp_path))
+    evidence = _evidence(candidate)
+    evidence[0]["manifest_sha256"] = "0" * 64
+    result = qualification.build_untrusted_rehearsal(
+        candidate, evidence, baselines=BASELINES, avibe=AVIBE, run_id=RUN_ID,
+        run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
+    )
+    assert result["result"] == "untrusted_rehearsal"
+    assert any(problem.startswith("build:") for problem in result["observations"])
 
 
-def _legs(job: dict) -> list[dict]:
-    matrix = (job.get("strategy") or {}).get("matrix")
-    return [{}] if not matrix else matrix.get("include") or [{"role": role} for role in matrix["role"]]
+def test_future_backward_state_and_lifecycle_reports_are_not_universal_receipt_blocks(tmp_path) -> None:
+    candidate = qualification.load_candidate(_record(tmp_path))
+    produced_today = [item for item in _evidence(candidate) if item["class"] not in {"backward_state", "lifecycle"}]
+    assert _problems(candidate, produced_today) == []
+    result = qualification.build_untrusted_rehearsal(
+        candidate, produced_today, baselines=BASELINES, avibe=AVIBE,
+        run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
+    )
+    assert result["result"] == "untrusted_rehearsal"
+    assert not any(problem.startswith(("backward_state:", "lifecycle:")) for problem in result["observations"])
 
 
-def _expand(text: str, leg: dict) -> str:
-    for key, value in leg.items():
-        text = text.replace("${{ matrix.%s }}" % key, value)
-    return text
+def test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claims_success(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: GitHub run identity is checked independently of claims."""
+    candidate = qualification.load_candidate(_record(tmp_path))
+    result = _result(candidate)
+    result["run_id"] = RUN_ID + 1
+    with pytest.raises(QualificationError):
+        qualification.verify_untrusted_rehearsal(result, candidate=candidate, api=GitHub(),
+                                                 harness_sha256=HARNESS, baselines=BASELINES)
 
 
-def test_the_required_jobs_are_exactly_the_jobs_the_qualification_workflow_runs() -> None:
-    names = [_expand(job["name"], leg) for job in _workflow()["jobs"].values() for leg in _legs(job)]
-
-    assert sorted(names) == sorted(qualification.REQUIRED_JOBS)
-    smoke = _workflow()["jobs"]["platform-smoke"]["strategy"]["matrix"]["include"]
-    assert {leg["platform"] for leg in smoke} == EXPECTED_PLATFORMS
+def test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: catalog anchor for the renamed run-identity test."""
+    test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claims_success(tmp_path)
 
 
-def test_each_job_uploads_its_evidence_under_the_artifact_name_the_receipt_reads_its_class_from() -> None:
-    """MH-ENGINE-CHANNEL-010: the workflow and the receipt agree on which artifact holds which evidence."""
-
-    jobs = _workflow()["jobs"]
-    uploads = [
-        (_expand(job["name"], leg), _expand(step["with"]["name"], leg), step["with"])
-        for job in jobs.values() for leg in _legs(job) for step in job["steps"]
-        if "upload-artifact" in step.get("uses", "")
-    ]
-
-    assert {
-        artifact: job for job, artifact, _options in uploads
-        if artifact.startswith(qualification.EVIDENCE_ARTIFACT_PREFIX)
-    } == {producer.artifact: producer.job for producer in qualification.EVIDENCE_PRODUCERS}
-    # No step of this workflow asks to replace an artifact that already exists.
-    assert all("overwrite" not in options for _job, _artifact, options in uploads)
-    # The receipt keeps the artifacts apart, so each document is read from the artifact named for its job.
-    (evidence,) = [
-        step["with"] for step in jobs["receipt"]["steps"]
-        if "download-artifact" in step.get("uses", "") and "evidence" in step["with"]["path"]
-    ]
-    assert evidence == {
-        "pattern": f"{qualification.EVIDENCE_ARTIFACT_PREFIX}*",
-        "path": "${{ runner.temp }}/evidence",
-        "merge-multiple": False,
-    }
+def test_no_job_can_supply_the_evidence_classes_that_have_no_producer(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: catalog anchor for untrusted future observations."""
+    test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names(tmp_path)
 
 
-def test_qualification_is_secret_free_default_branch_only_and_never_publishes() -> None:
+def test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: absent future producers remain truthful observations."""
+    candidate = qualification.load_candidate(_record(tmp_path))
+    result = qualification.build_untrusted_rehearsal(
+        candidate, [{"class": "lifecycle", "manifest_sha256": candidate.manifest_sha256, "result": "pass"}],
+        baselines=BASELINES, avibe=AVIBE, run_id=RUN_ID, run_attempt=ATTEMPT,
+        head_sha=HEAD, harness_sha256=HARNESS,
+    )
+    assert result["result"] == "untrusted_rehearsal"
+
+
+def test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: catalog anchor for untrusted artifact parsing."""
+    test_an_artifact_holding_untrusted_reports_is_parsed_as_data(tmp_path)
+
+
+def test_an_artifact_holding_untrusted_reports_is_parsed_as_data(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: uploaded reports are parsed as untrusted data."""
+    root = tmp_path / "evidence" / "untrusted-rehearsal-evidence-build"
+    _write(root / "report.json", {"class": "lifecycle", "result": "pass"})
+    assert qualification.collect_evidence(tmp_path / "evidence")[0]["class"] == "lifecycle"
+
+
+def test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: catalog anchor for the removed authority receipt."""
+    test_an_assembled_authority_result_is_rejected_as_an_untrusted_rehearsal(tmp_path)
+
+
+def test_an_assembled_authority_result_is_rejected_as_an_untrusted_rehearsal(tmp_path) -> None:
+    """MH-ENGINE-CHANNEL-010: a rehearsal result never becomes an authority receipt."""
+    candidate = qualification.load_candidate(_record(tmp_path))
+    result = _result(candidate)
+    result["result"] = "receipt"
+    with pytest.raises(QualificationError):
+        qualification.verify_untrusted_rehearsal(result, candidate=candidate, api=GitHub(),
+                                                 harness_sha256=HARNESS, baselines=BASELINES)
+
+
+def _workflow(path: str = ".github/workflows/model-hub-engine-qualification.yml") -> dict:
+    return yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+
+
+def test_candidate_workflow_is_untrusted_and_has_no_authoritative_receipt() -> None:
     workflow = _workflow()
     text = (ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8")
-
     assert set(workflow[True]) == {"workflow_dispatch"}
     assert workflow["permissions"] == {"contents": "read"}
-    assert all("permissions" not in job and "environment" not in job for job in workflow["jobs"].values())
+    assert "model-hub-engine-untrusted-rehearsal" in text
+    assert "untrusted_rehearsal" in text
+    assert "qualification-receipt" not in text
+    assert "EVIDENCE_PRODUCERS" not in text
     assert "secrets." not in text and "gh release" not in text and "s3api" not in text
-    assert workflow["jobs"]["build"]["if"] == "github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master'"
-    # Every other job follows the build, so none runs for another ref either.
-    assert all("build" in job["needs"] for name, job in workflow["jobs"].items() if name != "build")
-    # The receipt needs every evidence job, so a skipped or failed one leaves no receipt.
-    assert set(workflow["jobs"]["receipt"]["needs"]) == set(workflow["jobs"]) - {"receipt"}
-    assert "if" not in workflow["jobs"]["receipt"]
+    assert workflow["jobs"]["untrusted-rehearsal"]["if"] == "always()"
+    assert workflow["jobs"]["untrusted-rehearsal"]["needs"] == ["build", "platform-smoke", "released-avibe-e2e", "hosted-wire"]
+    assert all(
+        any(step.get("with", {}).get("persist-credentials") is False for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
+        for job in workflow["jobs"].values()
+    )
+
+
+def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trusted_namespace() -> None:
+    workflow = _workflow(".github/workflows/model-hub-engine-channel.yml")
+    text = (ROOT / ".github/workflows/model-hub-engine-channel.yml").read_text(encoding="utf-8")
+    assert "rehearsal_run_id" in workflow[True]["workflow_dispatch"]["inputs"]
+    assert workflow["jobs"]["prepare"]["name"] == "trusted prepare"
+    assert "verify-untrusted-rehearsal" in text
+    assert "model-hub-engine-untrusted-rehearsal" in text
+    assert "model-hub-engine-trusted-assets" in text
+    assert "model-hub-engine-untrusted-assets" in text
+    assert "rehearsal-baselines" in text
+    assert "Runtime pass/fail assertions above are rehearsal data" in text
+    assert "persist-credentials: false" in text
+    assert "secrets." not in json.dumps(workflow["jobs"]["prepare"])
+
+
+def test_harness_digest_covers_the_candidate_workflow_and_shared_action() -> None:
+    for name in qualification.HARNESS_FILES:
+        (ROOT / name).is_file()
+    workflow = (ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8")
+    invoked = set(re.findall(r"scripts/[A-Za-z0-9_]+\.(?:py|sh)", workflow)) | {qualification.ORIGINS_MODULE}
+    invoked.discard("scripts/ci_scenario_evidence.py")
+    assert invoked <= set(qualification.HARNESS_FILES)
+
+
+def test_qualification_and_rehearsal_use_the_same_released_wheel_action() -> None:
+    action = ".github/actions/model-hub-released-e2e"
+    qualify = _workflow()["jobs"]["released-avibe-e2e"]
+    rehearsal = _workflow(".github/workflows/model-hub-engine-released-e2e-rehearsal.yml")["jobs"]["rehearsal"]
+
+    def shared(job: dict) -> dict:
+        (step,) = [item for item in job["steps"] if item.get("uses") == f"./{action}"]
+        return step["with"]
+
+    assert shared(qualify)["tests-source"] == "released-src"
+    assert shared(rehearsal)["tests-source"] == "${{ matrix.tests == 'tag' && 'released-src' || '.' }}"
+    assert rehearsal["strategy"]["matrix"] == {"tests": ["tag", "head"]}
+    scripts = "\n".join(step.get("run", "") for step in rehearsal["steps"])
+    assert "rehearsal-record" in scripts and "--require-pass" in scripts
+    assert "receipt" not in scripts and "evidence-" not in scripts

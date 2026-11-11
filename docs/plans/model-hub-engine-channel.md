@@ -85,7 +85,7 @@ Each decoded manifest retains the existing `version`, `asset_release_tag`, sourc
 commit, toolchain/patch identity and six assets (`platform`, canonical owned `url`,
 `size_bytes`, archive `sha256`, `binary_sha256`, `bin_path`). Reuse that schema and
 strict release guard. The signed digest binds the exact decoded bytes, the CI
-receipt and the published manifest; never regenerate the file from parsed JSON.
+result and the published manifest; never regenerate the file from parsed JSON.
 The placeholders above are not a publishable release.
 
 Each entry adds a required stable `min_avibe_version`; an identity's bytes and
@@ -109,7 +109,7 @@ Selection rules:
   round trips, not by a signature or a second publisher-assigned number. There is
   no independent CPA contract-epoch handshake today. A falsely assigned epoch
   would not protect against a falsely assigned minimum. Future Avibe releases
-  must preserve the qualified boundary or revise this protocol before breaking
+  must preserve the reviewed compatibility boundary or revise this protocol before breaking
   it; incompatible state migrations are ineligible for this channel. Raising the
   minimum on a *new* engine leaves older Avibe on their newest eligible entry.
 - Every Avibe release keeps its reviewed packaged manifest. Startup, repair,
@@ -316,19 +316,23 @@ Extend the existing builder/guard and workflows; do not create a second builder.
 4. Require per-platform startup/version/health smoke checks for all six artifacts,
    focused lifecycle/rollback tests, and backward-state fixtures. Full protocol E2E
    remains Linux-based. Record exact runtime/test SHA, manifest digest, asset
-   digests and CI run/attempt in a qualification receipt. Skipped, cancelled or
-   failing required checks do not qualify; reviewed strict xfails follow existing
-   policy, never a new blanket waiver.
-5. A protected default-branch finalizer validates the receipt and owner publication
-   authorization, publishes an immutable non-latest engine release, mirrors and
-   reads back all assets, then signs and atomically promotes the new index. It
-   never rebuilds different bytes after qualification. Availability precedes
-   advertisement. Publication alone does not make an engine eligible.
+   digests and CI run/attempt in an informational `untrusted_rehearsal` result.
+   Missing, skipped, cancelled or failing checks remain visible to the owner;
+   they are not relabeled as passes and do not create promotion authority.
+5. A trusted default-branch finalizer independently checks the exact rehearsal
+   run, current candidate/source/manifest/archive digests and owner-facing
+   summary, then the existing protected owner approval authorizes publication or
+   promotion for that exact run and digest. It publishes an immutable non-latest
+   engine release, mirrors and reads back all assets, then signs and atomically
+   promotes the new index. It never rebuilds different bytes after the trusted
+   digest check. Availability precedes advertisement. Publication alone does
+   not make an engine eligible. A future malicious-candidate-resistant receipt
+   needs a new product decision.
 
 Extend backup/recovery coverage to all advertised and rollback targets, not just
 the packaged pin. Generic mirror/recovery jobs cannot promote releases or erase
 revocations. Withdraw via an owner-authorized dispatch that adds a permanent
-signed tombstone, names a previously qualified compatible rollback target, bumps
+signed tombstone, names a previously reviewed compatible rollback target, bumps
 sequence, writes the index and purges/revalidates its 60-second cache. Do not
 remove immutable assets or merely delete the entry. Normal updates remain
 forward-only; an explicit authenticated revocation is the narrow downgrade
@@ -396,9 +400,10 @@ review.
 After approval, deliver four bounded PRs, in contract order (no stacked branches):
 
 1. avault keyless verifier + shared signed-envelope vectors and custody docs.
-2. Avibe channel contract/resolver, pinned verifier integration, gated producer,
-   promotion/withdrawal workflow and release docs; no client adoption until
-   complete. A follow-up before step 3 removes the index's expiry and renewal.
+2. Avibe channel contract/resolver, pinned verifier integration, the
+   informational untrusted rehearsal and trusted owner-approved publication/
+   promotion workflow; no client adoption until the lifecycle lane is ready.
+   A follow-up before step 3 removes the index's expiry and renewal.
 3. Transactional engine lifecycle, shared auto/manual updater, recovery, effective
    evidence identity and all startup/repair/cleanup consumers.
 4. Dependencies/CLI/policy controls, design frames, English/Chinese public docs,
@@ -577,21 +582,35 @@ and the writer make are diagnostics for a ledger that is behind; they are not
 that protection. Ledger loss or doubt stops the channel pending a separately
 approved recovery.
 
-**Qualification status.** The receipt requires six evidence classes. Four have
-producing jobs. `build` reuses the release guard's strict rebuild, which
-already publishes the packaged engine. The per-platform smoke producer runs in
-pull-request CI on all six platforms against the packaged engine, which shows
-the producer works and qualifies nothing. The hosted-wire job has not run: it
-needs a candidate. The released-Avibe job has not run for qualification: it
-needs published 3.2.6 artifacts. Its steps are rehearsed in pull-request CI
-against a pinned 3.2.6 release candidate. `backward_state` and `lifecycle`
-have no producer until steps 3 and 4, so no receipt can be produced before
-then. That holds whatever a job uploads: evidence counts only under the job
-that produces its class, read from the artifact named for that job, and a
-class with no job is accepted from nowhere, when a receipt is made and when
-the finalizer checks one. This is an allowlist by artifact name and document
-shape; it does not authenticate the uploading job. Jobs that execute the
-candidate are not contained. That is unfinished work, listed below.
+**Untrusted rehearsal status.** The candidate workflow now runs the concrete
+checks as an informational `untrusted_rehearsal`: source rebuild and exact
+manifest/archive hashes, six-platform smoke, hosted-wire comparisons, and the
+released-wheel minimum/current-stable E2E where those inputs exist. Missing,
+skipped and failed reports remain visible; no result is relabeled as a pass.
+`backward_state` and `lifecycle` are future observations, not universal
+producer requirements, and their absence does not block every rehearsal.
+
+The rehearsal result includes the upstream source reference, exact manifest and
+archive digests, minimum Avibe, run/attempt identity, baseline context, and the
+observed reports. The name of an artifact or job is not authentication, and
+candidate assertions are not proof against a malicious candidate.
+
+A separate trusted prepare job in the publication workflow checks the exact
+rehearsal run on `master`, the current candidate record, source reference,
+manifest and archive digests, baseline context, and run identity. It uses a
+fixed checkout, bounded JSON parsing and a separate trusted-checked artifact
+namespace. It never executes candidate code, imports uploaded modules, or
+uses uploaded executables as trusted inputs. The owner sees this summary and
+explicitly approves each publication or promotion for that exact run and
+manifest/archive digest through the existing protected environments. Owner
+authorization, not the rehearsal result, is the promotion authority.
+
+The job split protects trusted workflow code and privileged credentials; it
+does not make candidate self-reporting honest. Full candidate containment is
+rejected for this scope, not deferred as a prerequisite. A future requirement
+for malicious-candidate-resistant receipts or stronger provenance needs a new
+product/owner decision. PR4 must not restore this removed gate under another
+name.
 
 **Not in this step.** Adoption, activation, scheduling, recovery, the
 effective-engine consumers (step 3); the Dependencies row, CLI, policy switch
@@ -616,36 +635,3 @@ decisions; these are what a lifecycle that acts on them must hold.
   flush on POSIX, tested native write-through on Windows, with crash recovery
   tested by injected failure. The current write path does not meet that bar,
   and a platform that cannot meet it blocks automatic activation.
-
-**Containment of candidate execution, owed before every evidence class has a
-producer.** Qualification runs the candidate in the smoke, hosted-wire and
-released-Avibe jobs, and steps 3 and 4 add the backward-state and lifecycle
-producers, which run it too. Today the candidate runs as the user that writes
-each job's evidence, beside the run's artifact credential, so a candidate
-that attacks its runner can make those jobs report anything and could replace
-another job's artifact. Step 2 only guarantees that no receipt can be
-completed: the two missing classes have no producer, and nothing accepts them
-from anywhere.
-
-- The change that gives the last evidence class a producer does not merge
-  until the containment is implemented, reviewed independently and exercised.
-  The first usable receipt, the first promotion and commissioning stay
-  blocked until then. No flag or manual waiver may bypass it.
-- The design names three things: the trusted collector and receipt
-  authority, the untrusted engine with every process it starts, and the
-  operating-system boundary between them on each of the six platforms.
-- The new producers use the same protected collection boundary as the
-  existing ones. Step 4 cannot close qualification without it.
-- The candidate gets only the read-only inputs and the writable test state
-  it needs, with loopback fixtures.
-- Tests show that the candidate cannot alter the collector's code, the
-  manifests, the reports or the workflow's command files; cannot obtain the
-  runner's or the run's artifact credentials; cannot tamper with the trusted
-  collector's processes; and cannot persist into the trusted upload phase.
-- Missing privileges or a platform without the containment fail closed.
-- A separate working directory, a cleared child environment, a subprocess of
-  the same user, or a container label is not that proof by itself.
-- The boundary can be rehearsed before a candidate or a stable release
-  exists, with the packaged engine and test-owned negative probes. As with
-  the released-wheel rehearsal, such runs produce no qualification receipt.
-  They extract no real credential and write nowhere outside the run.
