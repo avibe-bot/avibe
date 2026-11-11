@@ -2,7 +2,6 @@ export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
   | 'app'
-  | 'direct'
   | 'haptics'
   | 'keyboardResizesViewport'
   | 'push'
