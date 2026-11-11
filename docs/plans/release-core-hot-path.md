@@ -17,4 +17,12 @@ Focused tests cover discovery order and early exit; six-platform reuse and any-m
 
 Tests use fixtures and temporary state, not real releases or the owner's runtime. Workflow lint and review/CI must pass on the final head. Exact-head owner approval precedes merge by the lead. No real release is dispatched for validation.
 
-Next two authorized RCs after merge must be measured against RC4 (8:10 workflow-created to published) and RC5 (9:23 tag to published; 9:21 workflow-created to published). Measure cache outcomes, job scheduling gaps, install verification and publication separately. A ~4–5 minute hot-path estimate is not a cold-build or hosted-runner latency guarantee; RC UI fallback is expected while its backstop is running. Public download and mirror readiness are separate from publishedAt and desktop Stage 2.
+Next two authorized RCs after merge must be measured against RC4 (8:10 workflow-created to published) and RC5 (9:23 tag to published; 9:21 workflow-created to published). Measure cache outcomes (including absent/pending full proof and partial-rerun inherited-job fallback), job scheduling gaps, install verification and publication separately. A ~4–5 minute hot-path estimate is not a cold-build or hosted-runner latency guarantee; RC UI fallback is expected while its backstop is running. Public download and mirror readiness are separate from publishedAt and desktop Stage 2.
+
+## Pre-PR evidence
+
+- Rebased independently after #3545 merged (`b53d330`); no stacked PR or gate-policy change.
+- 443 focused release tests passed on Python 3.12; changed-file Ruff and Actionlint 1.7.12 passed.
+- Read-only live API/byte checks: RC3 canonical Linux archive passed GitHub ZIP SHA256 and all identity/archive/router checks; RC5 backstop run 42947856231 attempt 1 supplied a verified UI artifact through the new consumer.
+- Independent review found and prompted fixes for PR/fork producer trust, historical-source dispatch tooling, transient poll failures and publisher time budgeting. Partial-rerun inherited jobs are rejected using actual job start times, not GitHub's relabelled attempt number.
+- No real release or workflow was dispatched. Hosted-runner scheduling, real parallel install speed, and end-to-end publication latency remain for the next two owner-authorized RCs.
