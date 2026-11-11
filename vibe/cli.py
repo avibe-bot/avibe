@@ -21132,6 +21132,9 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    ("remote", "direct", "on"): "owner",
+    ("remote", "direct", "off"): "owner",
+    ("remote", "direct", "status"): "member",
     # Launch at login writes a login item on this machine, outside the instance.
     ("autostart", "on"): "owner",
     ("autostart", "off"): "owner",

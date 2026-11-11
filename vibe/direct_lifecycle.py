@@ -544,6 +544,15 @@ class DirectAccessLifecycle:
         if result.last_error_code == "direct_access_not_allowed":
             self._deny("permission_denied")
             return
+        if result.last_error_code == "permission_expired":
+            # This poll carried an older receipt's deadline. A fresh grant can
+            # have arrived without changing the configuration generation. Keep
+            # the installed certificate and retry under the current authority;
+            # a request-local refusal is not a terminal certificate outcome.
+            self._resume_required = True
+            self._poll_at = time.time()
+            self._wake.set()
+            return
         if result.reload_required and self._ingress is not None and _certificate_usable(result):
             ingress = self._ingress
             try:
@@ -551,13 +560,14 @@ class DirectAccessLifecycle:
                     ingress._prepare_certificate_reload, result.certificate_file, result.key_file,
                     generation=generation, ingress=ingress,
                 )
-                if (
-                    generation != self._generation
-                    or ingress is not self._ingress
-                    or self._gate()[2] is None
-                ):
+                if generation != self._generation or self._gate()[2] is None:
                     return
-                ingress._apply_certificate_reload(prepared, result.certificate_file, result.key_file)
+                if ingress is self._ingress:
+                    ingress._apply_certificate_reload(prepared, result.certificate_file, result.key_file)
+                # The old certificate may have expired while preparing TLS,
+                # retiring this ingress without invalidating the grant. Keep
+                # the valid renewal below for a fresh ingress instead of losing
+                # both the certificate and the client's next polling deadline.
             except Exception:
                 if generation == self._generation:
                     self._deny("certificate_reload_failed")

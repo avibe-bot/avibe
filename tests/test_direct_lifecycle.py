@@ -396,6 +396,82 @@ async def test_old_reload_after_optout_never_applies_context(reports):
         release.set()
 
 
+@pytest.mark.parametrize("already_running", [False, True])
+async def test_old_poll_deadline_retries_under_refreshed_grant(reports, monkeypatch, already_running):
+    config = _config()
+    clock = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
+    entered, release = threading.Event(), threading.Event()
+    rejected_call = 2 if already_running else 1
+
+    class ExpiredPoll(FakeCertificateClient):
+        def poll(self, **kw):
+            self.calls.append(kw)
+            if len(self.calls) == rejected_call:
+                entered.set()
+                assert release.wait(3)
+                assert kw["permission_deadline"] < clock[0]
+                return CertificateResult("disabled", last_error_code="permission_expired")
+            return _ready(next_poll_at=time.time() + 0.1 if len(self.calls) < rejected_call else None)
+
+    try:
+        async with _owner(config, reports, cert=ExpiredPoll()) as (owner, calls, cert, rv):
+            await _permission(owner, config)
+            if already_running:
+                await _wait(lambda: owner.status().state == "running")
+            await _wait(entered.is_set)
+            generation = owner._generation
+            clock[0] = 900.0  # Refresh before the first receipt expires at 1000.
+            await _permission(owner, config)
+            clock[0] = 1001.0
+            release.set()
+            await _wait(lambda: len(cert.calls) == rejected_call + 1)
+            await _wait(lambda: owner.status().state == "running")
+            assert owner._generation == generation
+            assert cert.calls[-1]["permission_deadline"] == 1800.0
+            assert calls.count("supervisor_start") == 1
+            assert "supervisor_stop" not in calls and rv.endpoint is not None
+    finally:
+        release.set()
+
+
+async def test_renewal_survives_old_ingress_expiry_during_tls_preparation(reports):
+    config = _config()
+    entered, release = threading.Event(), threading.Event()
+    starts = []
+    renewal = _ready(reload_required=True, certificate_file="/test/renewed.pem")
+    cert = FakeCertificateClient([_ready(next_poll_at=time.time() + 0.1), renewal])
+
+    class SlowRenewal(FakeIngress):
+        def __init__(self, calls, **kwargs):
+            super().__init__(calls, **kwargs)
+            starts.append(kwargs["certfile"])
+
+        def _prepare_certificate_reload(self, *args):
+            entered.set()
+            assert release.wait(3)
+            return "renewed"
+
+    try:
+        async with _owner(config, reports, cert=cert, ingress_type=SlowRenewal) as (owner, calls, _, rv):
+            await _permission(owner, config)
+            await _wait(lambda: owner.status().state == "running")
+            await _wait(entered.is_set)
+            old_ingress, generation = owner._ingress, owner._generation
+            owner._certificate_result = _ready(certificate_not_after="2000-01-01T00:00:00+00:00")
+            owner._wake.set()
+            await _wait(lambda: owner._ingress is None)
+            assert rv.endpoint is None and not old_ingress.running
+            release.set()
+            await _wait(lambda: owner.status().state == "running")
+            assert owner._generation == generation and owner._ingress is not old_ingress
+            assert starts == ["/test/cert.pem", "/test/renewed.pem"]
+            assert owner._certificate_result is renewal and len(cert.calls) == 2
+            assert "ingress_reload" not in calls and old_ingress.context == "original"
+    finally:
+        release.set()
+
+
 async def test_cancelled_order_retried_once_not_forever(reports):
     config = _config()
     cancelled = CertificateResult("cancelled", last_error_code="order_failed")

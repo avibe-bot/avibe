@@ -29,7 +29,10 @@ from the first on. Every runtime-status request captures a ticket before HTTP;
 only a reply to a request that actually carried `direct_paths_enabled: true`
 can authorize the current generation. Permission is strictly less than 15
 minutes from receipt, using a monotonic clock. Missing permission is denial.
-A later denial cannot be undone by an older response.
+A later denial cannot be undone by an older response. A certificate worker's
+captured deadline can expire while a newer receipt refreshes the same owner
+generation; that request-local refusal retries under the fresh grant without
+discarding an installed certificate.
 
 On/off changes enqueue reports immediately after observation rather than
 waiting for the five-minute heartbeat. The existing single status-report
@@ -66,7 +69,10 @@ preparation has one retained worker slot across starts, reloads and all
 setting generations. Preparation constructs replacement TLS/Uvicorn data,
 but never binds a socket or changes active context/path fields in its worker.
 The loop checks generation, ingress identity and permission before committing
-a prepared start or renewed context. Failure to prepare a replacement leaves
+a prepared start or renewed context. If the old ingress expires during renewal
+preparation, the still-authorized certificate is retained for a fresh start,
+not applied to the retired ingress or lost with its next polling deadline.
+Failure to prepare a replacement leaves
 the previous context intact. The existing synchronous ingress reload API is
 retained for its previous callers.
 
