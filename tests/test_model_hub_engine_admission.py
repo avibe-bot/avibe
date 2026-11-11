@@ -150,6 +150,23 @@ async def test_routine_drain_upgrades_to_learned_withdrawal_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_supplied_reconcile_decision_is_revalidated_under_update_lock():
+    from core.model_hub_engine_channel import ResolutionAction
+
+    owner = adapter()
+    calls = []
+    fresh = SimpleNamespace(action=ResolutionAction.BLOCKED, target=None)
+    owner.lifecycle = SimpleNamespace(
+        withdrawn_current=False,
+        check=lambda **_kwargs: calls.append(True) or fresh,
+        pause_withdrawn=lambda: None,
+    )
+    stale = SimpleNamespace(action=ResolutionAction.WITHDRAW, target=SimpleNamespace(asset_release_tag="stale"))
+    await owner._reconcile_engine(explicit=False, decision=stale)
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
 async def test_successful_activation_rollback_reopens_routine_admission(tmp_path, monkeypatch):
     from tests.test_model_hub_engine_lifecycle import owner_fixture, signed_candidate
 

@@ -1744,10 +1744,13 @@ class CLIProxyEngineAdapter:
         from core.model_hub_engine_channel import ResolutionAction
 
         async with self._engine_update_lock:
-            if decision is None:
-                decision = await run_owned_in_thread(
-                    self.lifecycle.check, retry=explicit, allow_adoption=explicit or self._routine_adoption(),
-                )
+            # A decision supplied by an earlier caller may have waited behind
+            # the scheduler. Revalidate it under the lock before any drain,
+            # stop, or fallback action; the committed generation is the
+            # snapshot that makes the decision current.
+            decision = await run_owned_in_thread(
+                self.lifecycle.check, retry=explicit, allow_adoption=explicit or self._routine_adoption(),
+            )
             self._gate_known_withdrawal()
             withdrawn = decision.action in {ResolutionAction.WITHDRAW, ResolutionAction.BLOCKED}
             if withdrawn:
