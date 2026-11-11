@@ -1049,6 +1049,7 @@ scenarios:
       - "ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 the main Bot with no model of its own yet takes the model picked for Vibey"
       - ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 leaves a main Bot someone set to another model alone
       - ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 holds the choice for Retry when the main Bot did not take it
+      - ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 carries the main Bot into another pick after a half-done choice
     reason: >-
       Covered is bounded to the setup choice owner against a fake server that
       reproduces the controller's fill of an Agent with no model. The flagship

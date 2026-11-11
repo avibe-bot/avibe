@@ -20,13 +20,7 @@ const CANDIDATES_CHANGED = 'candidate_suppliers_changed';
  */
 export type BuiltinChoiceFailure = { model: string; kind: 'suppliersChanged' | 'failed' };
 
-type Choice = {
-  pick: ChosenCandidate; writing: boolean; failure: BuiltinChoiceFailure | null;
-  /** The main Bot's Agent this choice carries along, decided once, before its first
-   *  write: a retry after a half-done choice would otherwise find the main Bot no longer
-   *  on Vibey's model and leave it behind. `undefined` until decided. */
-  follower?: string | null;
-};
+type Choice = { pick: ChosenCandidate; writing: boolean; failure: BuiltinChoiceFailure | null };
 type ShownOffer = BuiltinModelOffer & { epoch: number };
 
 export type BuiltinModelChoiceDeps = {
@@ -70,6 +64,14 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
   const [choices, setChoices] = useState<Partial<Record<BuiltinBackend, Choice>>>({});
   const tokens = useRef<Partial<Record<BuiltinBackend, number>>>({});
   const writing = useRef<Partial<Record<BuiltinBackend, boolean>>>({});
+  /**
+   * The main Bot's Agent a choice carries along, decided once, before the first write of
+   * a choice that has not stood yet. A half-done choice leaves the main Bot off Vibey's
+   * model, so deciding again — on Retry, on the same row pressed again, or on another
+   * row picked instead — would read it as set apart on purpose and leave it behind. Held
+   * until a choice stands.
+   */
+  const followers = useRef<Partial<Record<BuiltinBackend, string | null>>>({});
 
   const read = useCallback(async (backend: BuiltinBackend) => {
     const token = (tokens.current[backend] ?? 0) + 1;
@@ -88,22 +90,25 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     }
   }, [latest]);
 
-  const choose = useCallback(async (backend: BuiltinBackend, pick: ChosenCandidate, carried?: string | null) => {
+  const choose = useCallback(async (backend: BuiltinBackend, pick: ChosenCandidate) => {
     const { api, models, agentReads, target: targetOf } = latest.current;
     const target = targetOf(backend);
     if (!target || !agentReads || writing.current[backend]) return;
     writing.current[backend] = true;
     const model = pick.candidate.id;
-    setChoices((current) => ({ ...current, [backend]: { pick, writing: true, failure: null, follower: carried } }));
+    setChoices((current) => ({ ...current, [backend]: { pick, writing: true, failure: null } }));
     let refused = false;
     // The efforts the chosen model takes: what the list holds for it, else what the
     // candidate states — the row the write would add.
     let efforts: readonly string[] = pick.candidate.reasoning_efforts;
     // Who follows this choice, decided from the Agents as they were before it: the first
     // write below can start the server's own fill of an Agent with no model.
-    let follower: string | null | undefined = carried;
+    let follower = followers.current[backend];
     try {
-      if (follower === undefined) follower = backend === 'vibey' ? await followingMainBot(api, target) : null;
+      if (follower === undefined) {
+        follower = backend === 'vibey' ? await followingMainBot(api, target) : null;
+        followers.current[backend] = follower;
+      }
       const supply = (await agentReads.readValue()).find((row) => row.backend === backend);
       if (!supply) throw new Error('supply_unread');
       const baseline = supply.catalog_models ?? [];
@@ -148,13 +153,14 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     // Still writing until the reads it set off have settled: entry acts on the same
     // shared reads, and a click in between would race them.
     if (confirmed) {
+      delete followers.current[backend];
       try { await agentReads.refresh(); } catch { /* The redraw below reports what it cannot read. */ }
     }
     try { await latest.current.onSettled(backend); } finally {
       writing.current[backend] = false;
       setChoices((current) => {
         const next = { ...current };
-        if (failure) next[backend] = { pick, writing: false, failure, follower };
+        if (failure) next[backend] = { pick, writing: false, failure };
         else delete next[backend];
         return next;
       });
@@ -171,7 +177,7 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     /** Apply a choice that did not stand once more. */
     retry: (backend: BuiltinBackend) => {
       const choice = choices[backend];
-      if (choice?.failure?.kind === 'failed') void choose(backend, choice.pick, choice.follower);
+      if (choice?.failure?.kind === 'failed') void choose(backend, choice.pick);
     },
     /** The candidates this showing of the screen read. */
     offer: (backend: BuiltinBackend): BuiltinModelOffer | undefined => shown(backend),

@@ -91,15 +91,16 @@ export function BuiltinAssistantRow({ backend, route, block, offer, picking = nu
                   : candidates.map((candidate, index) => (
                     <button key={candidate.id} type="button" className="onboarding-model-offer-row"
                       disabled={busy || configuringDisabled} onClick={() => onPick(candidate)}>
-                      <span className="onboarding-model-offer-id">{candidate.display_name?.trim() || candidate.id}</span>
                       {/* The offer is flagship first, so its first row is the one to suggest.
-                          The tag takes the supplier's place on that one row: the card is
-                          narrow, and the provider is the one the rows below name. */}
+                          The tag goes under the name rather than beside it: the card is
+                          narrow, and a tag beside the name would cut the name short. */}
+                      <span className="onboarding-model-offer-name">
+                        <span className="onboarding-model-offer-id">{candidate.display_name?.trim() || candidate.id}</span>
+                        {index === 0 && <span className="onboarding-model-offer-recommended">{t('onboarding.setup.recommended')}</span>}
+                      </span>
                       {picking === candidate.id
                         ? <RefreshCw size={14} className="motion-safe:animate-spin" aria-hidden="true" />
-                        : index === 0
-                          ? <span className="onboarding-model-offer-recommended">{t('onboarding.setup.recommended')}</span>
-                          : <span className="onboarding-model-offer-supplier">{candidate.suppliers[0].source_name}</span>}
+                        : <span className="onboarding-model-offer-supplier">{candidate.suppliers[0].source_name}</span>}
                     </button>
                   ))
               ) : (

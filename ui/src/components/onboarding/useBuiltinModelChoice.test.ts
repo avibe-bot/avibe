@@ -288,6 +288,26 @@ describe('AUTH-SETUP-162 the main Bot follows the setup choice', () => {
     expect(fixture.api.updateVibeAgent).not.toHaveBeenCalledWith('main', expect.anything());
   });
 
+  it('AUTH-SETUP-162 carries the main Bot into another pick after a half-done choice', async () => {
+    const fixture = server({ catalog: ['lab-large'], main: { model: 'lab-large' } });
+    const write = fixture.api.updateVibeAgent.getMockImplementation()!;
+    fixture.api.updateVibeAgent.mockImplementation(async (name, payload) => {
+      if (name === 'main') throw new Error('offline');
+      return write(name, payload);
+    });
+    const { view } = mount(fixture);
+    await act(async () => view.result.current.choose('vibey', chosenCandidate(candidate('lab-mini'))));
+    expect(fixture.state.main?.model).toBe('lab-large');
+
+    // Vibey is on lab-mini now and the main Bot is not: the next pick still carries it.
+    fixture.api.updateVibeAgent.mockImplementation(write);
+    await act(async () => view.result.current.choose('vibey', chosenCandidate(candidate('lab-large'))));
+    expect(fixture.state.model).toBe('lab-large');
+    expect(fixture.state.main?.model).toBe('lab-large');
+    expect(fixture.api.updateVibeAgent).toHaveBeenLastCalledWith('main', expect.objectContaining({ model: 'lab-large' }));
+    expect(view.result.current.holds('vibey')).toBe(false);
+  });
+
   it('AUTH-SETUP-162 holds the choice for Retry when the main Bot did not take it', async () => {
     const fixture = server({ catalog: ['lab-large'], main: { model: 'lab-large' } });
     const write = fixture.api.updateVibeAgent.getMockImplementation()!;
