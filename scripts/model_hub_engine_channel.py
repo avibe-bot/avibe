@@ -7,7 +7,10 @@ is its only writer.
 
 **Authority is a ledger on the signer host.** It holds the next sequence, the
 exact payload last allocated, and every release identity and withdrawal ever
-allocated. Each change is planned from the ledger and adds at most one entry.
+allocated. Each change is planned from the ledger and adds exactly one entry:
+a promotion or a withdrawal. Nothing else allocates a sequence. An index does
+not expire, so there is nothing to renew, and the signer only has to run when
+one of those two changes was approved.
 The published object, the bucket and workflow artifacts are never read as
 desired state: an index that was replaced by an older signed one, or deleted,
 is put back from the ledger, and cannot make the signer sign older state again.
@@ -81,12 +84,10 @@ SIGNER_ENVIRONMENT = "model-hub-engine-channel-signer"
 WRITER_ENVIRONMENT = "model-hub-engine-channel-writer"
 #: Which events may start each operation, and whether the run needs a required
 #: reviewer's approval. Every operation is a manual dispatch with approval.
-#: ``renew`` takes no input and can only re-sign what the ledger already holds,
-#: so it is the only row that standing authorization could ever relax; no other
-#: operation becomes reachable by changing it.
+#: ``promote`` and ``revoke`` are the only two that allocate a new index.
 OPERATION_POLICY: dict[str, tuple[frozenset[str], bool]] = {
     operation: (frozenset({"workflow_dispatch"}), True)
-    for operation in ("release", "promote", "renew", "revoke", "resume")
+    for operation in ("release", "promote", "revoke", "resume")
 }
 
 _SIGN_TIMEOUT_SECONDS = 30.0
@@ -109,18 +110,13 @@ class Promote:
 
 
 @dataclass(frozen=True)
-class Renew:
-    pass
-
-
-@dataclass(frozen=True)
 class Revoke:
     asset_release_tag: str
     rollback_to: str
     reason: str
 
 
-Operation = Promote | Renew | Revoke
+Operation = Promote | Revoke
 
 
 def _release_entry(manifest_bytes: bytes, min_avibe_version: str) -> dict[str, str]:
@@ -143,8 +139,10 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
 
     ``current`` is the payload the ledger last allocated, or ``None`` only for
     the first allocation after commissioning. Every release and withdrawal it
-    carries is copied byte for byte; the operation adds at most one entry.
+    carries is copied byte for byte; the operation adds one entry.
     ``sequence`` is allocated by the ledger and must exceed ``current``'s.
+    ``now`` is written as ``issued_at``, a record of when this was allocated.
+    It orders nothing and is compared with nothing, this host's clock included.
     """
 
     now = now.astimezone(timezone.utc).replace(microsecond=0)
@@ -158,12 +156,9 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
 
     if current is None:
         if not isinstance(operation, Promote):
-            raise ProducerError("the channel has no allocated index to renew or withdraw from")
-    else:
-        if now < current.issued_at:
-            raise ProducerError("this host's clock is behind the index it last allocated")
-        if sequence <= current.sequence:
-            raise ProducerError("a new index must carry a higher sequence than the last one allocated")
+            raise ProducerError("the channel has no allocated index to withdraw from")
+    elif sequence <= current.sequence:
+        raise ProducerError("a new index must carry a higher sequence than the last one allocated")
 
     if isinstance(operation, Promote):
         try:
@@ -208,7 +203,6 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
         "channel": channel.CHANNEL_NAME,
         "sequence": sequence,
         "issued_at": channel.format_timestamp(now),
-        "expires_at": channel.format_timestamp(now + channel.MAX_VALIDITY),
         "releases": releases,
         "revoked": revoked,
     }
@@ -700,9 +694,11 @@ def sign_from_ledger(
 
     ``operation`` ``None`` resumes: it returns the envelope of the current
     allocation byte for byte, signing that same committed payload first if it
-    was never signed. Nothing is returned before it is committed to the
-    ledger, so a failure anywhere leaves either no allocation or one that
-    ``resume`` completes without a second payload for the same sequence.
+    was never signed. An allocation can be resumed however long ago it was
+    made: it is the channel's current index until the next promotion or
+    withdrawal. Nothing is returned before it is committed to the ledger, so
+    a failure anywhere leaves either no allocation or one that ``resume``
+    completes without a second payload for the same sequence.
     """
 
     with ledger.locked():
@@ -713,8 +709,6 @@ def sign_from_ledger(
         if operation is None:
             if state.allocation is None:
                 raise ProducerError("nothing was allocated yet; there is nothing to resume")
-            if now >= channel.parse_payload(state.allocation.payload).expires_at:
-                raise ProducerError("the allocated index has expired; renew instead of resuming it")
         else:
             if isinstance(operation, Promote):
                 standing = standing_releases(state.payload)
@@ -1007,8 +1001,6 @@ def _run_command(command: Sequence[str]) -> subprocess.CompletedProcess:
 def _operation(args: argparse.Namespace) -> Operation | None:
     if args.operation == "resume":
         return None
-    if args.operation == "renew":
-        return Renew()
     if args.operation == "revoke":
         if not (args.tag and args.rollback_to and args.reason):
             raise ProducerError("a withdrawal needs the release, its rollback target and a public reason")
@@ -1059,7 +1051,7 @@ def _build_parser() -> argparse.ArgumentParser:
     initialize_parser.add_argument("--first-sequence", type=int, required=True)
 
     sign_parser = commands.add_parser("sign", help="Allocate the next index in the ledger and sign it with avault.")
-    sign_parser.add_argument("--operation", required=True, choices=["promote", "renew", "revoke", "resume"])
+    sign_parser.add_argument("--operation", required=True, choices=["promote", "revoke", "resume"])
     sign_parser.add_argument("--ledger", type=Path, required=True)
     sign_parser.add_argument("--tag")
     sign_parser.add_argument("--rollback-to")
