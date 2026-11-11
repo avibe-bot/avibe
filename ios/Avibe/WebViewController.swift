@@ -328,6 +328,7 @@ final class WebViewFactory {
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let directStatus: (WebOrigin) -> DirectPathStatus
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private var outerScrollLockControllers: [
@@ -346,6 +347,7 @@ final class WebViewFactory {
         historyDidChange: historyDidChange,
         colorSchemeDidChange: colorSchemeDidChange,
         showAccount: showAccount,
+        directStatus: directStatus,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
                 return ["state": "unavailable"]
@@ -385,6 +387,7 @@ final class WebViewFactory {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         pushCoordinator: NativePushCoordinator? = nil
     ) {
@@ -394,6 +397,7 @@ final class WebViewFactory {
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
         self.pushCoordinator = pushCoordinator
     }
@@ -546,6 +550,7 @@ final class WebViewController: UIViewController {
     private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
+    private let directStatus: (WebOrigin) -> DirectPathStatus
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private var popupRecords: [ObjectIdentifier: PopupRecord] = [:]
@@ -593,6 +598,7 @@ final class WebViewController: UIViewController {
             showAccount: { [weak self] in
                 self?.showAccountIfActive()
             },
+            directStatus: directStatus,
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },
@@ -618,6 +624,7 @@ final class WebViewController: UIViewController {
         pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
+        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
@@ -629,6 +636,7 @@ final class WebViewController: UIViewController {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.directStatus = directStatus
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
         self.accountFallbackVisibilityChanged =
@@ -786,6 +794,37 @@ final class WebViewController: UIViewController {
             }));
             """
         )
+    }
+
+    /// Tells every instance-origin document this runtime shows, the primary
+    /// and instance-origin child windows, that the path carrying the
+    /// instance changed. A connection stays on the path it was opened on, so
+    /// the Web UI rebuilds its long-lived ones on this event.
+    func deliverDirectTransportChanged(_ status: DirectPathStatus) {
+        guard
+            !isInvalidatedForAccountTransition,
+            let data = try? JSONSerialization.data(
+                withJSONObject: status.jsonObject,
+                options: [.sortedKeys]
+            ),
+            let encoded = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+        let webViews = [retainedWebView].compactMap { $0 }
+            + popupRecords.values.map(\.webView)
+        for webView in webViews
+        where webView.url.flatMap({
+            WebOrigin(url: $0, requiresHTTPS: false)
+        }) == instanceOrigin {
+            webView.evaluateJavaScript(
+                """
+                window.dispatchEvent(new CustomEvent("avibe:native:direct.transportChanged", {
+                  detail: \(encoded)
+                }));
+                """
+            )
+        }
     }
 
     private func showAccountIfActive() {

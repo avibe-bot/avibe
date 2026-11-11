@@ -358,6 +358,10 @@ final class AccountWebsiteDataStore {
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
     private var ownedIdentifiers: Set<UUID>
+    /// Runs first in `rotate()`, while the store that is going away is still
+    /// `dataStore`. What is installed on that store, the direct route, is
+    /// removed here, so it leaves with the store and never reaches the next.
+    var onWillRotate: (@MainActor () -> Void)?
 
     init(
         defaults: UserDefaults = .standard,
@@ -390,6 +394,7 @@ final class AccountWebsiteDataStore {
     }
 
     func rotate(sweepOwnedStores: Bool = true) async {
+        onWillRotate?()
         let newIdentifier = UUID()
         ownedIdentifiers.insert(newIdentifier)
         identifier = newIdentifier

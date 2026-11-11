@@ -18,6 +18,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let websiteDataStore: WKWebsiteDataStore
     let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
+    let directStatus: (WebOrigin) -> DirectPathStatus
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
@@ -32,6 +33,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         websiteDataStore: WKWebsiteDataStore,
         pushCoordinator: NativePushCoordinator? = nil,
         showAccount: @escaping () -> Void,
+        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
@@ -45,6 +47,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.websiteDataStore = websiteDataStore
         self.pushCoordinator = pushCoordinator
         self.showAccount = showAccount
+        self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
@@ -66,6 +69,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             websiteDataStore: websiteDataStore,
             pushCoordinator: pushCoordinator,
             showAccount: showAccount,
+            directStatus: directStatus,
             pushOpenedAck: pushOpenedAck,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,

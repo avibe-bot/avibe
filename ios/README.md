@@ -231,11 +231,18 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
+| `direct: 1` | `direct.status()` | `{transport: "tunnel" \| "direct", sequence}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. This shell has no direct transport, so the answer is always `{transport: "tunnel", sequence: 0}` |
 
 After a validated notification tap, the native shell emits
 `push.opened({url})` to the selected instance's primary WebView. The event
 contains only a same-origin path, query, and fragment; invalid, unavailable,
 or mismatched notification context opens the instance recovery surface.
+
+When the path that carries the selected instance changes, the shell emits
+`direct.transportChanged({transport, sequence})` to every instance-origin
+document of the runtime, the primary and instance-origin child windows, after
+the data store's route has changed. `sequence` grows with every change while
+the App process lives. This shell never emits it: see the next section.
 
 Covering the runtime instead of closing it did not change any capability
 number: `app.showAccount()` keeps its parameters and `null` result, and no Web
@@ -252,6 +259,55 @@ Unknown methods never expand the native surface.
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
 origin and its navigation test in the same change.
+
+## Remote direct path (inactive)
+
+The design is `docs/plans/remote-direct-ios.md`. The App can carry the
+selected instance's origin over a direct transport instead of Cloudflare
+Tunnel, without changing the origin: WebKit's connections for that one host
+go to a loopback HTTP CONNECT listener inside the App, which relays them over
+transport streams to the instance. TLS stays between WebKit and the instance;
+the shell adds no trust override and sees only ciphertext.
+
+**Nothing in this shell implements a transport**, so none of it runs: no
+socket is bound, `proxyConfigurations` is never written, `direct.status()`
+answers `tunnel`, and no event is emitted. `AppModel` takes the transport as
+an optional argument that `AvibeApp` does not pass.
+
+- `DirectTransport.swift` is the seam: `DirectTransporting` is told which
+  instance is selected, reports when its path is usable or lost, and opens
+  byte streams. A report is bound to the selection it was requested for.
+- `DirectConnectListener.swift` binds `127.0.0.1` on a port the system
+  chooses, only while a route is being installed or is installed. It answers
+  `CONNECT <instance host>:443` and refuses everything else: another host, a
+  subdomain (which `matchDomains`, a suffix match, also sends it), another
+  port, no port, userinfo, an IP literal, any other method, a body, and a
+  head over 4 KiB or slower than 5 seconds. It writes the ingress contract's
+  canonical head to the stream, never WebKit's bytes, passes the instance's
+  status back, and then copies both directions with backpressure and
+  half-close. At most 64 connections; no idle timeout.
+- `DirectPathController.swift` holds the state. It is `tunnel` unless a
+  transport reported a usable path for the current tags, the listener is
+  bound, and the route is installed. A stream that cannot be opened, a
+  refused or unanswered CONNECT, a failed listener, the connection limit, a
+  lost path, and the App entering the background each return to `tunnel` at
+  once: the route is removed first, then the listener and its relays close,
+  then the event is emitted.
+- `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
+  account data store, which the runtime WebViews and the hidden account
+  transport share. The route matches the instance's exact host, with
+  `allowFailover` off.
+- Every route carries its tags: the selection, the `MobileRuntimeContext`
+  lease (account, instance, account generation), the data-store identifier,
+  the instance authority, and the rendezvous generation. Before a route is
+  installed the controller asks `MobileSessionCoordinator.isCurrentRuntime`,
+  the check the route and the WebView registration already use, and the route
+  owner compares the store identifier. A late report, or a listener that
+  becomes ready after its selection ended, installs nothing.
+- The route leaves with the store it was installed on:
+  `AccountWebsiteDataStore.rotate()` runs `onWillRotate` before it replaces
+  the store. `AppModel` also stops the selection wherever it stops the
+  runtime, so an instance switch removes the route without a rotation.
 
 ## Mobile account onboarding
 
@@ -600,6 +656,7 @@ pinned to Xcode 26.6.
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
 | `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
+| `websiteDataStore.proxyConfigurations` | Never written by this shell, which has no direct transport. With one, `DirectRouteOwner` is the only writer: one HTTP CONNECT route to a loopback listener for the selected instance's exact host, removed on any failure, on background, when the runtime stops, and when the store rotates. | Lifecycle XCTest with and without a stand-in transport on real `WKWebsiteDataStore` objects, including that no listening socket and no route exist without one; one WebKit load through the route on the simulator. |
 | `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
 | `allowsInlineMediaPlayback`, `mediaTypesRequiringUserActionForPlayback` | WebKit defaults. Phase 0a adds no media playback policy. | API ledger; playback is a device check. |

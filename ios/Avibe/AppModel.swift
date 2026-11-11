@@ -60,6 +60,9 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
+    /// The direct transport, when this build has one. Without it the direct
+    /// path never activates: no listener, no route, always the tunnel.
+    private let directTransport: DirectTransporting?
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
     private let pushInstallationMarker: PushInstallationMarkerStoring
@@ -114,8 +117,23 @@ final class AppModel: ObservableObject {
         }
     )
 
+    private lazy var directPathController: DirectPathController = DirectPathController(
+        websiteDataStore: websiteDataStore,
+        transport: directTransport,
+        isCurrentRuntime: { [weak self] runtime in
+            self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
+        },
+        onStatusChanged: { [weak self] status in
+            self?.runtimeController?.deliverDirectTransportChanged(status)
+        }
+    )
+
     var mobileSessionCoordinator: MobileSessionCoordinator {
         sessionCoordinator
+    }
+
+    var directPaths: DirectPathController {
+        directPathController
     }
 
     var pushCoordinator: NativePushCoordinator {
@@ -130,6 +148,7 @@ final class AppModel: ObservableObject {
         defaults: UserDefaults = .standard,
         controlPlane: MobileControlPlaneConfiguration =
             MobileControlPlaneConfiguration(),
+        directTransport: DirectTransporting? = nil,
         pushKeychain: PushKeychainStoring = PushKeychainStore(),
         pushGenerationStore: PushGenerationStoring =
             SharedPushGenerationStore(),
@@ -141,6 +160,7 @@ final class AppModel: ObservableObject {
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
+        self.directTransport = directTransport
         self.pushKeychain = pushKeychain
         self.pushGenerationStore = pushGenerationStore
         self.pushInstallationMarker = pushInstallationMarker
@@ -149,6 +169,7 @@ final class AppModel: ObservableObject {
         self.pushOpenedLifetime = pushOpenedLifetime
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
+        _ = directPathController
 
         Task { [weak self] in
             await self?.bootstrap()
@@ -244,6 +265,7 @@ final class AppModel: ObservableObject {
     }
 
     private func stopRuntime() {
+        directPathController.runtimeDidStop()
         if let runtimeController {
             recordRuntimeReleaseBarrier(
                 runtimeController.invalidateForAccountTransition()
@@ -266,6 +288,7 @@ final class AppModel: ObservableObject {
         stopRuntime()
         runtimeIdentity += 1
         route = .browser(runtime)
+        directPathController.runtimeDidOpen(runtime)
     }
 
     func didFinishRuntimeLoading() {

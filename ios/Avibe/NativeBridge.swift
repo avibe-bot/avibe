@@ -18,6 +18,7 @@ struct NativeShellMetadata: Equatable {
         "accountPresentation": 2,
         "app": 1,
         "haptics": 1,
+        "direct": 1,
         "keyboardResizesViewport": 1,
         "push": 1,
         "viewport": 1,
@@ -76,6 +77,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
+    case directStatus = "direct.status"
     case navigationHistoryChanged = "navigation.historyChanged"
     case pushStatus = "push.status"
     case pushSubscribe = "push.subscribe"
@@ -202,6 +204,7 @@ enum NativeBridgeConfiguration {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
+        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -238,6 +241,7 @@ enum NativeBridgeConfiguration {
             historyDidChange: historyDidChange,
             colorSchemeDidChange: colorSchemeDidChange,
             showAccount: showAccount,
+            directStatus: directStatus,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
@@ -498,6 +502,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
+    private let directStatus: (WebOrigin) -> DirectPathStatus
     private let pushStatus: @MainActor (
         String?,
         WebOrigin
@@ -523,6 +528,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         historyDidChange: @escaping (WKWebView) -> Bool,
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool,
         showAccount: @escaping () -> Void,
+        directStatus: @escaping (WebOrigin) -> DirectPathStatus,
         pushStatus: @escaping @MainActor (
             String?,
             WebOrigin
@@ -547,6 +553,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.historyDidChange = historyDidChange
         self.colorSchemeDidChange = colorSchemeDidChange
         self.showAccount = showAccount
+        self.directStatus = directStatus
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
@@ -820,6 +827,22 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             reply(replyHandler, result: NSNull())
+        case .directStatus:
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "direct.status does not accept parameters."
+                    )
+                )
+                return
+            }
+            // The instance this WebView was made for. Only the selected
+            // instance's origin can be on the direct path.
+            reply(
+                replyHandler,
+                result: directStatus(policy.instanceOrigin).jsonObject
+            )
         case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck:
             reply(replyHandler, error: .unsupported)
         case .hapticsImpact:
