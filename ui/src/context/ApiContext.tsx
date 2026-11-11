@@ -438,6 +438,13 @@ export type VaultCreatePayload = {
   tags?: string[];
   kind?: string;
   signer_kind?: string | null;
+  /**
+   * A Solana signing key, which avault creates: it generates the key, or imports the secret key
+   * sealed in `blind_box`. Standard tier only, and sent without `public_meta`.
+   */
+  keypair?:
+    | { curve: 'ed25519'; source: 'generate' }
+    | { curve: 'ed25519'; source: 'import'; format: 'solana-cli-json' | 'base58-secret' };
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
   /** Bare skill names. Sent alongside the folded `skill:<name>` tags so skill scopes work on
