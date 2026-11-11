@@ -57,22 +57,43 @@ write_runtime_env() {
   } > "$OUTPUT_DIR/ios-runtime.env"
 }
 
+# Keep an installed runtime as a fallback, but first try each lower version in
+# ascending order. This matters on runner images that ship with 17.4 while a
+# lower runtime is still downloadable from the pinned Xcode.
+for candidate in 17.0 17.1 17.2 17.3 17.4; do
+  selected=""
+  if selected=$(runtime_info | find_lowest_runtime); then
+    selected_version=${selected%%|*}
+    selected_minor=${selected_version#17.}
+    selected_minor=${selected_minor%%.*}
+    candidate_minor=${candidate#17.}
+    if (( selected_minor <= candidate_minor )); then
+      write_runtime_env "$selected"
+      exit 0
+    fi
+  fi
+
+  echo "attempting to download iOS $candidate runtime" | tee -a "$RUNTIME_LOG"
+  if ! xcodebuild -downloadPlatform iOS -buildVersion "$candidate" >> "$RUNTIME_LOG" 2>&1; then
+    echo "iOS $candidate runtime is not available from the pinned Xcode" | tee -a "$RUNTIME_LOG"
+  fi
+
+  if selected=$(runtime_info | find_lowest_runtime); then
+    selected_version=${selected%%|*}
+    selected_minor=${selected_version#17.}
+    selected_minor=${selected_minor%%.*}
+    candidate_minor=${candidate#17.}
+    if (( selected_minor <= candidate_minor )); then
+      write_runtime_env "$selected"
+      exit 0
+    fi
+  fi
+done
+
 if selected=$(runtime_info | find_lowest_runtime); then
   write_runtime_env "$selected"
   exit 0
 fi
-
-for candidate in 17.0 17.1 17.2 17.3 17.4; do
-  echo "attempting to download iOS $candidate runtime" | tee -a "$RUNTIME_LOG"
-  if ! xcodebuild -downloadPlatform iOS -buildVersion "$candidate" >> "$RUNTIME_LOG" 2>&1; then
-    echo "iOS $candidate runtime is not available from the pinned Xcode" | tee -a "$RUNTIME_LOG"
-    continue
-  fi
-  if selected=$(runtime_info | find_lowest_runtime); then
-    write_runtime_env "$selected"
-    exit 0
-  fi
-done
 
 echo "could not install or find an iOS 17.x runtime below 17.5" >&2
 cat "$RUNTIME_LOG" >&2
