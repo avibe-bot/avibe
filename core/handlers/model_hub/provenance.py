@@ -208,7 +208,8 @@ class TurnUpstreamFailure:
     # protocol-level failure can still have answered through an HTTP 2xx
     # envelope, so this is not by itself a connection verdict.
     http_status: int | None
-    # Redacted and bounded by the engine client; display only.
+    # Redacted and bounded by the engine client; display only. Empty when the
+    # provider supplied a status but no readable diagnostic message.
     detail: str
     connection_error: bool = False
 
@@ -466,7 +467,7 @@ def produce_turn_outcome(
             if resolution is not None and resolution.route_origin == "passthrough"
             and (
                 (last_upstream_failure is not None and not last_upstream_failure.connection_error)
-                or (decision == "turn.request_nonfallback" and upstream_detail)
+                or decision == "turn.request_nonfallback"
             )
             else None
         ),
@@ -693,7 +694,7 @@ def render_turn_outcome_copy(
             else rule.upstream_failure_without_status_key
         )
     )
-    if failure is not None and suffix_key is not None:
+    if failure is not None and failure.detail and suffix_key is not None:
         text = " ".join((
             text,
             i18n_t(

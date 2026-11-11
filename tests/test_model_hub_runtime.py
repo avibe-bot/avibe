@@ -3686,17 +3686,23 @@ def test_adapter_provisions_probes_and_revokes_credential(tmp_path: Path) -> Non
         asyncio.run(run(base_url, handler))
 
 
+@pytest.mark.parametrize('encoding', ['plain', 'escaped_slash', 'unicode_escape', 'long'])
 @pytest.mark.parametrize("protocol", ["openai_chat", "anthropic", "google"])
 @pytest.mark.parametrize(("status", "rejected"), ((401, 401), (403, 403), (503, None)))
-def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected, protocol) -> None:
+def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, status, rejected, protocol, encoding) -> None:
     """Listings retain status and provider prose, never the credential, across protocols."""
+    secret = 'opaque/' + 'z' * 5000 if encoding == 'long' else 'relay/9adf08382a1c7654'
 
     class Refusing(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
-            body = json.dumps({"error": {"message": "Access denied for wrong-key. Check permissions."}}).encode()
+            body = json.dumps({"error": {"message": f"Access denied for {secret}. Check permissions."}}).encode()
+            if encoding == 'escaped_slash':
+                body = body.replace(b'/', b'\\/')
+            elif encoding == 'unicode_escape':
+                body = body.replace(secret.encode(), ''.join(f'\\u{ord(char):04x}' for char in secret).encode())
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -3718,13 +3724,13 @@ def test_adapter_discovery_names_only_a_credential_refusal(tmp_path: Path, statu
             supervisor=Supervisor(store),  # type: ignore[arg-type]
             state_store=store,
         )
-        credential_ref = await adapter.provision_credential("custom", protocol, "wrong-key", base_url)
+        credential_ref = await adapter.provision_credential("custom", protocol, secret, base_url)
         with pytest.raises(ModelDiscoveryError) as raised:
             await adapter.discover_models("custom", protocol, base_url, credential_ref)
         assert raised.value.rejected_status == rejected
         assert raised.value.upstream_status == status
         assert raised.value.upstream_detail == "Access denied for [redacted]. Check permissions."
-        assert "wrong-key" not in str(raised.value)
+        assert secret not in str(raised.value)
 
     try:
         asyncio.run(run())

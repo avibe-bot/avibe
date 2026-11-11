@@ -1173,11 +1173,7 @@ async def _model_discovery_http_error(response: aiohttp.ClientResponse, secret: 
         except asyncio.IncompleteReadError as exc:
             payload = exc.partial
         if len(payload) <= limit:
-            if secret:
-                payload = payload.replace(secret.encode(), b"[redacted]")
-                # JSON may escape a credential that contains quotes or non-ASCII.
-                payload = payload.replace(json.dumps(secret)[1:-1].encode(), b"[redacted]")
-            detail = _upstream_error_detail(payload, (("error",), ()))
+            detail = _upstream_error_detail(payload, (("error",), ()), secret=secret)
     except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
         pass
     return EngineClientError(
@@ -2339,8 +2335,15 @@ def _raw_error_fields(
 def _upstream_error_detail(
     payload: bytes,
     envelope_paths: tuple[ErrorEnvelopePath, ...],
+    *,
+    secret: str | None = None,
 ) -> str | None:
-    """Project the first envelope's ``message`` as bounded, redacted display text."""
+    """Project the first envelope's ``message`` as bounded, redacted display text.
+
+    Credentialed discovery bounds the body before calling this with its exact
+    secret. Decode those messages losslessly so JSON escaping or truncation
+    cannot hide the credential from redaction, then apply the display bound.
+    """
 
     message_paths = tuple((*path, "message") for path in envelope_paths)
     values: dict[JSONPath, str] = {}
@@ -2356,10 +2359,16 @@ def _upstream_error_detail(
         elif event == "scalar" and isinstance(value, str):
             values[path] = value
 
-    if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
+    if not payload or not project_json_reader(
+        io.BytesIO(payload), message_paths, visit,
+        lossless_string_paths=message_paths if secret else (),
+    ):
         return None
     for path in message_paths:
-        text = bounded_diagnostic_detail(values.get(path, ""))
+        message = values.get(path, "")
+        if secret:
+            message = message.replace(secret, "[redacted]")
+        text = bounded_diagnostic_detail(message)
         if text:
             return text
     return None

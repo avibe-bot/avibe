@@ -27,7 +27,8 @@ from vibe import model_hub_client, ui_server
 @pytest.mark.parametrize('language', ['en', 'zh'])
 @pytest.mark.parametrize('listed', [True, False])
 @pytest.mark.parametrize('status', [400, 503])
-def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path, language, listed, status):
+@pytest.mark.parametrize('has_detail', [True, False])
+def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path, language, listed, status, has_detail):
     """Only an unlisted route gains the hint; 503 still cools/retries, definite refusal does not."""
     source = _source('src_hint0001', (MODEL,) if listed else ())
     config = _loaded_catalog_config('claude', MODEL, source)
@@ -36,7 +37,7 @@ def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path
         kind=RawOutcomeKind.HTTP_ERROR, http_status=status,
         error_code='model_not_found' if status == 400 else None,
         redacted_message=None, stream_started=False, model_id=MODEL, source_id=source.id,
-        upstream_detail='No available accounts' if status == 503 else 'Model does not exist',
+        upstream_detail=('No available accounts' if status == 503 else 'Model does not exist') if has_detail else None,
     ))
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.resolve(backend='claude', model_id=MODEL, request={}))
@@ -46,7 +47,8 @@ def test_failed_passthrough_names_inventory_without_changing_settlement(tmp_path
     assert (hint in text) is not listed
     if not listed:
         assert ('Try choosing another model' if language == 'en' else '请尝试选择其他模型') in text
-    assert ('No available accounts' if status == 503 else 'Model does not exist') in text
+    assert (('No available accounts' if status == 503 else 'Model does not exist') in text) is has_detail
+    assert 'None' not in text
     assert store.config.sources[0].state.status == ('cooldown' if status == 503 else 'standby')
     assert projection.outcome == ('exhausted' if status == 503 else 'failed_terminal')
 
