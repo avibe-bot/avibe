@@ -51,6 +51,12 @@ capabilities:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
+      - tests/test_model_hub_engine_channel.py
+      - tests/test_model_hub_engine_channel_client.py
+      - tests/test_model_hub_engine_channel_producer.py
+      - tests/test_model_hub_engine_qualification.py
+      - tests/test_model_hub_engine_release_guard.py
+      - tests/test_release_mirror.py
       - tests/test_model_hub_hosted_tools_resolution.py
       - tests/test_model_hub_hosted_tools_config.py
       - tests/test_model_hub_capability_evidence.py

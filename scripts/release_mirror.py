@@ -54,6 +54,10 @@ PINNED_BY_MANIFEST = {
 FULL_RELEASES_ONLY = frozenset({"tmux/tmux-builds"})
 RELEASE_PREFIX = "releases/"
 INDEX_KEY = "index/releases.json"
+# The signed Model Hub engine channel index shares the bucket. Its one writer is
+# scripts/model_hub_engine_channel.py; a copy made here, or a deletion, could
+# replace a newer signed index or drop a withdrawal, so this job never touches it.
+RESERVED_KEYS = frozenset({"index/model-hub-engine.json"})
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 # The index and the ``latest/`` installers change bytes under one URL.
 MUTABLE_CACHE_CONTROL = "public, max-age=60"
@@ -418,6 +422,12 @@ class Bucket:
     def _s3api(self, *arguments: str) -> str:
         return _run(["aws", "s3api", *arguments, "--bucket", self.name, "--endpoint-url", self.endpoint_url])
 
+    @staticmethod
+    def _writable(key: str) -> str:
+        if key in RESERVED_KEYS:
+            raise MirrorError(f"{key} belongs to another writer; the release mirror never changes it")
+        return key
+
     def objects(self) -> dict[str, int]:
         output = self._s3api("list-objects-v2", "--output", "json")
         listing = json.loads(output) if output.strip() else {}
@@ -431,7 +441,7 @@ class Bucket:
 
     def put(self, key: str, path: Path, *, content_type: str, cache_control: str, sha256: str) -> None:
         self._s3api(
-            "put-object", "--key", key, "--body", str(path),
+            "put-object", "--key", self._writable(key), "--body", str(path),
             "--content-type", content_type, "--cache-control", cache_control,
             "--metadata", f"sha256={sha256}",
         )
@@ -441,7 +451,7 @@ class Bucket:
     ) -> None:
         # A server-side copy; REPLACE gives the copy its own headers.
         self._s3api(
-            "copy-object", "--copy-source", f"{self.name}/{source}", "--key", key,
+            "copy-object", "--copy-source", f"{self.name}/{source}", "--key", self._writable(key),
             "--metadata-directive", "REPLACE", "--content-type", content_type,
             "--cache-control", cache_control, "--content-disposition", content_disposition,
             "--metadata", f"sha256={sha256}",
@@ -454,7 +464,7 @@ class Bucket:
 
     def delete(self, key: str) -> None:
         # DeleteObjects requires a request checksum that R2 may not implement.
-        self._s3api("delete-object", "--key", key)
+        self._s3api("delete-object", "--key", self._writable(key))
 
 
 def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run: bool) -> int:

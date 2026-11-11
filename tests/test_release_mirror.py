@@ -494,3 +494,35 @@ def test_pinned_manifest_archives_download_from_the_mirrored_release(repository)
             f"https://dl.avibe.bot/{mirror.REPOSITORIES[repository]}releases/{tag}/{archive['name']}",
             url,
         ]
+
+
+def test_the_mirror_never_writes_or_deletes_the_signed_engine_channel_index(monkeypatch, tmp_path):
+    """MH-ENGINE-CHANNEL-008: the engine channel index has its own writer (scripts/model_hub_engine_channel.py).
+    A mirror run that copied or deleted it could put back an older signed index or drop a
+    withdrawal, so no plan names it and the bucket client refuses it outright."""
+    from scripts import model_hub_engine_channel
+
+    channel_key = model_hub_engine_channel.INDEX_KEY
+    assert mirror.RESERVED_KEYS == {channel_key}
+    (release,) = releases(github_release("v1.0.0", published_at="2026-01-01T00:00:00Z", assets=("a.tgz",)))
+    objects = {channel_key: 4096, "releases/gh-v0.9.0rc1/old.tgz": 1}
+
+    result = mirror.plan(REPOSITORY, [release], objects, None)
+
+    planned = {key for key, _ in result.uploads} | set(result.deletions) | {key for key, _, _ in result.aliases}
+    assert channel_key not in planned and result.deletions == ("releases/gh-v0.9.0rc1/old.tgz",)
+
+    calls = []
+    monkeypatch.setattr(mirror, "_run", lambda command: calls.append(command) or "")
+    bucket = mirror.Bucket("avibe", "https://example.invalid")
+    body = tmp_path / "body"
+    body.write_bytes(b"{}")
+    for write in (
+        lambda: bucket.put(channel_key, body, content_type="application/json", cache_control="x", sha256="0" * 64),
+        lambda: bucket.copy("releases/v1.0.0/a.tgz", channel_key, content_type="x", cache_control="x",
+                            content_disposition="x", sha256="0" * 64),
+        lambda: bucket.delete(channel_key),
+    ):
+        with pytest.raises(mirror.MirrorError, match="another writer"):
+            write()
+    assert calls == []

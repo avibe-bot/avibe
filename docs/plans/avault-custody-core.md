@@ -323,6 +323,63 @@ nor the sandbox integrity pin is changed by this integration.
 
 ---
 
+### 8.6 Public verification for the Model Hub engine channel
+
+The Model Hub engine channel (`model-hub-engine-channel.md`) is the first use
+of avault that involves none of the user's secrets. Avibe downloads a signed
+index of engine releases and has to decide whether a key it ships signed those
+bytes. It asks avault, so Avibe gains no crypto stack of its own.
+
+**Client side: avault's keyless `verify`, 0.1.10 or later.** Avibe computes
+`SHA256("avibe:model-hub-engine-channel:v1\n" || payload)` over the exact
+payload bytes it downloaded, takes the public key from the roots shipped in
+Avibe, and runs `avault verify` with the fixed scheme `ecdsa-secp256k1-der`.
+The index can choose none of the three: not the key, not the algorithm, not
+the digest. Only exit status 0 together with `{"valid": true}` counts. Exit 1,
+exit 70, a timeout, unreadable output, or a missing or older binary all mean
+the index is not trusted.
+
+This call does not go through Avibe's general avault caller. That caller
+exists for operations that load the master key: it selects a store and records
+Keychain authorization state from the result. `verify` reads no key, so the
+channel's caller selects no store, sends no passphrase line, drops `AVAULT_*`
+from the child's environment, and never installs or upgrades avault. It finds
+the binary through Avibe's existing read-only path lookup and runs two short,
+bounded processes: `version`, then `verify`. Verification works the same on a
+machine that has no Vault and never creates one.
+
+**Publisher side: `sign` with a dedicated key.** The release signer holds one
+secp256k1 key for the channel, sealed by avault on the signer host. It is not
+a wallet key and signs nothing else. The publication script commits the exact
+payload to a ledger on that host, then sends avault the digest above and
+receives a DER signature; the key never leaves avault, and neither the script
+nor any Agent sees it. The ledger holds no secret. Before anything is
+published, the script checks the new envelope exactly as a client would,
+against the shipped root, so a signer holding any other key produces nothing
+publishable.
+
+**Key creation is not possible with avault 0.1.10.** Its `keypair generate`
+and `keypair import` accept only `ed25519`. Creating the channel key inside
+avault needs the later avault release that adds secp256k1 generation
+(avault#47, not yet merged or released):
+
+```text
+avault keypair generate --name NAME --curve secp256k1
+{"envelope": {"ciphertext": "...", "nonce": "...", "wrap_meta": "..."},
+ "curve": "secp256k1",
+ "public_key": "<66 lowercase hex characters: compressed SEC1>"}
+```
+
+That output is the sealed envelope the signer keeps and the public key Avibe
+ships as a root; no private key or seed is printed. It is a requirement on the
+signer only. Installed clients keep needing nothing beyond `verify` in 0.1.10,
+and Avibe's managed avault pin does not move for it. Generating the key
+outside avault and importing it is not the intended path.
+
+No channel key exists today, and Avibe ships no root, so the channel is off.
+Creating the key and commissioning the signer are owner-held operations
+(`docs/release.md`, Model Hub engine channel).
+
 ## 9. Authorization & grants
 
 - **ApprovalCard** (§7.2) is rendered on the current session's surface (Web chat / IM). It shows the agent/session, the secret **name**, the exact command/host, the requested scope, and TTL options. It never shows the value.
