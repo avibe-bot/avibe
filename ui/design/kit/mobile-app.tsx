@@ -161,31 +161,51 @@ export function AccountPage({ instance, licenses = false }: { instance?: MobileI
   const t = useCopy();
   return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section>{licenses && <AboutSection />}<div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
 }
-/** One component in the App binary and the license text collected for it at build time. */
-export interface MobileLicense { name: string; version: string; license: string; text: string }
-/** An MPL-2.0 component and where recipients get its unmodified covered source. */
-export interface MobileSourceOffer { name: string; version: string; registry: string; upstream: string }
-export interface MobileLicensesFixture { count: number; sources: MobileSourceOffer[]; licenses: MobileLicense[] }
+/** Where recipients get an MPL-2.0 crate's unmodified covered source. */
+export interface MobileSourceCrate { name: string; registry: string }
+/**
+ * One line of the source offer: a crate, or a family that shares one version and
+ * one upstream commit (uniffi and its related crates), so the source link appears once.
+ */
+export interface MobileSourceOffer { crates: MobileSourceCrate[]; version: string; upstream: string }
+/** One distinct license text and every component it covers. Text keeps its hard wraps; the page reflows them. */
+export interface MobileLicenseGroup { license: string; components: string[]; text: string; open?: boolean }
+export interface MobileLicensesFixture { sources: MobileSourceOffer[]; groups: MobileLicenseGroup[] }
 
 /** Account's About section: the App's own information, not the instance's. Proposed. */
 function AboutSection() {
   const t = useCopy();
   return <section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('关于', 'About')}</h2><button type="button" className={cn(raised, 'flex w-full items-center gap-3 text-left')}><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft"><ScrollText className="size-5 text-mint-ink" /></span><span className="min-w-0 flex-1 text-base font-semibold">{t('开源许可', 'Open-source licenses')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></button></section>;
 }
+/** Hard wraps become spaces; a blank line still ends a paragraph. */
+function paragraphs(text: string) {
+  return text.split(/\n\s*\n/).map(block => block.split('\n').map(line => line.trim()).join(' ').trim()).filter(Boolean);
+}
+const textLink = 'inline-flex items-center gap-1 text-sm font-medium text-foreground underline underline-offset-4';
 /**
- * Open-source licenses. The page is generated from the notices collected with
- * the App binary: the MPL-2.0 source offer first, then every component with
- * its license text, in one plain scrolling page. Proposed.
+ * Open-source licenses, generated from the notices collected with the App
+ * binary: the MPL-2.0 source offer first, then each distinct license text once
+ * with the components it covers. Proposed.
  */
 export function LicensesPage({ fixture }: { fixture: MobileLicensesFixture }) {
   const t = useCopy();
-  const link = 'block break-all text-xs leading-5 text-foreground underline';
-  return <CloudScreen><Brand back /><PageTitle title={t('开源许可', 'Open-source licenses')} subtitle={t('Avibe App 包含以下开源组件。感谢它们的作者。', 'The Avibe app includes the open-source components below. Thanks to their authors.')} />
-    <section className={raised} aria-labelledby="licenses-source"><h2 id="licenses-source" className="text-base font-semibold">{t('MPL-2.0 组件的源代码', 'Source code for MPL-2.0 components')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('以下组件按 Mozilla Public License 2.0 分发，未作修改。可从下方的 crates.io 归档或上游源代码地址获取它们的源代码。', 'These components are distributed unmodified under the Mozilla Public License 2.0. Get their source code from the crates.io archive or upstream source listed for each.')}</p>
-      <ul className="mt-4 divide-y divide-edge border-t border-edge">{fixture.sources.map(source => <li key={source.name} className="py-4 last:pb-0"><p className="text-sm font-semibold">{source.name} <span className="font-normal text-muted">{source.version}</span></p><p className="mt-2 text-xs text-muted">{t('crates.io 归档', 'crates.io archive')}</p><a href={source.registry} className={link}>{source.registry}</a><p className="mt-2 text-xs text-muted">{t('上游源代码', 'Upstream source')}</p><a href={source.upstream} className={link}>{source.upstream}</a></li>)}</ul>
+  const total = fixture.groups.reduce((sum, group) => sum + group.components.length, 0);
+  return <CloudScreen><Brand back /><PageTitle title={t('开源许可', 'Open-source licenses')} subtitle={t(`Avibe App 包含 ${total} 个开源组件。感谢它们的作者。`, `The Avibe app includes ${total} open-source components. Thanks to their authors.`)} />
+    <section className={raised} aria-labelledby="licenses-source"><h2 id="licenses-source" className="text-base font-semibold">{t('MPL-2.0 组件的源代码', 'Source code for MPL-2.0 components')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('以下组件按 Mozilla Public License 2.0 分发，未作修改。可从 crates.io 归档或上游源代码获取它们的源代码。', 'These components are distributed unmodified under the Mozilla Public License 2.0. Get their source code from the crates.io archive or the upstream source.')}</p>
+      <ul className="mt-4 divide-y divide-edge border-t border-edge">{fixture.sources.map(source => {
+        const [first, ...related] = source.crates;
+        return <li key={first.name} className="py-4 last:pb-0">
+          <p className="break-words text-sm font-semibold">{related.length ? t(`${first.name} 及 ${related.length} 个相关组件，${source.version}`, `${first.name} and ${related.length} related crates, ${source.version}`) : <>{first.name} <span className="font-normal text-muted">{source.version}</span></>}</p>
+          {related.length > 0 && <p className="mt-1 break-words text-xs leading-5 text-muted">{t('crates.io 归档：', 'crates.io archives: ')}{source.crates.map((crate, index) => <span key={crate.name}>{index > 0 && ', '}<a href={crate.registry} className="underline underline-offset-2">{crate.name}</a></span>)}</p>}
+          <p className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">{!related.length && <a href={first.registry} className={textLink}>{t('crates.io 归档', 'crates.io archive')}<ExternalLink className="size-3.5" /></a>}<a href={source.upstream} className={textLink}>{t('源代码', 'Source code')}<ExternalLink className="size-3.5" /></a></p>
+        </li>;
+      })}</ul>
     </section>
-    <section className="mt-8" aria-labelledby="licenses-list"><h2 id="licenses-list" className="mb-4 text-sm font-semibold">{t(`组件许可（${fixture.count}）`, `Component licenses (${fixture.count})`)}</h2>
-      <ul className="divide-y divide-edge rounded-3xl border border-edge bg-surface/80 shadow-elevation-0">{fixture.licenses.map(item => <li key={item.name} className="p-5"><p className="break-words text-sm font-semibold">{item.name} <span className="font-normal text-muted">{item.version}</span></p><p className="mt-1 text-xs text-muted">{item.license}</p><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-5 text-muted">{item.text}</p></li>)}</ul>
+    <section className="mt-8" aria-labelledby="licenses-list"><h2 id="licenses-list" className="mb-4 text-sm font-semibold">{t('许可文本', 'License texts')}</h2>
+      <div className="divide-y divide-edge rounded-3xl border border-edge bg-surface/80 shadow-elevation-0">{fixture.groups.map(group => <details key={group.license + group.components[0]} open={group.open} className="group">
+        <summary className="flex cursor-pointer list-none items-center gap-3 p-5 [&::-webkit-details-marker]:hidden"><span className="min-w-0 flex-1"><span className="block text-base font-semibold">{group.license}</span><span className="mt-1 block text-xs text-muted">{t(`${group.components.length} 个组件`, `${group.components.length} ${group.components.length === 1 ? 'component' : 'components'}`)}</span></span><ChevronRight className="size-4 shrink-0 text-muted transition-transform group-open:rotate-90" /></summary>
+        <div className="px-5 pb-5"><p className="text-xs font-semibold">{t('覆盖的组件', 'Covers')}</p><p className="mt-1 break-words text-xs leading-5 text-muted">{group.components.join(', ')}</p><div className="mt-4 border-t border-edge pt-4">{paragraphs(group.text).map((paragraph, index) => <p key={index} className="mt-3 break-words text-xs leading-5 text-muted first:mt-0">{paragraph}</p>)}</div></div>
+      </details>)}</div>
     </section>
     <p className="pt-7 pb-3 text-center text-xs leading-6 text-muted">{t('此列表随 App 构建时生成。', 'This list is generated when the app is built.')}</p>
   </CloudScreen>;

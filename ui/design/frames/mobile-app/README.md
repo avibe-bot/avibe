@@ -328,12 +328,24 @@ and Account's `licenses` flag live in `ui/design/kit/mobile-app.tsx`.
 
 | File / surface | States |
 | --- | --- |
-| `licenses` | `entry` (Account with the About row), `default` (first screen), `scrolled` (390 × 2600 excerpt: the whole source offer, then the start of the list) |
+| `licenses` | `entry` (Account with the About row), `default` (first screen), `group-open` (390 × 2400 whole page, MIT group expanded) |
 
 6 frames / 12 theme captures (3 states × zh/en × light/dark).
 
-The page is one plain scroll generated from the collected notices: the
-MPL-2.0 source offer first (each crate, version, crates.io archive and
-upstream source, as `NOTICE.md` lists them), then every component with its
-version, license expression and text. Fixture versions and texts are
-illustrative.
+Revised after 产品伙伴's review on 2026-11-11 (direction approved; the
+revision goes to implementation without a further owner review):
+
+- Entry stays Account → About → Open-source licenses.
+- The MPL-2.0 source offer stays at the top. A crate family sharing one version
+  and upstream commit is one line: "uniffi and 8 related crates, 0.31.2", the
+  crate names in small type (each linking its crates.io archive), and one
+  Source code link.
+- Links are labels (crates.io archive / Source code) with an external-link
+  icon; raw URLs are never shown and the targets are unchanged.
+- Each distinct license text appears once, with the components it covers
+  ("MIT · 214 components"), collapsed until opened.
+- License texts are reflowed: hard wraps become spaces and a blank line ends a
+  paragraph. No monospace.
+
+Fixture names and counts are illustrative; the App renders the generated
+notices.
