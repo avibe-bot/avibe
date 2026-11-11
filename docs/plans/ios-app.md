@@ -136,6 +136,7 @@ interface AvibeNative {
 | --- | --- | --- |
 | `accountPresentation` | `app.showAccount()`, `app.setAccountActionAvailable({available})` | - |
 | `app` | `app.info()`, `app.openExternal({url})` | `app.foreground`, `app.background` |
+| `badge` | `badge.set({count})`: the App icon badge shows `count`, the Inbox total the Web UI shows; `0` clears it. Fire-and-forget. | - |
 | `haptics` | `haptics.impact({style})`, `haptics.notify({type})`, `haptics.selection()` | - |
 | `keyboardResizesViewport` | No calls. Declares that UIKit shrinks this WebView's viewport with `keyboardLayoutGuide`. | - |
 | `voice` | `voice.permission()` (the grant itself needs no call) | `voice.trigger({action: 'start' \| 'stop'})` from App Intents and hardware |
@@ -162,6 +163,17 @@ Phase 0a PR 2 implements this v1 subset:
 - `haptics.impact({style})` accepts `light`, `medium`, `heavy`, `soft`, or
   `rigid`; `haptics.notify({type})` accepts `success`, `warning`, or `error`;
   and `haptics.selection()` has no parameters;
+- `badge: 1` admits `badge.set({count})` from the selected-instance main frame
+  (the rule `push.*` uses), which returns `null` at once and sets the App icon
+  badge with `UNUserNotificationCenter.setBadgeCount`. `count` is a number:
+  a negative one clears the badge, a fraction is rounded down, and anything
+  above 2147483647 shows that. Any other value, or another parameter, is
+  `invalid_argument`. The shell sets nothing while the user does not allow the
+  App's badges. The Web UI calls it with the same total it mirrors to a PWA's
+  `setAppBadge`, `0` included, and again after a read when the App returns to
+  the foreground; a push in the background has the notification service
+  extension set the instance's total meanwhile (section 8). Signing out or
+  switching accounts clears the badge;
 - `voice.permission()` returns `{state: 'granted' | 'denied' | 'prompt'}`. It
   does not itself display a permission prompt; the user-initiated Web media
   request remains the single prompt path;

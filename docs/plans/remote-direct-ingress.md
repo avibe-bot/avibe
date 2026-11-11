@@ -36,7 +36,7 @@ Host: <hostname>:443
 
 ```
 
-The instance answers `HTTP/1.1 200 Connection Established` and from then on relays bytes in both directions. The App forwards the head WebKit sent to its loopback listener (or writes this canonical one) and reports the instance's answer back, so a refusal reaches WebKit as a failed proxy connection.
+The instance answers `HTTP/1.1 200 Connection Established` and from then on relays bytes in both directions. The App writes this canonical head, whatever WebKit sent to its loopback listener, and reports the instance's answer back, so a refusal reaches WebKit as a failed proxy connection.
 
 | Request | Answer |
 | --- | --- |

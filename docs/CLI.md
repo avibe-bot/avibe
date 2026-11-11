@@ -830,6 +830,13 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
   with `--on-failure {none,agent}`, a per-run `--timeout` (default 21600
   seconds, 0 = none), and `--cwd` for the directory the command runs in
 
+One-shot `--at` Tasks tolerate up to five minutes of scheduler lateness, including
+service restarts. An older missed fire is retired without executing its message
+or command and records a failed Run with a durable notice through the normal
+failure-delivery route to its creator (with the workspace inbox as fallback).
+Inspect the Task before manually running time-sensitive work. This grace does
+not change recurring `--cron` schedules.
+
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
 `AVIBE_SESSION_ID`; the printed definition's `session_id` shows the resolved

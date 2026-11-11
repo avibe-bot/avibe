@@ -3459,6 +3459,12 @@ export const ChatPage: React.FC = () => {
     : { executionProcess: showAgentActivity, harnessMessages: true, backgroundTasks: true };
   // The in-chat ways to the Settings switch stay only where it decides what shows.
   const offersActivitySwitch = canEditAgentActivityVisibility && details.harnessMessages;
+  // Harness input waiting for its Turn is hidden with the delivered Harness rows;
+  // what the user sent, and anything else, stays in the strip. Only the rows drawn
+  // change: Send now still acts on the real queue head.
+  const shownQueueRows = details.harnessMessages
+    ? undefined
+    : queueRows.filter((row) => chatRowKind(row).kind !== 'harness');
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
@@ -3657,6 +3663,7 @@ export const ChatPage: React.FC = () => {
         {writable && (
           <QueueStrip
             queue={queueRows}
+            rows={shownQueueRows}
             pendingIds={pendingRowIds}
             onRemove={removeQueued}
             onRecall={recallQueued}
@@ -4153,10 +4160,14 @@ export const QueueStrip: React.FC<{
   botName?: string | null;
   /** Rows the reader just sent that the server has not queued yet. */
   pendingIds?: ReadonlySet<string>;
-}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false, botName = null, pendingIds = NO_PENDING_ROWS }) => {
+  /** The rows drawn, when some of `queue` is hidden (a Bot's queued Harness input
+   *  with "Hide details" on, docs/plans/bots.md D5). Send now keeps reading the
+   *  whole `queue`: it promotes the real head, which may be a hidden row. */
+  rows?: WorkbenchMessage[];
+}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false, botName = null, pendingIds = NO_PENDING_ROWS, rows = queue }) => {
   const { t } = useTranslation();
-  if (queue.length === 0) return null;
-  const held = queue.filter((item) => item.requires_explicit_retry === true);
+  if (rows.length === 0 || queue.length === 0) return null;
+  const held = rows.filter((item) => item.requires_explicit_retry === true);
   const retryRequired = held.length > 0;
   // An input held because its Agent cannot run, whose notice offers Continue on Vibey
   // (``agent_unavailable``), is continued there rather than by fixing a startup error.
@@ -4170,12 +4181,12 @@ export const QueueStrip: React.FC<{
   // there is nothing to send now.
   const nothingQueued = queue.every((item) => pendingIds.has(item.id));
   const buttonBusy = sendingNow || (headFenced && !reconciling);
-  const waiting = queue.some((item) => !isQueueDeliveryFenced(item));
+  const waiting = rows.some((item) => !isQueueDeliveryFenced(item));
   const title = retryRequired
-    ? t('chat.queue.retryRequired', { count: queue.length })
+    ? t('chat.queue.retryRequired', { count: rows.length })
     : botName
-      ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: queue.length })
-      : t('chat.queue.title', { count: queue.length });
+      ? t(waiting ? 'bots.conversation.notDelivered' : 'bots.conversation.delivering', { count: rows.length })
+      : t('chat.queue.title', { count: rows.length });
   return (
     <div className="motion-appear shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
@@ -4217,7 +4228,7 @@ export const QueueStrip: React.FC<{
         )}
         {/* Why the user's own message is still here: the Bot's Turn refused it. A
             message from another Bot or Agent waits behind the user's by design. */}
-        {botName && !retryRequired && queue.some((item) => item.source === 'user' && !isQueueDeliveryFenced(item)) && (
+        {botName && !retryRequired && rows.some((item) => item.source === 'user' && !isQueueDeliveryFenced(item)) && (
           <p className="px-1 pb-1.5 text-[11px] text-muted">{t('bots.conversation.notDeliveredHint', { name: botName })}</p>
         )}
         <div
@@ -4226,7 +4237,7 @@ export const QueueStrip: React.FC<{
         >
           {/* Keyed so a row sent from here keeps its element from pending to the
               server's queue row. */}
-          {queue.map((item) => (
+          {rows.map((item) => (
             <QueueRow
               key={transcriptRowKey(item)}
               item={item}

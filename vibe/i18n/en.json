@@ -154,6 +154,7 @@
     },
     "task": {
       "resultNotRecorded": "The result of this run could not be recorded: the task was reclaimed, repointed or removed while it was running, so its stored state is unchanged.",
+      "scheduleMissed": "The one-shot Task scheduled for {run_at} did not run: the scheduler resumed after its five-minute grace period. The Task has been retired; review it before running it manually.",
       "schedulerCallbackFailed": "The scheduled fire failed before it could be queued: {detail}",
       "scheduleReplaced": "This scheduled fire belongs to an earlier task schedule and was not executed."
     },

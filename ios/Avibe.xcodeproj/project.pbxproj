@@ -20,6 +20,8 @@
 		10000000000000000000000B /* NavigationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* NavigationPolicyTests.swift */; };
 		10000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* Assets.xcassets */; };
 		10000000000000000000000D /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
+		1000000000000000000000D0 /* NativeBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
+		1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D1 /* NativeBadgeTests.swift */; };
 		10000000000000000000000E /* MobileAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		10000000000000000000000F /* MobileAuthTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
@@ -81,6 +83,8 @@
 		20000000000000000000000E /* AvibeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AvibeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		20000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		200000000000000000000010 /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
+		2000000000000000000000D0 /* NativeBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBadge.swift; sourceTree = "<group>"; };
+		2000000000000000000000D1 /* NativeBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBadgeTests.swift; sourceTree = "<group>"; };
 		200000000000000000000011 /* MobileAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccount.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* MobileAuthTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransport.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* MobileOnboardingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingBridge.swift; sourceTree = "<group>"; };
@@ -155,6 +159,7 @@
 				200000000000000000000013 /* MobileOnboardingBridge.swift */,
 				200000000000000000000014 /* MobileOnboardingContainer.swift */,
 				200000000000000000000018 /* MobilePasskey.swift */,
+				2000000000000000000000D0 /* NativeBadge.swift */,
 				200000000000000000000010 /* NativeBridge.swift */,
 				2000000000000000000000A2 /* NativePushCoordinator.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
@@ -188,6 +193,7 @@
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
+				2000000000000000000000D1 /* NativeBadgeTests.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
 			);
@@ -413,6 +419,7 @@
 				100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */,
 				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
 				100000000000000000000015 /* MobilePasskey.swift in Sources */,
+				1000000000000000000000D0 /* NativeBadge.swift in Sources */,
 				10000000000000000000000D /* NativeBridge.swift in Sources */,
 				1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
@@ -434,6 +441,7 @@
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
+				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
 			);
