@@ -4122,6 +4122,8 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
     assert sends[0][0]["endpoint"] == subscription["endpoint"]
     assert sends[0][1]["title"] == "Hello"
     assert sends[0][1]["badge_count"] == 0
+    # The iOS App shows a notification while it is in front only for this tag.
+    assert sends[0][1]["tag"] == "web-push-test"
     # The test surface carries the same authorization evaluation the normal
     # path applies, so a successful test send can be compared against the
     # normal-only gates (#1434). A local install has no remote gates.

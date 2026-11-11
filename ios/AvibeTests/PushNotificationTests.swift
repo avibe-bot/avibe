@@ -17,6 +17,54 @@ final class PushNotificationTests: XCTestCase {
         XCTAssertNotEqual(value, "AVIBE_PUSH_FALLBACK")
     }
 
+    /// While the App is in front, the test notification sent from Settings
+    /// is shown, without the badge, which the Web UI keeps (`badge.set`).
+    @MainActor
+    func testInFrontTheTestNotificationIsShownWithoutTheBadge() throws {
+        // The App is the notification center's delegate, so it decides.
+        XCTAssertTrue(
+            UNUserNotificationCenter.current().delegate is AvibeAppDelegate
+        )
+        // What the extension makes of the instance's test send: its tag in
+        // `threadIdentifier`, and the Inbox total as of the send.
+        let content = UNMutableNotificationContent()
+        content.title = "Avibe"
+        content.body = "Notifications are ready."
+        content.threadIdentifier = "web-push-test"
+        content.badge = 3
+        XCTAssertEqual(try presentedInFront(content), [.banner, .list, .sound])
+    }
+
+    /// A real notification stays silent while the App is in front: the Inbox
+    /// and the badge in the App already show it.
+    @MainActor
+    func testInFrontARealNotificationStaysSilent() throws {
+        let receiver = try loadReceiverFixture()
+        let decrypted = try processThroughNSE(
+            receiver: receiver,
+            privateKey: try XCTUnwrap(
+                PushBase64URL.decode(receiver.receiverPrivateKey)
+            ),
+            generation: receiver.expectedNative.bindGeneration
+        )
+        XCTAssertEqual(decrypted.threadIdentifier, receiver.expected.tag)
+        XCTAssertEqual(try presentedInFront(decrypted), [])
+    }
+
+    /// So does one the extension could not decrypt: the relay's envelope has
+    /// no thread, so the fallback alert carries no tag.
+    @MainActor
+    func testInFrontAnUndecryptedNotificationStaysSilent() throws {
+        let receiver = try loadReceiverFixture()
+        let fallback = try processThroughNSE(
+            receiver: receiver,
+            privateKey: Data(repeating: 1, count: 32),
+            generation: receiver.expectedNative.bindGeneration
+        )
+        assertFallback(fallback)
+        XCTAssertEqual(try presentedInFront(fallback), [])
+    }
+
     func testSharedAccessGroupResolverRejectsUnexpandedOrMissingValues() {
         XCTAssertEqual(
             try? PushKeychainStore.resolveSharedAccessGroup(
@@ -371,6 +419,42 @@ final class PushNotificationTests: XCTestCase {
     }
 }
 
+private final class PresentationRecorder: @unchecked Sendable {
+    var options: UNNotificationPresentationOptions?
+}
+
+/// `UNNotification` has no public initializer. Decoding one from a coder that
+/// answers a request holding `content` (and a date), and nothing else, gives
+/// the notification the App's delegate is handed.
+private final class StubNotificationCoder: NSKeyedArchiver {
+    var content = UNNotificationContent()
+
+    override func decodeObject(forKey key: String) -> Any? {
+        switch key {
+        case "request":
+            return UNNotificationRequest(
+                identifier: "notification",
+                content: content,
+                trigger: nil
+            )
+        case "date":
+            return Date()
+        default:
+            return nil
+        }
+    }
+
+    override func decodeBool(forKey key: String) -> Bool { false }
+
+    override func decodeInt64(forKey key: String) -> Int64 { 0 }
+
+    override func decodeDouble(forKey key: String) -> Double { 0 }
+
+    override func containsValue(forKey key: String) -> Bool {
+        key == "request" || key == "date"
+    }
+}
+
 private final class RecordingPushKeychainItemAccess:
     PushKeychainItemAccessing
 {
@@ -541,6 +625,30 @@ private extension PushNotificationTests {
         }
         wait(for: [expectation], timeout: 1)
         return try XCTUnwrap(processed)
+    }
+
+    /// What the App's notification-center delegate shows for `content` when
+    /// it arrives while the App is in front; `nil` if no delegate method runs.
+    @MainActor
+    func presentedInFront(
+        _ content: UNNotificationContent
+    ) throws -> UNNotificationPresentationOptions? {
+        let coder = StubNotificationCoder(requiringSecureCoding: false)
+        coder.content = content
+        let notification = try XCTUnwrap(UNNotification(coder: coder))
+        XCTAssertEqual(
+            notification.request.content.threadIdentifier,
+            content.threadIdentifier
+        )
+        let delegate: UNUserNotificationCenterDelegate = AvibeAppDelegate()
+        let presented = PresentationRecorder()
+        delegate.userNotificationCenter?(
+            UNUserNotificationCenter.current(),
+            willPresent: notification
+        ) { options in
+            presented.options = options
+        }
+        return presented.options
     }
 
     func assertFallback(_ result: UNNotificationContent) {

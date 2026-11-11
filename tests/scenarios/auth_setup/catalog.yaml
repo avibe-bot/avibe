@@ -336,6 +336,8 @@ scenarios:
     layer: contract
     backend: ios
     test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-148 completes email OTP discovery and authorized instance selection
+    supporting_tests:
+      - ui/e2e/onboarding-fidelity/mobile-otp.spec.ts
     reason: >-
       The owning browser boundary is the bundled React page and its fixed
       avibeMobile contract. The collected Vitest case drives the approved

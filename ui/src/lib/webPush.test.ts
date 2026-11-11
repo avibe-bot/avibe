@@ -1334,6 +1334,101 @@ describe('web push recovery', () => {
     expect(api.subscribeWebPush).toHaveBeenCalledOnce();
   });
 
+  it('reports native push enabled only once the instance has accepted the subscription', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') return { state: 'off' as const };
+      if (method === 'push.subscribe') {
+        return {
+          endpoint: 'https://avibe.bot/api/push/apns/native-new',
+          keys: { p256dh: 'new-key', auth: 'new-auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: writableLocalStorage(),
+    });
+    let accept: ((value: { ok: true; accepted: true }) => void) | undefined;
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      subscribeWebPush: vi.fn(() => new Promise((resolve) => {
+        accept = resolve;
+      })),
+    } as unknown as ApiContextType;
+    const store = pendingRegistrationStore();
+
+    let settled = false;
+    const enabled = enableWebPush(api, { pendingRegistrationStore: store }).finally(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(api.subscribeWebPush).toHaveBeenCalledOnce());
+    // The native side is subscribed and the POST is out: still not enabled, and
+    // the subscription waits in the pending store until the instance answers.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(store.value?.endpoint).toBe('https://avibe.bot/api/push/apns/native-new');
+
+    accept?.({ ok: true, accepted: true });
+    await expect(enabled).resolves.toMatchObject({
+      endpoint: 'https://avibe.bot/api/push/apns/native-new',
+    });
+    expect(store.value).toBeNull();
+  });
+
+  it('reports a refused native registration as off, not registering', async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === 'push.status') {
+        return {
+          state: 'on' as const,
+          endpoint: 'https://avibe.bot/api/push/apns/native-current',
+          keys: { p256dh: 'key', auth: 'auth' },
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    });
+    vi.stubGlobal('window', {
+      avibeNative: {
+        contract: 1,
+        platform: 'ios',
+        shellVersion: 'test',
+        capabilities: { push: 1 },
+        call,
+        on: vi.fn(() => () => undefined),
+      },
+      localStorage: { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() },
+    });
+    const refused = Object.assign(new Error('invalid subscription'), {
+      status: 400,
+      code: 'invalid_subscription',
+    });
+    const api = {
+      getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+      getWebPushStatus: vi.fn(async () => ({
+        current_subscription_enabled: false,
+        current_subscription_repairable: false,
+      })),
+      subscribeWebPush: vi.fn(async () => {
+        throw refused;
+      }),
+    } as unknown as ApiContextType;
+    const store = pendingRegistrationStore();
+
+    // A retry cannot turn a refusal into a registration, so the control offers
+    // to enable again instead of registering forever.
+    await expect(reconcileWebPush(api, store)).resolves.toMatchObject({
+      status: 'disabled',
+    });
+    expect(store.value?.endpoint).toBe('https://avibe.bot/api/push/apns/native-current');
+  });
+
   it('reconciles a native endpoint again after the instance disables it', async () => {
     let nativeEndpoint = 'https://avibe.bot/api/push/apns/native-old';
     const nativeSubscription = () => ({
@@ -1635,8 +1730,10 @@ describe('web push recovery', () => {
     } as unknown as ApiContextType;
     const store = pendingRegistrationStore();
 
+    // The App holds the subscription and the instance has not stored it: not
+    // enabled, and not off either; the next reconcile registers it.
     await expect(reconcileWebPush(api, store)).resolves.toMatchObject({
-      status: 'disabled',
+      status: 'registering',
     });
     expect(store.value?.endpoint).toBe(
       'https://avibe.bot/api/push/apns/native-new',

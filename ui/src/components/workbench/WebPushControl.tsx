@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bell, BellOff, Loader2, Smartphone } from 'lucide-react';
 
@@ -16,9 +16,19 @@ import {
   type WebPushSupportState,
 } from '@/lib/webPush';
 import { hasNativeCapability, nativePushStatus } from '@/lib/native';
+import { onPageReactivated } from '@/lib/pageActivity';
 
 type Status = 'checking' | WebPushReconcileStatus;
 type DisableFeedback = 'not_saved';
+
+/** How long to wait before each further attempt to register a waiting native subscription. */
+const REGISTRATION_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000];
+
+/** The instance has no enabled subscription for the endpoint a test was sent to. */
+function isNoSubscription(error: unknown): boolean {
+  const { status, code } = (error ?? {}) as { status?: unknown; code?: unknown };
+  return status === 404 && code === 'no_subscription';
+}
 
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
@@ -31,12 +41,16 @@ export const WebPushControl: React.FC = () => {
   const [support, setSupport] = useState<WebPushSupportState | null>(null);
   const [disableFeedback, setDisableFeedback] = useState<DisableFeedback | null>(null);
   const canRegister = capabilities.can_read_instance;
+  // Attempts made since this device's subscription began waiting for the instance.
+  const [registrationAttempt, setRegistrationAttempt] = useState(0);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     const result = await reconcileWebPush(api);
     setSupport(result.support);
     setStatus(result.status);
-  };
+    if (result.status !== 'registering') setRegistrationAttempt(0);
+    return result;
+  }, [api]);
 
   useEffect(() => {
     if (!canRegister) return;
@@ -44,8 +58,38 @@ export const WebPushControl: React.FC = () => {
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
   }, [canRegister]);
 
+  // In the App, the enable flow can be interrupted by its own permission prompt
+  // or by leaving the App, and the foreground reconcile (WebPushReconciler) is
+  // what finishes it; read the result again when the page comes back, so this
+  // control does not keep showing a state that reconcile has since moved past.
+  useEffect(() => {
+    if (!canRegister || !hasNativeCapability('push')) return;
+    return onPageReactivated(() => {
+      void refresh();
+    });
+  }, [canRegister, refresh]);
+
+  // While the instance has yet to store this device's native subscription, keep
+  // registering it here rather than leaving it to the next foreground: each
+  // reconcile posts the waiting subscription again.
+  useEffect(() => {
+    if (status !== 'registering' || busy) return;
+    const delay = REGISTRATION_RETRY_DELAYS_MS[
+      Math.min(registrationAttempt, REGISTRATION_RETRY_DELAYS_MS.length - 1)
+    ];
+    const timer = window.setTimeout(() => {
+      void refresh().then((result) => {
+        if (result.status === 'registering') setRegistrationAttempt((attempt) => attempt + 1);
+      });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [status, busy, registrationAttempt, refresh]);
+
   const onEnable = async () => {
     setBusy(true);
+    // The native flow (permission, relay, then the instance) can take a while;
+    // say what it is doing. Only the instance accepting it turns this to enabled.
+    if (hasNativeCapability('push')) setStatus('registering');
     try {
       await enableWebPush(api);
       setDisableFeedback(null);
@@ -128,7 +172,14 @@ export const WebPushControl: React.FC = () => {
           'error',
         );
       }
-    } catch {
+    } catch (error) {
+      if (hasNativeCapability('push') && isNoSubscription(error)) {
+        // The App's subscription has not reached the instance (yet): register it
+        // again, and say so instead of reporting a failed send.
+        showToast(t('workbench.inbox.notifications.testRegistering'), 'warning');
+        setStatus('registering');
+        return;
+      }
       showToast(t('workbench.inbox.notifications.testFailed', { count: 0 }), 'error');
     } finally {
       setTesting(false);
@@ -168,6 +219,28 @@ export const WebPushControl: React.FC = () => {
         <Smartphone className="size-3" />
         {t('workbench.inbox.notifications.installFirst')}
       </Badge>
+    );
+  }
+
+  if (status === 'registering') {
+    return (
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <Badge variant="secondary" className="h-8 min-w-0 rounded-lg px-3">
+          <Loader2 className="size-3 animate-spin" />
+          <span className="truncate">{t('workbench.inbox.notifications.registering')}</span>
+        </Badge>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          onClick={onDisable}
+          disabled={busy}
+          className="shrink-0"
+        >
+          <BellOff className="size-3.5" />
+          {t('workbench.inbox.notifications.disable')}
+        </Button>
+      </div>
     );
   }
 

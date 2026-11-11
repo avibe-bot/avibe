@@ -420,6 +420,24 @@ def test_service_main_owns_monitor_shutdown(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
     handlers = {}
 
+    class FakeShutdownDiagnostics:
+        path = tmp_path / "shutdown-test.log"
+
+        def __init__(self, logs_dir):
+            assert logs_dir == tmp_path
+
+        def start(self):
+            calls.append("shutdown-diagnostics.start")
+
+        def phase(self, name):
+            calls.append(f"shutdown-phase:{name}")
+            if name == "logging_drain_return":
+                from vibe import service_logging
+
+                assert service_logging._runtime is None
+
+    monkeypatch.setattr(service_main, "ShutdownDiagnostics", FakeShutdownDiagnostics)
+
     class FakeMonitor:
         def stop(self) -> None:
             calls.append("diagnostics.stop")
@@ -524,3 +542,21 @@ def test_service_main_owns_monitor_shutdown(monkeypatch, tmp_path) -> None:
     )
     assert calls.index("controller.after-signal") < calls.index(desktop_ui_stop)
     assert calls.index(desktop_ui_stop) < calls.index("lock.release")
+
+    # Distinct from the sink tests: the real main wires every late boundary
+    # around its actual cleanup calls, including records after logging drains.
+    assert calls.index("shutdown-diagnostics.start") < calls.index("controller.shutdown:signal 15")
+    phases = [call for call in calls if call.startswith("shutdown-phase:")]
+    assert phases == [
+        "shutdown-phase:controller_run_return",
+        "shutdown-phase:macos_monitor_stop_start",
+        "shutdown-phase:macos_monitor_stop_return",
+        "shutdown-phase:macos_monitor_stop_start",
+        "shutdown-phase:macos_monitor_stop_return",
+        "shutdown-phase:logging_drain_start",
+        "shutdown-phase:logging_drain_return",
+        "shutdown-phase:main_return",
+    ]
+    assert calls.index("controller.after-signal") < calls.index(phases[0])
+    assert calls.index(phases[1]) < calls.index("diagnostics.stop") < calls.index(phases[2])
+    assert calls.index(phases[-2]) < calls.index("lock.release") < calls.index(phases[-1])

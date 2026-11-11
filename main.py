@@ -20,6 +20,7 @@ from vibe.service_logging import (
     configure_service_logging,
     shutdown_service_logging,
 )
+from vibe.shutdown_diagnostics import ShutdownDiagnostics
 from vibe.macos_session_diagnostics import start_macos_session_diagnostics
 from vibe.process_limits import raise_open_file_limit
 from vibe.runtime import (
@@ -139,13 +140,16 @@ def _should_reap_desktop_runtime_ui(shutdown_intent: dict | None) -> bool:
     return shutdown_intent is None
 
 
-def _stop_macos_session_diagnostics(monitor: Any) -> None:
+def _stop_macos_session_diagnostics(monitor: Any, diagnostics: ShutdownDiagnostics) -> None:
     if monitor is None:
         return
+    diagnostics.phase("macos_monitor_stop_start")
     try:
         monitor.stop()
     except Exception:
         logging.getLogger(__name__).debug("macOS session diagnostics cleanup failed")
+    finally:
+        diagnostics.phase("macos_monitor_stop_return")
 
 
 def _stop_owned_desktop_runtime_ui(logger: logging.Logger) -> None:
@@ -181,6 +185,7 @@ def main():
     macos_session_diagnostics = None
     controller = None
     shutdown_intent = None
+    shutdown_diagnostics = ShutdownDiagnostics(get_logs_dir())
     try:
         # Before anything opens files, and inherited by every Agent and worker.
         raise_open_file_limit()
@@ -255,7 +260,9 @@ def main():
             if shutdown_initiated:
                 return
             shutdown_initiated = True
+            shutdown_diagnostics.start()
             try:
+                logger.info("Shutdown diagnostic destination: %s", shutdown_diagnostics.path)
                 _log_shutdown_signal(logger, signum)
                 shutdown_intent = _log_shutdown_intent(logger, signum)
                 logger.info("Shutting down after signal %s", signum)
@@ -277,9 +284,10 @@ def main():
         try:
             controller.run()
         finally:
+            shutdown_diagnostics.phase("controller_run_return")
             if _should_reap_desktop_runtime_ui(shutdown_intent):
                 _stop_owned_desktop_runtime_ui(logger)
-            _stop_macos_session_diagnostics(macos_session_diagnostics)
+            _stop_macos_session_diagnostics(macos_session_diagnostics, shutdown_diagnostics)
         
     except ServiceAlreadyRunningError as e:
         logging.error("Failed to start: %s", e)
@@ -289,19 +297,26 @@ def main():
         sys.exit(1)
     finally:
         try:
-            _stop_macos_session_diagnostics(macos_session_diagnostics)
+            _stop_macos_session_diagnostics(macos_session_diagnostics, shutdown_diagnostics)
         finally:
             try:
                 # Controller.run() has finished its census/watchdog cleanup.
                 # Finish rotating/writing before another service can own the log.
+                shutdown_diagnostics.phase("logging_drain_start")
                 shutdown_service_logging()
+                shutdown_diagnostics.phase("logging_drain_return")
             finally:
-                lock_safe = bool(
-                    controller is None
-                    or getattr(controller, "service_lock_safe_to_release", True)
-                )
-                if lock_acquired and lock_safe:
-                    release_service_instance_lock()
+                try:
+                    lock_safe = bool(
+                        controller is None
+                        or getattr(controller, "service_lock_safe_to_release", True)
+                    )
+                    if lock_acquired and lock_safe:
+                        release_service_instance_lock()
+                finally:
+                    # This is main's exit boundary, not process-exit evidence:
+                    # Python may still be joining workers. Keep diagnostics armed.
+                    shutdown_diagnostics.phase("main_return")
 
 
 if __name__ == "__main__":
