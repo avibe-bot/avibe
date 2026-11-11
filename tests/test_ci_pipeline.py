@@ -475,6 +475,28 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert jobs["windows-install-smoke-runners"]["needs"] == ["changes", "build-linux-artifacts"]
 
 
+def test_browser_lanes_pin_the_os_and_keep_dependency_install_and_cache_isolation() -> None:
+    browsers = _jobs()["ui-browser-checks"]
+    assert browsers["runs-on"] == "ubuntu-24.04"
+    steps = browsers["steps"]
+    install, = [step for step in steps if step.get("name") == "Install browsers"]
+    assert "npx playwright install --with-deps chromium webkit" in install["run"].splitlines()
+    assert not install.get("if") and not install.get("continue-on-error")
+    packages, = [step for step in steps if step.get("id") == "browser-packages"]
+    # Restore keys must not mix Ubuntu releases; exact keys also distinguish
+    # image revisions and Playwright's package requirements.
+    assert 'prefix="playwright-apt-$ImageOS-"' in packages["run"]
+    assert '$ImageVersion-' in packages["run"]
+    assert "require('playwright-core/package.json').version" in packages["run"]
+    cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache@")]
+    assert cache["with"] == {
+        "path": "~/.cache/playwright-apt",
+        "key": "${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.key }}",
+        "restore-keys": "${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.prefix }}",
+    }
+    assert steps.index(packages) < steps.index(cache) < steps.index(install)
+
+
 def test_browser_lanes_check_out_exactly_the_paths_the_classifier_treats_as_their_input() -> None:
     """A browser lane can only read what it checks out, so a change outside that set may skip the lanes.
 

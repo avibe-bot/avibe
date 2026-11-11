@@ -273,7 +273,9 @@ jobs:
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for every lane, including failure/cancellation. Design captures stay manual.
     name: ui-browser-checks (${{ matrix.lane }})
-    runs-on: ubuntu-latest
+    # Keep the browser system dependencies on a deliberate LTS baseline rather
+    # than following ubuntu-latest rollouts (and their apt mirror changes).
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
