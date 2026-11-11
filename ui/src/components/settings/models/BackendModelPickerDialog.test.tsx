@@ -242,8 +242,9 @@ describe('BackendModelPickerDialog', () => {
     await user.click(screen.getByRole('button', { name: /^Add "gemini-4" as a custom model/ }));
     expect(onCustom).not.toHaveBeenCalled();
     const [[picks]] = onAdd.mock.calls as [[ChosenCandidate[]]];
+    // No supplier was shown, so the write promises none (as the editor's rows do).
     expect(picks.map((pick) => [pick.candidate.id, pick.row?.origin, pick.row?.supports_tools, pick.expected_suppliers]))
-      .toEqual([['gemini-4', 'manual', true, []]]);
+      .toEqual([['gemini-4', 'manual', true, undefined]]);
 
     await user.clear(search());
     expect(screen.queryByRole('button', { name: /as a custom model/ })).toBeNull();
@@ -277,7 +278,8 @@ describe('BackendModelPickerDialog', () => {
     await user.click(confirm());
     const [[picks]] = onAdd.mock.calls as [[ChosenCandidate[]]];
     expect(picks).toHaveLength(1);
-    expect(picks[0].expected_suppliers).toEqual([]);
+    // No supplier was shown: the server's own matching decides, unasserted.
+    expect(picks[0].expected_suppliers).toBeUndefined();
     expect(picks[0].row).toMatchObject({ id: 'claude-fable-5-2', origin: 'models_dev', models_dev_id: 'anthropic/claude-fable-5-2', context_window: 400000, reasoning_efforts: ['low', 'high'] });
   });
 

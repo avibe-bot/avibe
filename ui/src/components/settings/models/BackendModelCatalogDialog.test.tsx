@@ -410,6 +410,34 @@ describe('BackendModelCatalogDialog', () => {
     }));
   });
 
+  it('saves a catalog model no provider lists without promising its suppliers', async () => {
+    // A provider may still supply it under a dated ID the server matches; only the
+    // server can say, so the write states no expectation for it.
+    const user = userEvent.setup();
+    const catalog = [locked, model('alpha')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([{
+      provider_id: 'anthropic', provider_name: 'Anthropic', model_id: 'claude-sonnet-4', models_dev_id: 'anthropic/claude-sonnet-4',
+      display_name: 'Claude Sonnet 4', context_window: 200000, max_output_tokens: 64000, input_modalities: ['text'],
+      output_modalities: ['text'], supports_tools: true, supports_reasoning: true, reasoning_efforts: [], native_protocol: 'anthropic',
+    } satisfies ModelsDevMatch]);
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog();
+
+    await user.click(await enabledAddModels());
+    await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
+    await user.type(screen.getByLabelText('Search models or providers'), 'sonnet 4');
+    await user.click(await screen.findByRole('checkbox', { name: /Claude Sonnet 4/ }));
+    await user.click(screen.getByRole('button', { name: 'Add 1 model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    const [, body] = write.mock.calls[0];
+    expect(body.models.at(-1)).toMatchObject({ id: 'claude-sonnet-4', origin: 'models_dev', context_window: 200000 });
+    expect(body).not.toHaveProperty('expected_suppliers');
+  });
+
   it('re-adds a typed ID as the row the user already has, not a blank one', async () => {
     const user = userEvent.setup();
     const FOO = model('foo', {

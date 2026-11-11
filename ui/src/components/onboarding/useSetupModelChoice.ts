@@ -116,7 +116,8 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
       efforts = row.reasoning_efforts;
       if (!baseline.some((held) => held.id === model)) {
         await models.putAgentModels(backend, {
-          baseline, models: [...baseline, row], expected_suppliers: { [model]: pick.expected_suppliers },
+          baseline, models: [...baseline, row],
+          ...(pick.expected_suppliers ? { expected_suppliers: { [model]: pick.expected_suppliers } } : {}),
         });
       }
       const current = await api.getVibeAgent(target, { cache: false });

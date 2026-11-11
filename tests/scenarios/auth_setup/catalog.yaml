@@ -830,6 +830,22 @@ scenarios:
       - ui/src/components/onboarding/AssistantSetup.test.tsx
       - ui/src/components/onboarding/useSetupModelChoice.test.ts
       - ui/e2e/onboarding-fidelity/pm-main-flow.spec.ts
+  - id: AUTH-SETUP-164
+    name: Setup picks a model no provider lists (a catalog model or a typed ID) and completes on it
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: vibey
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_picks_a_model_no_provider_lists_and_completes
+    # The scenario owns the server boundary for an unlisted pick: the catalog write
+    # with no supplier promise, the Agent's model, the runnable named route and
+    # completion. The browser side (which rows the picker offers for a search, the
+    # row a catalog or typed pick carries, and that it promises no suppliers) is the
+    # supporting tests.
+    supporting_tests:
+      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx
+      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
+      - ui/src/components/onboarding/useSetupModelChoice.test.ts
   - id: AUTH-SETUP-132
     name: A new install starts on Vibey, and setup completes without writing a default
     status: covered

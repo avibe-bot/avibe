@@ -5696,6 +5696,99 @@ def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes
         agents.close()
 
 
+@pytest.mark.parametrize(
+    ("model_id", "origin", "row"),
+    [
+        # A model the catalog knows that no provider lists, described by the catalog.
+        ("mock-xl", "models_dev", {"display_name": "Mock XL", "models_dev_id": "mocklab/mock-xl",
+                                    "context_window": 400000, "max_output_tokens": 64000,
+                                    "input_modalities": ["text"], "output_modalities": ["text"],
+                                    "supports_tools": True, "supports_reasoning": True,
+                                    "reasoning_efforts": ["low", "high"]}),
+        # An ID typed when nothing matched, on the custom-model editor's defaults.
+        ("my-finetune-v3", "manual", {"display_name": None, "models_dev_id": None,
+                                      "context_window": None, "max_output_tokens": None,
+                                      "input_modalities": ["text"], "output_modalities": ["text"],
+                                      "supports_tools": True, "supports_reasoning": False,
+                                      "reasoning_efforts": []}),
+    ],
+)
+def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_path, model_id, origin, row):
+    """AUTH-SETUP-164: unlisted pick -> catalog write with no supplier promise -> Agent model -> runnable route -> completion.
+
+    The setup picker also offers what no provider lists: a catalog model, or the ID the
+    user typed. Neither showed a supplier, so the catalog write states no expectation for
+    it; the API-key provider receives the ID as it is, which makes the built-in Agent
+    runnable and lets setup finish on it. Every step is the HTTP route the picker calls.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_vibey164",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Lab",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model, provenance="discovered") for model in ("mock-large", "mock-mini")],
+        credential_ref="cred_vibey164",
+    )
+    store.config.sources = [source]
+    store.config.agents["vibey"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents").get_json()
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
+        candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
+        offered = {row["id"] for group in candidates.values() for row in group}
+        assert model_id not in offered
+
+        def vibey_supply():
+            rows = client.get("/api/models/agents").get_json()["agents"]
+            return next(row for row in rows if row["backend"] == "vibey")
+
+        baseline = vibey_supply()["catalog_models"]
+        added = {"id": model_id, "origin": origin, "locked": False, "routeable": True, **row}
+        written = client.put(
+            "/api/models/agents/vibey/models",
+            json={"baseline": baseline, "models": [*baseline, added]},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        saved = next(row for row in vibey_supply()["catalog_models"] if row["id"] == model_id)
+        assert saved["origin"] == origin
+        assert saved["context_window"] == row["context_window"]
+
+        named = client.patch(f"/api/agents/{vibey['name']}", json={"model": model_id}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        route = next(row for row in vibey_supply()["named_agents"] if row["name"] == vibey["name"])
+        assert route["effective_model_id"] == model_id
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
+        chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
+        assert chosen.status_code == 200, chosen.get_json()
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+    finally:
+        agents.close()
+
+
 def test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_without_a_pick(monkeypatch, tmp_path):
     """AUTH-SETUP-131: add source -> seed -> catalog change -> Agent model -> runnable route -> completion.
 

@@ -512,7 +512,7 @@ export const BackendModelCatalogDialog: React.FC<{
     const expected = Object.fromEntries(
       requested.flatMap((model) => {
         const pick = baselineIds.has(model.id) ? undefined : chosenRef.current.get(model.id);
-        return pick ? [[model.id, pick.expected_suppliers] as const] : [];
+        return pick?.expected_suppliers ? [[model.id, pick.expected_suppliers] as const] : [];
       }),
     );
     if (Object.keys(expected).length > 0) body.expected_suppliers = expected;
