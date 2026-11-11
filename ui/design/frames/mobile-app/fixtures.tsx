@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import type { FrameSpec } from '../../frame';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
-import { MobileLanguage, type MobileAccount, type MobileInstance, type MobileLoginFixture } from '../../kit/mobile-app';
+import { MobileLanguage, type MobileAccount, type MobileInstance, type MobileLicensesFixture, type MobileLoginFixture } from '../../kit/mobile-app';
 
 export const account: MobileAccount = { name: 'Max', email: 'max@example.com' };
 const codeSent: MobileLoginFixture = { step: 'code', email: account.email };
@@ -56,3 +56,26 @@ export function bilingual(name: string, title: string, render: () => ReactNode, 
     render: () => <MobileLanguage lang={lang}>{render()}</MobileLanguage>,
   }));
 }
+
+const mitBody = 'Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.';
+const uniffiCommit = '05b45b110f652d58d94c653992aeb3adc3a094f4';
+const crate = (name: string, version: string) => `https://static.crates.io/crates/${name}/${name}-${version}.crate`;
+/**
+ * Shaped like the notices the iOS iroh build collects (packaging/iroh-apple, #3551): attohttpc and
+ * nine uniffi-family crates under MPL-2.0, 330 packages in all. Versions and texts are illustrative;
+ * the App renders the generated file.
+ */
+export const licensesFixture: MobileLicensesFixture = {
+  count: 330,
+  sources: [
+    { name: 'attohttpc', version: '0.30.1', registry: crate('attohttpc', '0.30.1'), upstream: 'https://github.com/sbstp/attohttpc' },
+    ...['uniffi', 'uniffi_bindgen', 'uniffi_build', 'uniffi_core', 'uniffi_internal_macros', 'uniffi_macros', 'uniffi_meta', 'uniffi_pipeline', 'uniffi_udl'].map(name => ({
+      name, version: '0.31.2', registry: crate(name, '0.31.2'), upstream: `https://github.com/mozilla/uniffi-rs/tree/${uniffiCommit}`,
+    })),
+  ],
+  licenses: [
+    { name: 'aead', version: '0.5.2', license: 'MIT OR Apache-2.0', text: mitBody },
+    { name: 'anyhow', version: '1.0.98', license: 'MIT OR Apache-2.0', text: mitBody },
+    { name: 'attohttpc', version: '0.30.1', license: 'MPL-2.0', text: 'Mozilla Public License Version 2.0\n==================================\n\n1. Definitions\n--------------\n\n1.1. "Contributor"\nmeans each individual or legal entity that creates, contributes to the creation of, or owns Covered Software.\n\n1.2. "Contributor Version"\nmeans the combination of the Contributions of others (if any) used by a Contributor and that particular Contributor\'s Contribution.' },
+  ],
+};

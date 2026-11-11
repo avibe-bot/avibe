@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, Plus, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, Plus, RotateCw, ScrollText, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -157,9 +157,38 @@ export function EmptyInstancesPage({ cli = false }: { cli?: boolean }) {
     <div className="mt-auto pt-7 pb-3"><Button variant="outline" size="lg" className="w-full whitespace-normal rounded-full"><RotateCw className="size-4 shrink-0" />{t('我已完成配对，刷新', 'I have paired · Refresh')}</Button></div>
   </CloudScreen>;
 }
-export function AccountPage({ instance }: { instance?: MobileInstance }) {
+export function AccountPage({ instance, licenses = false }: { instance?: MobileInstance; licenses?: boolean }) {
   const t = useCopy();
-  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section><div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
+  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section>{licenses && <AboutSection />}<div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
+}
+/** One component in the App binary and the license text collected for it at build time. */
+export interface MobileLicense { name: string; version: string; license: string; text: string }
+/** An MPL-2.0 component and where recipients get its unmodified covered source. */
+export interface MobileSourceOffer { name: string; version: string; registry: string; upstream: string }
+export interface MobileLicensesFixture { count: number; sources: MobileSourceOffer[]; licenses: MobileLicense[] }
+
+/** Account's About section: the App's own information, not the instance's. Proposed. */
+function AboutSection() {
+  const t = useCopy();
+  return <section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('关于', 'About')}</h2><button type="button" className={cn(raised, 'flex w-full items-center gap-3 text-left')}><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft"><ScrollText className="size-5 text-mint-ink" /></span><span className="min-w-0 flex-1 text-base font-semibold">{t('开源许可', 'Open-source licenses')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></button></section>;
+}
+/**
+ * Open-source licenses. The page is generated from the notices collected with
+ * the App binary: the MPL-2.0 source offer first, then every component with
+ * its license text, in one plain scrolling page. Proposed.
+ */
+export function LicensesPage({ fixture }: { fixture: MobileLicensesFixture }) {
+  const t = useCopy();
+  const link = 'block break-all text-xs leading-5 text-foreground underline';
+  return <CloudScreen><Brand back /><PageTitle title={t('开源许可', 'Open-source licenses')} subtitle={t('Avibe App 包含以下开源组件。感谢它们的作者。', 'The Avibe app includes the open-source components below. Thanks to their authors.')} />
+    <section className={raised} aria-labelledby="licenses-source"><h2 id="licenses-source" className="text-base font-semibold">{t('MPL-2.0 组件的源代码', 'Source code for MPL-2.0 components')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('以下组件按 Mozilla Public License 2.0 分发，未作修改。可从下方的 crates.io 归档或上游源代码地址获取它们的源代码。', 'These components are distributed unmodified under the Mozilla Public License 2.0. Get their source code from the crates.io archive or upstream source listed for each.')}</p>
+      <ul className="mt-4 divide-y divide-edge border-t border-edge">{fixture.sources.map(source => <li key={source.name} className="py-4 last:pb-0"><p className="text-sm font-semibold">{source.name} <span className="font-normal text-muted">{source.version}</span></p><p className="mt-2 text-xs text-muted">{t('crates.io 归档', 'crates.io archive')}</p><a href={source.registry} className={link}>{source.registry}</a><p className="mt-2 text-xs text-muted">{t('上游源代码', 'Upstream source')}</p><a href={source.upstream} className={link}>{source.upstream}</a></li>)}</ul>
+    </section>
+    <section className="mt-8" aria-labelledby="licenses-list"><h2 id="licenses-list" className="mb-4 text-sm font-semibold">{t(`组件许可（${fixture.count}）`, `Component licenses (${fixture.count})`)}</h2>
+      <ul className="divide-y divide-edge rounded-3xl border border-edge bg-surface/80 shadow-elevation-0">{fixture.licenses.map(item => <li key={item.name} className="p-5"><p className="break-words text-sm font-semibold">{item.name} <span className="font-normal text-muted">{item.version}</span></p><p className="mt-1 text-xs text-muted">{item.license}</p><p className="mt-3 whitespace-pre-wrap break-words text-xs leading-5 text-muted">{item.text}</p></li>)}</ul>
+    </section>
+    <p className="pt-7 pb-3 text-center text-xs leading-6 text-muted">{t('此列表随 App 构建时生成。', 'This list is generated when the app is built.')}</p>
+  </CloudScreen>;
 }
 export function NativeInstanceError({ instance }: { instance: MobileInstance }) {
   const t = useCopy();

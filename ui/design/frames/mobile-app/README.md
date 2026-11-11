@@ -314,3 +314,26 @@ no console errors), production build, and a light/dark inspection of every
 password capture. A screenshot proves layout only. Keychain suggestions and
 saving, keyboard insets, focus and announcements, and real Supabase answers
 belong to the implementation PR and a device check.
+
+## Open-source licenses — proposed
+
+Status: **proposed**, for 产品伙伴's review; not approved and not implemented.
+A build of the App that contains iroh ships several hundred open-source
+components, and the MPL-2.0 ones (attohttpc and the uniffi family) need a
+visible offer of their source code (`packaging/iroh-apple`, #3551). The App's
+own surface is Account, so its new About section opens 开源许可 / Open-source
+licenses. The page reuses the A composition (`CloudScreen`, `Brand`,
+`PageTitle`, the raised card) and adds no tokens or assets. `LicensesPage`
+and Account's `licenses` flag live in `ui/design/kit/mobile-app.tsx`.
+
+| File / surface | States |
+| --- | --- |
+| `licenses` | `entry` (Account with the About row), `default` (first screen), `scrolled` (390 × 2600 excerpt: the whole source offer, then the start of the list) |
+
+6 frames / 12 theme captures (3 states × zh/en × light/dark).
+
+The page is one plain scroll generated from the collected notices: the
+MPL-2.0 source offer first (each crate, version, crates.io archive and
+upstream source, as `NOTICE.md` lists them), then every component with its
+version, license expression and text. Fixture versions and texts are
+illustrative.
