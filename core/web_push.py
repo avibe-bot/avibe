@@ -6,14 +6,18 @@ import base64
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
+import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+import httpx
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 from config import paths
 
@@ -27,6 +31,47 @@ MAX_NOTIFICATION_PLAINTEXT_BYTES = 2800
 MAX_NOTIFICATION_TITLE_SCALARS = 80
 MAX_NOTIFICATION_BODY_SCALARS = 240
 MAX_NOTIFICATION_TAG_BYTES = 64
+MAX_BADGE_COUNT = 2_147_483_647
+DEFAULT_BADGE_VAPID_EXPIRY_SECONDS = 12 * 60 * 60
+NATIVE_PUSH_RELAY_ORIGIN = "https://avibe.bot"
+_NATIVE_PUSH_ENDPOINT_RE = re.compile(r"^/api/push/apns/([A-Za-z0-9_-]{43})$")
+_NATIVE_BADGE_REQUEST_RE = re.compile(
+    r"^/api/push/apns/[A-Za-z0-9_-]{43}/badge$"
+)
+
+
+class _BadgeRelayHttpxLogFilter(logging.Filter):
+    _avibe_badge_relay_filter = True
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if record.name != "httpx" or not isinstance(args, tuple) or len(args) < 2:
+            return True
+        try:
+            parsed = urllib.parse.urlsplit(str(args[1]))
+        except ValueError:
+            return True
+        if (
+            parsed.scheme == "https"
+            and parsed.netloc == "avibe.bot"
+            and _NATIVE_BADGE_REQUEST_RE.fullmatch(parsed.path)
+        ):
+            redacted = list(args)
+            redacted[1] = f"{NATIVE_PUSH_RELAY_ORIGIN}/api/push/apns/<redacted>/badge"
+            record.args = tuple(redacted)
+        return True
+
+
+_httpx_logger = logging.getLogger("httpx")
+if not any(
+    getattr(log_filter, "_avibe_badge_relay_filter", False)
+    for log_filter in _httpx_logger.filters
+):
+    _httpx_logger.addFilter(_BadgeRelayHttpxLogFilter())
+
+
+class BadgeUpdateProtocolError(RuntimeError):
+    """The relay returned a successful HTTP status with a non-contract body."""
 
 
 @dataclass(frozen=True)
@@ -167,6 +212,139 @@ def load_or_create_vapid_keys(path: Path | None = None) -> VapidKeys:
         except FileExistsError:
             return _read_vapid_keys(key_path)
         return keys
+
+
+def _badge_vapid_authorization(
+    *,
+    keys: VapidKeys,
+    subject: str,
+    expires_at: int,
+) -> str:
+    """Build deterministic ES256 VAPID bytes for fixture-safe badge requests."""
+
+    private_key = serialization.load_pem_private_key(
+        keys.private_key_pem.encode("ascii"),
+        password=None,
+    )
+    if not (
+        isinstance(private_key, ec.EllipticCurvePrivateKey)
+        and isinstance(private_key.curve, ec.SECP256R1)
+    ):
+        raise ValueError("badge_vapid_key_must_be_p256")
+    header = _b64url_no_padding(b'{"typ":"JWT","alg":"ES256"}')
+    claims = _b64url_no_padding(
+        json.dumps(
+            {
+                "aud": NATIVE_PUSH_RELAY_ORIGIN,
+                "exp": expires_at,
+                "sub": subject,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    unsigned_token = f"{header}.{claims}"
+    der_signature = private_key.sign(
+        unsigned_token.encode("ascii"),
+        ec.ECDSA(hashes.SHA256(), deterministic_signing=True),
+    )
+    r, s = utils.decode_dss_signature(der_signature)
+    signature = _b64url_no_padding(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+    public_key = _b64url_no_padding(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+    )
+    return f"vapid t={unsigned_token}.{signature},k={public_key}"
+
+
+def _native_relay_registration_id(subscription: dict[str, Any]) -> str | None:
+    endpoint = subscription.get("endpoint")
+    if not isinstance(endpoint, str):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "avibe.bot"
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    match = _NATIVE_PUSH_ENDPOINT_RE.fullmatch(parsed.path)
+    return match.group(1) if match is not None else None
+
+
+def is_native_relay_subscription(subscription: dict[str, Any]) -> bool:
+    """Return whether this is the fixed native APNs relay endpoint shape."""
+
+    return _native_relay_registration_id(subscription) is not None
+
+
+def send_badge_update(
+    *,
+    subscription: dict[str, Any],
+    badge: int,
+    vapid_keys: VapidKeys | None = None,
+    subject: str = "mailto:notifications@avibe.bot",
+    timeout: float = DEFAULT_WEB_PUSH_TIMEOUT_SECONDS,
+    client: httpx.Client | None = None,
+) -> None:
+    """Send one unencrypted, registration-scoped badge reconciliation request."""
+
+    if isinstance(badge, bool) or not isinstance(badge, int) or not 0 <= badge <= MAX_BADGE_COUNT:
+        raise ValueError("invalid_badge")
+    registration_id = _native_relay_registration_id(subscription)
+    if registration_id is None:
+        raise ValueError("native_relay_subscription_required")
+
+    keys = vapid_keys or load_or_create_vapid_keys()
+    authorization = _badge_vapid_authorization(
+        keys=keys,
+        subject=subject,
+        expires_at=int(time.time()) + DEFAULT_BADGE_VAPID_EXPIRY_SECONDS,
+    )
+    body = json.dumps({"badge": badge}, separators=(",", ":")).encode("utf-8")
+    url = f"{NATIVE_PUSH_RELAY_ORIGIN}/api/push/apns/{registration_id}/badge"
+    headers = {
+        "Authorization": authorization,
+        "Content-Type": "application/json",
+    }
+
+    def _post(http: httpx.Client) -> httpx.Response:
+        return http.post(url, content=body, headers=headers, timeout=timeout)
+
+    if client is None:
+        with httpx.Client() as owned_client:
+            response = _post(owned_client)
+    else:
+        response = _post(client)
+    response.raise_for_status()
+    if response.status_code != 201:
+        raise BadgeUpdateProtocolError("badge relay returned an unexpected success status")
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise BadgeUpdateProtocolError("badge relay returned an unexpected content type")
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise BadgeUpdateProtocolError("badge relay returned invalid JSON") from exc
+    if not (
+        isinstance(result, dict)
+        and set(result) == {"ok", "registration_id", "badge", "apns_status"}
+        and result.get("ok") is True
+        and result.get("registration_id") == registration_id
+        and isinstance(result.get("badge"), int)
+        and not isinstance(result.get("badge"), bool)
+        and result.get("badge") == badge
+        and result.get("apns_status") == 200
+    ):
+        raise BadgeUpdateProtocolError("badge relay returned a non-contract response")
 
 
 def send_web_push(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 from datetime import datetime, timezone
 from typing import Any
@@ -11,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
-from storage.models import web_push_subscriptions
+from storage.models import state_meta, web_push_subscriptions
 
 
 def _utc_now_iso() -> str:
@@ -20,6 +22,62 @@ def _utc_now_iso() -> str:
 
 def _new_id() -> str:
     return "wps_" + secrets.token_urlsafe(16)
+
+
+_LAST_BADGE_STATE_PREFIX = "web_push.last_successful_badge."
+
+
+def _last_badge_state_key(endpoint: str) -> str:
+    digest = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+    return f"{_LAST_BADGE_STATE_PREFIX}{digest}"
+
+
+def get_last_successful_badge(conn: Connection, *, endpoint: str) -> int | None:
+    endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
+    if not endpoint:
+        return None
+    value_json = conn.execute(
+        select(state_meta.c.value_json).where(
+            state_meta.c.key == _last_badge_state_key(endpoint)
+        )
+    ).scalar_one_or_none()
+    try:
+        value = json.loads(value_json) if value_json is not None else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _clear_last_successful_badges(conn: Connection, endpoints: list[str]) -> None:
+    keys = [
+        _last_badge_state_key(endpoint)
+        for endpoint in dict.fromkeys(endpoints)
+        if isinstance(endpoint, str) and endpoint
+    ]
+    if keys:
+        conn.execute(state_meta.delete().where(state_meta.c.key.in_(keys)))
+
+
+def _set_last_successful_badge(
+    conn: Connection,
+    *,
+    endpoint: str,
+    badge_count: int,
+    now: str,
+) -> None:
+    stmt = sqlite_insert(state_meta).values(
+        key=_last_badge_state_key(endpoint),
+        value_json=json.dumps(badge_count),
+        updated_at=now,
+    )
+    conn.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[state_meta.c.key],
+            set_={"value_json": json.dumps(badge_count), "updated_at": now},
+        )
+    )
 
 
 def validate_subscription_payload(payload: dict[str, Any]) -> tuple[str, str, str]:
@@ -81,6 +139,7 @@ def _disable_previous_endpoints(
         .where(web_push_subscriptions.c.endpoint.in_(endpoints))
         .values(enabled=0, provider_invalidated_at=None, updated_at=now)
     )
+    _clear_last_successful_badges(conn, endpoints)
 
 
 def upsert_subscription(
@@ -144,6 +203,7 @@ def upsert_subscription(
         },
     )
     conn.execute(stmt)
+    _clear_last_successful_badges(conn, [endpoint])
     row = conn.execute(
         select(web_push_subscriptions).where(web_push_subscriptions.c.endpoint == endpoint)
     ).mappings().one()
@@ -287,6 +347,8 @@ def disable_subscription(conn: Connection, *, endpoint: str, user_key: str | Non
     result = conn.execute(
         stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=now)
     )
+    if result.rowcount:
+        _clear_last_successful_badges(conn, [endpoint])
     return bool(result.rowcount)
 
 
@@ -323,9 +385,17 @@ def disable_device_subscription(
         stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
     else:
         stmt = stmt.where(web_push_subscriptions.c.device_id.in_(device_ids))
+    endpoints = [
+        row[0]
+        for row in conn.execute(
+            select(web_push_subscriptions.c.endpoint).where(stmt.whereclause)
+        ).all()
+    ]
     result = conn.execute(
         stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=_utc_now_iso())
     )
+    if result.rowcount:
+        _clear_last_successful_badges(conn, endpoints)
     return bool(result.rowcount)
 
 
@@ -385,14 +455,28 @@ def get_enabled_by_endpoint(
     return row if row and row["enabled"] else None
 
 
-def mark_send_success(conn: Connection, *, endpoint: str) -> None:
+def mark_send_success(
+    conn: Connection,
+    *,
+    endpoint: str,
+    badge_count: int | None = None,
+) -> None:
     now = _utc_now_iso()
-    conn.execute(
+    result = conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.endpoint == endpoint)
         .where(web_push_subscriptions.c.enabled == 1)
         .values(last_success_at=now, last_failure_at=None, provider_invalidated_at=None, failure_count=0, updated_at=now)
     )
+    if result.rowcount and badge_count is not None:
+        if isinstance(badge_count, bool) or not isinstance(badge_count, int) or badge_count < 0:
+            raise ValueError("invalid_badge_count")
+        _set_last_successful_badge(
+            conn,
+            endpoint=endpoint,
+            badge_count=badge_count,
+            now=now,
+        )
 
 
 def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False) -> None:
@@ -405,9 +489,11 @@ def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False)
     if disable:
         values["enabled"] = 0
         values["provider_invalidated_at"] = now
-    conn.execute(
+    result = conn.execute(
         web_push_subscriptions.update()
         .where(web_push_subscriptions.c.endpoint == endpoint)
         .where(web_push_subscriptions.c.enabled == 1)
         .values(**values)
     )
+    if result.rowcount and disable:
+        _clear_last_successful_badges(conn, [endpoint])

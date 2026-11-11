@@ -189,6 +189,77 @@ def _get(client, path: str):
     return client.get(path, base_url=REMOTE_ORIGIN, environ_base=REMOTE_PEER)
 
 
+def test_mark_read_badge_change_schedules_best_effort_owner_reconciliation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from core import web_push_notifications
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    client = _remote_client(config, role="editor", email="alice@example.com")
+    calls = []
+
+    def fail_after_schedule(user_key, context):
+        calls.append((user_key, context))
+        raise RuntimeError("fixture scheduler failure")
+
+    monkeypatch.setattr(
+        web_push_notifications,
+        "schedule_badge_reconciliation",
+        fail_after_schedule,
+    )
+
+    response = client.post(
+        f"/api/sessions/{ids['session_a']}/mark-read",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(client, REMOTE_ORIGIN),
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["updated"] == 1
+    assert response.get_json()["badge_total"] == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "remote:user-editor-alice@example.com"
+    assert calls[0][1] is not None
+    assert calls[0][1].subject == "user-editor-alice@example.com"
+
+
+def test_mark_read_without_badge_change_does_not_schedule_reconciliation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from core import web_push_notifications
+    from core.notification_preferences import set_notification_preferences
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config, ids = _setup_state(tmp_path)
+    client = _remote_client(config, role="editor", email="alice@example.com")
+    user_key = "remote:user-editor-alice@example.com"
+    set_notification_preferences(user_key, {"enabled": False})
+    calls = []
+    monkeypatch.setattr(
+        web_push_notifications,
+        "schedule_badge_reconciliation",
+        lambda *args: calls.append(args),
+    )
+
+    response = client.post(
+        f"/api/sessions/{ids['session_a']}/mark-read",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers=csrf_headers(client, REMOTE_ORIGIN),
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["updated"] == 1
+    assert response.get_json()["badge_total"] == 0
+    assert calls == []
+
+
 def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
