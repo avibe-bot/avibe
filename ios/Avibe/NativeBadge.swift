@@ -92,13 +92,6 @@ final class NativeBadge {
         set(0)
     }
 
-    /// Settles once every request made so far has been applied or skipped.
-    func settled() async {
-        while let applying {
-            await applying.value
-        }
-    }
-
     private func applyWaiting() async {
         while let count = waiting {
             waiting = nil

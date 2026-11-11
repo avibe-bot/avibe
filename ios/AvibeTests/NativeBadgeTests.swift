@@ -38,34 +38,33 @@ final class NativeBadgeTests: XCTestCase {
     }
 
     @MainActor
-    func testTheBadgeTakesTheLatestCountWhileTheUserAllowsBadges() async {
+    func testTheBadgeTakesTheLatestCountWhileTheUserAllowsBadges() async throws {
         let center = FakeAppBadgeCenter(allowed: true)
         let badge = NativeBadge(center: center)
 
         // A burst ends on the badge the last request asked for.
         badge.set(3)
         badge.set(5)
-        await badge.settled()
+        try await waitUntil { center.counts.count == 1 }
         XCTAssertEqual(center.counts, [5])
 
         badge.set(0)
-        await badge.settled()
-        XCTAssertEqual(center.counts, [5, 0])
-
+        try await waitUntil { center.counts.count == 2 }
         badge.clear()
-        await badge.settled()
+        try await waitUntil { center.counts.count == 3 }
         XCTAssertEqual(center.counts, [5, 0, 0])
+        XCTAssertEqual(center.checks, 3)
     }
 
     @MainActor
-    func testNothingIsSetWhileTheUserDoesNotAllowBadges() async {
+    func testNothingIsSetWhileTheUserDoesNotAllowBadges() async throws {
         let center = FakeAppBadgeCenter(allowed: false)
         let badge = NativeBadge(center: center)
 
         badge.set(4)
-        await badge.settled()
+        try await waitUntil { center.checks == 1 }
         badge.clear()
-        await badge.settled()
+        try await waitUntil { center.checks == 2 }
 
         XCTAssertEqual(center.counts, [])
     }
@@ -240,12 +239,12 @@ final class NativeBadgeTests: XCTestCase {
         }
         XCTAssertTrue(appModel.setBadgeCount(7, origin: one))
         XCTAssertFalse(appModel.setBadgeCount(9, origin: two))
-        await appModel.badgeSettled()
+        try await waitUntil { center.counts.count == 1 }
         XCTAssertEqual(center.counts, [7])
 
         // Signing out clears the previous account's badge.
         _ = try await appModel.mobileSessionCoordinator.logout()
-        await appModel.badgeSettled()
+        try await waitUntil { center.counts.count == 2 }
         XCTAssertEqual(center.counts, [7, 0])
         XCTAssertFalse(appModel.setBadgeCount(3, origin: one))
     }
@@ -276,6 +275,8 @@ final class NativeBadgeTests: XCTestCase {
 
 private final class FakeAppBadgeCenter: AppBadgeCentering {
     let allowed: Bool
+    /// How often it was asked whether badges are allowed: once per request applied or skipped.
+    private(set) var checks = 0
     private(set) var counts: [Int] = []
 
     init(allowed: Bool) {
@@ -283,7 +284,8 @@ private final class FakeAppBadgeCenter: AppBadgeCentering {
     }
 
     func badgeAllowed() async -> Bool {
-        allowed
+        checks += 1
+        return allowed
     }
 
     func setBadgeCount(_ count: Int) async throws {

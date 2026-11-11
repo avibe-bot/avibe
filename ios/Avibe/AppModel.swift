@@ -338,11 +338,6 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// Settles once every badge change asked for so far has been applied.
-    func badgeSettled() async {
-        await nativeBadge.settled()
-    }
-
     private func handlePushTap(_ tap: PushNotificationTap) {
         guard hasCompletedBootstrap else {
             pendingPushTap = tap
