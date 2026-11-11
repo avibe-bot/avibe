@@ -242,3 +242,81 @@ def test_stapler_does_not_retry_a_failure_that_is_not_a_network_drop(tmp_path, m
         signing.stapler("staple", tmp_path / "Avibe.dmg")
 
     assert len(calls) == 1
+
+
+SUBMISSION_ID = "a8a6a8f9-ab9f-42aa-add9-cf84f4928a06"
+UPLOADED = {"stdout": {"id": SUBMISSION_ID, "message": "Successfully uploaded file"}}
+ACCEPTED = {"stdout": {"id": SUBMISSION_ID, "status": "Accepted", "message": "Processing complete"}}
+INVALID = {"stdout": {"id": SUBMISSION_ID, "status": "Invalid", "message": "Processing complete"}}
+# What gh-v3.2.6rc4 printed when a status poll of its uploaded submission timed out.
+TIMED_OUT = {
+    "stderr": 'Error: HTTPError(statusCode: nil, error: Error Domain=NSURLErrorDomain Code=-1001 "The request '
+    'timed out." UserInfo={NSErrorFailingURLStringKey=https://appstoreconnect.apple.com/notary/v2/submissions/'
+    f'{SUBMISSION_ID}?, NSLocalizedDescription=The request timed out.}})',
+}
+CONNECTION_LOST = {
+    "stderr": 'Error: HTTPError(statusCode: nil, error: Error Domain=NSURLErrorDomain Code=-1005 "The network '
+    'connection was lost." UserInfo={NSErrorFailingURLStringKey=https://appstoreconnect.apple.com/notary/v2/submissions})',
+}
+SERVER_ERROR = {"stderr": "Error: HTTPError(statusCode: Optional(503), error: nil)"}
+UNAUTHORIZED = {"stderr": "Error: HTTPError(statusCode: Optional(401), error: nil)"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake xcrun is a POSIX script")
+@pytest.mark.parametrize(
+    ("submits", "waits", "error", "sleeps"),
+    [
+        # The upload has an id, so a lost status poll waits on it again.
+        ([UPLOADED], [TIMED_OUT, ACCEPTED], None, [30]),
+        # An upload that never returned an id is submitted again.
+        ([CONNECTION_LOST, SERVER_ERROR, UPLOADED], [ACCEPTED], None, [30, 60]),
+        ([UPLOADED], [INVALID], "ended 'Invalid', not Accepted", []),
+        ([UPLOADED], [TIMED_OUT, TIMED_OUT, TIMED_OUT], "NSURLErrorDomain Code=-1001", [30, 60]),
+        ([UNAUTHORIZED], [], r"Optional\(401\)", []),
+    ],
+)
+def test_notarization_retries_only_lost_connections_and_never_resubmits_an_uploaded_build(
+    tmp_path, monkeypatch, submits, waits, error, sleeps
+):
+    outcomes, calls = tmp_path / "outcomes.json", tmp_path / "calls.jsonl"
+    outcomes.write_text(json.dumps({"submit": submits, "wait": waits}))
+    xcrun = tmp_path / "bin" / "xcrun"
+    xcrun.parent.mkdir()
+    xcrun.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"open({str(calls)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "tool, command = sys.argv[1], sys.argv[2]\n"
+        "if tool == 'notarytool' and command in ('submit', 'wait'):\n"
+        f"    queued = json.load(open({str(outcomes)!r}))\n"
+        "    outcome = queued[command].pop(0)\n"
+        f"    json.dump(queued, open({str(outcomes)!r}, 'w'))\n"
+        "    if 'stdout' in outcome:\n"
+        "        print(json.dumps(outcome['stdout']))\n"
+        "        sys.exit(0)\n"
+        "    print(outcome['stderr'], file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "if tool == 'notarytool' and command == 'log':\n"
+        "    print(json.dumps({'issues': None}))\n"
+    )
+    xcrun.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{xcrun.parent}{os.pathsep}{os.environ['PATH']}")
+    waited: list[float] = []
+    monkeypatch.setattr(signing.time, "sleep", waited.append)
+    dmg = tmp_path / "Avibe.dmg"
+    dmg.write_bytes(b"dmg")
+
+    if error is None:
+        signing.notarize(dmg, key_path="AuthKey.p8", key_id="ABCDE12345", issuer=COMPLETE["APPLE_API_ISSUER"])
+    else:
+        with pytest.raises(signing.SigningError, match=error):
+            signing.notarize(dmg, key_path="AuthKey.p8", key_id="ABCDE12345", issuer=COMPLETE["APPLE_API_ISSUER"])
+
+    commands = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert json.loads(outcomes.read_text()) == {"submit": [], "wait": []}
+    waits_run = [command for command in commands if command[:2] == ["notarytool", "wait"]]
+    assert [command[2] for command in waits_run] == [SUBMISSION_ID] * len(waits)
+    assert all(command[command.index("--timeout") + 1] == "2h" for command in waits_run)
+    assert waited == sleeps
+    stapled = [command[1:3] for command in commands if command[0] == "stapler"]
+    assert stapled == ([] if error else [["staple", str(dmg)], ["validate", str(dmg)]])
