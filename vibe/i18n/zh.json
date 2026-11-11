@@ -292,14 +292,16 @@
   },
   "vault": {
     "signing": {
-      "invalidKey": "签名需要已固定的有效 secp256k1 压缩公钥。未交付签名。请保留现有密钥及其保护档位，修复公钥元数据后再试。",
+      "invalidKey": "签名需要与签名方案匹配的已固定有效公钥：secp256k1 方案需要 secp256k1 压缩公钥，ed25519 需要 Solana Ed25519 公钥。未交付签名。请保留现有密钥及其保护档位，修复公钥元数据后再试。",
       "protectedUnsupported": "保护档 Bitcoin Taproot 签名需要类型化交易审批流程和兼容的沙箱；旧式地址及 SegWit-v0 输入仍不支持。",
       "missingContext": "保护档签名需要可验证的签名上下文。请补齐操作详情后重新创建请求。",
       "invalidDigest": "签名摘要必须是十六进制编码的 32 字节数据。",
       "invalidParameters": "签名请求包含不支持的参数。目前仅支持空脚本树的 BIP86 密钥路径签名，不支持脚本树或 Merkle 根。",
       "invalidContext": "签名上下文无效或与请求不一致。请检查类型、摘要、字段和规范编码后重新创建请求。Agent 操作必须以 avault-agent-operation:v1 域开头，后接真实换行符和非空操作文本。",
-      "contextSchemeMismatch": "Bitcoin Taproot 上下文必须使用 schnorr-secp256k1-bip341-keypath；EVM 和 EIP-712 上下文必须使用 ECDSA。请用兼容的配对重新创建请求。",
-      "invalidSignature": "返回的签名编码无效，或无法通过已固定公钥和请求摘要的验证。该签名未作为成功结果交付。"
+      "contextSchemeMismatch": "Bitcoin Taproot 上下文必须使用 schnorr-secp256k1-bip341-keypath；EVM 和 EIP-712 上下文必须使用 ECDSA；Solana 交易上下文必须使用 ed25519。请用兼容的配对重新创建请求。",
+      "invalidSignature": "返回的签名编码无效，或无法通过已固定公钥和请求摘要（或消息）的验证。该签名未作为成功结果交付。",
+      "invalidInput": "签名输入与签名方案不匹配。ed25519 对原始消息字节签名：请提供 message_hex（十六进制，最大 1 MiB），不要提供 digest。secp256k1 方案对 32 字节摘要签名，不接受 message_hex。",
+      "protectedSolanaUnsupported": "暂不支持保护档 Solana 密钥和保护档 Solana 签名。未创建、请求或签署任何内容。请保留现有密钥及其保护档位不变，待 Avibe 更新支持保护档 Solana 后再试。"
     },
     "requestNotification": {
       "title": "有一个密钥请求需要你处理",

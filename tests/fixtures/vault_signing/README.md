@@ -18,6 +18,28 @@ these keys to receive funds or to authenticate a production instance.
   not with the Python producer under test. The independent output agrees with
   the previous fixture bytes; its provenance is corrected accordingly.
 
+- `rfc8032-ed25519.json`: RFC 8032 section 7.1 Ed25519 TEST 1 (empty message),
+  TEST 2 and TEST 3, copied from the RFC.
+  https://www.rfc-editor.org/rfc/rfc8032#section-7.1
+- `protected-solana-sign-context.json`: the protected Solana signing binding,
+  shared byte for byte with `avibe-bot/vault-sandbox`. SHA256
+  `bd68ae39dc1eec511b4b4dbe084adbfe974d5f866a0e461e6122047eefd0746a`.
+  `release` is `{name, scheme: "ed25519", messageHex, publicKey, signingContext:
+  {kind: "solana-transaction-v1", messageHex}}`: the exact message, never a
+  digest. `messageHex` is a 150-byte legacy Solana message assembled by hand:
+  one signer (the RFC 8032 TEST 1 public key), the TEST 2 public key as
+  recipient, a System Program transfer of 1,000,000 lamports, and recent
+  blockhash bytes `0x01..0x20`. `signingSeedHex` is the RFC TEST 1 secret key
+  and `expectedSignature` is pure Ed25519 over the message under it.
+  No Avibe code produced it: `canonicalUnsignedContext` is the output of the
+  sandbox's own `signedOperationContextMessage` (`src/operationContext.ts`,
+  commit `52b690a47f88f9eb29e3efa1d8ce706f7afc0b78`, bundled with esbuild as
+  below plus `--define:__SANDBOX_VERSION__='"fixture"'` and
+  `--define:__SANDBOX_BUILD_HASH__='"fixture"'`), and both signatures were made
+  with the `cryptography` library. The address literals in
+  `test_vault_solana.py` are published Solana program ids, plus the TEST 2
+  public key encoded by a base58 routine outside Avibe.
+
 To regenerate the canonical expectation independently, bundle the **consumer**
 from that sandbox checkout using its own installed dependencies:
 

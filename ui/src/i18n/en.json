@@ -6080,6 +6080,7 @@
       "btcSegwit": "BTC SegWit",
       "btcTaproot": "BTC Taproot",
       "btcLegacy": "BTC Legacy",
+      "solana": "Solana",
       "copy": "Copy {{label}} address",
       "protectedBitcoinWarning": "Typed Bitcoin Taproot transaction details are independently checked in the secure approval window. The network label is the requester's selection, not chain proof.",
       "standardBitcoinTaprootWarning": "BTC Taproot uses schnorr-secp256k1-bip341-keypath. Older avault builds fail closed; Avibe never falls back to raw BIP340."
@@ -6390,6 +6391,9 @@
       "signingAs": "Signing as",
       "digest": "Hash to sign",
       "copyDigest": "Copy hash to sign",
+      "message": "Message to sign",
+      "copyMessage": "Copy message to sign",
+      "emptyMessage": "Empty message (0 bytes)",
       "source": "Source",
       "sourceTag": "Tag · {{name}}",
       "sourceSkill": "Skill · {{name}}",
@@ -6421,6 +6425,7 @@
         "loadFailed": "Couldn't load this request. It may have been handled already.",
         "noScope": "This request has no grantable scope.",
         "missingDigest": "This sign request is missing its digest.",
+        "missingMessage": "This sign request is missing its message.",
         "missingMaterial": "Protected key material wasn't available to sign. Reload and try again."
       }
     },

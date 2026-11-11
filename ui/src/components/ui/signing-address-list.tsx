@@ -13,6 +13,7 @@ const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: TranslationKe
   { key: 'btc_segwit', labelKey: 'vaults.addresses.btcSegwit' },
   { key: 'btc_taproot', labelKey: 'vaults.addresses.btcTaproot' },
   { key: 'btc_legacy', labelKey: 'vaults.addresses.btcLegacy' },
+  { key: 'solana', labelKey: 'vaults.addresses.solana' },
 ];
 
 /** One labeled address, truncated, with its copy button. */
