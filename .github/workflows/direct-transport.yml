@@ -1,0 +1,139 @@
+name: avibe-direct-transport
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - direct-transport/**
+      - .github/workflows/direct-transport.yml
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.91.0
+
+jobs:
+  build-test-package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-26
+          - target: x86_64-apple-darwin
+            os: macos-26-intel
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: direct-transport
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+          rustup target add --toolchain "$RUST_TOOLCHAIN" "${{ matrix.target }}"
+          cargo fmt --check
+
+      - name: Install static Linux linker
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          echo 'CC=musl-gcc' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+
+      - name: Verify resolved feature graph
+        run: |
+          set -euo pipefail
+          cargo tree --locked --target "${{ matrix.target }}" --edges features \
+            --package avibe-direct-transport > "$RUNNER_TEMP/feature-graph.txt"
+          cargo metadata --locked --format-version 1 --filter-platform "${{ matrix.target }}" \
+            > "$RUNNER_TEMP/cargo-metadata.json"
+          ./scripts/check-feature-graph.sh "$RUNNER_TEMP/feature-graph.txt" "$RUNNER_TEMP/cargo-metadata.json" \
+            > "$RUNNER_TEMP/feature-evidence.json"
+
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          started=$(date +%s)
+          cargo build --locked --release --target "${{ matrix.target }}"
+          echo "BUILD_SECONDS=$(( $(date +%s) - started ))" >> "$GITHUB_ENV"
+
+      - name: Run native contract tests
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --target "${{ matrix.target }}" -- --test-threads=1
+
+      - name: Check Linux binary is static
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/avibe-direct-transport"
+          file "$binary"
+          if readelf -l "$binary" | grep -q INTERP; then
+            echo 'ELF has a dynamic interpreter' >&2; exit 1
+          fi
+          if readelf -d "$binary" | grep -q NEEDED; then
+            echo 'ELF needs a shared library' >&2; exit 1
+          fi
+
+      - name: Sign and check macOS binary, with scanner positive control
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/avibe-direct-transport"
+          codesign --force --sign - "$binary"
+          codesign --verify --strict "$binary"
+          checker="$GITHUB_WORKSPACE/packaging/iroh-apple/check-private-apple-datapath.sh"
+          "$checker" "$binary"
+          printf '#include <stdio.h>\nint main(void) { puts("sendmsg_x"); return 0; }\n' > "$RUNNER_TEMP/scanner-control.c"
+          cc "$RUNNER_TEMP/scanner-control.c" -o "$RUNNER_TEMP/scanner-control"
+          "$checker" --expect-hit "$RUNNER_TEMP/scanner-control"
+
+      - name: Assemble workflow artifact
+        run: python3 scripts/package_artifact.py "${{ matrix.target }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: avibe-direct-transport-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/direct-transport-artifact/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  nat-disabled-experiment:
+    name: NAT-disabled experiment (non-shipping, advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Test stock client against separately patched server
+        working-directory: direct-transport
+        run: bash scripts/experiment-nat-disabled.sh
+      - name: Keep experiment evidence only, never its binaries
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nat-disabled-experiment-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/nat-disabled-experiment/evidence/
+          if-no-files-found: warn
+          retention-days: 30

@@ -92,6 +92,26 @@ updates:
       - dependency-name: tauri-plugin-single-instance
         versions: ["2.5.4", "2.5.5"]
 
+  - package-ecosystem: cargo
+    directory: /direct-transport
+    schedule:
+      interval: weekly
+      day: friday
+      time: "06:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      direct-transport-cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    # iroh is a deliberate native-runtime pin shared with the iOS qualification gate.
+    # Review and update it explicitly; never let a grouped Dependabot PR bump it.
+    ignore:
+      - dependency-name: iroh
+
   # Dependabot's uv ecosystem can update the declared Python requirements and
   # uv.lock together. `increase` makes declaration-bound maintenance explicit;
   # review still rejects lock-only drift. Keep the Claude SDK on its explicit
