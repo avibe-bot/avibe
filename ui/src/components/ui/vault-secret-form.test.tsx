@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   listSkills: vi.fn(async () => ({ skills: [] })),
   createVaultSecret: vi.fn(),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public', fingerprint: 'fingerprint' })),
+  deriveSigningAddresses: vi.fn(async () => ({ ok: true, addresses: {} })),
   connectWorkbenchEvents: vi.fn(() => vi.fn()),
 }));
 const envelope = vi.hoisted(() => ({ ciphertext: 'ciphertext', nonce: 'nonce', wrap_meta: '{}' }));
@@ -322,4 +323,124 @@ it('previews agent references for valid fields and the default shorthand', () =>
   expect(preview().textContent).toBe(
     'Agent referencesGITHUB_LOGIN.usernameGITHUB_LOGIN.passwordGITHUB_LOGIN alone resolves to the default field, password.',
   );
+});
+
+// ---- Solana signing keys (ui/design: vault/solana/*) ----
+// avault creates these keys, so the form's contract is what it sends and what it refuses to hold.
+const startSolanaKey = async (name = 'SOL_KEY') => {
+  render(form(<VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />));
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: name } });
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.chainSolana }));
+};
+const createButton = () => screen.getByRole('button', { name: en.vaults.dialog.createSecret }) as HTMLButtonElement;
+const tier = (title: string) => screen.getByRole('button', { name: new RegExp(`^${title}`) });
+
+it('asks avault to generate a Solana key and sends no key material or public key', async () => {
+  await startSolanaKey();
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+  fireEvent.click(createButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload).toMatchObject({
+    name: 'SOL_KEY', kind: 'keypair', signer_kind: 'local', protection: 'standard',
+    keypair: { curve: 'ed25519', source: 'generate' },
+  });
+  for (const field of ['blind_box', 'sealed', 'public_meta']) expect(payload).not.toHaveProperty(field);
+  expect(sealBlindBox).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['[1, 2, 3]', 'solana-cli-json'],
+  ['  notARealBase58Secret  ', 'base58-secret'],
+] as const)('seals a pasted Solana key %s for avault as %s and posts no plaintext', async (pasted, format) => {
+  await startSolanaKey();
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.signingImport }));
+  expect(createButton().disabled).toBe(true);
+  fireEvent.change(screen.getByPlaceholderText(en.vaults.dialog.solanaImportPlaceholder), { target: { value: pasted } });
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+  fireEvent.click(createButton());
+  await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
+  expect(sealBlindBox).toHaveBeenCalledExactlyOnceWith(
+    pasted.trim(),
+    { public_key: 'public', fingerprint: 'fingerprint' },
+    { purpose: 'keypair-import', name: 'SOL_KEY', curve: 'ed25519', format },
+  );
+  const payload = api.createVaultSecret.mock.calls[0][0];
+  expect(payload.keypair).toEqual({ curve: 'ed25519', source: 'import', format });
+  expect(payload.blind_box).toEqual(blindBox);
+  expect(payload).not.toHaveProperty('public_meta');
+  expect(JSON.stringify(payload)).not.toContain(pasted.trim());
+});
+
+it('says what to check when avault does not import the pasted key, and keeps it to correct', async () => {
+  const onCreated = vi.fn();
+  api.createVaultSecret.mockResolvedValue({ ok: false, code: 'avault_failed', message: 'avault keypair failed: unreadable detail' });
+  render(form(<VaultSecretForm onCancel={vi.fn()} onCreated={onCreated} />));
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: 'SOL_KEY' } });
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.chainSolana }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.signingImport }));
+  const paste = screen.getByPlaceholderText(en.vaults.dialog.solanaImportPlaceholder) as HTMLTextAreaElement;
+  fireEvent.change(paste, { target: { value: '[1, 2, 3]' } });
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+  fireEvent.click(createButton());
+  expect(await screen.findByText(en.vaults.dialog.errors.solanaImportFailed)).toBeTruthy();
+  expect(screen.queryByText(/unreadable detail/)).toBeNull();
+  expect(paste.value).toBe('[1, 2, 3]');
+  expect(onCreated).not.toHaveBeenCalled();
+  // Editing the key withdraws the message: it described the previous attempt.
+  fireEvent.change(paste, { target: { value: '[1, 2, 3, 4]' } });
+  expect(screen.queryByText(en.vaults.dialog.errors.solanaImportFailed)).toBeNull();
+});
+
+it('drops what was made or pasted for one chain when the chain changes', async () => {
+  render(form(<VaultSecretForm onCancel={vi.fn()} onCreated={vi.fn()} />));
+  await waitFor(() => expect(api.listDependencies).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.kindKeypair }));
+  fireEvent.change(screen.getByRole('textbox', { name: `${en.vaults.dialog.name} ${en.vaults.dialog.nameHint}` }), { target: { value: 'KEY' } });
+  // A secp256k1 key generated in this browser must not survive a switch to Solana and back.
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.signingGenerateCta }));
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.chainSolana }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.dialog.signingImport }));
+  fireEvent.change(screen.getByPlaceholderText(en.vaults.dialog.solanaImportPlaceholder), { target: { value: '[1, 2, 3]' } });
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.chainEvmBitcoin }));
+  expect(createButton().disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: en.vaults.dialog.signingRegenerate })).toBeNull();
+  // And a pasted Solana key must not survive the round trip either.
+  fireEvent.click(screen.getByRole('radio', { name: en.vaults.dialog.chainSolana }));
+  expect((screen.getByPlaceholderText(en.vaults.dialog.solanaImportPlaceholder) as HTMLTextAreaElement).value).toBe('');
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+});
+
+it('keeps a chosen Protected tier for a Solana key, blocks Create, and never opens the passkey vault for it', async () => {
+  await startSolanaKey();
+  fireEvent.click(tier(en.vaults.dialog.protectedProtection));
+  // The tier is the person's choice: it is not switched back for them.
+  expect(tier(en.vaults.dialog.protectedProtection).getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByRole('alert').textContent).toBe(en.vaults.dialog.solanaProtectedUnavailable);
+  expect(screen.queryByRole('button', { name: en.vaults.dialog.signingImport })).toBeNull();
+  expect(createButton().disabled).toBe(true);
+  fireEvent.click(createButton());
+  expect(vault.refresh).not.toHaveBeenCalled();
+  expect(vault.sealValue).not.toHaveBeenCalled();
+  expect(api.createVaultSecret).not.toHaveBeenCalled();
+  fireEvent.click(tier(en.vaults.dialog.standardProtection));
+  expect(screen.queryByText(en.vaults.dialog.solanaProtectedUnavailable)).toBeNull();
+  await waitFor(() => expect(createButton().disabled).toBe(false));
+});
+
+it('shows the chain of a Solana key in Edit, where it cannot be changed', () => {
+  const key: VaultSecret = {
+    name: 'SOL_KEY', tags: [], kind: 'keypair', protection: 'standard', signer_kind: 'local', signing_curve: 'ed25519',
+    source: 'user', policy: {}, last_used_at: null, use_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  };
+  const { rerender } = render(form(<VaultSecretForm editSecret={key} onCancel={vi.fn()} onCreated={vi.fn()} />));
+  expect(screen.getByText(en.vaults.dialog.chainSolana)).toBeTruthy();
+  expect(screen.queryByRole('radio', { name: en.vaults.dialog.chainSolana })).toBeNull();
+  rerender(form(<VaultSecretForm editSecret={{ ...key, name: 'ETH_KEY', signing_curve: 'secp256k1' }} onCancel={vi.fn()} onCreated={vi.fn()} />));
+  expect(screen.queryByText(en.vaults.dialog.chainSolana)).toBeNull();
 });

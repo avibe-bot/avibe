@@ -78,8 +78,8 @@ Then it copies bytes in both directions until either side ends.
 ## 5. Limits
 
 - At most `max_connections` peers and `max_streams_per_connection` streams per peer; excess is refused by the transport's own flow control or closed. The ingress keeps its own limits as a second line.
-- The sidecar closes a handshake after 5 seconds and a connection with no open stream after 5 minutes; active long-lived streams do not trigger the idle timer. TCP connect/header writes and control output each have a 2-second deadline.
-- Before charging handshake budgets, the sidecar uses stateless QUIC Retry to validate the source address. Pending handshakes are capped at 16 total and 4 per IPv4 address or IPv6 /64. Token buckets allow a global burst of 32 with 8 new attempts per second, and a source burst of 8 with 1 per second. Source accounting holds at most 256 records; over-budget attempts are silently ignored. These limits do not bound frames processed inside one handshake or replace admission.
+- A handshake that does not complete in a few seconds, and a connection with no stream for several minutes, are closed. Exact defaults are set in the implementation and recorded here when it lands.
+- The instance-side listener accepts at most 160 bytes for the header and waits at most 2 seconds for its newline. Control lines are capped at 4 KiB. On stop it gives the child 3 seconds before killing its recorded PID; failed generations restart after 250 ms, with exponential backoff capped at 5 seconds.
 - The sidecar opens no application connection except to `stream_addr`, and contacts no public service. The transport itself exchanges UDP packets with peers; what it does for a peer before that peer is refused is described in section 8.
 
 ## 6. Build and supply chain

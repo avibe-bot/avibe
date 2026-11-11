@@ -17,7 +17,8 @@ Avibe merges directly instead of through a merge queue. Over 72 hours the queue
 caught no real combination conflict; every eviction was a flake or
 infrastructure, and it slowed delivery. Exact-head review and PR CI, including
 the `manifest-consistency` guard for locks and CI manifests, gate the merge; the
-full master backstop checks every landing, and releases need its exact-SHA pass.
+full master backstop checks every landing, and a stable release needs its
+exact-SHA pass. An RC is gated on its merged PR's required checks instead.
 
 A contract file left untracked causes a related failure. Other lanes cannot get
 it from the base branch, and it can later block the primary checkout's

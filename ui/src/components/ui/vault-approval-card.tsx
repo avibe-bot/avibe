@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 
@@ -160,6 +160,78 @@ export function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
     ) : null}
   </>;
 }
+
+/**
+ * What an `ed25519` request signs: the exact message bytes (ui/design: vault/solana/approval,
+ * vault/solana/approval-details). The row says how long the message is, where a digest scheme shows
+ * its hash; the bytes are never that summary, however long the message is. One Details section
+ * holds everything in full: the whole address, which its row cuts short where the dialog is narrow,
+ * and every byte. Copy takes the whole message whether or not Details is open. An empty message is
+ * a valid one, with no bytes to show.
+ */
+const SignMessage: React.FC<{ messageHex: string; scheme: string; address?: string }> = ({ messageHex, scheme, address }) => {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(false);
+  const bytes = Math.floor(messageHex.length / 2);
+  const Chevron = open ? ChevronDown : ChevronRight;
+  const whole = 'min-w-0 break-all rounded-md bg-surface px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground';
+  return (
+    <>
+      <DetailRow label={t('vaults.approval.message')}>
+        <span className="text-[13px] text-foreground">
+          {bytes > 0 ? t('vaults.approval.messageBytes', { count: bytes }) : t('vaults.approval.emptyMessage')}
+        </span>
+        <Badge variant="secondary">{scheme}</Badge>
+        {bytes > 0 ? (
+          <button
+            type="button"
+            onClick={() => {
+              void copyTextToClipboard(messageHex).then((ok) => {
+                if (!ok) return;
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+            aria-label={t('vaults.approval.copyMessage')}
+            className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground"
+          >
+            {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
+          </button>
+        ) : null}
+      </DetailRow>
+      {address || bytes > 0 ? (
+        <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+            className="flex items-center gap-1.5 px-3 py-2.5 text-left"
+          >
+            <Chevron className="size-3.5 text-muted" />
+            <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.approval.details')}</span>
+          </button>
+          {open ? (
+            <div className="flex min-w-0 flex-col gap-1.5 px-3 pb-3">
+              {address ? (
+                <>
+                  <span className="text-xs text-muted">{t('vaults.approval.detailsAddress')}</span>
+                  <code className={whole}>{address}</code>
+                </>
+              ) : null}
+              {bytes > 0 ? (
+                <>
+                  <span className={cn('text-xs text-muted', address && 'mt-1')}>{t('vaults.approval.detailsMessage')}</span>
+                  <code className={cn(whole, 'max-h-40 overflow-y-auto')}>{messageHex}</code>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+};
 
 /**
  * Full approval surface for a single pending vault request (access or sign), rendering
@@ -605,20 +677,16 @@ export const VaultApprovalCard: React.FC<{
             </span>
           </DetailRow>
         ) : null}
-        {isSign && typeof signInput === 'string' ? (
-          <DetailRow label={t(signsMessage ? 'vaults.approval.message' : 'vaults.approval.digest')}>
+        {isSign && signsMessage && typeof signInput === 'string' ? (
+          <SignMessage messageHex={signInput} scheme={delivery.scheme ?? 'ed25519'} address={signAddresses?.solana} />
+        ) : isSign && typeof signInput === 'string' ? (
+          <DetailRow label={t('vaults.approval.digest')}>
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-              {/* The full digest or message in a copyable code box (break-all) — it's the exact
-                  bytes being signed, so the user can verify it rather than trust an elision. A
-                  long message scrolls inside the box; it is never cut. */}
+              {/* Full digest in a copyable code box (break-all) — it's the exact bytes being
+                  signed, so the user can verify it rather than trust an elision. */}
               <div className="flex min-w-0 items-start gap-2">
-                <code
-                  className={cn(
-                    'min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground',
-                    signsMessage && 'max-h-48 overflow-y-auto',
-                  )}
-                >
-                  {signInput || t('vaults.approval.emptyMessage')}
+                <code className="min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
+                  {signInput}
                 </code>
                 <button
                   type="button"
@@ -631,7 +699,7 @@ export const VaultApprovalCard: React.FC<{
                       window.setTimeout(() => setCopiedDigest(false), 1500);
                     });
                   }}
-                  aria-label={t(signsMessage ? 'vaults.approval.copyMessage' : 'vaults.approval.copyDigest')}
+                  aria-label={t('vaults.approval.copyDigest')}
                   className="shrink-0 pt-1 text-muted transition-colors hover:text-foreground"
                 >
                   {copiedDigest ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}

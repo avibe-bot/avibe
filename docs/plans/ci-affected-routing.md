@@ -183,10 +183,15 @@ run plus that terminal certificate. PR, merge-group, failed, cancelled, missing,
 or another SHA's runs do not qualify. Historical full runs without this explicit
 certificate are not assumed equivalent.
 
-A SHA coalesced out of the pending queue is **not releaseable** merely because a
-later master is green. Release a full-green SHA; wait for its in-progress full
-run or rerun its existing master backstop. No tag/publish operation is performed
-by this CI change.
+GitHub-only RC tags (`gh-vX.Y.ZrcN`) were later exempted: Stage 1 and Stage 2
+gate them on their merged pull request's required checks and only report the
+backstop at their SHA. Stable tags and `publish.yml` keep the gate above. See
+[the release gate](../release.md#select-the-release-commit).
+
+A SHA coalesced out of the pending queue is **not releaseable** as a stable
+merely because a later master is green. Release a full-green SHA; wait for its
+in-progress full run or rerun its existing master backstop. No tag/publish
+operation is performed by this CI change.
 
 **Fix-forward owner:** the author of the landing that first made master red owns
 triage and the fix (release owner `cyhhao` assigns an owner if attribution is unclear).

@@ -7382,6 +7382,8 @@ def web_push_test():
         "title": payload.get("title") if isinstance(payload.get("title"), str) else "avibe",
         "body": payload.get("body") if isinstance(payload.get("body"), str) else "Test notification",
         "url": payload.get("url") if isinstance(payload.get("url"), str) else "/inbox",
+        # The iOS App shows a notification while it is in front only for this
+        # tag (AvibeAppDelegate.testNotificationThread).
         "tag": "web-push-test",
         "badge_count": badge_count,
     }

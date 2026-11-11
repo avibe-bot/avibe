@@ -9,6 +9,13 @@ questions and changes nothing else:
 - ``snapshot()``: the last accepted index, re-authenticated from disk;
 - ``resolve()``: what that index means for the engine in effect.
 
+The recorded index does not expire. A refresh that fails, for a day or a
+year, leaves the machine on the index it has, and that index keeps deciding:
+what it lists may still be adopted, and a withdrawal it does not carry is not
+known here. Two things stop an index from bringing in anything new, and
+neither is its age: offline mode, and a sequence floor a later Avibe raised
+above it.
+
 A withdrawal this machine recorded outlives the ability to check it. When the
 recorded index cannot be authenticated, because avault cannot run or because
 this Avibe build ships no readable key, an engine recorded as withdrawn is
@@ -28,13 +35,14 @@ import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from core.dependency_network import DependencyNetworkError, fetch_bytes
 from core.model_hub_engine_channel import (
     CHANNEL_INDEX_URL,
+    HOLD_BELOW_FLOOR,
+    HOLD_OFFLINE,
     MAX_ENVELOPE_BYTES,
     AvaultVerifier,
     ChannelError,
@@ -45,7 +53,6 @@ from core.model_hub_engine_channel import (
     SignatureVerifier,
     TrustRoots,
     authenticate,
-    format_timestamp,
     parse_trust_roots,
     resolve,
 )
@@ -134,7 +141,6 @@ class ChannelStatus:
     reason: str | None = None
     detail: str | None = None
     sequence: int | None = None
-    expires_at: str | None = None
     #: Whether an accepted index is newer than the one already recorded.
     changed: bool = False
 
@@ -147,7 +153,6 @@ class EngineChannel:
         roots: TrustRoots | None = None,
         verifier: SignatureVerifier | None = None,
         fetch: Callable[[], bytes] = fetch_channel_index,
-        clock: Callable[[], datetime] | None = None,
         avibe_version: str | None = None,
     ) -> None:
         self.manager = manager or EngineRuntimeManager()
@@ -157,7 +162,6 @@ class EngineChannel:
         )
         self.store = ChannelStateStore(self.manager.runtime_dir / "channel")
         self._fetch = fetch
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
         if avibe_version is None:
             from vibe import __version__ as avibe_version
         self._avibe_version = avibe_version
@@ -193,19 +197,14 @@ class EngineChannel:
             return ChannelStatus("unavailable", "network", type(exc).__name__)
         try:
             envelope, payload = authenticate(raw, roots=self.roots, verifier=self.verifier)
-            changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor, now=self._clock())
+            changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
         except ChannelError as exc:
             logger.warning("Model Hub engine channel index rejected: %s", exc)
             return ChannelStatus("rejected", exc.reason, exc.detail)
         except Exception as exc:  # noqa: BLE001 - a refresh reports, it does not raise
             logger.exception("Model Hub engine channel refresh failed")
             return ChannelStatus("rejected", "state_unreadable", type(exc).__name__)
-        return ChannelStatus(
-            "accepted",
-            sequence=payload.sequence,
-            expires_at=format_timestamp(payload.expires_at),
-            changed=changed,
-        )
+        return ChannelStatus("accepted", sequence=payload.sequence, changed=changed)
 
     def snapshot(self) -> ChannelSnapshot | None:
         """The last accepted index, re-authenticated from disk; no network.
@@ -217,7 +216,7 @@ class EngineChannel:
 
         if self.opt_out_reason() is not None:
             return None
-        return self.store.cached(roots=self.roots, verifier=self.verifier, now=self._clock())
+        return self.store.cached(roots=self.roots, verifier=self.verifier)
 
     def bundled_release_tag(self) -> str | None:
         manifest = self.manager.load_manifest_for_diagnostics()
@@ -233,12 +232,14 @@ class EngineChannel:
     ) -> Resolution:
         """What the last accepted index means for the engine release in effect.
 
-        ``current`` is that engine's asset release tag. Offline mode keeps
-        every recorded withdrawal in force and authorizes no download. So does
-        an Avibe build with no readable key, such as a downgrade to a release
-        that ships none: it reads the record and nothing else. A manifest
-        override is the one documented way out of the channel, withdrawals
-        included.
+        ``current`` is that engine's asset release tag. The recorded index
+        decides however long ago it was accepted. Offline mode, and a recorded
+        index below the sequence floor this Avibe ships, each keep every
+        recorded withdrawal in force, adopt nothing and authorize no download;
+        the resolution's reason says which. An Avibe build with no readable
+        key, such as a downgrade to a release that ships none, reads the
+        record and nothing else. A manifest override is the one documented way
+        out of the channel, withdrawals included.
         """
 
         reason = self.opt_out_reason()
@@ -253,9 +254,15 @@ class EngineChannel:
             return self._unverifiable(current, exc.reason)
         if snapshot is None:
             return Resolution(ResolutionAction.KEEP, "no_index")
+        hold = None
+        if self.manager.offline:
+            # The caller's own choice, so it is the reason given when both apply.
+            hold = HOLD_OFFLINE
+        elif not snapshot.meets_floor:
+            hold = HOLD_BELOW_FLOOR
         return resolve(
             snapshot.payload,
-            fresh=snapshot.fresh and not self.manager.offline,
+            hold=hold,
             avibe_version=self._avibe_version,
             host_platform=self.manager.host_platform(),
             # An unreadable bundled identity stops adoption inside ``resolve``;

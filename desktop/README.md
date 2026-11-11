@@ -250,7 +250,10 @@ notarize on its own.
 3. **App.** The Cua Driver helper and then Avibe.app are signed, the app is
    notarized with `notarytool` through the API key, and its ticket is stapled.
    The launch smoke test, the DMG, and the updater archive all use this final
-   app.
+   app. A notary request that times out, loses its connection, or meets a 5xx
+   is tried up to three times; once the upload has an id, the retry waits on
+   that submission rather than submitting again. A verdict such as `Invalid`
+   fails at once.
 4. **DMG.** The image is signed, notarized, and stapled, then checked the way a
    download is: `stapler validate`, `spctl -a -t open --context
    context:primary-signature`, `spctl -a -t exec` on the app, and both code
