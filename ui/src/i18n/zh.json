@@ -6318,7 +6318,7 @@
       "solanaGenerateHint": "保存时生成新密钥，保存后会显示地址。",
       "solanaImportPlaceholder": "粘贴 Solana CLI 密钥对（64 个数字的 JSON 数组）或 base58 私钥",
       "solanaImportHelp": "私钥在浏览器中加密后交给 avault 校验，保存后会显示地址。不支持助记词。",
-      "solanaProtectedHelp": "在沙箱内新生成一把 Solana 密钥并就地封存。只有密文和它的地址会到达 Avibe，私钥绝不离开沙箱。",
+      "solanaProtectedHelp": "在沙箱内新生成一把 Solana 密钥并就地封存。只有密文和这把密钥的公钥（即它的地址）会到达 Avibe，私钥绝不离开沙箱。",
       "solanaProtectedBornHint": "私钥在沙箱内生成，从未进入本应用。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",
