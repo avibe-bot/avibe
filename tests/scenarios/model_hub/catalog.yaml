@@ -2916,12 +2916,12 @@ scenarios:
     missing_layer: e2e
     test:
       - tests/test_model_hub_engine_qualification.py::test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified
-      - tests/test_model_hub_engine_qualification.py::test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself
+      - tests/test_model_hub_engine_qualification.py::test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claims_success
       - tests/test_model_hub_engine_qualification.py::test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence_nor_a_clean_rehearsal
       - tests/test_model_hub_engine_qualification.py::test_a_log_that_never_catches_up_is_refused_although_what_it_holds_reads_as_complete
-      - tests/test_model_hub_engine_qualification.py::test_no_job_can_supply_the_evidence_classes_that_have_no_producer
-      - tests/test_model_hub_engine_qualification.py::test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt
-      - tests/test_model_hub_engine_qualification.py::test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked
+      - tests/test_model_hub_engine_qualification.py::test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names
+      - tests/test_model_hub_engine_qualification.py::test_an_artifact_holding_untrusted_reports_is_parsed_as_data
+      - tests/test_model_hub_engine_qualification.py::test_an_assembled_authority_result_is_rejected_as_an_untrusted_rehearsal
   - id: MH-ENGINE-CHANNEL-011
     name: Every engine release the channel lists, withdrawn ones and rollback targets included, stays under the release guard, which restores lost assets from a backup that still verifies and never overwrites published bytes
     status: covered

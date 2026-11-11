@@ -959,8 +959,14 @@ def test_trusted_context_resolves_current_wheels_and_bundled_manifests_without_e
         assert destination.stat().st_size <= max_bytes
 
     monkeypatch.setattr("scripts.release_asset_download.download_to_path", download)
-    candidate = qualification.load_candidate(_record(tmp_path / "records"))
-    resolved = qualification.trusted_released_context(candidate, api=api, output_dir=tmp_path / "trusted")
+    monkeypatch.setattr(qualification, "_api", lambda _token: api)
+    candidate_dir = _record(tmp_path / "records")
+    assert qualification.main([
+        "trusted-released-context", "--candidate-dir", str(candidate_dir),
+        "--output-dir", str(tmp_path / "trusted"),
+    ]) == 0
+    candidate = qualification.load_candidate(candidate_dir)
+    resolved = qualification._load_released_directory(tmp_path / "trusted")
     assert {role: item.version for role, item in resolved.items()} == {"minimum": "3.2.6", "current_stable": "3.2.7"}
     assert (tmp_path / "trusted" / "bundled-manifest-minimum.json").read_bytes() == manifest_bytes(build=1)
     assert (tmp_path / "trusted" / "bundled-manifest-current_stable.json").read_bytes() == manifest_bytes(build=2)
@@ -1004,6 +1010,31 @@ def test_untrusted_rehearsal_cli_assembles_the_real_artifact_paths(tmp_path) -> 
     assert json.loads(output.read_text())["result"] == "untrusted_rehearsal"
 
 
+def test_main_rehearsal_and_trusted_verifier_chain_handles_absent_runtime_reports(tmp_path, monkeypatch) -> None:
+    candidate_dir = _record(tmp_path / "records")
+    released_dir = tmp_path / "released"
+    for role, released in AVIBE.items():
+        _write(released_dir / f"{role}.json", released.__dict__)
+    baselines = tmp_path / "baselines.json"
+    baselines.write_text(json.dumps(BASELINES))
+    rehearsal = tmp_path / "untrusted_rehearsal.json"
+    assert qualification.main([
+        "untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
+        "--evidence-dir", str(tmp_path / "absent-evidence"), "--released-dir", str(released_dir),
+        "--baselines", str(baselines), "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
+        "--head-sha", HEAD, "--output", str(rehearsal),
+    ]) == 0
+    result = json.loads(rehearsal.read_text())
+    assert result["result"] == "untrusted_rehearsal" and result["observations"]
+
+    monkeypatch.setattr(qualification, "_api", lambda _token: GitHub())
+    assert qualification.main([
+        "verify-untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
+        "--rehearsal", str(rehearsal), "--released-dir", str(released_dir),
+        "--baselines", str(baselines),
+    ]) == 0
+
+
 def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tmp_path) -> None:
     """MH-ENGINE-CHANNEL-010: concrete failures remain observations, never approval."""
     candidate = qualification.load_candidate(_record(tmp_path))
@@ -1039,16 +1070,6 @@ def test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claim
                                                  harness_sha256=HARNESS, baselines=BASELINES)
 
 
-def test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself(tmp_path) -> None:
-    """MH-ENGINE-CHANNEL-010: catalog anchor for the renamed run-identity test."""
-    test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claims_success(tmp_path)
-
-
-def test_no_job_can_supply_the_evidence_classes_that_have_no_producer(tmp_path) -> None:
-    """MH-ENGINE-CHANNEL-010: catalog anchor for untrusted future observations."""
-    test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names(tmp_path)
-
-
 def test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names(tmp_path) -> None:
     """MH-ENGINE-CHANNEL-010: absent future producers remain truthful observations."""
     candidate = qualification.load_candidate(_record(tmp_path))
@@ -1060,21 +1081,11 @@ def test_untrusted_reports_do_not_gain_authority_from_artifact_or_job_names(tmp_
     assert result["result"] == "untrusted_rehearsal"
 
 
-def test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt(tmp_path) -> None:
-    """MH-ENGINE-CHANNEL-010: catalog anchor for untrusted artifact parsing."""
-    test_an_artifact_holding_untrusted_reports_is_parsed_as_data(tmp_path)
-
-
 def test_an_artifact_holding_untrusted_reports_is_parsed_as_data(tmp_path) -> None:
     """MH-ENGINE-CHANNEL-010: uploaded reports are parsed as untrusted data."""
     root = tmp_path / "evidence" / "untrusted-rehearsal-evidence-build"
     _write(root / "report.json", {"class": "lifecycle", "result": "pass"})
     assert qualification.collect_evidence(tmp_path / "evidence")[0]["class"] == "lifecycle"
-
-
-def test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked(tmp_path) -> None:
-    """MH-ENGINE-CHANNEL-010: catalog anchor for the removed authority receipt."""
-    test_an_assembled_authority_result_is_rejected_as_an_untrusted_rehearsal(tmp_path)
 
 
 def test_an_assembled_authority_result_is_rejected_as_an_untrusted_rehearsal(tmp_path) -> None:

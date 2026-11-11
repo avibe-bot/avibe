@@ -1201,7 +1201,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rehearsal.add_argument("--output", type=Path, required=True)
 
     trusted_context = command(
-        "trusted-released-context", "Resolve current released Avibe wheels and inspect their bundled manifests.", candidate=False
+        "trusted-released-context", "Resolve current released Avibe wheels and inspect their bundled manifests."
     )
     trusted_context.add_argument("--output-dir", type=Path, required=True)
 
