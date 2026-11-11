@@ -141,7 +141,7 @@ class _StubScheduler:
     def get_job(self, job_id):
         return self.jobs.get(job_id)
 
-    def add_job(self, func, trigger, id, replace_existing, coalesce, max_instances, args):
+    def add_job(self, func, trigger, id, replace_existing, coalesce, max_instances, args, **kwargs):
         # ``func`` is retained so a test can fire a registered job exactly the way
         # APScheduler does: ``await job.func(*job.args)``.
         self.jobs[id] = SimpleNamespace(id=id, func=func, trigger=trigger, args=args)
@@ -11427,7 +11427,7 @@ def test_hfr_477_job_error_event_recovers_only_registered_generation(
         exception=RuntimeError("callback failed"),
     )
 
-    service._on_scheduler_event(event)
+    asyncio.run(service._handle_scheduler_event(event))
 
     current = service.request_store._sqlite.get_scheduled_task(task.id)
     assert current is not None and current["lifecycle_detail"] == "error"
@@ -11435,6 +11435,200 @@ def test_hfr_477_job_error_event_recovers_only_registered_generation(
     assert owner is not None and owner["status"] == "failed"
     generation = task_schedule_generation(owner["metadata"])
     assert generation is not None and generation["job_id"] == job_id
+
+
+@pytest.mark.parametrize("late_seconds", [1.230657, 3, 300, 301])
+@pytest.mark.parametrize("command", [False, True])
+def test_one_shot_late_executor(tmp_path: Path, monkeypatch, late_seconds, command) -> None:
+    """A restored DateTrigger uses real executor misfire checks, not a manual fire."""
+    from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
+    from apscheduler.executors import base as executor
+    from core import failure_notices
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    run_at = datetime(2026, 11, 11, 10, 27, tzinfo=timezone(timedelta(hours=8)))
+    now = run_at.astimezone(timezone.utc) + timedelta(seconds=late_seconds)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(executor, "datetime", Clock)
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=run_at.isoformat(),
+        timezone_name="Asia/Shanghai",
+        session_policy="create_per_run",
+        shell_command="echo should-run-only-within-grace" if command else None,
+        metadata={"created_by": {"kind": "caller_context", "caller": {
+            "session_key": "avibe::channel::creator", "session_id": "creator",
+        }}},
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+    sent = []
+
+    async def build_context(target, **kwargs):
+        return SimpleNamespace(target=target.to_key())
+
+    async def emit(_controller, context, _backend, _error, *, display_text, delivery, **kwargs):
+        sent.append((context.target, display_text))
+        delivery.persisted_row = {"id": "creator-notice"}
+        delivery.delivered_id = "creator-notice"
+        delivery.send_returned = True
+
+    monkeypatch.setattr(service, "_build_context", build_context)
+    monkeypatch.setattr("core.scheduled_tasks.emit_replayed_backend_failure", emit)
+
+    async def exercise():
+        service.scheduler.start(paused=True)
+        try:
+            service.reconcile_jobs()
+            job = service.scheduler.get_job(service._job_ids[task.id])
+            assert job.trigger.run_date == run_at.astimezone(timezone.utc)
+            assert job.misfire_grace_time == 300
+            events = await executor.run_coroutine_job(
+                job, "default", [run_at], "test.one-shot"
+            )
+            assert [e.code for e in events] == [
+                EVENT_JOB_EXECUTED if late_seconds <= 300 else EVENT_JOB_MISSED
+            ]
+            # APScheduler removes a date job before publishing its outcome.
+            service.scheduler.remove_job(job.id)
+            for event in events:
+                service._on_scheduler_event(event)
+            if service._scheduler_event_tasks:
+                await asyncio.gather(*service._scheduler_event_tasks)
+            current = store.refresh_task(task.id)
+            assert current.enabled is False
+            rows = requests._sqlite.list_runs()
+            assert len(rows) == 1
+            owner = rows[0]
+            assert owner["definition_id"] == task.id
+            if late_seconds <= 300:
+                assert owner["status"] == "queued"
+                assert current.retirement_reason == "schedule_consumed"
+                assert requests._sqlite.owed_failure_notice(owner["id"]) is None
+            else:
+                assert owner["status"] == "failed"
+                assert owner["started_at"] is None
+                assert current.retirement_reason == "schedule_missed"
+                notice = requests._sqlite.owed_failure_notice(owner["id"])
+                assert notice["state"] == "pending"
+                # Earlier manual failures must not suppress this missed follow-up.
+                assert failure_notices.bypasses_suppression(notice)
+                assert failure_notices.decide(
+                    run_id=owner["id"], definition_id=task.id, notice=notice,
+                    streak_facts={"has_sent_elsewhere": True}, earlier_unsettled=None,
+                ).action == failure_notices.ACTION_DELIVER
+                # Recovery after service recreation uses the same durable notice.
+                recovered = ScheduledTaskService(
+                    controller=service.controller, store=ScheduledTaskStore(),
+                    request_store=TaskExecutionStore(),
+                )
+                monkeypatch.setattr(recovered, "_build_context", build_context)
+                await recovered._drain_failure_notices()
+                await recovered._drain_failure_notices()
+                assert len(sent) == 1
+                assert sent[0][0] == "avibe::channel::creator"
+                assert "did not run" in sent[0][1]
+                assert requests._sqlite.owed_failure_notice(owner["id"])["state"] == "sent"
+                requests._sqlite.enqueue_run({
+                    "id": "later-manual-failure", "definition_id": task.id,
+                    "request_type": "scheduled", "source_kind": "cli", "status": "failed",
+                    "created_at": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+                    "metadata": {"owed_failure_notice": {"state": "pending"}},
+                })
+                streak = requests._sqlite.failure_streak_decision(task.id, "later-manual-failure")
+                assert streak["in_streak"] is True
+                assert streak["has_sent_elsewhere"] is False
+            service.reconcile_jobs()
+            assert service.scheduler.get_jobs() == []
+        finally:
+            service.scheduler.shutdown(wait=False)
+            await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+
+def test_missed_one_shot_retirement_and_notice_are_atomic(tmp_path: Path, monkeypatch) -> None:
+    from storage import background
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="", prompt="follow up", schedule_type="at",
+        run_at="2026-11-11T10:27:00+08:00", timezone_name="Asia/Shanghai",
+        session_policy="create_per_run",
+    )
+    prior = task.to_dict()
+    prior.update(last_run_at="2026-11-11T02:00:00Z", last_exit_code=7,
+                 last_error="earlier manual failure", metadata={
+                     background.COMMAND_TIMED_OUT_METADATA_KEY: False,
+                     background.TASK_LAST_RESULT_STATUS_METADATA_KEY: "failed",
+                     "keep": "policy",
+                 })
+    store.sqlite_backend.upsert_scheduled_task(prior)
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store, request_store=requests,
+    )
+    kwargs = dict(
+        expected_run_at=task.run_at, expected_timezone=task.timezone,
+        expected_updated_at=task.updated_at, expected_job_id="missed-generation",
+        error="The scheduled Task did not run", schedule_missed=True,
+    )
+
+    def fail_insert(*args, **kwargs):
+        raise RuntimeError("injected run insert failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(background, "enqueue_run_in_connection", fail_insert)
+        with pytest.raises(RuntimeError, match="injected run insert failure"):
+            service._recover_failed_one_shot_fire(task.id, **kwargs)
+    current = store.refresh_task(task.id)
+    assert current.enabled is True
+    assert current.retired_at is None
+    assert requests._sqlite.list_runs() == []
+    assert service._recover_failed_one_shot_fire(task.id, **kwargs)
+    current = store.refresh_task(task.id)
+    assert (current.last_run_at, current.last_exit_code, current.last_error) == (None, None, None)
+    assert current.metadata == {"keep": "policy"}
+    assert requests.get_run(current.last_run_id)["status"] == "failed"
+    assert requests._sqlite.owed_failure_notice(current.last_run_id)["state"] == "pending"
+
+
+def test_one_shot_grace_does_not_change_cron(tmp_path: Path, monkeypatch) -> None:
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="", prompt="hourly", schedule_type="cron", cron="0 * * * *",
+        timezone_name="UTC", session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store, request_store=TaskExecutionStore(),
+    )
+
+    async def exercise():
+        service.scheduler.start(paused=True)
+        try:
+            service.reconcile_jobs()
+            assert service.scheduler.get_job(task.id).misfire_grace_time == 1
+        finally:
+            service.scheduler.shutdown(wait=False)
+            await asyncio.sleep(0)
+
+    asyncio.run(exercise())
 
 
 def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
@@ -11495,7 +11689,7 @@ def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
     service.reconcile_jobs()
     replacement_job_id = service._job_ids[task.id]
     assert replacement_job_id != original_job_id
-    service._on_scheduler_event(stale_event)
+    asyncio.run(service._handle_scheduler_event(stale_event))
     current = store.refresh_task(task.id)
     assert current is not None
     assert (current.enabled, current.retired_at, current.retirement_reason) == (
@@ -11511,7 +11705,7 @@ def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
         resolve_run_at(replacement_run_at, "Asia/Shanghai"),
     )
     service.scheduler.remove_job(replacement_job_id)
-    service._on_scheduler_event(missed_event)
+    asyncio.run(service._handle_scheduler_event(missed_event))
     missed = store.refresh_task(task.id)
     assert missed is not None
     assert missed.enabled is False
@@ -11519,11 +11713,21 @@ def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
     assert missed.retirement_reason == "schedule_missed"
     assert service.scheduler.get_jobs() == []
     assert task.id not in service._job_ids
-    assert [
+    runs = [
         row
         for row in service.request_store._sqlite.list_runs()
         if row["definition_id"] == task.id
-    ] == []
+    ]
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert "did not run" in runs[0]["error"]
+    assert runs[0]["started_at"] is None
+    notice = service.request_store._sqlite.owed_failure_notice(runs[0]["id"])
+    assert notice["state"] == "pending"
+    assert notice["schedule_missed"] is True
+    # Replaying the same event cannot create another Run or another notice.
+    asyncio.run(service._handle_scheduler_event(missed_event))
+    assert len(service.request_store._sqlite.list_runs()) == 1
 
 
 @pytest.mark.parametrize("replacement_schedule", ["cron", "at"])
@@ -11595,7 +11799,7 @@ def test_hfr_478_stale_event_reconciles_the_current_replacement_schedule(
         resolve_run_at(original_identity[1], original_identity[2]),
         exception=RuntimeError("stale callback") if event_code == "error" else None,
     )
-    service._on_scheduler_event(event)
+    asyncio.run(service._handle_scheduler_event(event))
 
     refreshed = store.refresh_task(task.id)
     assert refreshed is not None
