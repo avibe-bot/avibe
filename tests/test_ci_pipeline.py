@@ -972,13 +972,49 @@ _GITHUB_LINUX_SHELLS = {
 
 
 def _workflow_steps():
-    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for workflow in sorted((ROOT / ".github/workflows").iterdir()):
+        if workflow.suffix not in {".yml", ".yaml"}:
+            continue
         data = yaml.safe_load(workflow.read_text())
         default = ((data.get("defaults") or {}).get("run") or {}).get("shell")
         for job_id, job in (data.get("jobs") or {}).items():
             job_default = ((job.get("defaults") or {}).get("run") or {}).get("shell") or default
             for step in job.get("steps") or []:
                 yield workflow.name, job_id, step, step.get("shell") or job_default
+
+
+def test_release_publishers_do_not_replace_latest_product_release() -> None:
+    """Runtime assets must not displace the stable product release as GitHub's Latest.
+
+    Product stable promotion belongs to scripts/github_release.py finalize and
+    is covered by test_github_release.py; direct workflow publishers opt out.
+    """
+    unguarded = []
+    for workflow, job_id, step, _ in _workflow_steps():
+        location = f"{workflow} {job_id}: {step.get('name')}"
+        if step.get("uses", "").startswith("softprops/action-gh-release@"):
+            if str((step.get("with") or {}).get("make_latest")).lower() != "false":
+                unguarded.append(location)
+        # Join shell continuations, but never borrow --latest=false from another
+        # command (including another create in the same step) or from a comment.
+        for line in (step.get("run") or "").replace("\\\n", "").splitlines():
+            if "gh" not in line or "create" not in line:
+                continue
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+            for index in range(len(tokens) - 2):
+                if tokens[index:index + 3] != ["gh", "release", "create"]:
+                    continue
+                arguments = []
+                for token in tokens[index + 3:]:
+                    if all(char in ";&|()" for char in token):
+                        break
+                    arguments.append(token)
+                latest = [arg for arg in arguments if arg == "--latest" or arg.startswith("--latest=")]
+                if latest != ["--latest=false"]:
+                    unguarded.append(location)
+    assert not unguarded, f"Release publishers must explicitly opt out of Latest: {unguarded}"
 
 
 def test_steps_that_tee_a_command_keep_its_exit_status() -> None:

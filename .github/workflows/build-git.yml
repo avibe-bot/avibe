@@ -785,6 +785,7 @@ jobs:
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3
         with:
           tag_name: ${{ inputs.release_tag }}
+          make_latest: false
           name: "Avibe local-only Git runtime ${{ env.GIT_VERSION }} (build ${{ env.GIT_RELEASE_REVISION }})"
           body: |
             Avibe-managed local-only Git runtime built from the pinned upstream source tarball.
