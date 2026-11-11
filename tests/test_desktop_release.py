@@ -748,6 +748,35 @@ def test_macos_desktop_builds_pin_xcode_and_check_link_metadata():
     assert "Contents/Helpers/cua-driver=13.0" in package_check["run"]
 
 
+def test_package_concurrency_normalizes_the_dispatch_only_warmup_input():
+    # workflow_call does not declare warmup. A bare inputs.warmup can return
+    # a missing value through ||/&& on that path, preventing Actions from creating
+    # matrix children. actionlint accepts it, so keep this runtime contract.
+    package = workflow("desktop-package.yml")
+    triggers = package.get("on", package.get(True))
+    assert "warmup" not in triggers["workflow_call"]["inputs"]
+    assert package["concurrency"] == {
+        "group": "desktop-package-${{ inputs.release_tag || github.ref }}",
+        "cancel-in-progress": "${{ (github.event_name == 'push' || github.event_name == 'schedule' || "
+        "inputs.warmup == true) && github.ref == 'refs/heads/master' && !inputs.release_tag }}",
+    }
+
+
+def test_release_consumers_require_successful_producers():
+    # !cancelled() bypasses Actions' implicit success() check: a failed reusable
+    # matrix can have no jobs/artifacts at all (RC9), not merely a failed child.
+    # Do not run signing/attachment against that absent producer.
+    jobs = workflow("desktop-release.yml")["jobs"]
+    for consumer, producer in (
+        ("certum-windows-sign", "desktop-packages"),
+        ("windows-updater-finalize", "certum-windows-sign"),
+        ("stage-desktop", "desktop-packages"),
+        ("stage-desktop", "certum-windows-sign"),
+    ):
+        assert producer in jobs[consumer]["needs"]
+        assert f"needs.{producer}.result == 'success'" in jobs[consumer]["if"]
+
+
 def test_workflow_signs_every_macos_layer_before_recording():
     package = workflow("desktop-package.yml")
     triggers = package.get("on", package.get(True))

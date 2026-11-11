@@ -63,6 +63,31 @@ measure this change.
 - Workflow tests cover actual matrix selection, trusted cache writers, exact
   key inputs, miss fallback, and unchanged signing/verification steps.
 
+## RC9 expansion fix-forward (2026-11-12)
+
+RC9 run `43105205180` failed before any `desktop-packages` matrix child
+existed. Its resolver emitted valid targets. The callee's `cancel-in-progress`
+expression used bare `inputs.warmup`, which is absent on `workflow_call`.
+For a dispatched caller, the logical operators propagated that missing value
+instead of a boolean; Actions failed the reusable workflow before job expansion,
+without a useful check annotation. Actionlint accepted the original expression.
+
+Branch-only echo probes isolated the boundary without checkout, secrets,
+builds, signing or publication: `43107022986` reproduced the failure;
+`43107283070` expanded both targets after removing concurrency;
+`43107559272` still failed after moving the same expression to job concurrency;
+`43107769678` expanded with literal `false`. Finally `43107904620` expanded
+both targets with the original workflow-level group and only
+`inputs.warmup == true` changed. Keep that explicit boolean comparison; do not
+change matrix policy or remove warm-up serialization to work around it.
+
+Certum now requires `needs.desktop-packages.result == 'success'` in addition
+to its existing gates. Its `!cancelled()` otherwise bypasses the implicit
+success check and attempts to download artifacts from a failed producer.
+Updater finalization and attachment retain their successful-producer gates.
+Contract tests pin both fixes. Only an owner-authorized RC9 retry can prove the
+full packaging/signing/attachment path; the echo probes are not RC samples.
+
 ## Measurement baseline and follow-up
 
 RC5 desktop run `42953973959`: dispatch 2026-11-11 03:37:24 UTC, attachment

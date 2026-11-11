@@ -114,6 +114,7 @@ jobs:
     needs: [release-backstop, resolve-desktop-release, desktop-packages]
     if: >-
       ${{ needs.release-backstop.result == 'success' && !cancelled() && needs.resolve-desktop-release.outputs.enabled == 'true' &&
+          needs.desktop-packages.result == 'success' &&
           (startsWith(inputs.tag, 'gh-v') ||
            startsWith(inputs.tag, 'v')) }}
     runs-on: windows-latest

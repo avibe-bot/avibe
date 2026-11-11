@@ -68,8 +68,10 @@ on:
 concurrency:
   group: desktop-package-${{ inputs.release_tag || github.ref }}
   # Only master cache warm-ups may cancel an older warm-up. Release and manual
-  # non-warm-up builds must not cancel one another.
-  cancel-in-progress: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || inputs.warmup) && github.ref == 'refs/heads/master' && !inputs.release_tag }}
+  # non-warm-up builds must not cancel one another. workflow_call has no warmup
+  # input: compare explicitly so this expression returns a boolean when called
+  # by workflow_dispatch. A missing value prevents Actions from expanding jobs.
+  cancel-in-progress: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || inputs.warmup == true) && github.ref == 'refs/heads/master' && !inputs.release_tag }}
 
 permissions:
   contents: read
