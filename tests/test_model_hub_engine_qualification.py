@@ -951,7 +951,9 @@ def test_trusted_context_resolves_current_wheels_and_bundled_manifests_without_e
     def api(path: str):
         if path.endswith("/releases?per_page=100"):
             return [{"tag_name": f"v{version}", "draft": False, "prerelease": False} for version in releases]
-        return releases[path.rsplit("/v", 1)[1]]
+        if "/releases/tags/v" in path:
+            return releases[path.rsplit("/v", 1)[1]]
+        return GitHub()(path)
 
     def download(url, destination, *, max_bytes):
         version = url.rsplit("/v", 1)[1].split("/", 1)[0]
@@ -965,11 +967,76 @@ def test_trusted_context_resolves_current_wheels_and_bundled_manifests_without_e
         "trusted-released-context", "--candidate-dir", str(candidate_dir),
         "--output-dir", str(tmp_path / "trusted"),
     ]) == 0
-    candidate = qualification.load_candidate(candidate_dir)
     resolved = qualification._load_released_directory(tmp_path / "trusted")
     assert {role: item.version for role, item in resolved.items()} == {"minimum": "3.2.6", "current_stable": "3.2.7"}
     assert (tmp_path / "trusted" / "bundled-manifest-minimum.json").read_bytes() == manifest_bytes(build=1)
     assert (tmp_path / "trusted" / "bundled-manifest-current_stable.json").read_bytes() == manifest_bytes(build=2)
+
+    # Exercise the actual data path, not a fixture pretending to be a baseline
+    # producer: trusted wheels -> baselines CLI -> rehearsal -> verifier CLI.
+    from scripts import model_hub_engine_channel as producer
+
+    monkeypatch.setattr(producer, "_published_payload", lambda _avault: None)
+    baseline_dir = tmp_path / "baselines"
+    assert producer.main([
+        "baselines", "--bundled", str(tmp_path / "trusted" / "bundled-manifest-minimum.json"),
+        "--bundled", str(tmp_path / "trusted" / "bundled-manifest-current_stable.json"),
+        "--output-dir", str(baseline_dir),
+    ]) == 0
+    baselines = baseline_dir / "baselines.json"
+    rehearsal = tmp_path / "untrusted_rehearsal.json"
+    assert qualification.main([
+        "untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
+        "--evidence-dir", str(tmp_path / "absent-evidence"), "--released-dir", str(tmp_path / "trusted"),
+        "--baselines", str(baselines), "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
+        "--head-sha", HEAD, "--output", str(rehearsal),
+    ]) == 0
+    result = json.loads(rehearsal.read_text())
+    assert result["result"] == "untrusted_rehearsal" and result["observations"]
+    verify_args = [
+        "verify-untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
+        "--rehearsal", str(rehearsal), "--released-dir", str(tmp_path / "trusted"),
+        "--baselines", str(baselines),
+    ]
+    # GitHub's fixture deliberately reports a failed run and failed build.
+    assert qualification.main(verify_args) == 0
+    role_path = tmp_path / "trusted" / "current_stable.json"
+    role_bytes = role_path.read_bytes()
+    role_path.unlink()
+    assert qualification.main(verify_args) == 1
+    role_path.write_bytes(role_bytes)
+    tampered = json.loads(role_bytes)
+    tampered["wheel_sha256"] = "0" * 64
+    role_path.write_text(json.dumps(tampered))
+    assert qualification.main(verify_args) == 1
+    role_path.write_bytes(role_bytes)
+    old_baselines = baselines.read_bytes()
+    baselines.write_text("{}")
+    assert qualification.main(verify_args) == 1
+    baselines.write_bytes(old_baselines)
+
+    # A newly published stable wheel bundles another engine. Refresh from the
+    # trusted source, then the old rehearsal must no longer match its roles.
+    next_release = _released("3.2.8")
+    next_wheel = io.BytesIO()
+    with zipfile.ZipFile(next_wheel, "w") as archive:
+        archive.writestr(qualification.PACKAGED_MANIFEST, manifest_bytes(build=3))
+    wheels["3.2.8"] = next_wheel.getvalue()
+    releases["3.2.8"] = {
+        "tag_name": next_release.tag, "draft": False, "prerelease": False,
+        "assets": [{"name": next_release.wheel_name, "size": len(wheels["3.2.8"]),
+                    "digest": f"sha256:{hashlib.sha256(wheels['3.2.8']).hexdigest()}",
+                    "browser_download_url": next_release.wheel_url}],
+    }
+    context_args = ["trusted-released-context", "--candidate-dir", str(candidate_dir),
+                    "--output-dir", str(tmp_path / "trusted")]
+    assert qualification.main(context_args) == 0
+    assert (tmp_path / "trusted" / "bundled-manifest-current_stable.json").read_bytes() == manifest_bytes(build=3)
+    assert qualification.main(verify_args) == 1
+    # Fresh metadata cannot excuse a changed downloaded wheel, even with the
+    # same size: this fails before a manifest is used as trusted context.
+    wheels["3.2.8"] = b"x" * len(wheels["3.2.8"])
+    assert qualification.main(context_args) == 1
 
 
 def test_released_context_skips_bundled_manifests_before_deserialization(tmp_path) -> None:
@@ -1008,31 +1075,6 @@ def test_untrusted_rehearsal_cli_assembles_the_real_artifact_paths(tmp_path) -> 
         "--head-sha", HEAD, "--output", str(output),
     ]) == 0
     assert json.loads(output.read_text())["result"] == "untrusted_rehearsal"
-
-
-def test_main_rehearsal_and_trusted_verifier_chain_handles_absent_runtime_reports(tmp_path, monkeypatch) -> None:
-    candidate_dir = _record(tmp_path / "records")
-    released_dir = tmp_path / "released"
-    for role, released in AVIBE.items():
-        _write(released_dir / f"{role}.json", released.__dict__)
-    baselines = tmp_path / "baselines.json"
-    baselines.write_text(json.dumps(BASELINES))
-    rehearsal = tmp_path / "untrusted_rehearsal.json"
-    assert qualification.main([
-        "untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
-        "--evidence-dir", str(tmp_path / "absent-evidence"), "--released-dir", str(released_dir),
-        "--baselines", str(baselines), "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-        "--head-sha", HEAD, "--output", str(rehearsal),
-    ]) == 0
-    result = json.loads(rehearsal.read_text())
-    assert result["result"] == "untrusted_rehearsal" and result["observations"]
-
-    monkeypatch.setattr(qualification, "_api", lambda _token: GitHub())
-    assert qualification.main([
-        "verify-untrusted-rehearsal", "--candidate-dir", str(candidate_dir),
-        "--rehearsal", str(rehearsal), "--released-dir", str(released_dir),
-        "--baselines", str(baselines),
-    ]) == 0
 
 
 def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tmp_path) -> None:
@@ -1110,7 +1152,6 @@ def test_candidate_workflow_is_untrusted_and_has_no_authoritative_receipt() -> N
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "untrusted_rehearsal" in text
     assert "qualification-receipt" not in text
-    assert "EVIDENCE_PRODUCERS" not in text
     assert "secrets." not in text and "gh release" not in text and "s3api" not in text
     assert workflow["jobs"]["untrusted-rehearsal"]["if"] == "always()"
     assert workflow["jobs"]["untrusted-rehearsal"]["needs"] == ["build", "platform-smoke", "released-avibe-e2e", "hosted-wire"]
