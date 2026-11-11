@@ -1160,7 +1160,50 @@ enum MobileExternalURLPolicy {
         "https://avibe.bot/app/account/security",
     ]
 
+    /// Source links on the bundled Open-source licenses page: exactly the
+    /// URLs its generated `licenses.json` lists, nothing else on those hosts.
+    private static let licenseSourceURLs: Set<String> = {
+        guard
+            let url = Bundle.main.resourceURL?
+                .appendingPathComponent("MobileApp", isDirectory: true)
+                .appendingPathComponent("licenses.json"),
+            let data = try? Data(contentsOf: url)
+        else { return [] }
+        return licenseSourceURLs(from: data)
+    }()
+
     static func allows(_ url: URL) -> Bool {
+        allows(url, licenseSources: licenseSourceURLs)
+    }
+
+    static func allows(_ url: URL, licenseSources: Set<String>) -> Bool {
         allowedURLs.contains(url.absoluteString)
+            || licenseSources.contains(url.absoluteString)
+    }
+
+    /// The crates.io archives and upstream sources of the page's MPL-2.0 offer.
+    static func licenseSourceURLs(from data: Data) -> Set<String> {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let root = object as? [String: Any],
+            let sources = root["sources"] as? [[String: Any]]
+        else { return [] }
+        var urls: [String] = []
+        for source in sources {
+            if let upstream = source["upstream"] as? String {
+                urls.append(upstream)
+            }
+            for crate in source["crates"] as? [[String: Any]] ?? [] {
+                if let registry = crate["registry"] as? String {
+                    urls.append(registry)
+                }
+            }
+        }
+        return Set(urls.filter { raw in
+            guard let url = URL(string: raw), url.scheme == "https", url.user == nil,
+                  url.query == nil, url.fragment == nil
+            else { return false }
+            return url.host == "static.crates.io" || url.host == "github.com"
+        })
     }
 }

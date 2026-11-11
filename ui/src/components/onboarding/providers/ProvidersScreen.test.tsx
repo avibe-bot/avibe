@@ -572,7 +572,7 @@ describe('ProvidersScreen — the stage', () => {
     // Refused again: the dialog says so, and the card keeps the key it had.
     await user.type(within(dialog).getByLabelText('New API Key'), 'still-wrong');
     await user.click(within(dialog).getByRole('button', { name: 'Save and check' }));
-    expect(await within(dialog).findByText('Key rejected (401). Check it and try again.')).toBeTruthy();
+    expect(await within(dialog).findByText('API key invalid or lacks permission (401). Check or replace it.')).toBeTruthy();
 
     await user.clear(within(dialog).getByLabelText('New API Key'));
     await user.type(within(dialog).getByLabelText('New API Key'), 'right-key');

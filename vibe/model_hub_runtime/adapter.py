@@ -2796,6 +2796,8 @@ class CLIProxyEngineAdapter:
                     if exc.status_code in _AUTHENTICATION_ERROR_STATUSES
                     else None
                 ),
+                upstream_status=exc.status_code,
+                upstream_detail=exc.upstream_detail,
             ) from exc
 
     async def observe_source(

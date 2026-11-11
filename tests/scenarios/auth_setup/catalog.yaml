@@ -1022,7 +1022,8 @@ scenarios:
     reason: >-
       The closed loop carries one saved key through real credential custody and
       real model listing against a local upstream: saved unverified, checked and
-      refused with its 401, a refused replacement that keeps the stored key, the
+      refused with its 401 and bounded provider message (invalid or insufficient
+      permission, not proof of revocation), a refused replacement that keeps the stored key, the
       right key, a passing check and removal. The provider screen cases pin what
       the wizard shows for each answer against a controlled source API. Engine
       lifecycle stays simulated; the live journey was also run once in a
@@ -1031,4 +1032,26 @@ scenarios:
       - tests/test_model_hub_api.py::test_refresh_names_a_rejected_key_and_its_status
       - tests/test_model_hub_runtime.py::test_adapter_discovery_names_only_a_credential_refusal
       - ui/src/components/onboarding/providers/providerStage.test.ts
+  - id: AUTH-SETUP-161
+    name: Setup can finish without a provider (Set up later) and the home leads back to adding a model
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_finishes_without_a_provider_closed_loop
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 finishes setup without a provider and lands home, choosing nothing about supply
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 stays in setup and says so when the finish cannot be confirmed
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-161 is not offered once a provider is there to continue with
+    reason: >-
+      The closed loop sends the Wizard's one write to a fresh install with no
+      source through the real config API and reads back what the shell and the home
+      read: setup_state.needs_setup false and the main Bot's backend connection
+      reporting auth none, which the home shows as its model card. The Wizard cases
+      pin the browser half against controlled APIs: offered only with nothing to
+      continue with, believed only on readback, no entry gate or default Agent. The
+      HomeGuide case pins the card itself; the live journey was run once in a
+      fresh-install Incus environment.
+    supporting_tests:
+      - ui/src/components/home/HomeGuide.test.tsx
 next_priority: []

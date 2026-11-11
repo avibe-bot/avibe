@@ -410,7 +410,7 @@ describe('search service add dialog', () => {
     expect(observe).not.toHaveBeenCalled();
     if (outcome === 'invalid') {
       expect(onAdded).not.toHaveBeenCalled();
-      expect(await screen.findByText('The API key was rejected. Check it and try again.')).toBeTruthy();
+      expect(await screen.findByText('API key invalid or lacks permission. Check or replace it.')).toBeTruthy();
     } else await waitFor(() => expect(onAdded).toHaveBeenCalledWith(answer));
   });
 

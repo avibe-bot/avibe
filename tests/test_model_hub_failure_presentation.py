@@ -233,14 +233,15 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
 
 
 @pytest.mark.parametrize("last_said", ["text", "nothing", "connection"])
+@pytest.mark.parametrize("unlisted", [False, True])
 @pytest.mark.parametrize("backend,endpoint,status", [
     ("codex", "responses", 400), ("claude", "messages", 424),
 ])
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_upstream_refusal_text_reaches_reply_record_and_log(
-    tmp_path, caplog, backend, endpoint, status, language, last_said,
+    tmp_path, caplog, backend, endpoint, status, language, last_said, unlisted,
 ):
-    """MH-UPSTREAM-DETAIL-001: what the upstream said is shown, kept, and logged, not only its class."""
+    """MH-UPSTREAM-DETAIL-001: upstream facts survive short copy in the record and log."""
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
     if last_said == "connection":
         # The engine's own transport envelope: no upstream answered at all.
@@ -255,6 +256,8 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
     ])
     service.store.load().sources[0].display_name = "Relay 服务"
     models = _canonicalize_fixed_test_routes(service)
+    if unlisted:
+        service.store.load().agents[backend].routes = {}
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     context = MessageContext(
@@ -298,11 +301,23 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
         connection = t("modelHub.launch.last_connection_failure", language, source="Relay 服务", detail=detail)
         # An older message never stands in for a newer refusal that had none,
         # and a connection failure is never presented as an upstream answer.
-        assert (suffix in notice.args[2]) is (last_said == "text")
+        assert (suffix in notice.args[2]) is (last_said == "text" and not unlisted)
         assert (connection in notice.args[2]) is (last_said == "connection")
+        if unlisted and last_said != "connection":
+            assert notice.args[2] == t(
+                "modelHub.launch.passthrough_model_unlisted", language, model=models[backend],
+            )
         gateway.correlation.settle("turn-detail", settled_by=SETTLED_BY_TERMINAL_RESULT)
         record = service.provenance.get("turn-detail")
         assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
+        assert all(attempt["source_id"] == "src_recovery01" for attempt in record["failed_attempts"])
+        assert all(
+            attempt.get("http_status") == (None if last_said == "connection" else 500)
+            for attempt in record["failed_attempts"]
+        )
+        if unlisted:
+            assert all(attempt["configured_model_id"] == models[backend] for attempt in record["failed_attempts"])
+        assert record["outcome"] == "exhausted"
         logged = [entry.getMessage() for entry in caplog.records if "Model Hub attempt failed" in entry.getMessage()]
         status_text = "http_status=None" if last_said == "connection" else "http_status=500"
         assert len(logged) == attempts and all(status_text in line for line in logged)

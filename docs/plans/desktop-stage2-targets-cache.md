@@ -34,8 +34,11 @@ updater signatures, source provenance, digest checks, and immutable attachment.
   coverage. Cache warming is an optimization, not a new release correctness gate.
   The Intel warm-up is restricted to `desktop/**` (excluding Markdown), `uv.lock`,
   and release helper/workflow inputs, runs with concurrency one and cancels a
-  superseded master warm-up. A real master run must confirm that the Ubuntu
-  lookup-only touch refreshes `last_accessed_at` and can read macOS entries.
+  superseded master warm-up. The lookup-only keep-alive runs on master pushes
+  and every five days; a missing, unreadable, or unrefreshed entry warns the
+  operator to run the next warm-up. No additional five-day warm-up was added;
+  the existing warm-up remains the writer and the keep-alive is an observation,
+  not a release correctness gate.
 
 ## Scope and delivery
 

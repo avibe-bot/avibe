@@ -274,6 +274,15 @@ jobs:
     # for every lane, including failure/cancellation. Design captures stay manual.
     name: ui-browser-checks (${{ matrix.lane }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Browsers and their OS libraries are baked in: no runtime apt/mirror
+    # dependency. Keep this version equal to ui/package-lock.json (tested).
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -339,34 +348,20 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      # `--with-deps` fetches about 120 MB of WebKit system packages from the
-      # runner's Ubuntu mirror, which has taken 13 to 44 minutes when the
-      # mirror is slow. apt keeps the packages it downloads in this directory,
-      # restored and saved per runner image and Playwright version; apt still
-      # resolves, verifies and installs every package, and fetches any it lacks.
-      - name: Keep Playwright system packages restorable
-        id: browser-packages
+      - name: Verify preinstalled browsers
+        timeout-minutes: 10
         working-directory: ui
         run: |
-          mkdir -p "$HOME/.cache/playwright-apt/partial"
-          echo "Dir::Cache::Archives \"$HOME/.cache/playwright-apt/\";" | sudo tee /etc/apt/apt.conf.d/99playwright-archives
-          prefix="playwright-apt-$ImageOS-"
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-          echo "key=$prefix$ImageVersion-$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.cache/playwright-apt
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.key }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.prefix }}
-      - name: Install browsers
-        working-directory: ui
-        run: |
-          npx playwright install --with-deps chromium webkit
-          # Drop superseded packages, then hand apt's root-owned files to the
-          # runner user so the cache can save them.
-          sudo apt-get autoclean
-          sudo rm -rf "$HOME/.cache/playwright-apt/partial" "$HOME/.cache/playwright-apt/lock"
-          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
+          # Launch both engines to fail early on missing binaries/libraries.
+          # Do not install here: the matching image already supplies them.
+          node --input-type=module <<'JS'
+          import { chromium, webkit } from 'playwright';
+          for (const engine of [chromium, webkit]) {
+            const browser = await engine.launch();
+            console.log(`${engine.name()}: ${browser.version()}`);
+            await browser.close();
+          }
+          JS
 
       - name: Test browser interactions
         # The Model Hub catalog regression (about ten minutes) runs on the
@@ -462,6 +457,7 @@ jobs:
           # Ordinary UI changes still validate the bundled phone app on Linux;
           # only native/bridge/contract changes allocate the iOS simulator.
           npm run build:mobile
+          python3 ../ios/scripts/app_licenses.py generate --bundle ../ios/Avibe/Resources/MobileApp
           ../ios/scripts/verify_mobile_bundle.sh ../ios/Avibe/Resources/MobileApp
 
       # What a phone downloads before the first screen draws (docs/plans/web-ui-first-load.md).

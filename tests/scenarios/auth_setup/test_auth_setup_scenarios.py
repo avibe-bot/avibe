@@ -170,6 +170,64 @@ def test_selected_cli_health_refusal_recovers_through_setup_http(monkeypatch, tm
     assert commands.calls and {path for _backend, path in commands.calls} == {str(selected)}
 
 
+def test_setup_finishes_without_a_provider_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-161 — 「稍后再配」 through the real config boundary.
+
+    A fresh install with no Model Hub source sends the one write the Wizard's
+    Set up later sends, then reads back what the shell and the home read: the
+    config's own setup projection, and the main Bot's backend connection whose
+    `auth` is what the home's model card keys on.
+    """
+    from vibe import api, internal_client
+
+    monkeypatch.setattr(
+        internal_client, "reconcile_platforms",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True}}),
+    )
+    # The controller answers that the backend's config is applied; what the home
+    # reads from the connection is the supply verdict, not process state.
+    monkeypatch.setattr(
+        internal_client, "backend_application",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "state": "applied", "controller_pid": 123}}),
+    )
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    V2Config.default().save()
+    client = app.test_client()
+    runner = ScenarioRunner(SimpleNamespace())
+
+    def fresh(_h):
+        envelope = client.get("/api/config").get_json()
+        assert envelope["setup_completed"] is False
+        assert envelope["setup_state"]["needs_setup"] is True
+        assert V2Config.load().model_hub.sources == []
+
+    def later(_h):
+        response = client.post("/api/config", json={"setup_completed": True}, headers=csrf_headers(client))
+        assert response.status_code == 200, response.get_json()
+
+    def read_back(_h):
+        envelope = client.get("/api/config").get_json()
+        assert envelope["setup_completed"] is True
+        assert envelope["setup_state"]["needs_setup"] is False
+        saved = V2Config.load()
+        # Finishing chose nothing about supply.
+        assert saved.model_hub.sources == []
+
+    def home_sees_no_model(_h):
+        response = client.get("/api/backend/vibey/connection")
+        assert response.status_code == 200, response.get_json()
+        # `auth: none` is what the home's Getting started reads as "Give Vibey a model".
+        assert response.get_json()["auth"] == "none"
+
+    steps = [("fresh", fresh), ("later", later), ("read_back", read_back), ("home_sees_no_model", home_sees_no_model)]
+    asyncio.run(runner.run(*(ScenarioStep(name, action) for name, action in steps)))
+    ScenarioExpect.step_history(runner, [name for name, _ in steps])
+
+
 def test_auth_setup_catalog_priorities_reference_live_scenarios():
     catalog = yaml.safe_load((ROOT / "tests/scenarios/auth_setup/catalog.yaml").read_text())
     live_ids = {scenario["id"] for scenario in catalog["scenarios"]}
@@ -4573,7 +4631,9 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
             presented.append(supplied)
             if supplied != right_key:
-                return web.json_response({"error": {"code": "invalid_api_key"}}, status=401)
+                return web.json_response({"error": {
+                    "code": "invalid_api_key", "message": "This key cannot list models.",
+                }}, status=401)
             return web.json_response({"data": [{"id": "relay-model-a"}, {"id": "relay-model-b"}]})
 
         upstream_app = web.Application()
@@ -4606,14 +4666,14 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
                 await service.refresh_source(h.source_id)
             assert refused.value.code == "discovery_failed"
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401}
+            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
             assert store.config.sources[0].state.status == "error"
 
         async def refused_replacement_keeps_the_key(h):
             with pytest.raises(ModelHubError) as refused:
                 await service.replace_credential(h.source_id, {"key": other_wrong_key})
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401}
+            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
             assert stored_key(h) == wrong_key
 
         async def right_replacement_lists_models(h):
