@@ -1597,6 +1597,71 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 with: identifiersCreatedByTest.subtracting(before)
             )
         )
+        // EXPERIMENT: does anything the test created come back after its checks?
+        try? await Task.sleep(for: .milliseconds(1500))
+        let later = await fetchAllNamedDataStoreIdentifiers()
+        let cameBack = later.intersection(identifiersCreatedByTest.subtracting(before))
+        print("LEDGER-LATER new-test \(cameBack.isEmpty ? "clean" : "CAME-BACK")")
+    }
+
+    func testZZCookieVersion() async throws {
+        let before = await fetchAllNamedDataStoreIdentifiers()
+        let defaults = makeDefaults()
+        let registry = RealNamedDataStoreRegistry()
+        var accountStore: AccountWebsiteDataStore? = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let unownedIdentifier = UUID()
+        addTeardownBlock {
+            let remaining = await registry.removeCreatedIdentifiers()
+            XCTAssertTrue(remaining.isEmpty)
+        }
+        // Someone else's store, alive and on disk, with no network session.
+        // A session would let WebKit refuse its removal as "in use" and so hide
+        // a sweep that wrongly tried; and a released session keeps writing its
+        // directory back for a while after the cleanup below removes it (#3418).
+        var unownedStore: WKWebsiteDataStore? = registry.makeUnownedStore(
+            unownedIdentifier
+        )
+        await setCookie(
+            HTTPCookie(properties: [
+                .domain: "example.test",
+                .path: "/",
+                .name: "test_owned_unrelated",
+                .value: "present",
+            ])!,
+            in: try XCTUnwrap(unownedStore).httpCookieStore
+        )
+        let registered = await fetchAllNamedDataStoreIdentifiers()
+        XCTAssertTrue(registered.contains(unownedIdentifier))
+
+        await accountStore?.rotate()
+        await accountStore?.sweepOrphans()
+
+        let afterSweep = await fetchAllNamedDataStoreIdentifiers()
+        XCTAssertTrue(before.isSubset(of: afterSweep))
+        XCTAssertTrue(afterSweep.contains(unownedIdentifier))
+
+        let identifiersCreatedByTest =
+            registry.createdIdentifiers
+        accountStore = nil
+        unownedStore = nil
+        let remaining = await registry.removeCreatedIdentifiers()
+        XCTAssertTrue(remaining.isEmpty)
+
+        let afterCleanup = await fetchAllNamedDataStoreIdentifiers()
+        XCTAssertTrue(before.isSubset(of: afterCleanup))
+        XCTAssertTrue(
+            afterCleanup.isDisjoint(
+                with: identifiersCreatedByTest.subtracting(before)
+            )
+        )
+        // EXPERIMENT: does anything the test created come back after its checks?
+        try? await Task.sleep(for: .milliseconds(1500))
+        let later = await fetchAllNamedDataStoreIdentifiers()
+        let cameBack = later.intersection(identifiersCreatedByTest.subtracting(before))
+        print("LEDGER-LATER cookie-version \(cameBack.isEmpty ? "clean" : "CAME-BACK")")
     }
 
     private static let sessionJSON = """

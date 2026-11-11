@@ -104,16 +104,33 @@ jobs:
 
       - name: Run XCTest on iPhone Simulator
         run: |
-          set -euo pipefail
-          xcodebuild \
-            -project ios/Avibe.xcodeproj \
-            -scheme Avibe \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
-            -parallel-testing-enabled NO \
-            -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
-            CODE_SIGNING_ALLOWED=NO \
-            test
+          set -uo pipefail
+          run() {
+            variant="$1"; shift
+            xcodebuild \
+              -project ios/Avibe.xcodeproj \
+              -scheme Avibe \
+              -configuration Debug \
+              -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+              -parallel-testing-enabled NO \
+              CODE_SIGNING_ALLOWED=NO \
+              "$@" test 2>&1 | grep -E "LEDGER-LATER|: error:|Test Case .*(passed|failed)|\*\* TEST" | sed "s/^/[$variant] /"
+          }
+          run diag \
+            -only-testing:AvibeTests/MobileAuthTransportIntegrationTests/testNamedStoreLedgerNeverRemovesAnUnownedLiveIdentifier \
+            -only-testing:AvibeTests/MobileAuthTransportIntegrationTests/testZZCookieVersion \
+            -test-iterations 60
+          python3 ios/scripts/exp_mutate.py m1
+          git diff --stat
+          run m1-forget-on-success \
+            -only-testing:AvibeTests/MobileOnboardingTests/testARemovedStoreThatComesBackIsRemovedAgainAndForgottenOnlyOnceGone \
+            -only-testing:AvibeTests/MobileOnboardingTests/testNamedStoreRemovalFailurePersistsUntilALaterSweep
+          git checkout -- ios/Avibe/MobileAccount.swift
+          python3 ios/scripts/exp_mutate.py m2
+          git diff --stat
+          run m2-sweep-removes-unowned \
+            -only-testing:AvibeTests/MobileAuthTransportIntegrationTests/testNamedStoreLedgerNeverRemovesAnUnownedLiveIdentifier
+          git checkout -- ios/Avibe/MobileAccount.swift
 
       - name: Upload XCTest failure result bundle
         if: ${{ failure() }}
