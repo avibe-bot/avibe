@@ -101,6 +101,14 @@ def test_only_the_master_warmup_saves_and_every_build_restores_an_exact_key():
         assert package_step(save)["with"]["key"] == f"${{{{ steps.{package_step(restore)['id']}.outputs.cache-primary-key }}}}"
 
 
+def test_the_signpath_test_lane_reads_the_entry_the_windows_warmup_saves():
+    """It restores the package job's Windows entry, which is matched by key and path list together."""
+    lane = workflow("desktop-signpath-test.yml")["jobs"]["signpath-test-build"]["steps"]
+    restore = next(item for item in lane if item.get("name") == "Restore Rust build cache")
+    assert restore["uses"].startswith("actions/cache/restore@")
+    assert paths(restore) == paths(package_step("Save Rust build cache"))
+
+
 def test_an_inexact_rust_cache_match_is_removed_before_anything_compiles(tmp_path):
     """The cache service can answer a key with an entry whose key only starts with it."""
     steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]

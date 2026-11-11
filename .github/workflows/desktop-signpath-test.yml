@@ -74,7 +74,6 @@ jobs:
             desktop/target/release/.fingerprint
             desktop/target/release/build
             desktop/target/release/deps
-            desktop/target/cua-driver-patched
           key: ${{ runner.os }}-x86_64-pc-windows-msvc-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
           restore-keys: ${{ runner.os }}-x86_64-pc-windows-msvc-desktop-package-${{ steps.toolchain.outputs.rustc }}-
 
