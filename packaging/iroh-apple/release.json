@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "release_state": "pending",
+  "release_tag": "iroh-apple-v1.2.0-1",
+  "asset_url": "https://github.com/avibe-bot/avibe/releases/download/iroh-apple-v1.2.0-1/IrohLib.xcframework.zip",
+  "sha256": null,
+  "upstream_commit": "66a8d619a4d791d458d582f312df6e0ab42bc541",
+  "iroh_core_version": "1.4.1",
+  "patch_sha256": "38b18ade6e654173705901dad56da8fb3deeb72eaa157606e52bca31fe40fe48",
+  "deployment_target": "17.0",
+  "tested_runtime": null,
+  "runtime_identifier": null,
+  "source_commit": null,
+  "qualification_run_id": null,
+  "assets": {}
+}

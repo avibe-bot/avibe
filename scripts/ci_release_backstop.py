@@ -207,7 +207,12 @@ def _backstop(api: GitHubApi, source_sha: str) -> tuple[BackstopProof | None, st
 
 
 def prove_backstop(api: GitHubApi, *, tag: str) -> BackstopProof:
-    source_sha = resolve_tag_sha(api, tag)
+    return prove_backstop_sha(api, source_sha=resolve_tag_sha(api, tag))
+
+
+def prove_backstop_sha(api: GitHubApi, *, source_sha: str) -> BackstopProof:
+    """Prove an exact commit before a release workflow creates its tag."""
+    source_sha = _sha(source_sha, context="source")
     proof, _state, _run_id = _backstop(api, source_sha)
     if proof is not None:
         return proof
@@ -337,7 +342,9 @@ def prove_release(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
-    parser.add_argument("--tag", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--tag", help="Resolve an existing release tag before checking its source")
+    source.add_argument("--source-sha", help="Check the source commit before creating a tag")
     parser.add_argument("--token", default=os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", ""))
     parser.add_argument(
         "--rc-pull-request-gate",
@@ -350,11 +357,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        proof = prove_release(
-            GitHubApi(args.repository, args.token),
-            tag=args.tag,
-            rc_pull_request_gate=args.rc_pull_request_gate,
-        )
+        api = GitHubApi(args.repository, args.token)
+        if args.source_sha is not None:
+            proof = prove_backstop_sha(api, source_sha=args.source_sha)
+        else:
+            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate)
     except ReleaseBackstopError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
