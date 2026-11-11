@@ -435,6 +435,14 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       }
     : null;
   const effortLabel = (effort: string) => t(`chat.picker.effortOptions.${effort}`, { defaultValue: effort });
+  // No effort on the route is not "nothing": dispatch falls back to the Agent's own
+  // effort, and only without one to the model's. The Default option says which, and
+  // picking it clears the route's override back to exactly that.
+  const inheritedEffort = displayedAgent?.reasoning_effort || null;
+  const defaultEffortLabel = inheritedEffort
+    ? t('chat.picker.effortDefaultNamed', { effort: effortLabel(inheritedEffort) })
+    : t('chat.picker.effortDefault');
+  const defaultEffortHint = t(inheritedEffort ? 'chat.picker.effortDefaultAgentHint' : 'chat.picker.effortDefaultHint');
 
   // The model list body — search, loading/empty states, rows — is shared; only
   // how a row presents its name differs.
@@ -717,7 +725,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               <EffortChip
                 active={!currentEffort}
                 disabled={loadingModels}
-                label={t('chat.picker.effortDefault')}
+                label={defaultEffortLabel}
                 onClick={() => applyPatch({ reasoning_effort: null })}
               />
               {effortOptions.map((opt) => (
@@ -884,8 +892,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 onClick={() => applyPatch({ reasoning_effort: null })}
               >
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span>{t('chat.picker.effortDefault')}</span>
-                  <span className="text-[10px] leading-snug text-muted">{t('chat.picker.effortDefaultHint')}</span>
+                  <span>{defaultEffortLabel}</span>
+                  <span className="text-[10px] leading-snug text-muted">{defaultEffortHint}</span>
                 </span>
               </RouteItem>
               {effortOptions.map((opt) => {

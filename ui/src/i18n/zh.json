@@ -5666,6 +5666,8 @@
       "effort": "思考强度",
       "effortDefault": "默认",
       "effortDefaultHint": "使用模型自己的设置",
+      "effortDefaultNamed": "默认（{{effort}}）",
+      "effortDefaultAgentHint": "使用 Agent 的设置",
       "effortNotOn": "{{sources}} 不支持",
       "effortNotOnSome": "部分供应商不支持",
       "effortRefused": "当前没有供应商支持 · 可在模型 → 供应商中清除",

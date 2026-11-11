@@ -809,6 +809,27 @@ describe('AgentRoutePicker compact presentation', () => {
     expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
   });
 
+  it("names the Agent's effort as the Default a route without one runs on", async () => {
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'Low' }, { value: 'high', label: 'High' }] };
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <MemoryRouter>
+        <AgentRoutePicker
+          presentation="compact"
+          value={{ ...CLAUDE_ROUTE, reasoning_effort: null }}
+          agents={[agent({ reasoning_effort: 'high' }), AGENTS[1]]}
+          onChange={onChange}
+        />
+      </MemoryRouter>,
+    );
+    await openMenu(user);
+    // Dispatch falls back to the Agent's effort, so that is what Default runs and says.
+    const byDefault = effortGroup().getByRole('radio', { name: 'chat.picker.effortDefaultNamed' });
+    expect(byDefault.getAttribute('aria-checked')).toBe('true');
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('aria-checked')).toBe('false');
+  });
+
   // A Bot's conversation (docs/plans/bots.md D5): its Agent is internal to the Bot,
   // and the server refuses any Agent write on a Bot's Session, so the picker shows
   // and offers only the model and effort: no Agent name, no Agent level.

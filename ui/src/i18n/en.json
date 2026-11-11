@@ -5666,6 +5666,8 @@
       "effort": "Effort",
       "effortDefault": "Default",
       "effortDefaultHint": "The model's own setting",
+      "effortDefaultNamed": "Default ({{effort}})",
+      "effortDefaultAgentHint": "The Agent's setting",
       "effortNotOn": "Not on {{sources}}",
       "effortNotOnSome": "Not on some providers",
       "effortRefused": "No provider accepts it now · clear it under Models → Providers & routing",
