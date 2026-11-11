@@ -649,6 +649,29 @@ def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch):
         yield pushed
 
 
+@pytest.fixture(autouse=True)
+def _no_login_shell_lookup(monkeypatch):
+    """Keep a Runtime start from running the developer's login shell.
+
+    ``runtime.start_service`` and ``runtime.start_ui`` ask the login shell for
+    its ``PATH``, which runs the developer's own startup files and makes the
+    environment a test sees depend on them. The lookup reports no ``PATH`` here,
+    so a start keeps the caller's. A test of the lookup drives ``resolve_with``
+    with a shell it wrote, or replaces ``login_shell_path`` itself. The answer
+    cached for the process does not cross test boundaries.
+    """
+
+    def stub(login_path) -> None:
+        login_path._runtime_path.cache_clear()  # noqa: SLF001
+        monkeypatch.setattr(login_path, "login_shell_path", lambda: login_path.LoginPath(None, "test"))
+
+    with _stubbed_for_this_test("vibe.login_path", stub):
+        yield
+    login_path = sys.modules.get("vibe.login_path")
+    if login_path is not None:
+        login_path._runtime_path.cache_clear()  # noqa: SLF001
+
+
 def _models_dev_unreachable(_previous: dict) -> dict:
     raise OSError("tests do not fetch models.dev")
 
@@ -687,6 +710,28 @@ def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch):
         _stubbed_for_this_test("vibe.backend_model_catalog", stub_backend_catalog),
         _stubbed_for_this_test("vibe.models_dev_catalog", stub_models_dev),
     ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_desktop_session_probe(request: pytest.FixtureRequest, monkeypatch):
+    """Keep a restart or start from asking macOS which login session the test runs in.
+
+    ``schedule_restart`` and ``vibe start`` ask ``launchctl`` whether the caller
+    is in the user's desktop session, and a caller outside it hands its restart
+    to the running service. The answer would depend on where the developer
+    started pytest, so here the caller is never outside. ``real_desktop_session_probe``
+    opts out a test that drives the decision with a probe of its own.
+    """
+
+    if request.node.get_closest_marker("real_desktop_session_probe"):
+        yield
+        return
+
+    def stub(restart_supervisor) -> None:
+        monkeypatch.setattr(restart_supervisor, "outside_desktop_session", lambda: False)
+
+    with _stubbed_for_this_test("vibe.restart_supervisor", stub):
         yield
 
 
@@ -1380,6 +1425,27 @@ def hold_migration_lock_elsewhere():
         assert not failures, failures[0]
 
     return _holder
+
+
+@pytest.fixture(autouse=True)
+def _no_real_launch_agent(monkeypatch):
+    """Keep `vibe autostart` and its login entry away from the developer's launchd.
+
+    The LaunchAgent file lands in the isolated home, but ``launchctl`` acts on the
+    developer's real desktop session: loading the agent there runs its login
+    entry, which starts or restarts the Avibe the developer is working in. A test
+    that reaches ``launchctl`` through ``vibe.login_autostart`` fails here unless
+    it replaced the runner with a fake of its own.
+    """
+
+    def refuse(command, timeout):
+        raise AssertionError(f"a test reached the real launchctl: {list(command)}")
+
+    def stub(login_autostart) -> None:
+        monkeypatch.setattr(login_autostart, "run_bounded_command", refuse)
+
+    with _stubbed_for_this_test("vibe.login_autostart", stub):
+        yield
 
 
 @pytest.fixture(autouse=True)

@@ -103,6 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
+      lock_sha: ${{ steps.ref.outputs.lock_sha }}
     steps:
       - name: Resolve Show Runtime ref
         id: ref
@@ -116,10 +117,53 @@ jobs:
             exit 1
           fi
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          LOCK_SHA=$(gh api "repos/avibe-bot/vibe-show-runtime/contents/package-lock.json?ref=$REF" --jq '.content' | base64 --decode | python -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+          echo "lock_sha=$LOCK_SHA" >> "$GITHUB_OUTPUT"
+
+  resolve-show-runtime-canonical:
+    needs: [release-backstop, resolve-show-runtime-ref]
+    if: needs.release-backstop.result == 'success' && needs.resolve-show-runtime-ref.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+      workflow_file: ${{ steps.find.outputs.workflow_file }}
+      workflow_name: ${{ steps.find.outputs.workflow_name }}
+      run_attempt: ${{ steps.find.outputs.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.release-backstop.outputs.source_sha }}
+          sparse-checkout: scripts/show_runtime_canonical.py
+          sparse-checkout-cone-mode: false
+      - name: Find trusted canonical Show Runtime set
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python scripts/show_runtime_canonical.py find \
+            --repository "$REPOSITORY" \
+            --runtime-ref "$RUNTIME_REF" \
+            --workflow .github/workflows/release_ai.yml \
+            --workflow .github/workflows/publish.yml \
+            --platform linux-x64 \
+            --platform linux-arm64 \
+            --platform darwin-x64 \
+            --platform darwin-arm64 \
+            --platform win32-x64 \
+            --platform win32-arm64 \
+            --output "$GITHUB_OUTPUT"
 
   show-runtime-bundles:
-    needs: [release-backstop, resolve-show-runtime-ref]
+    needs: [release-backstop, resolve-show-runtime-ref, resolve-show-runtime-canonical]
     runs-on: ${{ matrix.os }}
+    permissions:
+      actions: read
+      contents: read
     strategy:
       matrix:
         include:
@@ -141,14 +185,63 @@ jobs:
         with:
           repository: avibe-bot/vibe-show-runtime
           ref: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
-
+      - name: Checkout Avibe release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.release-backstop.outputs.source_sha }}
+          path: avibe-source
+          sparse-checkout: scripts/show_runtime_canonical.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
           cache: "npm"
-
+      - name: Reuse trusted canonical Show Runtime bundle when identity matches
+        id: canonical
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANONICAL_RUN_ID: ${{ needs.resolve-show-runtime-canonical.outputs.run_id }}
+          CANONICAL_WORKFLOW_FILE: ${{ needs.resolve-show-runtime-canonical.outputs.workflow_file }}
+          CANONICAL_WORKFLOW_NAME: ${{ needs.resolve-show-runtime-canonical.outputs.workflow_name }}
+          RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
+          LOCK_SHA: ${{ needs.resolve-show-runtime-ref.outputs.lock_sha }}
+          TARGET: ${{ matrix.artifact }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reused=false
+          canonical_dir="$RUNNER_TEMP/show-runtime-canonical"
+          rm -rf "$canonical_dir"
+          mkdir -p "$canonical_dir"
+          canonical_name="canonical-show-runtime-${RUNTIME_REF}-${TARGET}"
+          if [ -n "$CANONICAL_RUN_ID" ] && gh run download "$CANONICAL_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" --name "$canonical_name" --dir "$canonical_dir"; then
+            if python avibe-source/scripts/show_runtime_canonical.py verify \
+                --directory "$canonical_dir" --artifact "$TARGET" \
+                --runtime-ref "$RUNTIME_REF" --lock-sha "$LOCK_SHA" \
+                --producer-workflow-name "$CANONICAL_WORKFLOW_NAME" \
+                --producer-workflow-file "$CANONICAL_WORKFLOW_FILE" \
+                --producer-run-id "$CANONICAL_RUN_ID" \
+                --producer-run-attempt "${{ needs.resolve-show-runtime-canonical.outputs.run_attempt }}" \
+                --node-version "$(node --version)" --npm-version "$(npm --version)"; then
+              cp "$canonical_dir"/vibe-show-runtime-node-*.tgz .
+              cp "$canonical_dir/show-runtime-ref-$TARGET.txt" .
+              cp "$canonical_dir/show-router-$TARGET.tsx" .
+              cp "$canonical_dir/show-runtime-identity-$TARGET.json" .
+              reused=true
+            else
+              echo "Canonical artifact identity mismatch; falling back to a fresh build."
+            fi
+          else
+            echo "No trusted canonical artifact set; falling back to a fresh build."
+          fi
+          echo "reused=$reused" >> "$GITHUB_OUTPUT"
       - name: Build Show Runtime bundle
+        if: steps.canonical.outputs.reused != 'true'
         # Keep the runner's native shell: Git Bash shadows Windows' tar.
         run: |
           npm ci
@@ -158,6 +251,7 @@ jobs:
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
 
       - name: Export Show Runtime router
+        if: steps.canonical.outputs.reused != 'true'
         shell: bash
         run: |
           node --input-type=module <<'JS'
@@ -173,7 +267,26 @@ jobs:
             await rm(workspace, { recursive: true, force: true })
           }
           JS
-
+      - name: Record Show Runtime identity
+        if: steps.canonical.outputs.reused != 'true'
+        shell: bash
+        env:
+          RUNTIME_REF: ${{ needs.resolve-show-runtime-ref.outputs.ref }}
+          LOCK_SHA: ${{ needs.resolve-show-runtime-ref.outputs.lock_sha }}
+          SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
+          PRODUCER_RUN_ID: ${{ github.run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PRODUCER_WORKFLOW_NAME: ${{ github.workflow }}
+          PRODUCER_WORKFLOW_FILE: .github/workflows/publish.yml
+          TARGET: ${{ matrix.artifact }}
+        run: |
+          python avibe-source/scripts/show_runtime_canonical.py record \
+            --directory . --artifact "$TARGET" --runtime-ref "$RUNTIME_REF" \
+            --lock-sha "$LOCK_SHA" --producer-workflow-name "$PRODUCER_WORKFLOW_NAME" \
+            --producer-workflow-file "$PRODUCER_WORKFLOW_FILE" \
+            --producer-run-id "$PRODUCER_RUN_ID" --producer-run-attempt "$PRODUCER_RUN_ATTEMPT" \
+            --producer-source-sha "$SOURCE_SHA" --node-version "$(node --version)" \
+            --npm-version "$(npm --version)"
       - name: Upload Show Runtime bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
@@ -182,6 +295,18 @@ jobs:
             vibe-show-runtime-node-*.tgz
             show-runtime-ref-${{ matrix.artifact }}.txt
             show-router-${{ matrix.artifact }}.tsx
+            show-runtime-identity-${{ matrix.artifact }}.json
+      - name: Upload fresh canonical Show Runtime bundle
+        if: steps.canonical.outputs.reused != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: canonical-show-runtime-${{ needs.resolve-show-runtime-ref.outputs.ref }}-${{ matrix.artifact }}
+          path: |
+            vibe-show-runtime-node-*.tgz
+            show-runtime-ref-${{ matrix.artifact }}.txt
+            show-router-${{ matrix.artifact }}.tsx
+            show-runtime-identity-${{ matrix.artifact }}.json
+          retention-days: 30
 
   build:
     needs:
@@ -206,19 +331,9 @@ jobs:
             scripts/github_release.py
             scripts/show_runtime_manifest_asset.py
             scripts/release_asset_download.py
-            scripts/build_retired_companion.py
             scripts/release_package_version.py
-            scripts/ci_scenario_evidence.py
-            scripts/pytest_collection.py
             .github/actions/sqlite-predecessor-contract/action.yml
-            .github/workflows/publish.yml
-            tests/scenarios/**/catalog.yaml
             tests/test_distribution_artifacts.py
-            tests/__init__.py
-            tests/e2e/test_retired_updater_bridge.py
-            tests/e2e/test_install_command.py
-            tests/e2e/retired_updater_probe.py
-            tests/e2e/github_release_fixture.py
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
@@ -338,13 +453,6 @@ jobs:
                   )
           PY
 
-      - name: Build and verify inert old-updater bridge
-        env:
-          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
-        run: |
-          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG"
-          python release-automation/scripts/build_retired_companion.py --tag "$RELEASE_TAG" --verify
-
       - name: Verify built distribution contracts
         run: |
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
@@ -364,54 +472,15 @@ jobs:
           fi
 
       - name: Run release install and upgrade regressions
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
-          export AVIBE_CORE_WHEEL="$(realpath "$VIBE_INSTALL_TEST_WHEEL")"
-          export AVIBE_BRIDGE_WHEEL="$(realpath "$(ls dist/avibe_memory-*.whl)")"
-          mkdir -p old-release
-          for asset in avibe_os-3.1.0-py3-none-any.whl avibe_memory-3.1.0-py3-none-any.whl; do
-            gh release download v3.1.0 --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir old-release
-          done
-          echo '7c2321ae32174c0fcf0b659c7d7a5b90ae53740c223ae41452702adbc393b924  old-release/avibe_os-3.1.0-py3-none-any.whl' | sha256sum -c -
-          echo 'ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0  old-release/avibe_memory-3.1.0-py3-none-any.whl' | sha256sum -c -
-          export AVIBE_OLD_CORE_WHEEL="$(realpath old-release/avibe_os-3.1.0-py3-none-any.whl)"
-          export AVIBE_OLD_COMPANION_WHEEL="$(realpath old-release/avibe_memory-3.1.0-py3-none-any.whl)"
-          export AVIBE_RELEASE_GATE=1
           pytest \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
-          TARGET_VERSION="$(python release-automation/scripts/release_package_version.py "$RELEASE_TAG")"
-          export TARGET_VERSION
-          UPGRADE_DIRECTION="$(python - <<'PY'
-          import os
-          from packaging.version import Version
-
-          print("forward" if Version(os.environ["TARGET_VERSION"]) > Version("3.1.0") else "historical")
-          PY
-          )"
-          if [ "$UPGRADE_DIRECTION" = forward ]; then
-            mkdir -p "$RUNNER_TEMP/retired-updater-junit"
-            pytest_status=0
-            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=. -v \
-              --junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml") || pytest_status=$?
-            evidence_status=0
-            (cd release-automation && python scripts/ci_scenario_evidence.py --release \
-              "$RUNNER_TEMP/retired-updater-junit" \
-              --workflow .github/workflows/publish.yml \
-              --pytest-root . \
-              --pytest-command-index 1) || evidence_status=$?
-            if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
-            exit "$evidence_status"
-          else
-            echo "No forward Memory retirement upgrade from v3.1.0 to $RELEASE_TAG"
-          fi
 
       - name: Upload GitHub release assets
         env:
@@ -426,8 +495,8 @@ jobs:
             --title "$TAG" \
             --notes "Release assets for $TAG."
 
-          # All artifacts are immutable per tag, including the GitHub-only
-          # companion. Compare every existing byte BEFORE uploading anything.
+          # All artifacts are immutable per tag. Compare every existing byte
+          # BEFORE uploading anything.
           existing="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
           tmp="$(mktemp -d)"
           trap 'rm -r -- "$tmp"' EXIT
@@ -435,7 +504,6 @@ jobs:
           package_to_upload=()
           package_paths=(
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
-            dist/avibe_memory-*-py3-none-any.whl
           )
           # The existing v3.0.x shim remains part of those releases only.
           for path in dist/vibe_remote-*.whl dist/vibe_remote-*.tar.gz; do

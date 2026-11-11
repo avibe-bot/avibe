@@ -82,7 +82,10 @@ dependencies = [
     "pypdf>=6.21.2",
     "python-multipart>=0.0.9",
     "PyJWT[crypto]>=2.15.0",
-    "SQLAlchemy>=2.0.0",
+    # 2.1 requires Python 3.11+. Keep its adopted line on newer Python while
+    # maintaining the compatible 2.0 patch line for Python 3.10.
+    "SQLAlchemy>=2.0.57,<2.1; python_version < '3.11'",
+    "SQLAlchemy>=2.1.0; python_version >= '3.11'",
     "alembic>=1.13.0",
     "psutil>=7.1.0",
     "packaging>=23.0",
@@ -199,6 +202,7 @@ markers = [
     "reap_processes: kill every process the test started that is still running when it ends, and after a killed run (tests/process_reaper.py)",
     "real_web_push_sender: opt out of the autouse stub that keeps the delayed Web Push sender from outliving a test, for tests that drive the sender directly",
     "real_catalog_refresh: opt out of the autouse stubs that keep the remote model catalog and models.dev fetches off the network and off threads that outlive a test, for tests that drive a refresh or fetch directly",
+    "real_desktop_session_probe: opt out of the autouse stub that keeps a restart or start from probing the macOS login session pytest runs in, for tests that drive the decision with a probe of their own",
     "allow_network(reason): opt an integration test that is meant to be live out of the suite-wide refusal of network access past loopback (tests/network_guard.py; state the reason)",
 ]
 

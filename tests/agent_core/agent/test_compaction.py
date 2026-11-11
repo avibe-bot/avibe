@@ -1057,6 +1057,29 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     assert events[-1].reason == "completed"
 
 
+async def test_a_run_whose_route_moves_to_a_smaller_window_between_requests_rolls_before_the_next_one_is_sent():
+    # A Turn can move to another model between two requests (its Session's model changed). Nine results read on the
+    # 200,000-token window meet the engine route's 32,000-token input limit at the next request: it rolls on the new
+    # route and goes out within that route's room, so the provider is never sent a request the new route cannot take.
+    store = InMemoryTranscriptStore()
+    model = Model(
+        reads(9),
+        [[Done(assistant(block(f"{CHECKPOINT_BODY} ROLL ONE")))], [Done(assistant(block(f"{CHECKPOINT_BODY} ROLL TWO")))]],
+    )
+    agent = make_agent(model, store=store, tools=[sized_reader(*[5_000] * 9)], selection=(LARGE,) * 9 + (SELECTION,))
+    events = await run(agent)
+    rows = await store.load("session")
+    compactions = [row for row in rows if row.kind == "compaction"]
+    assert [(row.payload["mode"], row.payload["reason"]) for row in compactions] == [("rolling", "overflow")] * 2
+    # Nothing moved out while the large window had room: both rolls follow the ninth result.
+    assert compactions[0].context_seq > max(row.context_seq for row in rows if row.kind == "tool_result")
+    moved = model.conversation_requests[-1]
+    assert "ROLL TWO" in checkpoint_message(moved)
+    assert request_tokens(moved.system, moved.tools, moved.messages) + 4_096 + 8_000 <= 32_000
+    assert all(request_tokens(fork.system, fork.tools, fork.messages) <= 32_000 for fork in model.checkpoint_requests)
+    assert events[-1].reason == "completed"
+
+
 #: A 1,000,000-token route answering up to 128,000 tokens: M = 30,000 and T = 842,000 (section 1).
 MILLION = ModelSelection(
     ENDPOINT, replace(SELECTION.capabilities, context_window=1_000_000, input_limit=None, max_output_tokens=128_000)
@@ -1241,6 +1264,29 @@ async def test_a_turn_keeps_its_input_and_every_steer_verbatim_across_a_mid_turn
     (compaction,) = [row for row in rows if row.kind == "compaction"]
     inputs = [row.context_seq for row in rows if row.kind == "input"]
     assert compaction.payload["kept_inputs"] == inputs
+
+
+async def test_a_steer_arriving_during_a_checkpoint_enters_the_request_the_checkpoint_made_room_for():
+    # The checkpoint turn runs after the tool batch's boundary drained the queue and before the request it makes room
+    # for is sent. A steer accepted meanwhile is that request's newest message: composing admits steers after the
+    # transition too, or the model would answer without it.
+    holder, steered = {}, []
+
+    class SteeredAtCheckpoint(Model):
+        async def stream(self, request, cancel):
+            if is_checkpoint(request):
+                steered.append(await holder["agent"].steer(input_row("steer", "STEER: also report each size")))
+            async for event in super().stream(request, cancel):
+                yield event
+
+    model = SteeredAtCheckpoint(growing(4), [[Done(assistant(CHECKPOINT))]])
+    holder["agent"] = agent = make_agent(model, tools=[reader(tokens(6_000))])
+    events = await run(agent, "read f0 to f3")
+    assert steered == [True] and len(model.checkpoint_requests) == 1
+    assert len(model.conversation_requests) == 5
+    newest = model.conversation_requests[-1].messages[-1]
+    assert isinstance(newest, UserMessage) and newest.content[0].text == "STEER: also report each size"
+    assert events[-1].reason == "completed"
 
 
 async def test_a_small_fallback_drops_a_previous_checkpoint_too_large_for_it_and_continues():

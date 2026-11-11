@@ -2810,6 +2810,7 @@ def test_config_reload_recovers_invalid_codex_agent_with_disabled_default(monkey
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     payload["show_duration"] = True
+    payload["agents"]["claude"]["enabled"] = True
     payload["agents"]["codex"] = "invalid"
     config_path = tmp_path / "config.json"
     original = json.dumps(payload)

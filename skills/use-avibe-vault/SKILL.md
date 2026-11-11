@@ -1,8 +1,8 @@
 ---
 name: use-avibe-vault
 slug: use-avibe-vault
-description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or digest signing without exposing secret values to the agent.
-version: 0.7.1
+description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or signing digests and Solana messages without exposing secret values to the agent.
+version: 0.8.0
 ---
 
 # Use Avibe Vault
@@ -32,6 +32,8 @@ Rules:
 - For the listed standard-tier BTC Taproot addresses, use `schnorr-secp256k1-bip341-keypath` (BIP86, empty script tree). It requires an avault build supporting that scheme. Older builds fail closed: never retry with raw BIP340, rotate the key, or change the receiving address as a workaround. No Merkle-root/script-tree option is supported.
 - `schnorr-secp256k1-bip340` is raw signing under the internal public key, NOT signing for the listed tweaked Taproot address. `ecdsa-secp256k1-der` produces low-S DER for Bitcoin ECDSA; the caller constructs and validates the transaction sighash and appends any transaction-required sighash byte.
 - Protected Bitcoin transaction signing is not supported yet. BTC addresses remain visible to identify existing funds; do not recommend deposits expecting this workflow to spend them. Never disguise a Bitcoin sighash as an agent operation or downgrade a protected key.
+- A Solana key (its row lists `signing_addresses.solana`) signs only with `--scheme ed25519 --message-hex HEX`. `--message-hex` is the exact serialized Solana message bytes, signed as given, at most 1 MiB: it is not a digest, so do not hash the message first. `--digest` is refused with `ed25519`, and `--message-hex` is refused with every secp256k1 scheme. The result is a 64-byte signature with no recovery id. Solana signing needs avault 0.1.10 or later; on `avault_upgrade_required`, ask the user to update avault from the Vault page rather than retrying.
+- Protected Solana keys cannot be created or used for signing yet (`protected_solana_unsupported`). Do not work around it with another key, a standard key, another scheme, or a digest. Keep the key and its protection unchanged and tell the user it needs an Avibe update.
 - Protected signing needs `--signing-context-json` with a supported verifiable context. An `avault-agent-operation` preimage must begin with `avault-agent-operation:v1` followed by a real LF newline and nonempty operation text; its digest is SHA256 of those UTF-8 bytes. JSON encodes that newline as `\n`, not `\\n`. This domain is for agent operations only, not transaction authorization. A legacy unbound request must be recreated after both producer and sandbox are upgraded.
 
 Common commands:
@@ -81,6 +83,9 @@ Sign a 32-byte digest with a standard keypair secret. Protected keys additionall
 
 Standard-tier BIP86 Taproot scheme example (replace the example digest with the independently verified BIP341 transaction sighash):
 `vibe vault sign BTC_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme schnorr-secp256k1-bip341-keypath --command "sign verified Bitcoin key-path spend"`
+
+Sign a Solana transaction message with a standard Solana keypair secret. `$MESSAGE_HEX` is the complete serialized transaction message your code built (header, account keys, recent blockhash and instructions), as hex. It is the bytes every signer signs: it does not include the transaction's signature count or signatures, and it is not a hash. Never pass a partial or placeholder message:
+`vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX" --command "sign Solana transaction message"`
 
 Ask the user to delete a Vault secret. Every agent-initiated delete needs one-click user approval, including standard, protected, static, and keypair secrets:
 `vibe vault remove OLD_TOKEN --reason "Rotated credential"`

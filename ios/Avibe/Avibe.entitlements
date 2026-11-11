@@ -11,6 +11,7 @@
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>webcredentials:avibe.bot</string>
+		<string>webcredentials:sandbox.avibe.bot</string>
 	</array>
 	<key>keychain-access-groups</key>
 	<array>

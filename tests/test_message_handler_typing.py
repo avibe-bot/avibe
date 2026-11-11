@@ -50,6 +50,8 @@ def _load_message_handler_class():
             vibe_agent_reasoning_effort: str | None = None
             vibe_agent_model_explicit: bool = False
             vibe_agent_reasoning_effort_explicit: bool = False
+            vibe_agent_inherited_model: str | None = None
+            vibe_agent_inherited_reasoning_effort: str | None = None
             vibe_agent_system_prompt: str | None = None
             files: list | None = None
             input_metadata: object | None = None
@@ -760,6 +762,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             (request.vibe_agent_model, request.vibe_agent_reasoning_effort, request.vibe_agent_system_prompt),
             ("team-model", "high", "Run the steps in order."),
         )
+        # A setting the Session's row does not name stays the accepted one while the rerun follows its Session.
+        self.assertEqual(
+            (request.vibe_agent_inherited_model, request.vibe_agent_inherited_reasoning_effort),
+            ("team-model", "high"),
+        )
 
     async def test_scope_model_and_reasoning_override_vibe_agent_defaults(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
@@ -1432,6 +1439,35 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.handle_user_message(context, "hello")
 
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
+
+    async def test_dispatch_records_what_the_session_inherits_apart_from_its_own_row(self):
+        """A backend that follows its Session during a Turn resolves a setting the row stops naming to what the
+        Session inherits. That is the Agent's default, never the row's own values, which the run target carries
+        too."""
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        row = {"agent_name": "pm", "agent_backend": "claude", "model": "claude-sonnet", "reasoning_effort": "max"}
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses_wb",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {"id": "ses_wb", **row},
+                "agent_run_target": {"agent_session_id": "ses_wb", **row},
+            },
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual((request.vibe_agent_model, request.vibe_agent_reasoning_effort), ("claude-sonnet", "max"))
+        # The Agent "pm" defaults to this model and names no effort.
+        self.assertEqual(
+            (request.vibe_agent_inherited_model, request.vibe_agent_inherited_reasoning_effort),
+            ("claude-opus", None),
+        )
 
     async def test_workbench_scalar_explicit_route_marker_uses_shared_parser(self):
         """A tolerated legacy scalar marker must mean the same thing to the

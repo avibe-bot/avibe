@@ -193,6 +193,22 @@ def test_background_refresh_never_removes_a_model_or_route_hop(tmp_path):
     assert store.load().agents["claude"].routes[MENU_MODEL].hops == hops
 
 
+def test_alias_follows_a_newly_listed_family_member_without_a_manual_refresh(tmp_path):
+    """MH-MATCH-003: a listing that re-targets an alias on a Source still serving it removes no hop."""
+
+    source = _listed(_hub_source("src_aliasnew1"), Clock(), hours_ago=7)
+    service, store, _, _ = _background(
+        tmp_path, [source], ListingAdapter((MENU_MODEL, "claude-opus-4-8")),
+    )
+
+    _refresh(service)
+
+    assert _model_ids(store) == [MENU_MODEL, "claude-opus-4-8"]
+    assert [
+        (hop["source_id"], hop["model_id"]) for hop in service.agent_chain("claude", "opus")["chain"]
+    ] == [(source.id, "claude-opus-4-8")]
+
+
 @pytest.mark.parametrize("upstream_order", ["same", "reversed"])
 def test_unchanged_listing_writes_nothing_and_still_counts_as_a_listing(tmp_path, upstream_order):
     inventory = (MENU_MODEL, "claude-other-model")

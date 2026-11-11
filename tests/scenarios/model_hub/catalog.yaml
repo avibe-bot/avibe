@@ -87,6 +87,14 @@ capability:
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
+    # The signed engine channel: what an installed Avibe trusts and selects, and
+    # what its one writer may publish (docs/plans/model-hub-engine-channel.md).
+    - tests/test_model_hub_engine_channel.py
+    - tests/test_model_hub_engine_channel_client.py
+    - tests/test_model_hub_engine_channel_producer.py
+    - tests/test_model_hub_engine_qualification.py
+    - tests/test_model_hub_engine_release_guard.py
+    - tests/test_release_mirror.py
     - tests/scenarios/model_hub/test_model_hub_catalog.py
     - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
@@ -687,6 +695,14 @@ scenarios:
     test: tests/test_model_hub_vibey_consumer.py::test_sequential_vibey_retry_replaces_route_and_retains_served_provenance
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request
+  - id: MH-VIBEY-011
+    name: A Vibey Turn that follows its Session to another model is routed and recorded under the model it asked for last
+    status: covered
+    kind: routing
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_a_vibey_turn_that_moves_to_another_model_is_routed_and_recorded_under_it
+    related_tests:
+      - tests/test_vibey_agent.py::test_a_running_turn_takes_its_sessions_model_effort_and_speed_at_its_next_request
   - id: MH-VIBEY-010
     name: A Vibey call that failed over to another Source does not refuse the Turn's next call while it settles
     status: covered
@@ -949,6 +965,17 @@ scenarios:
     kind: determinism
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_002_matching_tie_break_is_independent_of_inventory_order
+  - id: MH-MATCH-003
+    name: A Claude family alias resolves to the newest full id a Hub Source lists, so the launch and its gateway credential name the id the CLI sends
+    status: covered
+    kind: selection
+    layer: turn-gateway
+    test: tests/test_model_hub_l3.py::test_mh_match_003_claude_alias_launches_and_routes_on_its_observed_full_id
+    related_tests:
+      - tests/test_model_hub_resolution.py::test_claude_alias_selects_the_newest_observed_family_member_on_a_hub_source
+      - tests/test_model_hub_resolution.py::test_claude_alias_without_an_observed_family_member_keeps_literal_identity
+      - tests/test_model_hub_resolution.py::test_claude_alias_inherits_its_full_ids_route_and_yields_to_an_explicit_one
+      - tests/test_model_hub_background_discovery.py::test_alias_follows_a_newly_listed_family_member_without_a_manual_refresh
   - id: MH-MENU-ADD-001
     name: Adding a provider menu model projects overlapping suppliers in default order without persisting automatic hops
     status: covered
@@ -2269,6 +2296,12 @@ scenarios:
     kind: projection
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_003_model_menu_marks_the_models_a_turn_would_run_fast_on
+  - id: MH-FAST-005
+    name: A running Vibey Turn's next request runs at the tier its Session names now, and an unchanged resolution keeps it
+    status: covered
+    kind: routing
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_fast_005_a_running_turn_moves_to_the_tier_its_session_names_now
   - id: MH-FAST-004
     name: A relay is asked for the fast tier too, and its responses decide whether the menu says it ran
     status: covered
@@ -2661,7 +2694,7 @@ scenarios:
       A fresh install of the installed service, on Windows x64 and Arm64 as on Linux and macOS: the engine installs
       from the selected manifest (a candidate's, else the packaged one) as that manifest's verified build and turns healthy,
       API-key Sources save through the real credential check, a Vibey
-      turn and a Claude Code hub-mode turn get the upstream's reply, a hard-killed service's engine is reaped by the
+      turn and, once switched on, a Claude Code hub-mode turn get the upstream's reply, a hard-killed service's engine is reaped by the
       next start, and vibe stop leaves no engine
     status: assert
     kind: runtime_lifecycle
@@ -2801,6 +2834,113 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_engine_hosted_passthrough.py::test_responses_xai_over_limit_ids_replay_verbatim
+  - id: MH-ENGINE-CHANNEL-001
+    name: An engine channel index is trusted only when a key shipped in Avibe signed its exact bytes; the index chooses neither the key nor the algorithm
+    status: covered
+    kind: security
+    layer: unit
+    test: tests/test_model_hub_engine_channel.py::test_the_key_comes_from_the_shipped_roots_never_from_the_index
+  - id: MH-ENGINE-CHANNEL-002
+    name: An index older than one already accepted, different at the same sequence, or rewriting a promoted release or a withdrawal is refused and leaves the recorded state unchanged; a damaged record refuses every index, is kept as it is, and is read neither as a fresh start nor as a withdrawal
+    status: covered
+    kind: security
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel.py::test_an_index_that_goes_back_or_rewrites_history_is_refused_and_leaves_state_untouched
+      - tests/test_model_hub_engine_channel_client.py::test_a_damaged_record_authorizes_no_channel_change_and_is_kept_as_it_is
+  - id: MH-ENGINE-CHANNEL-003
+    name: Engine selection moves only forward, to the newest release whose minimum Avibe is met and that has an asset for this host, never below the bundled engine
+    status: partial
+    kind: selection
+    layer: unit
+    missing_layer: e2e
+    test: tests/test_model_hub_engine_channel.py::test_ordinary_selection_only_moves_forward_to_the_newest_release_this_avibe_may_run
+  - id: MH-ENGINE-CHANNEL-004
+    name: Only an explicit withdrawal moves an engine back, and only to the one fallback it names when that is listed, compatible, available for this host and not withdrawn; otherwise Model Hub is blocked, with no other release substituted and the withdrawn engine never kept
+    status: partial
+    kind: recovery
+    layer: unit
+    missing_layer: e2e
+    test: tests/test_model_hub_engine_channel.py::test_only_an_explicit_withdrawal_moves_an_engine_back_and_only_to_its_named_safe_fallback
+  - id: MH-ENGINE-CHANNEL-005
+    name: An Avibe release that ships no readable channel key makes no channel request, runs no verifier and adopts nothing, and still blocks an engine this machine recorded as withdrawn
+    status: covered
+    kind: guard
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel_client.py::test_this_avibe_ships_no_channel_key_so_the_channel_is_off
+      - tests/test_model_hub_engine_channel_client.py::test_a_recorded_withdrawal_stays_in_force_when_this_avibe_has_no_readable_key
+  - id: MH-ENGINE-CHANNEL-006
+    name: A manifest override opts out of the channel, and offline mode adopts nothing while a recorded withdrawal still applies
+    status: partial
+    kind: guard
+    layer: unit
+    missing_layer: e2e
+    test:
+      - tests/test_model_hub_engine_channel_client.py::test_an_engine_manifest_override_opts_out_of_the_channel
+      - tests/test_model_hub_engine_channel_client.py::test_a_manifest_override_leaves_the_channel_even_with_a_recorded_withdrawal
+      - tests/test_model_hub_engine_channel_client.py::test_offline_mode_uses_no_network_and_keeps_recorded_withdrawals_in_force
+  - id: MH-ENGINE-CHANNEL-007
+    name: The index signature is checked with avault's keyless verify alone, and anything but exit 0 with a true boolean is a failed verification
+    status: covered
+    kind: security
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel.py::test_only_exit_zero_with_a_true_boolean_verifies
+      - tests/test_model_hub_engine_channel.py::test_every_other_answer_fails_closed
+  - id: MH-ENGINE-CHANNEL-008
+    name: An old, deleted or replaced published index cannot make the signer sign older state, and a stale or racing writer, or the release mirror, cannot replace a newer index or drop a published withdrawal
+    status: covered
+    kind: concurrency
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel_producer.py::test_what_the_published_index_says_is_never_the_state_a_change_is_signed_from
+      - tests/test_model_hub_engine_channel_producer.py::test_an_object_that_is_missing_unreadable_or_older_is_put_back_from_the_signers_envelope
+      - tests/test_model_hub_engine_channel_producer.py::test_a_stale_writer_cannot_undo_a_newer_index_or_drop_its_withdrawal
+      - tests/test_model_hub_engine_channel_producer.py::test_a_writer_that_lost_a_race_does_not_overwrite_the_winner
+      - tests/test_release_mirror.py::test_the_mirror_never_writes_or_deletes_the_signed_engine_channel_index
+  - id: MH-ENGINE-CHANNEL-009
+    name: Nothing is signed or published while the channel is uncommissioned, from a signer ledger that is absent or does not check out, or unless the run is the reviewed workflow on the default branch with a protected environment's approval
+    status: covered
+    kind: authorization
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel_producer.py::test_while_avibe_ships_no_key_every_producer_step_stops_before_it_does_anything
+      - tests/test_model_hub_engine_channel_producer.py::test_a_missing_damaged_or_mismatched_ledger_stops_every_routine_operation
+      - tests/test_model_hub_engine_channel_producer.py::test_authorization_reads_protection_and_approval_from_github_for_this_run
+  - id: MH-ENGINE-CHANNEL-010
+    name: An engine candidate qualifies only with every evidence class for its exact bytes, each accepted only under the job that produces it, from a qualification run that GitHub confirms, in which every process imported Avibe from the released wheel
+    status: partial
+    kind: gate
+    layer: unit
+    missing_layer: e2e
+    test:
+      - tests/test_model_hub_engine_qualification.py::test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified
+      - tests/test_model_hub_engine_qualification.py::test_a_receipt_github_does_not_confirm_is_refused_whatever_it_says_about_itself
+      - tests/test_model_hub_engine_qualification.py::test_a_run_that_did_not_provably_test_the_released_wheel_is_neither_evidence_nor_a_clean_rehearsal
+      - tests/test_model_hub_engine_qualification.py::test_a_log_that_never_catches_up_is_refused_although_what_it_holds_reads_as_complete
+      - tests/test_model_hub_engine_qualification.py::test_no_job_can_supply_the_evidence_classes_that_have_no_producer
+      - tests/test_model_hub_engine_qualification.py::test_an_artifact_holding_evidence_its_job_does_not_produce_stops_the_receipt
+      - tests/test_model_hub_engine_qualification.py::test_an_assembled_receipt_with_every_class_is_refused_when_it_is_made_and_when_it_is_checked
+  - id: MH-ENGINE-CHANNEL-011
+    name: Every engine release the channel lists, withdrawn ones and rollback targets included, stays under the release guard, which restores lost assets from a backup that still verifies and never overwrites published bytes
+    status: covered
+    kind: recovery
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_release_guard.py::test_assets_a_published_release_lost_are_restored_from_a_verified_backup_without_touching_the_rest
+      - tests/test_model_hub_engine_release_guard.py::test_published_bytes_that_changed_under_their_names_are_never_overwritten
+      - tests/test_model_hub_engine_release_guard.py::test_the_guard_covers_the_packaged_engine_and_every_release_the_channel_lists
+      - tests/test_model_hub_engine_channel_producer.py::test_the_guard_is_given_every_listed_release_withdrawn_ones_and_rollback_targets_included
+  - id: MH-ENGINE-CHANNEL-012
+    name: A channel sequence is only ever signed over the payload it was committed with, a retry republishes the identical envelope, and concurrent signers never share a sequence
+    status: covered
+    kind: idempotency
+    layer: unit
+    test:
+      - tests/test_model_hub_engine_channel_producer.py::test_a_sequence_is_only_ever_signed_over_the_payload_it_was_committed_with
+      - tests/test_model_hub_engine_channel_producer.py::test_resuming_publishes_the_same_envelope_again_byte_for_byte
+      - tests/test_model_hub_engine_channel_producer.py::test_concurrent_signers_are_serialized_into_distinct_increasing_sequences
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
@@ -2810,3 +2950,7 @@ next_priority:
   - B8
   - B9
   - G3
+  - MH-ENGINE-CHANNEL-003
+  - MH-ENGINE-CHANNEL-004
+  - MH-ENGINE-CHANNEL-006
+  - MH-ENGINE-CHANNEL-010

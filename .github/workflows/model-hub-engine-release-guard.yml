@@ -8,7 +8,12 @@ on:
       - "patches/model-hub-cpa-*/**"
       - "scripts/build_model_hub_engine.py"
       - "scripts/model_hub_engine_release_guard.py"
+      - "scripts/model_hub_engine_channel.py"
+      - "scripts/ci_avault_verifier.py"
       - "scripts/release_asset_download.py"
+      - "core/model_hub_engine_manifest.py"
+      - "core/model_hub_engine_channel.py"
+      - "vibe/model_hub_runtime/engine_channel_roots.json"
       - ".github/workflows/model-hub-engine-release-guard.yml"
   schedule:
     - cron: "23 */6 * * *"
@@ -152,149 +157,109 @@ jobs:
           python3 scripts/model_hub_engine_release_guard.py fetch \
             --output-dir "$RUNNER_TEMP/model-hub-engine-published"
 
-  guard:
-    name: Verify and recover pinned assets
+  # Every release this guard keeps available: the engine Avibe packages, and
+  # every release the signed engine channel index lists, withdrawn ones and
+  # rollback targets included. The index is authenticated against the keys
+  # Avibe ships before a manifest is taken from it. While the channel is not
+  # commissioned, the list is the packaged engine alone.
+  plan:
+    name: List guarded releases
     if: >-
       always() &&
       (github.event_name != 'workflow_dispatch' ||
       needs.publish-patched-source.result == 'success')
     needs: [publish-patched-source]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      releases: ${{ steps.plan.outputs.releases }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Resolve pinned manifest identity
-        id: manifest
+      - name: Collect the manifests to guard
+        id: plan
         shell: bash
-        run: |
-          echo "sha256=$(sha256sum vibe/model_hub_runtime/cliproxyapi_manifest.json | cut -d' ' -f1)" \
-            >> "$GITHUB_OUTPUT"
-
-      - name: Fetch and verify published assets
-        id: probe
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/model_hub_engine_release_guard.py fetch \
-            --output-dir "$RUNNER_TEMP/model-hub-engine-release"
+          set -euo pipefail
+          listed_args=(--output-dir "$RUNNER_TEMP/listed")
+          if [ "$(python3 scripts/model_hub_engine_channel.py commissioned)" = "true" ]; then
+            avault="$(python3 scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
+            listed_args+=(--avault "$avault")
+          fi
+          python3 scripts/model_hub_engine_channel.py listed "${listed_args[@]}"
+          releases="$(
+            python3 scripts/model_hub_engine_release_guard.py plan \
+              --listed-dir "$RUNNER_TEMP/listed" \
+              --output-dir "$RUNNER_TEMP/guarded-manifests" | jq -c '.releases'
+          )"
+          printf 'releases=%s\n' "$releases" >> "$GITHUB_OUTPUT"
 
-      - name: Restore the latest verified backup
-        id: backup
-        if: steps.probe.outcome == 'failure'
+      - name: Hand the manifests to the guard
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: model-hub-engine-guarded-manifests
+          path: ${{ runner.temp }}/guarded-manifests
+          if-no-files-found: error
+          retention-days: 1
+
+  # Restores exactly the bytes a manifest pins and nothing else. It holds no
+  # channel key and never writes the channel index, so it cannot promote a
+  # release or undo a withdrawal.
+  guard:
+    name: Verify and recover ${{ matrix.release }}
+    if: always() && needs.plan.result == 'success'
+    needs: [plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.plan.outputs.releases) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: model-hub-engine-guarded-manifests
+          path: ${{ runner.temp }}/guarded-manifests
+
+      # Published assets are verified against the manifest. If they do not
+      # verify, the newest backup that still verifies supplies the missing asset
+      # names; an asset that exists under its name is never overwritten.
+      - name: Verify the published release, recovering it from a verified backup
+        id: guard
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}
-        shell: bash
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE: ${{ matrix.release }}
         run: |
           set -euo pipefail
-          artifact_name="model-hub-engine-release-backup-$MANIFEST_SHA"
-          mapfile -t artifact_ids < <(
-            gh api --method GET \
-              "repos/$GITHUB_REPOSITORY/actions/artifacts" \
-              -f name="$artifact_name" \
-              -f per_page=100 \
-              --jq '.artifacts | sort_by(.created_at) | reverse | .[] | select(.expired == false) | .id'
-          )
-
-          for artifact_id in "${artifact_ids[@]}"; do
-            candidate="$RUNNER_TEMP/model-hub-engine-backup-$artifact_id"
-            archive="$RUNNER_TEMP/model-hub-engine-backup-$artifact_id.zip"
-            rm -rf "$candidate"
-            mkdir -p "$candidate"
-            if gh api \
-              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
-              > "$archive" && unzip -q "$archive" -d "$candidate" && \
-              python3 scripts/model_hub_engine_release_guard.py verify \
-                --asset-dir "$candidate"; then
-              echo "asset_dir=$candidate" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-
-          echo "::error::No verified backup is available for manifest $MANIFEST_SHA."
-          exit 1
-
-      - name: Recover missing release assets
-        if: steps.probe.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RESTORE_DIR: ${{ steps.backup.outputs.asset_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          manifest="vibe/model_hub_runtime/cliproxyapi_manifest.json"
-          release_tag="$(jq -er '.asset_release_tag' "$manifest")"
-          version="$(jq -er '.version' "$manifest")"
-          assets=("$RESTORE_DIR"/*)
-
-          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            is_draft="$(
-              gh release view "$release_tag" \
-                --repo "$GITHUB_REPOSITORY" \
-                --json isDraft \
-                --jq '.isDraft'
-            )"
-            declare -A existing_assets=()
-            while IFS= read -r asset_name; do
-              existing_assets["$asset_name"]=1
-            done < <(
-              gh release view "$release_tag" \
-                --repo "$GITHUB_REPOSITORY" \
-                --json assets \
-                --jq '.assets[].name'
-            )
-
-            missing_assets=()
-            for asset in "${assets[@]}"; do
-              asset_name="${asset##*/}"
-              if [ -z "${existing_assets[$asset_name]:-}" ]; then
-                missing_assets+=("$asset")
-              fi
-            done
-            if [ "${#missing_assets[@]}" -eq 0 ]; then
-              if [ "$is_draft" != "true" ]; then
-                echo "::error::Every expected asset name exists but verification failed; refusing to overwrite pinned bytes."
-                exit 1
-              fi
-              echo "All expected names exist on the draft; verifying its bytes before publication."
-            else
-              gh release upload "$release_tag" \
-                --repo "$GITHUB_REPOSITORY" \
-                "${missing_assets[@]}"
-            fi
-            if [ "$is_draft" = "true" ]; then
-              python3 scripts/model_hub_engine_release_guard.py publish-draft \
-                --repo "$GITHUB_REPOSITORY" \
-                --asset-dir "$RESTORE_DIR"
-            fi
-          else
-            gh release create "$release_tag" \
+          result="$(
+            python3 scripts/model_hub_engine_release_guard.py \
+              --manifest "$RUNNER_TEMP/guarded-manifests/$RELEASE.json" \
+              guard \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --latest=false \
-              --title "Avibe Model Hub engine $version" \
-              --notes "Avibe-managed CPA assets recovered from a manifest-verified backup." \
-              "${assets[@]}"
-          fi
-
-      - name: Verify recovered release
-        if: steps.probe.outcome == 'failure'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 scripts/model_hub_engine_release_guard.py fetch \
-            --output-dir "$RUNNER_TEMP/model-hub-engine-release"
+              --output-dir "$RUNNER_TEMP/model-hub-engine-release" \
+              --work-dir "$RUNNER_TEMP/model-hub-engine-guard"
+          )"
+          printf '%s\n' "$result"
+          printf 'sha256=%s\n' "$(jq -er '.manifest_sha256' <<<"$result")" >> "$GITHUB_OUTPUT"
+          printf 'recovered=%s\n' "$(jq -er '.recovered | tostring' <<<"$result")" >> "$GITHUB_OUTPUT"
 
       - name: Preserve verified release backup
         if: >-
           github.event_name != 'schedule' ||
           github.event.schedule == '53 4 * * 0' ||
-          steps.probe.outcome == 'failure'
+          steps.guard.outputs.recovered == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-release-backup-${{ steps.manifest.outputs.sha256 }}
+          name: model-hub-engine-release-backup-${{ steps.guard.outputs.sha256 }}
           path: ${{ runner.temp }}/model-hub-engine-release
           if-no-files-found: error
           retention-days: 90

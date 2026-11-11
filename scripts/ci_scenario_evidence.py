@@ -18,6 +18,18 @@ The workflow command is collected from ``<root>`` and its one JUnit report is
 required to contain a passing result for every covered case that command
 selects. The explicit root is important for ``publish.yml``: its retired
 updater test runs from the separate ``release-automation`` checkout.
+
+Release join usage: ``python scripts/ci_scenario_evidence.py --release-join
+<evidence-dir> --workflow <workflow> --pytest-root <root> [--expect-version
+<name>=<version>]``, with the shard jobs' results in ``NEEDS_JSON``. A workflow
+that shares its release selection out over several jobs ends in this join:
+``<evidence-dir>/<job>`` holds each job's one JUnit report and its
+``provenance.json``. The join passes only when those jobs, between them, ran
+every case of the workflow's entry in ``RELEASE_SELECTIONS`` exactly once in
+this run attempt, at this commit and against the same version of everything
+its entry in ``RELEASE_SHARD_VERSIONS`` names, and every covered case passed.
+Both are fixed here, not passed by the workflow, so an edit to the shards
+cannot also shrink what they are compared with or what they must name.
 """
 
 from __future__ import annotations
@@ -41,6 +53,10 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 LINT_WORKFLOW = "lint.yml"
 # The workflows a release needs green at its SHA (docs/release.md).
 RELEASE_WORKFLOWS = ("model-hub-e2e.yml", "publish.yml")
+# The whole selection a release workflow owes, however its jobs share it out.
+RELEASE_SELECTIONS = {"model-hub-e2e.yml": ("-m", "e2e_model_hub", "tests/e2e")}
+# What each of its shards must name a version of: the agent CLIs it installed and the engine it ran.
+RELEASE_SHARD_VERSIONS = {"model-hub-e2e.yml": ("codex", "opencode", "claude-agent-sdk", "model-hub-engine")}
 # What scripts/ci_unit_tests.sh runs: every test file outside tests/e2e, without the integration marker.
 UNIT_SHARD_ARGS = ("-m", "not integration", "--ignore=tests/e2e", "tests")
 # The launchers that run it: the serial runner, or its concurrent lanes on one runner.
@@ -52,6 +68,8 @@ UNIT_SHARD_JOB = "unit-test-shards"
 _SELECTING = {"-m", "-k", "-p", "-c", "-o", "--noconftest", "--ignore", "--deselect", "--rootdir"}
 _VALUED = {"-m", "-k", "-p", "-c", "-o", "--ignore", "--deselect", "--rootdir"}
 _SEPARATORS = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+# What a release shard job records about itself, next to its JUnit report.
+PROVENANCE = "provenance.json"
 
 
 class ReleaseEvidenceError(RuntimeError):
@@ -209,7 +227,8 @@ def read_release_report(junit_dir: Path, repo_root: Path = REPO_ROOT) -> dict[st
             outcome = ("skipped", skipped.get("message", "") or skipped.get("type", ""))
         else:
             outcome = ("passed", "")
-        if nodeid in outcomes and outcomes[nodeid] != outcome:
+        # One record a case: pytest writes a second only for a failure in the call and another in teardown.
+        if nodeid in outcomes:
             raise ReleaseEvidenceError(f"release JUnit report records {nodeid} more than once")
         outcomes[nodeid] = outcome
 
@@ -291,6 +310,50 @@ def release_pytest_commands(workflow: Path) -> list[tuple[str, ...]]:
     return [args for commands in pytest_commands(workflow).values() for args in commands]
 
 
+def _collect_release(args: Iterable[str], pytest_root: Path) -> list[str]:
+    """The node ids a release pytest command selects from ``pytest_root``."""
+
+    from scripts import pytest_collection
+
+    args = list(args)
+    try:
+        return [entry["nodeid"] for entry in pytest_collection.collect(args, pytest_root)]
+    except Exception as exc:
+        raise ReleaseEvidenceError(
+            f"could not collect release pytest command from {pytest_root}: {' '.join(args)}: {exc}"
+        ) from exc
+
+
+def _selected_evidence(nodeids: list[str], scenario_root: Path) -> dict[str, list[str]]:
+    """Each covered ``test`` citation that names a selected case, with the cases it names."""
+
+    selected: dict[str, list[str]] = {}
+    for citation in covered_test_evidence(scenario_root):
+        named = [nodeid for nodeid in nodeids if names_case(citation, nodeid)]
+        if named:
+            selected[citation] = named
+    return selected
+
+
+def _unpassed_evidence(selected: dict[str, list[str]], outcomes: dict[str, tuple[str, str]]) -> list[str]:
+    """What keeps each selected covered case from being a pass in the release run."""
+
+    problems: list[str] = []
+    for citation, nodeids in selected.items():
+        missing = [nodeid for nodeid in nodeids if nodeid not in outcomes]
+        if missing:
+            problems.append(f"{citation} is missing from the release JUnit report: {', '.join(missing)}")
+            continue
+        failed = [
+            f"{nodeid}={outcomes[nodeid][0]}{': ' + outcomes[nodeid][1] if outcomes[nodeid][1] else ''}"
+            for nodeid in nodeids
+            if outcomes[nodeid][0] != "passed"
+        ]
+        if failed:
+            problems.append(f"{citation} did not pass in the release run ({'; '.join(failed)})")
+    return problems
+
+
 def check_release_evidence(
     junit_dir: Path,
     workflow: Path,
@@ -314,42 +377,186 @@ def check_release_evidence(
         )
 
     args = commands[pytest_command_index]
-    from scripts import pytest_collection
-
-    try:
-        collected = pytest_collection.collect(list(args), pytest_root)
-    except Exception as exc:
-        raise ReleaseEvidenceError(
-            f"could not collect release pytest command from {pytest_root}: {' '.join(args)}: {exc}"
-        ) from exc
-    selected: dict[str, list[str]] = {}
-    for citation in covered_test_evidence(scenario_root):
-        nodeids = [entry["nodeid"] for entry in collected if names_case(citation, entry["nodeid"])]
-        if nodeids:
-            selected[citation] = nodeids
+    selected = _selected_evidence(_collect_release(args, pytest_root), scenario_root)
     if not selected:
         raise ReleaseEvidenceError(
             "parsed release pytest command selects no covered scenario test evidence: "
             + " ".join(args)
         )
 
-    outcomes = read_release_report(junit_dir, pytest_root)
-    problems: list[str] = []
-    for citation, nodeids in selected.items():
-        missing = [nodeid for nodeid in nodeids if nodeid not in outcomes]
-        if missing:
-            problems.append(f"{citation} is missing from the release JUnit report: {', '.join(missing)}")
-            continue
-        failed = [
-            f"{nodeid}={outcomes[nodeid][0]}{': ' + outcomes[nodeid][1] if outcomes[nodeid][1] else ''}"
-            for nodeid in nodeids
-            if outcomes[nodeid][0] != "passed"
-        ]
-        if failed:
-            problems.append(f"{citation} did not pass in the release run ({'; '.join(failed)})")
+    problems = _unpassed_evidence(selected, read_release_report(junit_dir, pytest_root))
     if problems:
         raise ReleaseEvidenceError("; ".join(problems))
     return selected
+
+
+def _some(nodeids: Iterable[str], limit: int = 5) -> str:
+    nodeids = sorted(nodeids)
+    more = len(nodeids) - limit
+    return ", ".join(nodeids[:limit]) + (f" and {more} more" if more > 0 else "")
+
+
+def release_shards(workflow: Path, pytest_root: Path, selection: list[str]) -> dict[str, list[str]]:
+    """The cases each shard job selects, once the shards share ``selection`` out exactly.
+
+    A shard is a workflow job with one statically parsed pytest command. Collected
+    from ``pytest_root``, the shards must select no case twice, and together
+    select the cases of ``selection`` and no others.
+    """
+
+    commands = pytest_commands(workflow)
+    if not commands:
+        raise ReleaseEvidenceError(f"could not parse a pytest command from release workflow: {workflow}")
+    several = sorted(job for job, args in commands.items() if len(args) != 1)
+    if several:
+        raise ReleaseEvidenceError(f"a release shard job runs one pytest command, not several: {', '.join(several)}")
+    # A command that selects nothing does not collect: pytest exits 5 and the collection raises.
+    complete = set(_collect_release(selection, pytest_root))
+    shards = {job: _collect_release(args, pytest_root) for job, (args,) in commands.items()}
+
+    owners: dict[str, list[str]] = {}
+    for job, nodeids in shards.items():
+        for nodeid in nodeids:
+            owners.setdefault(nodeid, []).append(job)
+    problems: list[str] = []
+    duplicated = [nodeid for nodeid, jobs in owners.items() if len(jobs) > 1]
+    if duplicated:
+        problems.append(f"{len(duplicated)} case(s) are selected by more than one shard: {_some(duplicated)}")
+    omitted = complete - set(owners)
+    if omitted:
+        problems.append(f"{len(omitted)} case(s) of the release selection are selected by no shard: {_some(omitted)}")
+    outside = set(owners) - complete
+    if outside:
+        problems.append(f"{len(outside)} case(s) are selected by a shard but not by the release selection: {_some(outside)}")
+    if problems:
+        raise ReleaseEvidenceError("; ".join(problems))
+    return shards
+
+
+def _read_provenance(shard_dir: Path, version_names: Iterable[str]) -> dict:
+    """A shard's own record of its commit, run, attempt and a version for each of ``version_names``."""
+
+    path = shard_dir / PROVENANCE
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseEvidenceError(f"could not read release shard provenance {path}: {exc}") from exc
+    versions = record.get("versions") if isinstance(record, dict) else None
+    if not isinstance(versions, dict) or not all(
+        isinstance(record.get(key), str) and record[key] for key in ("sha", "run_id", "run_attempt")
+    ):
+        raise ReleaseEvidenceError(f"release shard provenance is incomplete: {path}")
+    names = sorted(version_names)
+    if sorted(versions) != names:
+        raise ReleaseEvidenceError(
+            f"release shard provenance must name a version of exactly {', '.join(names)}, "
+            f"not {', '.join(sorted(versions)) or 'nothing'}: {path}"
+        )
+    blank = [name for name in names if not (isinstance(versions[name], str) and versions[name].strip())]
+    if blank:
+        raise ReleaseEvidenceError(f"release shard provenance names no version of {', '.join(blank)}: {path}")
+    return record
+
+
+def check_release_join(
+    evidence_dir: Path,
+    workflow: Path,
+    pytest_root: Path,
+    selection: list[str],
+    *,
+    needs: dict,
+    source_sha: str,
+    run_id: str,
+    run_attempt: str,
+    version_names: Iterable[str],
+    expected_versions: dict[str, str] | None = None,
+    scenario_root: Path = SCENARIO_ROOT,
+) -> dict[str, list[str]]:
+    """Require the workflow's shard jobs to have run all of ``selection`` in this run attempt.
+
+    Every job that runs a pytest command must be one the join waited for and must
+    have succeeded. Each must have left, under ``evidence_dir/<job>``, one JUnit
+    report holding exactly the cases its command selects, none failed, and a
+    provenance record naming this commit, run and attempt, a version of exactly
+    ``version_names`` that is the same as the other shards', and each of
+    ``expected_versions``: what the join's own checkout pins. The shards must share ``selection`` out exactly, and every
+    covered case in it must have passed; any other case may skip or xfail, as in
+    one job. Returns each shard's cases.
+    """
+
+    if not workflow.is_file():
+        raise ReleaseEvidenceError(f"release workflow does not exist: {workflow}")
+    if not pytest_root.is_dir():
+        raise ReleaseEvidenceError(f"release pytest checkout does not exist: {pytest_root}")
+    jobs = list(pytest_commands(workflow))
+    if not jobs:
+        raise ReleaseEvidenceError(f"could not parse a pytest command from release workflow: {workflow}")
+
+    # What the jobs say about themselves comes first: it needs no collection.
+    problems: list[str] = []
+    if not isinstance(needs, dict) or set(needs) != set(jobs):
+        waited = sorted(needs) if isinstance(needs, dict) else []
+        raise ReleaseEvidenceError(
+            f"the release join must wait for exactly the shard jobs {sorted(jobs)}, not {waited}"
+        )
+    for job in jobs:
+        result = needs[job].get("result") if isinstance(needs[job], dict) else None
+        if result != "success":
+            problems.append(f"{job} concluded {result or 'without a result'}, not success")
+    if evidence_dir.is_dir():
+        unknown = sorted(path.name for path in evidence_dir.iterdir() if path.is_dir() and path.name not in jobs)
+        if unknown:
+            problems.append(f"unknown release evidence producers: {', '.join(unknown)}")
+    reports: dict[str, dict[str, tuple[str, str]]] = {}
+    provenance: dict[str, dict] = {}
+    for job in jobs:
+        try:
+            reports[job] = read_release_report(evidence_dir / job, pytest_root)
+            provenance[job] = _read_provenance(evidence_dir / job, version_names)
+        except ReleaseEvidenceError as exc:
+            problems.append(f"{job}: {exc}")
+    for job, record in provenance.items():
+        for key, expected in (("sha", source_sha), ("run_id", run_id), ("run_attempt", run_attempt)):
+            if record[key] != expected:
+                problems.append(f"{job} recorded {key} {record[key]}, but this join is for {expected}")
+        versions = record["versions"]
+        for name, expected in (expected_versions or {}).items():
+            if versions.get(name) != expected:
+                problems.append(f"{job} ran against {name} {versions.get(name)!r}, but this checkout pins {expected!r}")
+        first, first_versions = next((other, found["versions"]) for other, found in provenance.items())
+        differing = sorted(
+            f"{name} {version!r} != {first_versions[name]!r}"
+            for name, version in versions.items()
+            if version != first_versions[name]
+        )
+        if differing:
+            problems.append(f"{job} and {first} ran against different versions: {'; '.join(differing)}")
+    if problems:
+        raise ReleaseEvidenceError("; ".join(problems))
+
+    shards = release_shards(workflow, pytest_root, selection)
+    outcomes: dict[str, tuple[str, str]] = {}
+    for job, nodeids in shards.items():
+        report = reports[job]
+        not_run = set(nodeids) - set(report)
+        if not_run:
+            problems.append(f"{job} did not run {len(not_run)} case(s) it selects: {_some(not_run)}")
+        foreign = set(report) - set(nodeids)
+        if foreign:
+            problems.append(f"{job} reported {len(foreign)} case(s) it does not select: {_some(foreign)}")
+        failed = [nodeid for nodeid, (outcome, _) in report.items() if outcome == "failed"]
+        if failed:
+            problems.append(f"{job} recorded {len(failed)} failed case(s): {_some(failed)}")
+        outcomes.update((nodeid, report[nodeid]) for nodeid in nodeids if nodeid in report)
+    selected = _selected_evidence([nodeid for nodeids in shards.values() for nodeid in nodeids], scenario_root)
+    if not selected:
+        raise ReleaseEvidenceError(
+            "the release selection selects no covered scenario test evidence: " + " ".join(selection)
+        )
+    problems.extend(_unpassed_evidence(selected, outcomes))
+    if problems:
+        raise ReleaseEvidenceError("; ".join(problems))
+    return shards
 
 
 def judge(
@@ -436,10 +643,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("junit_dir", help="JUnit directory to inspect")
     parser.add_argument("--release", action="store_true", help="enforce the release-run evidence contract")
+    parser.add_argument("--release-join", action="store_true", help="join a release workflow's shard jobs into one verdict")
     parser.add_argument("--mode", choices=("PR", "MG_THIN", "MASTER_FULL"), help="explicit CI evidence scope")
     parser.add_argument("--workflow", type=Path, help="release workflow containing the pytest command")
     parser.add_argument("--pytest-root", type=Path, default=Path.cwd(), help="checkout root used by that pytest command")
     parser.add_argument("--pytest-command-index", type=int, default=0, help="parsed pytest command to verify")
+    parser.add_argument(
+        "--expect-version", action="append", default=[], metavar="NAME=VERSION",
+        help="a version the release join's checkout pins, which every shard must have recorded",
+    )
     return parser.parse_args(argv)
 
 
@@ -449,6 +661,51 @@ def _path_from_cwd(path: Path) -> Path:
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    if args.release_join:
+        selection = RELEASE_SELECTIONS.get(args.workflow.name) if args.workflow else None
+        version_names = RELEASE_SHARD_VERSIONS.get(args.workflow.name) if args.workflow else None
+        if selection is None or version_names is None:
+            print(f"::error::release join mode requires a --workflow that RELEASE_SELECTIONS and RELEASE_SHARD_VERSIONS name: {sorted(RELEASE_SELECTIONS)}")
+            return 1
+        expected_versions = dict(pin.split("=", 1) for pin in args.expect_version if "=" in pin)
+        if len(expected_versions) != len(args.expect_version) or not all(expected_versions.values()):
+            print(f"::error::--expect-version takes NAME=VERSION, each name once: {args.expect_version}")
+            return 1
+        try:
+            needs = json.loads(os.environ.get("NEEDS_JSON", ""))
+            source_sha, run_id, run_attempt = (
+                os.environ[name] for name in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
+            )
+        except (ValueError, KeyError) as exc:
+            print(f"::error::release join mode could not read its run from the environment: {exc!r}")
+            return 1
+        evidence_dir = _path_from_cwd(Path(args.junit_dir))
+        try:
+            shards = check_release_join(
+                evidence_dir,
+                _path_from_cwd(args.workflow),
+                _path_from_cwd(args.pytest_root),
+                list(selection),
+                needs=needs,
+                source_sha=source_sha,
+                run_id=run_id,
+                run_attempt=run_attempt,
+                version_names=version_names,
+                expected_versions=expected_versions,
+            )
+        except ReleaseEvidenceError as exc:
+            print(f"::error::{exc}")
+            return 1
+        versions = _read_provenance(evidence_dir / next(iter(shards)), version_names)["versions"]
+        print(
+            f"Release join passed for {sum(map(len, shards.values()))} case(s) of `{' '.join(selection)}` "
+            f"at {source_sha}, run {run_id} attempt {run_attempt}."
+        )
+        for job, nodeids in shards.items():
+            print(f"  {job}: {len(nodeids)} case(s)")
+        for name, version in sorted(versions.items()):
+            print(f"  {name}: {version}")
+        return 0
     if args.release:
         if args.workflow is None:
             print("::error::release mode requires --workflow")

@@ -51,9 +51,13 @@ DESKTOP_OPENCODE_ROLE = "opencode"
 DESKTOP_INSTALLER_OWNER_ENV = "AVIBE_DESKTOP_INSTALLER_OWNER"
 
 
-class DesktopEndpointPayload(TypedDict):
+class _DesktopEndpoint(TypedDict):
     schema_version: Literal[1]
     origin: str
+
+
+class DesktopEndpointPayload(_DesktopEndpoint, total=False):
+    replace_runtime: Literal[True]
 
 
 def _runtime_id_value(value: object) -> str | None:
@@ -332,10 +336,21 @@ def desktop_origin(bind_host: str | None, port: int | str) -> str:
 def desktop_endpoint_payload(
     bind_host: str | None,
     port: int | str,
+    *,
+    replace_runtime: bool = False,
 ) -> DesktopEndpointPayload:
-    """Return the frozen schema-v1 descriptor consumed by the desktop shell."""
+    """Return the schema-v1 descriptor consumed by the desktop shell.
 
-    return {
+    Its two fields are frozen: a shell refuses a descriptor carrying a field it
+    does not know. ``replace_runtime`` is therefore sent only when true, and
+    only to a desktop host asking about its own Runtime, whose shell and CLI
+    come from one bundle and so know the field together.
+    """
+
+    payload: DesktopEndpointPayload = {
         "schema_version": DESKTOP_ENDPOINT_SCHEMA_VERSION,
         "origin": desktop_origin(bind_host, port),
     }
+    if replace_runtime:
+        payload["replace_runtime"] = True
+    return payload

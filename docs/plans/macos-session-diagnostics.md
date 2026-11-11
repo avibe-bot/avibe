@@ -57,13 +57,37 @@ The monitor now treats the service process's own Directory Services
 was added to the existing bounded, redacted transition monitor and is kept
 separate from ordinary GUI-domain absence.
 
+## Service outside the desktop session (2026-11-10)
+
+On **November 10, 2026** a restart run over non-interactive SSH started the
+service in audit session 106269 while the user's desktop session was 105819.
+The login Keychain cannot be read from there: `gh` reported an invalid token
+and Vault could not use its key, until a restart from a desktop terminal. The
+startup snapshot recorded `asid_match: false` and was classified `healthy`.
+
+The classifier now reports `outside_gui_session` when the GUI domain is
+available, both audit session IDs are known, and they differ. The order is
+`stale_login_session`, `no_gui_session`, `unknown`, `outside_gui_session`,
+`healthy`: an ended login is the stronger finding, and a mismatch needs both
+IDs. Fast User Switching keeps the two IDs equal (confirmed in the same log:
+the console moved between three users while the service stayed matched), so it
+stays `healthy`. A GUI ASID that changed under a surviving service means a new
+desktop login, and the same restart from the desktop repairs it.
+
+The state is a warning, not a failure: only Keychain-backed credentials are
+lost. It reaches the user through the paths `stale_login_session` uses: the
+service's health identity, Doctor (`warn`), the Workbench banner, and the Vault
+error mapping (`avault-custody-core.md`, 13.1). Entering the desktop session at
+restart is separate work: the service-start-context plan introduced by #3507,
+whose step 3 this is.
+
 ## Residual Manual Matrix
 
 The classifier's explicit no-flag cases are represented in focused tests:
 Fast User Switching with both users logged in, lock/unlock, VNC, and sleep/wake
-(including a recreated GUI ASID) remain non-stale; a genuinely absent GUI domain
-is classified as `no_gui_session`, not stale. A real manual re-run can still
-validate these shapes on additional macOS versions.
+remain `healthy`; a genuinely absent GUI domain is classified as
+`no_gui_session`, not stale. A real manual re-run can still validate these
+shapes on additional macOS versions.
 
 - Lock/unlock and VNC disconnect/reconnect: any diagnostic transition is
   informational; neither case may be classified as `stale_login_session`.
@@ -85,3 +109,4 @@ best-effort; they do not start, stop, or restart service lifecycle state.
 - [x] Add focused parsing, transition, failure, and non-macOS tests.
 - [x] Confirm the explicit logout/login case and record the positive process-local signal.
 - [x] Expose the stale-session reason consistently through Vault, Doctor, CLI, and Web surfaces.
+- [x] Classify a service outside the user's desktop session and show it on the same surfaces.

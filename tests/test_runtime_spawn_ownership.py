@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from core import process_isolation
+from core.watch_protocol import LAST_DELIVERY_ENV, WATCH_ID_ENV
 from vibe import runtime
 
 MARKER = "avibe-spawn-ownership-probe"
@@ -280,3 +281,14 @@ def test_a_child_that_could_not_be_confirmed_dead_keeps_its_record(spawned, monk
     assert len(spawned) == 1
     assert spawned[0].poll() is None
     assert pid_path.read_text(encoding="utf-8") == str(spawned[0].pid)
+
+
+def test_a_process_avibe_owns_is_not_told_it_is_the_watch_that_started_it():
+    """A restart issued from inside a waiter left every Agent shell holding that Watch's id.
+
+    The service inherited it and handed it on, so a waiter script run by hand
+    refused to seed its state: it took itself for a managed Watch.
+    """
+    waiter_environment = {WATCH_ID_ENV: "wat_1", LAST_DELIVERY_ENV: "3", "AVIBE_HOME": "/home/avibe"}
+
+    assert runtime.independent_process_env(waiter_environment) == {"AVIBE_HOME": "/home/avibe"}

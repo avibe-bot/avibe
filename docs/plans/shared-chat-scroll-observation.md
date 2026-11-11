@@ -1,0 +1,129 @@
+# Shared chat-scroll observation follow-up
+
+> Note (2026-11-10): the curtain matrix (`ui/e2e/chat-scroll/curtain.spec.ts`) was removed afterwards by owner decision; #3453's product fix stays. The curtain notes below are history.
+
+## Contract and boundary
+
+This is a browser-test-only follow-up to the shared-base failures observed on
+November 10, 2026. No dependency, product, scroll-restore, or deployment changes.
+The branch starts from GitHub master `e13468888f206fb29d764ad113b85e3be6500e86`.
+After its second head passed full CI and exact-head review, it ordinary-merged
+master `8d35744c20c766910f8fee82d9b72161a769ae82`. The merge preserves #3490's
+prefetch-band setup, taller curtain viewport, source-chip preload, and on-time
+mutation samples. Relative to that base, the curtain change is only the explicit
+loaded-body assertion; interpolation and glide observation remain this PR's fixes.
+
+- A chip/panel handoff always draws exactly one shared icon and label. The label
+  travels through a real intermediate position instead of jumping to an endpoint.
+- The curtain matrix measures overlapping disclosures with their bodies already
+  loaded. When both grow, the next row does not overshoot its resting place.
+- Keep the existing geometry tolerances and real-time disclosure/scroll checks.
+
+## Findings and changes
+
+### Label interpolation: observation false negative
+
+PR #3482, lint run `42806307146`, WebKit's execution-process disclosure test:
+closing moved the label from `[49, 327.625]` to `[47, 321.875]`. The sampled path
+went from the start to only about 0.68px from the endpoint, with a 78ms gap. A
+maximum read gap below 110ms cannot guarantee a point more than 1px from both
+ends of a short, eased subinterval.
+
+`motion.spec.ts` now owns interpolation in a separate deterministic browser test.
+It captures the real disclosure animations in the click's microtask checkpoint,
+pauses and seeks them on a common animation clock, reads rendered geometry and
+copy visibility, then restores their original times. Opening and closing must
+both travel more than 2px, and include a point more than 1px from either end.
+The real-time tests still check every observed icon/label count, coverage, row
+geometry, interruption, reduced motion, and scroll-write behavior. There is no
+sample-gap exemption in the interpolation assertion anymore.
+
+### Curtain monotonicity: unloaded source fixture
+
+PR #3483, lint run `42806333918`, WebKit row/above/opening/grows:
+the row overshot by 5.022px. The same cell failed on master run `42807861392`.
+The fixture preloaded a chip when it was the host, but not a chip that was the
+source above/below it. That source first opens its skeleton, then shrinks to an
+empty panel. Thus the supposedly "both grow" cell also contains a shrink.
+
+With the existing `activityDelay=150` fixture parameter, the original setup
+fails the same monotonicity assertion on Chromium (7.529px) and WebKit (7.543px).
+Preloading both participating chips and checking that their busy body is gone
+passes both engines with the same delay. The committed fixture keeps its normal
+zero delay. The preload loop subsequently landed independently in #3490; this
+branch keeps that loop and adds the explicit loaded-body assertion.
+Loading/reveal motion remains covered by `motion.spec.ts`.
+
+### Return-to-latest glide: recording cutoff violates the rest contract
+
+PR #3483's Chromium-touch trace recorded scrollTop 8596 throughout, against
+bottom 9592: this was not simply a glide landing a little short. The same failure
+occurred on master run `42807861392` and this PR's first CI run `42816944256`.
+The last trace had 47 stationary samples spanning 779.6ms. Both browser projects
+pass the unchanged focused test locally under normal event delivery.
+
+The product intentionally waits for rest before starting the glide, with a
+1500ms lost-`scrollend` fallback. The old helper stopped recording 700ms after
+the click, which can be before a supported glide has even begun. Withholding
+`scrollend` at the document capture boundary deterministically reproduces the
+stationary, 996px-short failure on both engines without changing product code.
+
+`scroll.spec.ts` now waits, with the ordinary bounded assertion timeout, for the
+recorder's actual landing frame. It does not extend a fixed sleep. The same
+motion assertions still require at least five intermediate frames, a motion
+duration strictly between 150ms and 500ms, deceleration, a far-distance cut, and
+following the tail. The test is table-driven over delivered and lost scrollend;
+both pass with the new observation boundary. The precise missing event/rest
+state in the CI traces is not exposed, so event loss is a demonstrated supported
+path that invalidates the helper, not a claim about those traces' hidden refs.
+
+### Separate observations not fixed here
+
+#3487's group/above/on-screen/opening/grows trace had 156 exact reads but just one
+eligible non-null edge. Its coverage failure is not a geometry violation or a
+mixed-time read: edges below the viewport or between laid-out nodes are excluded
+by the observer. #3490 subsequently enlarged the fixture viewport to keep the
+edge on screen and landed that change on master; this merge preserves it rather
+than adding another sampling workaround. Its Chromium paging page-2 drift
+(1.34375px) remains a separate scroll/anchor investigation; no thresholds or
+product behavior are changed here.
+
+## Validation
+
+Normal parallelism only (`workers: 1`), no load generation or Incus operations:
+
+- Original-master focused baseline: all three reported cases on both engines,
+  six tests passed.
+- Final focused checks: 16 tests passed across both engines, covering the label
+  probe, real-time chip motion, interrupted close, reduced motion, curtain hosts
+  group/row/chip and above/below, and the unchanged return-to-latest glide.
+- Chat-scroll TypeScript check, `npm run build`, and `npm run lint` passed.
+- Controlled activity delay: original fixture failed both engines; preloaded
+  fixture passed both with the same delay.
+- Temporary product mutations (all restored before commit):
+  - `steps(1, end)` label easing failed the unchanged interior-position
+    assertion on both engines.
+  - Keeping the summary twin opaque failed the one-copy assertion (2 vs 1)
+    on both engines.
+  - An overshooting disclosure easing failed the unchanged curtain
+    monotonicity assertion (about 21px vs <=1px) on both engines, even after
+    the fixture preload fix.
+
+- Follow-up focused checks after the glide observation fix: 12 passed across
+  both engines (delivered/lost scrollend, interruption/reduced motion, label
+  interpolation, and row/group curtain cells). Build, lint, and types passed again.
+- Withheld-scrollend regression: the original helper failed both engines with
+  996px left; the landing-frame helper passed both.
+- Temporary glide mutations (restored): suppressing all glide writes fails the
+  bounded landing assertion with 996px left; slowing the actual motion to
+  1000–1200ms fails the unchanged <500ms motion-duration assertion on both engines.
+
+- After ordinary-merging current master and reinstalling its locked UI dependencies,
+  the selected 22 browser cases passed across two invocations: the first completed
+  19 before the shell's 120-second budget interrupted it; the remaining three
+  WebKit glide cases passed separately. No browser assertion failed. This also
+  covers #3490's changed no-restore-write sampling case. Build, lint, and types
+  passed on the merged base.
+
+PR review and the full CI backstop remain the delivery gates. This lane does not
+merge or deploy.

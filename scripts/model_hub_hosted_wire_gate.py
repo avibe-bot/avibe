@@ -9,12 +9,20 @@ pull request carries the label that says the change is intended. PR CI takes
 both engines from their published releases. Before a candidate is published,
 ``--head-assets`` takes it from the local build output instead. See
 docs/plans/model-hub-cpa-dependency.md.
+
+Engine channel qualification compares a candidate with engines that are not
+the packaged pin: every release the channel lists and every engine a released
+Avibe bundles. ``--base-manifest`` and ``--head-manifest`` name both sides by
+manifest, and ``--evidence-output`` records the comparison for the
+qualification receipt, which decides whether a difference was reviewed. See
+docs/plans/model-hub-engine-channel.md.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -181,10 +189,10 @@ def _run_cases(
     return cases
 
 
-def hosted_wire_differences(
+def _recorded_cases(
     base_bytes: bytes, head_bytes: bytes, work: Path, head_assets: Path | None = None,
     *, loopback_only: bool = False,
-) -> dict[str, list[str]]:
+) -> tuple[dict[str, dict], dict[str, dict]]:
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     platform = EngineRuntimeManager(runtime_dir=work / "probe", offline=True).host_platform()
@@ -192,12 +200,50 @@ def hosted_wire_differences(
                             must_pass=False, loopback_only=loopback_only)
     head_cases = _run_cases("PR", head_bytes, platform, work / "head", head_assets,
                             must_pass=True, loopback_only=loopback_only)
-    return wire_differences(base_cases, head_cases)
+    return base_cases, head_cases
+
+
+def hosted_wire_differences(
+    base_bytes: bytes, head_bytes: bytes, work: Path, head_assets: Path | None = None,
+    *, loopback_only: bool = False,
+) -> dict[str, list[str]]:
+    return wire_differences(*_recorded_cases(base_bytes, head_bytes, work, head_assets, loopback_only=loopback_only))
+
+
+def hosted_wire_evidence(
+    base_bytes: bytes, head_bytes: bytes, work: Path, head_assets: Path | None = None,
+    *, loopback_only: bool = False,
+) -> dict:
+    """Compare two explicit engines and describe the result for a qualification receipt.
+
+    The head engine must pass every case. A difference is recorded, not
+    judged: whether it was reviewed is the receipt's question.
+    """
+    try:
+        base_tag = json.loads(base_bytes)["asset_release_tag"]
+        head_tag = json.loads(head_bytes)["asset_release_tag"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise GateError(f"cannot read either manifest's asset_release_tag ({type(exc).__name__})") from exc
+    if base_tag == head_tag:
+        raise GateError(f"both manifests name {head_tag}; there is nothing to compare")
+    base_cases, head_cases = _recorded_cases(base_bytes, head_bytes, work, head_assets, loopback_only=loopback_only)
+    return {
+        "class": "hosted_wire",
+        "manifest_sha256": hashlib.sha256(head_bytes).hexdigest(),
+        "baseline_tag": base_tag,
+        "baseline_manifest_sha256": hashlib.sha256(base_bytes).hexdigest(),
+        "cases": sorted(head_cases),
+        "differences": wire_differences(base_cases, head_cases),
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", required=True, help="revision holding the base manifest")
+    sides = parser.add_mutually_exclusive_group(required=True)
+    sides.add_argument("--base", help="revision holding the base manifest")
+    sides.add_argument("--base-manifest", type=Path, help="an explicit base engine manifest")
+    parser.add_argument("--head-manifest", type=Path, help="the engine manifest to compare with --base-manifest")
+    parser.add_argument("--evidence-output", type=Path, help="where to record an explicit comparison")
     parser.add_argument(
         "--head-assets", type=Path,
         help="a local candidate's build output directory, instead of its published release",
@@ -213,7 +259,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.base_manifest is not None:
+        if args.head_manifest is None or args.evidence_output is None or args.pull_request:
+            parser.error("--base-manifest needs --head-manifest and --evidence-output, and takes no --pull-request")
+        try:
+            with tempfile.TemporaryDirectory(prefix="hosted-wire-") as scratch:
+                evidence = hosted_wire_evidence(
+                    args.base_manifest.read_bytes(), args.head_manifest.read_bytes(),
+                    args.work_dir or Path(scratch), args.head_assets, loopback_only=args.loopback_only,
+                )
+        except (GateError, OSError) as exc:
+            print(f"::error::hosted_wire gate: {exc}")
+            return 1
+        args.evidence_output.parent.mkdir(parents=True, exist_ok=True)
+        args.evidence_output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        verdict = "differs" if evidence["differences"] else "byte-identical"
+        print(f"hosted_wire gate: {evidence['baseline_tag']} -> candidate: hosted passthrough {verdict}")
+        return 0
+    if args.head_manifest is not None or args.evidence_output is not None:
+        parser.error("--head-manifest and --evidence-output belong to --base-manifest")
     try:
         base_bytes = _git_show(args.base, MANIFEST)
         head_bytes = (REPO_ROOT / MANIFEST).read_bytes()

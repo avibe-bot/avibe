@@ -1180,7 +1180,7 @@ describe('voice capture audio context', () => {
       // The shape the server keeps (vibe/ui_server.py asr_telemetry), and nothing a device names.
       expect(Object.keys(event).sort()).toEqual([
         'attempts', 'audioSession', 'audioSessionState', 'audioSessionStateEnd', 'captureClass', 'chunks', 'contextSampleRate', 'decodedSegments',
-        'dictationId', 'entry', 'event', 'fallback', 'fallbackLevel', 'fileSegments', 'hiddenCount', 'levels', 'mic', 'micMs', 'outcome', 'pageAgeMs',
+        'dictationId', 'entry', 'event', 'fallback', 'fallbackLevel', 'fileSegments', 'hiddenCount', 'levels', 'mic', 'micMs', 'origin', 'outcome', 'pageAgeMs',
         'peakDbfs', 'prewarm', 'prewarmAgeMs', 'recorderBytes', 'recorderChunks', 'recorderType', 'recorderTypes', 'stalledRates', 'stop', 'surface',
         'totalMs', 'trackEvents',
       ]);

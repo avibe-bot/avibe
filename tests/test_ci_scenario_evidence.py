@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,8 @@ from scripts.ci_docs_only import full
 from scripts.ci_scope import make_plan
 from scripts.ci_scenario_evidence import (
     LINT_WORKFLOW,
+    RELEASE_SELECTIONS,
+    RELEASE_SHARD_VERSIONS,
     RELEASE_WORKFLOWS,
     UNIT_SHARD_ARGS,
     UNIT_SHARD_JOB,
@@ -22,12 +27,14 @@ from scripts.ci_scenario_evidence import (
     ReleaseEvidenceError,
     Reports,
     check_release_evidence,
+    check_release_join,
     covered_evidence,
     covered_test_evidence,
     judge,
     pytest_commands,
     read_reports,
     release_pytest_commands,
+    release_shards,
 )
 
 CASE = "tests/test_x.py::test_case"
@@ -107,6 +114,257 @@ def test_release_evidence_fails_closed_for_bad_reports(tmp_path: Path, report_st
 
     with pytest.raises(ReleaseEvidenceError):
         check_release_evidence(junit, workflow, root, scenario_root=scenarios)
+
+
+A_REQUIRED, A_PLAIN = "tests/test_a.py::test_required", "tests/test_a.py::test_plain"
+B_REQUIRED, B_OPTIONAL = "tests/test_b.py::test_required", "tests/test_b.py::test_optional"
+SKIPPED = '<skipped message="not on this runner"/>'
+XFAILED = '<skipped type="pytest.xfail" message="known gap"/>'
+FAILED = '<failure message="assertion failed"/>'
+
+
+def _junit(report: dict[str, str], again: str = "") -> str:
+    """A JUnit report with one record for each case, and a second for ``again``."""
+
+    cases = "".join(
+        f'<testcase classname="{nodeid.partition("::")[0][:-3].replace("/", ".")}" '
+        f'name="{nodeid.partition("::")[2]}">{result}</testcase>'
+        for nodeid, result in [*report.items(), *((again, report[again]) for _ in [again] if again)]
+    )
+    return f"<testsuites><testsuite>{cases}</testsuite></testsuites>"
+
+
+@dataclass
+class _ShardedRun:
+    """A release run shared out over two shard jobs: everything its join reads, before it is written.
+
+    The checkout holds two required (catalog-covered) cases, one per shard, and
+    two others. As written here the run is green: each shard ran exactly its own
+    cases at the join's commit, run and attempt, against the same versions, and
+    the one skip is a case no covered row cites.
+    """
+
+    root: Path
+    source: dict[str, str] = field(
+        default_factory=lambda: {
+            "tests/test_a.py": "def test_required():\n    pass\n\n\ndef test_plain():\n    pass\n",
+            "tests/test_b.py": "def test_required():\n    pass\n\n\ndef test_optional():\n    pass\n",
+        }
+    )
+    covered: list[str] = field(default_factory=lambda: [A_REQUIRED, B_REQUIRED])
+    selection: list[str] = field(default_factory=lambda: ["tests"])
+    commands: dict[str, str] = field(
+        default_factory=lambda: {"shard-a": "tests/test_a.py", "shard-b": "tests --ignore=tests/test_a.py"}
+    )
+    needs: dict[str, dict] = field(
+        default_factory=lambda: {"shard-a": {"result": "success"}, "shard-b": {"result": "success"}}
+    )
+    reports: dict[str, dict[str, str] | None] = field(
+        default_factory=lambda: {
+            "shard-a": {A_REQUIRED: "", A_PLAIN: ""},
+            "shard-b": {B_REQUIRED: "", B_OPTIONAL: SKIPPED},
+        }
+    )
+    provenance: dict[str, dict | str | None] = field(
+        default_factory=lambda: {
+            job: {
+                "sha": "a" * 40,
+                "run_id": "77",
+                "run_attempt": "2",
+                "versions": {"codex": "codex-cli 1.2.3", "opencode": "4.5.6", "engine": "v1 sha256:abc"},
+            }
+            for job in ("shard-a", "shard-b")
+        }
+    )
+    extra_evidence: dict[str, str] = field(default_factory=dict)
+
+    def join(self) -> dict[str, list[str]]:
+        for name, body in self.source.items():
+            self.root.joinpath("checkout", name).parent.mkdir(parents=True, exist_ok=True)
+            self.root.joinpath("checkout", name).write_text(body, encoding="utf-8")
+        scenarios = self.root / "checkout" / "tests" / "scenarios"
+        scenarios.joinpath("capability").mkdir(parents=True)
+        scenarios.joinpath("capability", "catalog.yaml").write_text(
+            yaml.safe_dump(
+                {"scenarios": [{"id": f"ROW-{index}", "status": "covered", "test": case} for index, case in enumerate(self.covered)]}
+            ),
+            encoding="utf-8",
+        )
+        workflow = self.root / "workflow.yml"
+        workflow.write_text(
+            yaml.safe_dump(
+                {
+                    "jobs": {
+                        **{
+                            job: {"steps": [{"run": f"python -m pytest {command} --junitxml=junit.xml"}]}
+                            for job, command in self.commands.items()
+                        },
+                        "join": {"steps": [{"run": "python scripts/ci_scenario_evidence.py --release-join evidence"}]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        for job, report in self.reports.items():
+            if report is not None:
+                self.extra_evidence.setdefault(f"{job}/junit.xml", _junit(report))
+        for job, record in self.provenance.items():
+            if record is not None:
+                self.extra_evidence[f"{job}/provenance.json"] = record if isinstance(record, str) else json.dumps(record)
+        for name, body in self.extra_evidence.items():
+            evidence.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
+            evidence.joinpath(name).write_text(body, encoding="utf-8")
+        return check_release_join(
+            evidence,
+            workflow,
+            self.root / "checkout",
+            self.selection,
+            needs=self.needs,
+            source_sha="a" * 40,
+            run_id="77",
+            run_attempt="2",
+            version_names=("codex", "opencode", "engine"),
+            expected_versions={"engine": "v1 sha256:abc"},
+            scenario_root=scenarios,
+        )
+
+
+def _no_evidence(run: _ShardedRun, job: str) -> None:
+    run.reports[job] = run.provenance[job] = None
+
+
+def _swapped_reports(run: _ShardedRun) -> None:
+    run.reports["shard-a"], run.reports["shard-b"] = run.reports["shard-b"], run.reports["shard-a"]
+
+
+def _only_the_engine_named(run: _ShardedRun) -> None:
+    for record in run.provenance.values():
+        record["versions"] = {"engine": "v1 sha256:abc"}
+
+
+def _same_wrong_engine(run: _ShardedRun) -> None:
+    for record in run.provenance.values():
+        record["versions"]["engine"] = "v0 sha256:old"
+
+
+def _new_file_in_no_shard(run: _ShardedRun) -> None:
+    run.commands["shard-b"] = "tests/test_b.py"
+    run.source["tests/test_c.py"] = "def test_new():\n    pass\n"
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        # The shard jobs themselves.
+        pytest.param(lambda run: run.needs["shard-b"].update(result="failure"), "shard-b concluded failure", id="shard-failed"),
+        pytest.param(lambda run: run.needs["shard-b"].update(result="skipped"), "shard-b concluded skipped", id="shard-skipped"),
+        pytest.param(lambda run: run.needs["shard-b"].update(result="cancelled"), "shard-b concluded cancelled", id="shard-cancelled"),
+        pytest.param(lambda run: run.needs.pop("shard-b"), "must wait for exactly the shard jobs", id="join-does-not-wait-for-a-shard"),
+        # What each shard left behind.
+        pytest.param(lambda run: _no_evidence(run, "shard-b"), "shard-b: release JUnit directory does not exist", id="shard-left-nothing"),
+        pytest.param(lambda run: run.reports.update({"shard-b": None}), "shard-b: release JUnit directory is empty", id="shard-left-no-report"),
+        pytest.param(
+            lambda run: run.extra_evidence.update({"shard-b/again.xml": "<testsuites/>"}),
+            "shard-b: release JUnit directory must contain exactly one report",
+            id="shard-left-two-reports",
+        ),
+        pytest.param(
+            lambda run: run.extra_evidence.update({"shard-c/junit.xml": "<testsuites/>"}),
+            "unknown release evidence producers: shard-c",
+            id="evidence-from-an-unknown-job",
+        ),
+        pytest.param(lambda run: run.provenance.update({"shard-b": None}), "shard-b: could not read release shard provenance", id="no-provenance"),
+        pytest.param(lambda run: run.provenance.update({"shard-b": "{"}), "shard-b: could not read release shard provenance", id="malformed-provenance"),
+        pytest.param(lambda run: run.provenance["shard-b"].pop("versions"), "shard-b: release shard provenance is incomplete", id="no-versions"),
+        pytest.param(
+            lambda run: run.provenance["shard-b"]["versions"].update(codex=""),
+            "shard-b: release shard provenance names no version of codex",
+            id="blank-version",
+        ),
+        pytest.param(
+            _only_the_engine_named,
+            "shard-a: release shard provenance must name a version of exactly codex, engine, opencode, not engine",
+            id="both-shards-name-no-cli",
+        ),
+        pytest.param(
+            lambda run: run.provenance["shard-b"]["versions"].pop("opencode"),
+            "shard-b: release shard provenance must name a version of exactly codex, engine, opencode, not codex, engine",
+            id="version-recorded-by-one-shard-only",
+        ),
+        # Which run each shard belongs to, and what it ran against.
+        pytest.param(lambda run: run.provenance["shard-b"].update(sha="b" * 40), "shard-b recorded sha bbbb", id="another-commit"),
+        pytest.param(lambda run: run.provenance["shard-b"].update(run_id="76"), "shard-b recorded run_id 76, but this join is for 77", id="another-run"),
+        pytest.param(
+            lambda run: run.provenance["shard-a"].update(run_attempt="1"),
+            "shard-a recorded run_attempt 1, but this join is for 2",
+            id="shard-kept-from-an-earlier-attempt",
+        ),
+        pytest.param(
+            lambda run: run.provenance["shard-b"]["versions"].update(codex="codex-cli 1.2.4"),
+            "shard-b and shard-a ran against different versions: codex 'codex-cli 1.2.4' != 'codex-cli 1.2.3'",
+            id="cli-version-drifted-between-shards",
+        ),
+        pytest.param(_same_wrong_engine, "shard-a ran against engine 'v0 sha256:old', but this checkout pins 'v1 sha256:abc'", id="both-shards-off-the-pinned-engine"),
+        # How the shards share the selection out.
+        pytest.param(_new_file_in_no_shard, "1 case(s) of the release selection are selected by no shard: tests/test_c.py::test_new", id="selection-omitted"),
+        pytest.param(
+            lambda run: run.commands.update({"shard-b": "tests"}),
+            f"2 case(s) are selected by more than one shard: {A_PLAIN}, {A_REQUIRED}",
+            id="selection-duplicated",
+        ),
+        pytest.param(
+            lambda run: run.selection.append(f"--deselect={B_OPTIONAL}"),
+            f"1 case(s) are selected by a shard but not by the release selection: {B_OPTIONAL}",
+            id="shard-runs-outside-the-selection",
+        ),
+        pytest.param(lambda run: run.commands.update({"shard-b": "tests/test_b.py -k no_such_case"}), "could not collect release pytest command", id="shard-selects-nothing"),
+        # What each shard ran.
+        pytest.param(lambda run: run.reports["shard-b"].pop(B_REQUIRED), f"shard-b did not run 1 case(s) it selects: {B_REQUIRED}", id="required-case-not-run"),
+        pytest.param(lambda run: run.reports["shard-b"].pop(B_OPTIONAL), f"shard-b did not run 1 case(s) it selects: {B_OPTIONAL}", id="other-case-not-run"),
+        pytest.param(_swapped_reports, "shard-a reported 2 case(s) it does not select", id="reports-swapped"),
+        pytest.param(
+            lambda run: run.extra_evidence.update({"shard-b/junit.xml": _junit(run.reports["shard-b"], again=B_OPTIONAL)}),
+            f"shard-b: release JUnit report records {B_OPTIONAL} more than once",
+            id="case-reported-twice",
+        ),
+        pytest.param(lambda run: run.reports["shard-b"].update({B_REQUIRED: SKIPPED}), f"{B_REQUIRED} did not pass in the release run", id="required-case-skipped"),
+        pytest.param(lambda run: run.reports["shard-a"].update({A_REQUIRED: XFAILED}), f"{A_REQUIRED} did not pass in the release run", id="required-case-xfailed"),
+        pytest.param(lambda run: run.reports["shard-a"].update({A_REQUIRED: FAILED}), f"{A_REQUIRED} did not pass in the release run", id="required-case-failed"),
+        pytest.param(lambda run: run.reports["shard-b"].update({B_OPTIONAL: FAILED}), f"shard-b recorded 1 failed case(s): {B_OPTIONAL}", id="other-case-failed"),
+        pytest.param(lambda run: run.covered.clear(), "selects no covered scenario test evidence", id="no-required-case-in-the-selection"),
+    ],
+)
+def test_release_join_fails_unless_the_shards_ran_the_whole_selection_once(tmp_path: Path, change, problem: str) -> None:
+    """One departure from a green two-shard run at a time, each of which the join must name.
+
+    The join is the release verdict once the selection is shared out: a shard
+    that was skipped, left no report, belongs to another commit or attempt, ran
+    another CLI or engine, or left a case out, would otherwise still read green.
+    """
+
+    run = _ShardedRun(tmp_path)
+    change(run)
+
+    with pytest.raises(ReleaseEvidenceError) as raised:
+        run.join()
+
+    assert problem in str(raised.value)
+
+
+def test_release_join_passes_a_complete_run_and_lets_an_uncited_case_skip(tmp_path: Path) -> None:
+    """Only covered cases must pass: another case may skip or xfail, as it could in the one-job run."""
+
+    run = _ShardedRun(tmp_path)
+    run.reports["shard-a"][A_PLAIN] = XFAILED
+
+    assert run.join() == {"shard-a": [A_REQUIRED, A_PLAIN], "shard-b": [B_REQUIRED, B_OPTIONAL]}
+    # The same reports with a required case skipped are refused, so the pass above is not vacuous.
+    again = _ShardedRun(tmp_path / "again", reports=copy.deepcopy(run.reports))
+    again.reports["shard-a"][A_REQUIRED] = SKIPPED
+    with pytest.raises(ReleaseEvidenceError, match="did not pass in the release run"):
+        again.join()
 
 
 @pytest.mark.parametrize(
@@ -246,18 +504,15 @@ def test_a_report_names_each_case_by_its_node_id(tmp_path: Path) -> None:
     assert reports.outcomes["windows-agent"] == {}
 
 
-def test_publish_release_evidence_from_its_nested_automation_checkout(tmp_path: Path) -> None:
-    """publish.yml runs its release case from ``release-automation/`` inside the release checkout.
+def test_release_evidence_from_a_nested_automation_checkout(tmp_path: Path) -> None:
+    """Explicit root keeps node IDs and JUnit names relative to nested release automation.
 
-    Pytest finds the outer checkout's configuration from there and takes it as the root, so unless
-    the command roots itself every node id and JUnit class name carries ``release-automation/``
-    and the gate sees no covered case (the v3.2.3 publication failed this way). Runs publish.yml's
-    own selecting arguments in that layout, then the gate as the workflow does.
+    Pytest otherwise inherits the outer checkout's configuration and prefixes node IDs
+    with the nested directory. Keep this generic evidence regression even though the
+    retired Memory updater no longer needs a nested publish.yml gate.
     """
 
-    release_args = [arg for arg in release_pytest_commands(WORKFLOWS / "publish.yml")[1]
-                    if arg != "tests/e2e/test_retired_updater_bridge.py"]
-    command = ["tests/test_x.py", *release_args]
+    command = ["tests/test_x.py", "--rootdir=."]
     outer = tmp_path / "release"
     outer.mkdir()
     outer.joinpath("pyproject.toml").write_text("[tool.pytest.ini_options]\nmarkers = []\n", encoding="utf-8")
@@ -301,33 +556,31 @@ def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path
         check_release_evidence(junit, workflow, wrong_root, scenario_root=scenarios)
 
 
-
-    model_workflow = (WORKFLOWS / "model-hub-e2e.yml").read_text(encoding="utf-8")
-    publish_workflow = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
-
-    assert "--release" in model_workflow
-    assert "--workflow .github/workflows/model-hub-e2e.yml" in model_workflow
-    assert "--pytest-root ." in model_workflow
-    assert '--junitxml="$RUNNER_TEMP/model-hub-e2e-junit/model-hub-e2e.xml"' in model_workflow
-    assert "--release" in publish_workflow
-    assert "--workflow .github/workflows/publish.yml" in publish_workflow
-    assert "(cd release-automation && python scripts/ci_scenario_evidence.py --release" in publish_workflow
-    assert "--pytest-root ." in publish_workflow
-    assert "scripts/ci_scenario_evidence.py" in publish_workflow
-    assert "scripts/pytest_collection.py" in publish_workflow
-    assert ".github/workflows/publish.yml" in publish_workflow
-    assert "tests/scenarios/**/catalog.yaml" in publish_workflow
-    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=." in publish_workflow
-    assert '--junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml"' in publish_workflow
-
-    assert release_pytest_commands(WORKFLOWS / "model-hub-e2e.yml") == [
-        ("-m", "e2e_model_hub", "tests/e2e", "-p", "no:cacheprovider")
+def test_release_workflows_select_only_current_contracts() -> None:
+    wire, mock = "tests/e2e/test_model_hub_engine_wire.py", "tests/e2e/test_model_hub_mock_upstream.py"
+    # Each shard's literal command, and the index its own evidence gate reads it by.
+    assert pytest_commands(WORKFLOWS / "model-hub-e2e.yml") == {
+        "model-hub-e2e-wire-mock": [("-m", "e2e_model_hub", wire, mock, "-p", "no:cacheprovider")],
+        "model-hub-e2e-remaining": [
+            ("-m", "e2e_model_hub", "tests/e2e", f"--ignore={wire}", f"--ignore={mock}", "-p", "no:cacheprovider")
+        ],
+    }
+    jobs = yaml.safe_load((WORKFLOWS / "model-hub-e2e.yml").read_text(encoding="utf-8"))["jobs"]
+    for index, job in enumerate(("model-hub-e2e-wire-mock", "model-hub-e2e-remaining")):
+        (gate,) = [step["run"] for step in jobs[job]["steps"] if "--release" in step.get("run", "")]
+        assert "--workflow .github/workflows/model-hub-e2e.yml" in gate and f"--pytest-command-index {index} " in gate
+        assert '--junitxml="$RUNNER_TEMP/model-hub-e2e-evidence/junit.xml"' in gate
+    # What the shards are compared with is fixed in the checker, as the one-job command was written.
+    assert RELEASE_SELECTIONS == {"model-hub-e2e.yml": ("-m", "e2e_model_hub", "tests/e2e")}
+    # So is what each shard must name: both agent CLIs, the SDK that carries Claude Code, and the engine.
+    assert RELEASE_SHARD_VERSIONS == {"model-hub-e2e.yml": ("codex", "opencode", "claude-agent-sdk", "model-hub-engine")}
+    # The join is the last word: it waits for both shards and runs whatever they concluded.
+    join = jobs["model-hub-e2e"]
+    assert sorted(join["needs"]) == ["model-hub-e2e-remaining", "model-hub-e2e-wire-mock"] and join["if"] == "always()"
+    assert release_pytest_commands(WORKFLOWS / "publish.yml") == [
+        ("tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py")
     ]
-    publish_commands = release_pytest_commands(WORKFLOWS / "publish.yml")
-    assert publish_commands[1] == ("tests/e2e/test_retired_updater_bridge.py", "--rootdir=.")
-    assert covered_test_evidence()[
-        "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data"
-    ].rows == ["MUC-004"]
+    assert all("MUC-004" not in evidence.rows for evidence in covered_test_evidence().values())
 
 
 def test_the_lint_unit_shards_count_as_running_the_whole_unit_suite() -> None:
@@ -341,21 +594,34 @@ def test_the_lint_unit_shards_count_as_running_the_whole_unit_suite() -> None:
 
 
 def test_release_gating_is_read_from_the_release_workflows() -> None:
-    """The Model Hub E2E and release automation select the expected covered rows."""
+    """The live Model Hub shards run the whole E2E selection once; with release automation they gate the expected rows.
 
-    commands = [args for name in RELEASE_WORKFLOWS for job in pytest_commands(WORKFLOWS / name).values() for args in job]
+    The whole selection is written out here and fixed in the checker, apart from
+    the workflow: a shard edit that drops or doubles a file fails this pull
+    request, not the next release, and cannot shrink what it is compared with.
+    """
+
+    shards = release_shards(WORKFLOWS / "model-hub-e2e.yml", WORKFLOWS.parents[1], ["-m", "e2e_model_hub", "tests/e2e"])
+
+    assert sorted(shards) == ["model-hub-e2e-remaining", "model-hub-e2e-wire-mock"]
+    assert {nodeid.partition("::")[0] for nodeid in shards["model-hub-e2e-wire-mock"]} == {
+        "tests/e2e/test_model_hub_engine_wire.py", "tests/e2e/test_model_hub_mock_upstream.py"
+    }
+    assert RELEASE_WORKFLOWS == ("model-hub-e2e.yml", "publish.yml")
+    publish = [args for job in pytest_commands(WORKFLOWS / "publish.yml").values() for args in job]
     evidence = covered_evidence()
     gated = {
         citation
-        for args in commands
-        for nodeid in (entry["nodeid"] for entry in pytest_collection.collect(list(args)))
+        for nodeid in (
+            *(nodeid for nodeids in shards.values() for nodeid in nodeids),
+            *(entry["nodeid"] for args in publish for entry in pytest_collection.collect(list(args))),
+        )
         for citation in evidence
         if nodeid.partition("[")[0] in (citation, citation.partition("[")[0])
     }
 
     assert evidence["tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent"].rows == ["MH-ROUTING-001"]
     assert "tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent" in gated
-    assert "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data" in gated
 
 
 def test_a_covered_rows_partial_evidence_case_is_evidence_too(tmp_path: Path) -> None:

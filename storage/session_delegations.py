@@ -60,10 +60,6 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
         ).where(agent_runs.c.id == source.get("task_execution_id"))).mappings().first()
         if run is None or run["run_type"] != "agent_run" or run["session_id"] != recipient:
             continue
-        if _object(run["metadata_json"]).get("no_reply") is True:
-            # The run is still delivered and traceable, but it is informational:
-            # do not create or mutate a delegation pair for it.
-            continue
         if run["source_kind"] == "agent":
             sender = run["source_actor"]
         elif run["source_kind"] == "callback":
@@ -79,6 +75,10 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
             session_delegations.c.recipient_session_id == sender,
             session_delegations.c.state.in_(("open", "notified", "answered")),
         ).values(state="answered", updated_at=at)).rowcount
+        if _object(run["metadata_json"]).get("no_reply") is True:
+            # The run is still delivered and traceable, but it is informational:
+            # it answers an existing reverse delegation without opening another.
+            continue
         # Once B answers A, further progress/final/supplemental messages stay
         # answers. Only A sending again rearms A→B; wording/turns are not judged.
         if run["source_kind"] != "agent" or answered:

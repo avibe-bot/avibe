@@ -571,10 +571,11 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
 
 - An accepted A→B Harness message opens a delegation unless A is answering B.
   `--no-reply` is an exception for an existing Session or Bot: it is durable on
-  the Run and Delivery, opens no pair, and neither closes nor re-arms a reverse
-  pair. The receiver sees `[No reply needed.]` instead of a report hint, and the
+  the Run and Delivery, opens no pair, and does not re-arm a reverse pair. It
+  still closes an existing reverse pair, just like any other Agent-authored
+  return. The receiver sees `[No reply needed.]` instead of a report hint, and the
   safety net emits no read receipt for that input.
-  Any Agent-authored return, including progress, closes the reverse pair without
+  Any Agent-authored return, including progress and `--no-reply`, closes the reverse pair without
   opening another delegation. Once B answers A, B's progress, final, and follow-up
   messages stay answers until A sends again (orchestrator clarification,
   2026-11-08); a previously notified pair is still answerable. Avibe never

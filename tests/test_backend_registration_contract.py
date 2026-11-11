@@ -58,6 +58,7 @@ PYTHON_DECLARATIONS = {
     ("core/services/skills.py", "Dict", NATIVE): (1, "native", "askill native CLI ids."),
     ("core/session_turns.py", "Set", frozenset({"claude", "codex", "vibey"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
     ("core/vibe_agents.py", "Dict", NATIVE): (1, "native", "Native recommendations; Avibe uses its configured Hub catalog."),
+    ("scripts/ci_scenario_evidence.py", "Tuple", frozenset({"codex", "opencode"})): (1, "native_subset", "Versions a release E2E shard must name: the two agent CLIs its workflow installs from npm; Claude Code arrives inside claude-agent-sdk."),
     ("scripts/incus_tenant.py", "Dict", NATIVE): (1, "native", "Bootstrap config with backend-specific fields."),
     ("scripts/prepare_regression.py", "Dict", NATIVE): (2, "native", "Regression config with backend-specific fields; known legacy CLI executable paths."),
     ("vibe/api.py", "Dict", NATIVE): (1, "native", "Public runtime config plus the avault tool; the built-in backend has no section."),

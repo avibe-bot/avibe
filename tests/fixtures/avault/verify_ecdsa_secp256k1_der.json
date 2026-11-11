@@ -1,0 +1,295 @@
+{
+  "description": "Known-answer cases for avault's keyless `verify` command and avault_core::verify_ecdsa_secp256k1_der (docs/DESIGN.md Appendix C, Public signature verification). Every value is public. Each case is one request; digest_hex is always 32 bytes, so request-shape errors (JSON, scheme, digest length, hex) are covered by the CLI tests instead.",
+  "scheme": "ecdsa-secp256k1-der",
+  "expectations": {
+    "valid": "the signature verifies: stdout {\"valid\":true}, exit status 0",
+    "invalid": "every input is well formed but the signature does not verify: stdout {\"valid\":false}, exit status 1",
+    "error": "an input is malformed: no JSON result, exit status 70"
+  },
+  "cases": [
+    {
+      "name": "shared-signing-vector-compressed-key",
+      "expect": "valid",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "Compressed public key of signing.private_key_hex in p2_core_crypto.json; the digest and signature are that file's ecdsa-secp256k1-der vector."
+    },
+    {
+      "name": "shared-signing-vector-uncompressed-key",
+      "expect": "valid",
+      "public_key_hex": "044e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e47fd35c4215d1edf53e6f83de344615ce719bdb0fd878f6ed76f06dd277956de",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "The same key as a 65-byte uncompressed point."
+    },
+    {
+      "name": "uppercase-hex",
+      "expect": "valid",
+      "public_key_hex": "024E3B81AF9C2234CAD09D679CE6035ED1392347CE64CE405F5DCD36228A25DE6E",
+      "digest_hex": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
+      "signature_hex": "304402204CA3ACA3A41BC1CA96D67707E525AC6BD77DDC197A34B4C020BE1EE636E296170220199556DED3234058DAAFFF2BC3153DA60D402D0C71389A11A790B9F1A5862E80",
+      "note": "Hex is case-insensitive in the request."
+    },
+    {
+      "name": "rfc6979-private-key-one",
+      "expect": "valid",
+      "public_key_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "digest_hex": "a0dc65ffca799873cbea0ac274015b9526505daaaed385155425f7337704883e",
+      "signature_hex": "3045022100934b1ea10a4b3c1757e2b0c017d0b6143ce3c9a7e6a4a49860d7a6ab210ee3d802202442ce9d2b916064108014783e923ec36b49743e2ffa1c4496f01a512aafd9e5",
+      "note": "Private key 1 (the public key is the generator) signing SHA-256(\"Satoshi Nakamoto\") with the RFC 6979 nonce."
+    },
+    {
+      "name": "domain-separated-payload-digest",
+      "expect": "valid",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "0389b9e674c677e8f879323b379e802c991f06cd2bd69e817628faf993de9e49",
+      "signature_hex": "3044022012bf901dc17654c2f2661100fac65154256c96c3ebce34cdbc545a41a0b947ce022015e804932956c8dea39e6b5268ea26113f59801f2d48a6956e28a207f563a9a6",
+      "note": "A caller-side digest: SHA-256(domain || payload) over the bytes in digest_preimage, signed by the shared signing key with the RFC 6979 nonce. avault sees only the digest.",
+      "digest_preimage": {
+        "domain_utf8": "avibe:model-hub-engine-channel:v1\n",
+        "payload_utf8": "{\"example\":\"avault verify fixture payload\",\"sequence\":1}"
+      }
+    },
+    {
+      "name": "modified-digest",
+      "expect": "invalid",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1e",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "The last digest bit is flipped."
+    },
+    {
+      "name": "modified-signature-r",
+      "expect": "invalid",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296160220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "The last bit of r is flipped."
+    },
+    {
+      "name": "modified-signature-s",
+      "expect": "invalid",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e81",
+      "note": "The last bit of s is flipped."
+    },
+    {
+      "name": "high-s-signature",
+      "expect": "invalid",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304502204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e29617022100e66aa9212cdcbfa7255000d43ceac258ad6eafda3e10062a1841a49b2ab012c1",
+      "note": "(r, n - s) satisfies the ECDSA equation; verification accepts only the low-S form."
+    },
+    {
+      "name": "other-public-key",
+      "expect": "invalid",
+      "public_key_hex": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "A valid key that did not sign this digest."
+    },
+    {
+      "name": "public-key-empty",
+      "expect": "error",
+      "public_key_hex": "",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "No public key bytes."
+    },
+    {
+      "name": "public-key-x-only",
+      "expect": "error",
+      "public_key_hex": "4e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "A 32-byte X coordinate without a SEC1 tag."
+    },
+    {
+      "name": "public-key-raw-xy-without-tag",
+      "expect": "error",
+      "public_key_hex": "4e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e47fd35c4215d1edf53e6f83de344615ce719bdb0fd878f6ed76f06dd277956de",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "64 raw coordinate bytes without the 0x04 tag."
+    },
+    {
+      "name": "public-key-compressed-tag-with-uncompressed-length",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e47fd35c4215d1edf53e6f83de344615ce719bdb0fd878f6ed76f06dd277956de",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "Tag 0x02 on 65 bytes."
+    },
+    {
+      "name": "public-key-uncompressed-tag-with-compressed-length",
+      "expect": "error",
+      "public_key_hex": "044e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "Tag 0x04 on 33 bytes."
+    },
+    {
+      "name": "public-key-compact-tag",
+      "expect": "error",
+      "public_key_hex": "054e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "SEC1 compact form of the signer's key (its Y is even); not an accepted encoding."
+    },
+    {
+      "name": "public-key-hybrid-tag",
+      "expect": "error",
+      "public_key_hex": "064e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e47fd35c4215d1edf53e6f83de344615ce719bdb0fd878f6ed76f06dd277956de",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "Hybrid form of the signer's key."
+    },
+    {
+      "name": "public-key-identity",
+      "expect": "error",
+      "public_key_hex": "00",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "SEC1 point at infinity."
+    },
+    {
+      "name": "public-key-compressed-not-on-curve",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6f",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "No curve point has this X coordinate."
+    },
+    {
+      "name": "public-key-compressed-x-not-below-field-prime",
+      "expect": "error",
+      "public_key_hex": "02fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "X equals the field prime."
+    },
+    {
+      "name": "public-key-uncompressed-not-on-curve",
+      "expect": "error",
+      "public_key_hex": "044e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e47fd35c4215d1edf53e6f83de344615ce719bdb0fd878f6ed76f06dd277956df",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "The signer's X with Y + 1."
+    },
+    {
+      "name": "public-key-trailing-byte",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e00",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "A valid compressed key followed by one byte."
+    },
+    {
+      "name": "signature-empty",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "",
+      "note": "No signature bytes."
+    },
+    {
+      "name": "signature-truncated",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e",
+      "note": "The valid signature without its last byte."
+    },
+    {
+      "name": "signature-trailing-byte",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e8000",
+      "note": "The valid signature followed by one byte."
+    },
+    {
+      "name": "signature-raw-r-s",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "4ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e29617199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "64-byte r || s, not DER."
+    },
+    {
+      "name": "signature-long-form-length",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "30814402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "SEQUENCE length in non-minimal long form."
+    },
+    {
+      "name": "signature-negative-r",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "30440220cca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "r has its top bit set and no padding zero, so it is a negative INTEGER."
+    },
+    {
+      "name": "signature-non-minimal-r",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "30450221004ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80",
+      "note": "r carries an unnecessary leading zero."
+    },
+    {
+      "name": "signature-extra-sequence-element",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304702204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80020101",
+      "note": "A third INTEGER inside the SEQUENCE."
+    },
+    {
+      "name": "signature-r-zero",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "3006020100020101",
+      "note": "r = 0."
+    },
+    {
+      "name": "signature-s-zero",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "3006020101020100",
+      "note": "s = 0."
+    },
+    {
+      "name": "signature-r-equals-group-order",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "3026022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141020101",
+      "note": "r = n."
+    },
+    {
+      "name": "signature-s-equals-group-order",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304502204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e29617022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+      "note": "s = n."
+    },
+    {
+      "name": "signature-over-size-limit",
+      "expect": "error",
+      "public_key_hex": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+      "digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature_hex": "304402204ca3aca3a41bc1ca96d67707e525ac6bd77ddc197a34b4c020be1ee636e296170220199556ded3234058daafff2bc3153da60d402d0c71389a11a790b9f1a5862e80000000",
+      "note": "73 bytes: one more than the largest DER ECDSA secp256k1 signature."
+    }
+  ]
+}

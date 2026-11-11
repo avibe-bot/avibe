@@ -1723,6 +1723,59 @@ async def test_responses_terminal_output_item_type_must_be_a_string() -> None:
     assert "type" in error.message
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin", "call_id", "native_id", "expected_item_id"),
+    [
+        (Origin("anthropic", "anthropic", "claude"), "toolu_1", "toolu_1", None),
+        (Origin("openai", "openai_chat", "model-x"), "call_chat", "call_chat", None),
+        (Origin("openai", "openai_responses", "other-model"), "call_1", "fc_1", None),
+        (Origin("openai", "openai_responses", "model-x"), "call_1", "fc_1", "fc_1"),
+        (Origin("openai", "openai_responses", "model-x"), "call_1", None, None),
+        # A same-origin relay's IDs remain opaque; do not impose OpenAI prefixes on other Sources.
+        (Origin("openai", "openai_responses", "model-x"), "call_1", "relay_item", "relay_item"),
+    ],
+)
+async def test_responses_replay_separates_item_identity_from_call_pairing(
+    origin: Origin, call_id: str, native_id: str | None, expected_item_id: str | None,
+) -> None:
+    # The shared transform already clears foreign native IDs and reasoning. The serializer must not
+    # resurrect an item ID from the portable call ID (Claude's toolu_..., Chat's call_..., synthetic calls).
+    reasoning = {"id": "rs_1", "encrypted_content": "enc", "summary": []}
+    call = ToolCallBlock(call_id, "read", {"path": "x"}, native_id=native_id)
+    history = (
+        AssistantMessage(
+            content=(ThinkingBlock("plan", json.dumps(reasoning)), call),
+            origin=origin,
+            stop_reason="tool_use",
+        ),
+        ToolResultMessage(call_id, "read", (TextBlock("contents"),)),
+    )
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, text=(
+            'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n'
+        ))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses", messages=history))
+
+    assert isinstance(events[-1], Done)
+    expected_call = {"type": "function_call"}
+    if expected_item_id is not None:
+        expected_call["id"] = expected_item_id
+    expected_call.update(call_id=call_id, name="read", arguments='{"path": "x"}')
+    expected = [expected_call, {"type": "function_call_output", "call_id": call_id, "output": "contents"}]
+    if origin == Origin("openai", "openai_responses", "model-x"):
+        expected.insert(0, {"type": "reasoning", **reasoning})
+    # Include key order: native replay must keep the same serialized prefix, not just the same values.
+    assert len(sent) == 1
+    assert json.dumps(sent[0]["input"]) == json.dumps(expected)
+    assert call.native_id == native_id
+
+
 def test_responses_replay_preserves_output_item_order() -> None:
     history = (
         AssistantMessage(

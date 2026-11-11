@@ -156,6 +156,8 @@ struct LauncherState {
     failures: usize,
     /// `None` keeps the launch helper running; `Some` has already seen it exit.
     exit: Option<LaunchExit>,
+    /// The Runtime's CLI found its own Runtime in another login session.
+    replace_runtime: AtomicBool,
     resolvable: AtomicBool,
     prepares: AtomicUsize,
     launches: AtomicUsize,
@@ -177,6 +179,7 @@ impl FakeLauncher {
             private,
             failures,
             exit,
+            replace_runtime: AtomicBool::new(false),
             resolvable: AtomicBool::new(true),
             prepares: AtomicUsize::new(0),
             launches: AtomicUsize::new(0),
@@ -257,6 +260,11 @@ impl FakeLauncher {
         *self.0.remove_backends_outcome.lock().expect("removal outcome") = outcome;
     }
 
+    /// The endpoint answer asks for the running Runtime to be replaced.
+    fn ask_to_replace_runtime(&self) {
+        self.0.replace_runtime.store(true, Ordering::SeqCst);
+    }
+
     /// The bundle can no longer be prepared, so no CLI verb can run.
     fn stop_resolving(&self) {
         self.0.resolvable.store(false, Ordering::SeqCst);
@@ -320,6 +328,10 @@ impl ResolvedRuntimeLauncher for FakeLauncher {
 
     fn expected_runtime_id(&self) -> Option<&str> {
         self.0.runtime_id.as_deref()
+    }
+
+    fn wants_runtime_replaced(&self) -> bool {
+        self.0.replace_runtime.load(Ordering::SeqCst)
     }
 
     fn stop(&self, runtime_id: &str) -> CliOutcome {
@@ -565,6 +577,101 @@ async fn this_apps_runtime_with_a_stale_ui_is_restarted_rather_than_handed_over(
         launcher.verbs().is_empty(),
         "this app's own Controller is never handed over"
     );
+}
+
+/// After a log-out or a WindowServer crash the shell is gone and its Runtime
+/// is still ready, in a login session that ended. Adopting it leaves the user
+/// with a Runtime that cannot reach the Keychain or resolve names.
+#[tokio::test(start_paused = true)]
+async fn launch_and_retry_let_this_apps_start_replace_its_runtime_left_in_another_login_session() {
+    for trigger in [Launch, Retry] {
+        let launcher = FakeLauncher::bundled_exiting(LaunchExit::Started);
+        launcher.ask_to_replace_runtime();
+        let host = runtime_host(
+            FakeProbe::serving([Served::Ready(Some(bundle_id()))]),
+            launcher.clone(),
+            fast_settings(),
+        );
+        let recorder = Recorder::default();
+
+        let status = host.bootstrap(&recorder, trigger).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Ready, "{trigger:?}");
+        assert_eq!(
+            status.notice.code,
+            BootstrapNoticeCode::Ready,
+            "{trigger:?}: the Runtime the start left, not the one found"
+        );
+        assert_eq!(
+            launcher.handover_requests(),
+            [true],
+            "{trigger:?}: `vibe start` replaces the Runtime"
+        );
+        assert!(launcher.verbs().is_empty(), "the host itself never stops it");
+        assert!(
+            recorder.phases().contains(&BootstrapPhase::Starting),
+            "the window shows the bootstrap page while the Runtime is replaced"
+        );
+        assert!(host.has_owned_runtime());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runtime_being_replaced_is_never_adopted_while_this_apps_start_helper_still_runs() {
+    let launcher = FakeLauncher::bundled();
+    launcher.ask_to_replace_runtime();
+    let host = runtime_host(
+        FakeProbe::serving([Served::Ready(Some(bundle_id()))]),
+        launcher.clone(),
+        fast_settings(),
+    );
+
+    let status = boot(&host, Launch).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert_eq!(
+        status.notice.code,
+        BootstrapNoticeCode::ReadyTimeout,
+        "the Runtime answering may be the one the running helper is about to stop"
+    );
+    assert_eq!(launcher.calls(), 1);
+    assert!(launcher.verbs().is_empty());
+}
+
+/// The cue replaces this app's own Runtime, on a launch or the user's Try
+/// again, and nothing else: every other Runtime is adopted as before.
+#[tokio::test(start_paused = true)]
+async fn the_replace_cue_stops_nothing_but_this_apps_own_runtime_on_a_launch_or_retry() {
+    for (launcher, served, trigger, why) in [
+        (
+            FakeLauncher::bundled(),
+            Served::Ready(Some(bundle_id())),
+            Recovery,
+            "a shell recovering by itself never replaces a Runtime",
+        ),
+        (
+            FakeLauncher::bundled(),
+            Served::Ready(None),
+            Launch,
+            "a user-managed Avibe is never this app's to replace",
+        ),
+        (
+            FakeLauncher::working(),
+            Served::Ready(Some(predecessor())),
+            Launch,
+            "a shell without a Runtime identity owns no Runtime",
+        ),
+    ] {
+        launcher.ask_to_replace_runtime();
+        let host = runtime_host(FakeProbe::serving([served]), launcher.clone(), fast_settings());
+
+        let status = boot(&host, trigger).await;
+
+        assert_eq!(status.phase, BootstrapPhase::Ready, "{why}");
+        assert_eq!(status.notice.code, BootstrapNoticeCode::Adopted, "{why}");
+        assert_eq!(launcher.calls(), 0, "{why}");
+        assert!(launcher.verbs().is_empty(), "{why}");
+    }
 }
 
 #[tokio::test(start_paused = true)]

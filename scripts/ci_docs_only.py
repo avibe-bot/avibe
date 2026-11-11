@@ -229,22 +229,42 @@ def object_exists(repo: Path, revision_name: str) -> None:
         git(repo, "fetch", "--no-tags", "--depth=1", "origin", revision_name)
 
 
+def advanced_pr_base(repo: Path, recorded: str, parent: str) -> str:
+    """Accept only a proven first-parent advance, never a different base history."""
+    # Bound both the proof and any shallow fetch. Older/unavailable history
+    # remains full CI; do not fetch a moving branch ref to authorize a skip.
+    def history() -> list[str]:
+        return git(repo, "rev-list", "--first-parent", "--max-count=256", parent).decode().splitlines()
+
+    ancestors = history()
+    if recorded not in ancestors and git(repo, "rev-parse", "--is-shallow-repository").strip() == b"true":
+        git(repo, "fetch", "--no-tags", "--depth=256", "origin", parent)
+        ancestors = history()
+    if recorded not in ancestors:
+        raise ValueError("merge base is not a proven advance of the event base")
+    return parent
+
+
 def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
     try:
         if not isinstance(event, dict):
             raise ValueError("event payload is not an object")
         checked_out_sha = revision(git(repo, "rev-parse", "HEAD").decode().strip())
         if event_name == "pull_request":
-            # actions/checkout uses the synthetic merge ref, while GITHUB_SHA may
-            # identify the PR source head. The event's base/head parent check below
-            # is the authority that proves this checkout is the intended merge.
-            sha = checked_out_sha
+            # Preserve the matching-parent path (including source-head SHA
+            # callers). A stale base needs stronger evidence: the exact checked
+            # out merge SHA, its PR head, and a proven advance of the event base.
             pr = event["pull_request"]
             base, head = revision(pr["base"]["sha"]), revision(pr["head"]["sha"])
-            header = git(repo, "cat-file", "commit", sha).split(b"\n\n", 1)[0]
+            header = git(repo, "cat-file", "commit", checked_out_sha).split(b"\n\n", 1)[0]
             parents = [line[7:].decode() for line in header.splitlines() if line.startswith(b"parent ")]
-            if parents != [base, head]:
+            if len(parents) != 2 or parents[1] != head:
                 raise ValueError("checkout is not the event's synthetic merge")
+            if parents[0] != base:
+                if revision(sha) != checked_out_sha:
+                    raise ValueError("checkout does not match event merge SHA")
+                base = advanced_pr_base(repo, base, revision(parents[0]))
+            sha = checked_out_sha
         elif event_name == "merge_group":
             # The queue checkout is the exact merge-group head. Unlike a PR
             # merge ref, the event gives us the base/head pair to diff; this is

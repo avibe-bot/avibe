@@ -1,0 +1,187 @@
+// What a standard-tier Solana key adds to the Vault (docs/plans/vault-solana.md §8), drawn before the
+// consumer API is on the default branch. Only the new parts live here: the Chain choice and Solana key
+// builder of the Add dialog, the note a Protected choice gets, and the message a sign approval shows.
+// Everything else on those surfaces is the shipped component and is not redrawn. New copy is draft copy.
+// Delete this file when the shipped form and approval card draw these states.
+import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { SegmentedRadio } from '@/components/ui/segmented';
+import { SigningAddressRow } from '@/components/ui/signing-address-list';
+import { Textarea } from '@/components/ui/textarea';
+import { DetailRow } from '@/components/ui/vault-approval-card';
+import type { VaultRequestSessionDisplay } from '@/components/ui/vault-request-session';
+import { VaultRequestSessionLink } from '@/components/ui/vault-request-session-link';
+
+import { useDraft } from './draft';
+
+const noop = () => {};
+
+/**
+ * The Add dialog's signing-key builder with Solana chosen. It sits where the secp256k1 builder sits
+ * today, below Name. avault creates or checks the key, so nothing here shows an address before saving.
+ * A generated key never reaches this browser; an imported one is pasted here and encrypted for avault.
+ */
+export function SolanaKeyBuilder({ source, importText = '', importFailed = false }: {
+  source: 'generate' | 'import';
+  /** What the person pasted. Frames use text that is not a key. */
+  importText?: string;
+  /** avault did not import the pasted text when the form was submitted. It reports no reason the
+   *  form could name, so the message says what to check and does not claim the text was the cause. */
+  importFailed?: boolean;
+}) {
+  const { t } = useTranslation();
+  const d = useDraft();
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      {/* Which chain family the key is for. It decides the curve and cannot change after saving. */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-foreground">{d('链', 'Chain')}</span>
+        <SegmentedRadio
+          value="solana"
+          onChange={noop}
+          ariaLabel={d('链', 'Chain')}
+          options={[
+            { id: 'evm-bitcoin', label: 'EVM / Bitcoin' },
+            { id: 'solana', label: 'Solana' },
+          ]}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2 p-3 shadow-elevation-0">
+        {/* True of a generated key only: an imported key is pasted here, so this browser reads it. */}
+        {source === 'generate' ? (
+          <span className="text-xs text-muted">
+            {d(
+              'Solana 密钥由本机 avault 生成并就地封存，Avibe 和浏览器只会看到它的地址。',
+              'avault creates the Solana key on this computer and seals it there. Avibe and this browser only see its address.',
+            )}
+          </span>
+        ) : null}
+        <div className="grid grid-cols-2 gap-2">
+          {(['generate', 'import'] as const).map((src) => (
+            <Button key={src} type="button" size="sm" variant={source === src ? 'secondary' : 'ghost'}>
+              {src === 'generate' ? t('vaults.dialog.signingGenerate') : t('vaults.dialog.signingImport')}
+            </Button>
+          ))}
+        </div>
+        {source === 'generate' ? (
+          <span className="text-xs text-muted">
+            {d('保存时生成新密钥，保存后会显示地址。', 'A new key is created when you save. Its address appears once the key is saved.')}
+          </span>
+        ) : (
+          <>
+            <Textarea
+              value={importText}
+              readOnly
+              rows={4}
+              spellCheck={false}
+              autoComplete="off"
+              aria-label={t('vaults.dialog.signingImport')}
+              placeholder={d(
+                '粘贴 Solana CLI 密钥对（64 个数字的 JSON 数组）或 base58 私钥',
+                'Paste a Solana CLI keypair (a JSON array of 64 numbers) or a base58 secret key',
+              )}
+              className="font-mono text-xs"
+            />
+            {importFailed ? (
+              <span className="text-xs text-destructive-ink">
+                {d(
+                  '导入失败。请确认粘贴的是 Solana CLI 密钥对或 base58 私钥，然后重试。',
+                  "The key couldn't be imported. Check that it's a Solana CLI keypair or a base58 secret key, then try again.",
+                )}
+              </span>
+            ) : (
+              <span className="text-xs text-muted">
+                {d(
+                  '私钥在浏览器中加密后交给 avault 校验，保存后会显示地址。不支持助记词。',
+                  'The key is encrypted in this browser for avault, which checks it. Its address appears once the key is saved. Recovery phrases are not supported.',
+                )}
+              </span>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shown under the tier cards while Protected is chosen for a Solana key, until protected Solana keys
+ * ship. The tier is not changed for the person: Create stays unavailable until they pick Standard.
+ */
+export function SolanaProtectedNotice() {
+  const d = useDraft();
+  return (
+    <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
+      {d('Solana 密钥暂不支持保护档。改选标准档即可创建这把密钥。', "Protected isn't available for Solana keys yet. Choose Standard to create this key.")}
+    </div>
+  );
+}
+
+/**
+ * What the sign approval shows for a standard Solana key that asks before every signature. The rows
+ * and their order are the EVM approval's: the address that signs, the Session, then what is signed,
+ * where the size of the message stands in place of the hash. One Details section holds everything in
+ * full: the whole address, which the summary row cuts short where the dialog is narrow, and the exact
+ * bytes. The bytes are never the summary, however long the message is; Copy takes all of them whether
+ * or not Details is open. An empty message is a valid message with no bytes to show. Like the EVM
+ * approval, the standard tier decodes nothing and carries no notice about it.
+ */
+export function SolanaSignRows({ address, session, messageHex, details = false }: {
+  address: string;
+  session: VaultRequestSessionDisplay;
+  /** The exact message bytes, as hex. */
+  messageHex: string;
+  /** Details is open. */
+  details?: boolean;
+}) {
+  const { t } = useTranslation();
+  const d = useDraft();
+  const bytes = messageHex.length / 2;
+  const Chevron = details ? ChevronDown : ChevronRight;
+  const whole = 'min-w-0 break-all rounded-md bg-surface px-2 py-1.5 font-mono text-xs leading-relaxed text-foreground';
+  return (
+    <div className="flex min-w-0 flex-col gap-3.5">
+      <DetailRow label={t('vaults.approval.signingAs')}>
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <SigningAddressRow label="Solana" value={address} />
+        </div>
+      </DetailRow>
+      <DetailRow label={t('vaults.approval.session')}>
+        <VaultRequestSessionLink session={session} className="text-foreground" textClassName="text-sm" />
+      </DetailRow>
+      <DetailRow label={d('待签名消息', 'Message')}>
+        <span className="text-sm text-foreground">
+          {bytes > 0 ? d(`${bytes} 字节`, bytes === 1 ? '1 byte' : `${bytes} bytes`) : d('空消息（0 字节）', 'Empty message (0 bytes)')}
+        </span>
+        <Badge variant="secondary">ed25519</Badge>
+        {bytes > 0 ? (
+          <button type="button" aria-label={d('复制待签名消息', 'Copy message')} className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground">
+            <Copy className="size-3.5" />
+          </button>
+        ) : null}
+      </DetailRow>
+      <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
+        <button type="button" aria-expanded={details} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
+          <Chevron className="size-3.5 text-muted" />
+          <span className="flex-1 text-xs font-semibold text-foreground">{d('详情', 'Details')}</span>
+        </button>
+        {details ? (
+          <div className="flex min-w-0 flex-col gap-1.5 px-3 pb-3">
+            <span className="text-xs text-muted">{d('签名地址（Solana）', 'Signing address (Solana)')}</span>
+            <code className={whole}>{address}</code>
+            {bytes > 0 ? (
+              <>
+                <span className="mt-1 text-xs text-muted">{d('完整的待签名字节（十六进制）', 'Exact bytes to sign (hex)')}</span>
+                <code className={`${whole} max-h-40 overflow-y-auto`}>{messageHex}</code>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}

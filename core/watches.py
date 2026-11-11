@@ -17,7 +17,13 @@ from uuid import uuid4
 
 from config import paths
 from config.atomic_io import write_atomic
-from core.watch_protocol import DEFAULT_RETRY_EXIT_CODE, NO_EVENT_EXIT_CODE, NO_EVENT_MARKER
+from core.watch_protocol import (
+    DEFAULT_RETRY_EXIT_CODE,
+    LAST_DELIVERY_ENV,
+    NO_EVENT_EXIT_CODE,
+    NO_EVENT_MARKER,
+    WATCH_ID_ENV,
+)
 from core import watch_worker
 from core.caller_context import background_command_env
 from core.command_runner import SupervisedCommandStartupError, run_supervised_command
@@ -87,18 +93,7 @@ logger = logging.getLogger(__name__)
 # state, and the whole point of the code is that it costs nothing to reach. The limit is
 # wider than an error squash because a suppressed summary lists every watched workflow.
 NO_EVENT_SUMMARY_LOG_LIMIT = 1000
-# The watch id, handed to every waiter through its environment. Waiters that keep
-# per-watch state on disk use it as the owner of that state, so two identically
-# configured watches cannot silently share one file.
-WATCH_ID_ENV = "AVIBE_WATCH_ID"
-# How many event reports of this watch have been durably queued as a follow-up, or
-# empty for none. A waiter cannot see delivery for itself -- its output only reaches
-# the service once the process has exited -- so a waiter that stages the cursors
-# covering a reported event records this value alongside them, and a later cycle that
-# reads a DIFFERENT value knows the report was delivered and the staged cursors are
-# safe to promote. The value is opaque to the waiter, which only ever compares it.
-LAST_DELIVERY_ENV = "AVIBE_WATCH_LAST_DELIVERY"
-#: The count behind that value, on the watch's own ``metadata``, bumped in the same
+#: The count behind ``LAST_DELIVERY_ENV``, on the watch's own ``metadata``, bumped in the same
 #: transaction as the follow-up it acknowledges. Entry: a positive ``int``, absent
 #: until the first report is queued.
 #:

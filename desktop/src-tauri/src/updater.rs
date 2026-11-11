@@ -919,8 +919,10 @@ async fn releases(client: &reqwest::Client) -> Result<Vec<Release>, String> {
 /// The newer release in `channel`, verified, and whether it asked not to be announced.
 async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<(Manifest, bool)>, String> {
     let client = client()?;
-    let Some((version, release)) = channel.latest(releases(&client).await?) else {
-        return Err("no release in this channel".into());
+    let Some((version, release)) = channel.latest_for_target(releases(&client).await?, TARGET) else {
+        // A release can be visible before this target's signed set is attached.
+        // Treat that normal two-stage window as "no update", not a check error.
+        return Ok(None);
     };
     set_state(app, Phase::Checking, Some(version.to_string()));
     if version <= app.package_info().version {

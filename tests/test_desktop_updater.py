@@ -58,7 +58,7 @@ def test_source_version_binding_for_both_channels(tag, expected, monkeypatch):
     ('v3.1.2rc1', '', 'true', False, False),
 ])
 def test_real_workflow_channel_resolution(tmp_path, tag, test, stable, enabled, signed):
-    steps = workflow('release_ai.yml')['resolve-desktop-release']['steps']
+    steps = workflow('desktop-release.yml')['resolve-desktop-release']['steps']
     resolver = next(s for s in steps if s.get('id') == 'resolve')
     script = resolver['run']
     assert resolver['env']['BACKSTOP_SOURCE_SHA'] == '${{ needs.release-backstop.outputs.source_sha }}'
@@ -95,10 +95,10 @@ def test_resolver_appends_to_the_step_output_it_shares(tmp_path, monkeypatch):
 
 
 def test_release_cannot_publish_before_all_targets_and_signed_verification():
-    jobs = workflow('release_ai.yml')
-    assert 'desktop-packages' in jobs['release']['needs']
-    assert "needs.desktop-packages.result == 'success'" in jobs['release']['if']
-    assert "needs.resolve-desktop-release.result == 'success'" in jobs['release']['if']
+    jobs = workflow('desktop-release.yml')
+    assert 'desktop-packages' in jobs['stage-desktop']['needs']
+    assert "needs.desktop-packages.result == 'success'" in jobs['stage-desktop']['if']
+    assert "needs.resolve-desktop-release.outputs.enabled == 'true'" in jobs['stage-desktop']['if']
     package = workflow('desktop-package.yml')['package']
     assert package['environment'] == 'desktop-updater'
     steps = package['steps']
@@ -107,9 +107,9 @@ def test_release_cannot_publish_before_all_targets_and_signed_verification():
     sign = next(i for i,s in enumerate(steps) if s.get('name') == 'Sign and verify final updater artifacts')
     assert configure < runtime < sign < len(steps) - 1
     assert steps[configure]['env']['TAURI_SIGNING_PRIVATE_KEY'] == '${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}'
-    release_steps = jobs['release']['steps']
-    stable_stage = next(s for s in release_steps if s.get('name', '').startswith('Stage signed stable'))
-    assert '--enabled' in stable_stage['run']
+    stage_steps = jobs['stage-desktop']['steps']
+    attach = next(s for s in stage_steps if s.get('name') == 'Attach verified desktop assets to the same release')
+    assert 'desktop_release.py stage' in attach['run']
     finalizer = workflow('publish.yml')['finalize-github-release']['steps']
     assert next(i for i,s in enumerate(finalizer) if s.get('name') == 'Wait for exact-source release notes') < next(
         i for i,s in enumerate(finalizer) if s.get('name') == 'Publish GitHub Release')

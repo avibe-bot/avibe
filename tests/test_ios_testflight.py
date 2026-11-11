@@ -41,7 +41,7 @@ def app_store_profile(**overrides) -> dict:
         "Entitlements": {
             "application-identifier": testflight.APPLICATION_IDENTIFIER,
             "aps-environment": "production",
-            "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+            "com.apple.developer.associated-domains": testflight.ASSOCIATED_DOMAINS,
             "com.apple.security.application-groups": ["group.bot.avibe.ios"],
             "keychain-access-groups": [
                 testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
@@ -177,7 +177,7 @@ def test_an_app_store_profile_must_use_production_apns_and_no_filtering():
         ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios"}}, "aps-environment"),
         ({"Entitlements": {"application-identifier": "68B2SQ6YK3.bot.avibe.ios",
                            "aps-environment": "production",
-                           "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+                           "com.apple.developer.associated-domains": testflight.ASSOCIATED_DOMAINS,
                            "com.apple.security.application-groups": ["group.bot.avibe.ios"],
                            "keychain-access-groups": [
                                testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
@@ -234,7 +234,7 @@ def signed(info=None, entitlements=None):
                  "CFBundleShortVersionString": "0.1.0", "ITSAppUsesNonExemptEncryption": False}
     base_entitlements = {"application-identifier": "68B2SQ6YK3.bot.avibe.ios", "get-task-allow": False,
                          "aps-environment": "production",
-                         "com.apple.developer.associated-domains": ["webcredentials:avibe.bot"],
+                         "com.apple.developer.associated-domains": testflight.ASSOCIATED_DOMAINS,
                          "com.apple.security.application-groups": ["group.bot.avibe.ios"],
                          "keychain-access-groups": [
                              testflight.PRIVATE_KEYCHAIN_ACCESS_GROUP,
@@ -382,9 +382,15 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         (None, {"com.apple.developer.associated-domains": ["*"]}, "webcredentials:avibe.bot"),
         (
             None,
+            {"com.apple.developer.associated-domains": ["webcredentials:avibe.bot"]},
+            "webcredentials:sandbox.avibe.bot",
+        ),
+        (
+            None,
             {
                 "com.apple.developer.associated-domains": [
                     "webcredentials:avibe.bot",
+                    "webcredentials:sandbox.avibe.bot",
                     "webcredentials:attacker.example",
                 ]
             },
@@ -401,6 +407,7 @@ def test_archive_extension_inventory_is_recursive_and_exact(tmp_path: Path):
         "debuggable",
         "passkeys",
         "passkeys-wildcard",
+        "passkeys-without-vault-domain",
         "passkeys-extra-domain",
         "team",
         "development-aps",

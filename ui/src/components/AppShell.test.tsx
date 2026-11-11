@@ -290,9 +290,14 @@ const flushViewportSync = async () => {
   });
 };
 
-describe('AppShell stale login session notice', () => {
-  it('shows the restart instruction when the service outlived the macOS login session', async () => {
-    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+describe('AppShell macOS login session notice', () => {
+  it.each([
+    // The service outlived the login session it started in.
+    ['stale_login_session', 'errors.stale_login_session'],
+    // The service started outside the user's desktop session, so the Keychain is out of reach.
+    ['outside_gui_session', 'errors.outside_gui_session'],
+  ] as const)('shows the restart instruction for %s', async (state, copy) => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state });
 
     render(
       <MemoryRouter initialEntries={['/']}>
@@ -304,7 +309,7 @@ describe('AppShell stale login session notice', () => {
       </MemoryRouter>,
     );
 
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('errors.stale_login_session'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(copy));
   });
 
   it('reserves notice space on full-height app surfaces', async () => {

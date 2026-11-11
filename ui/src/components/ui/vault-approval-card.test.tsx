@@ -79,6 +79,21 @@ const standardSignRequest = {
   card: { request_type: 'sign', secret_name: 'ETH_KEY', kind: 'keypair', protection: 'standard' },
 } satisfies VaultRequest;
 
+// A 150-byte Solana transfer message, the public fixture shared with the sandbox, and its signer's address.
+const solanaMessage =
+  '01000103d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c'
+  + '00000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20'
+  + '01020200010c0200000040420f0000000000';
+const solanaAddress = 'FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z';
+const solanaSignRequest = {
+  ...protectedAccess,
+  id: 'vrq_solana',
+  request_type: 'sign',
+  secret_name: 'SOLANA_KEY',
+  delivery: { message_hex: solanaMessage, scheme: 'ed25519' },
+  card: { request_type: 'sign', secret_name: 'SOLANA_KEY', kind: 'keypair', protection: 'standard' },
+} satisfies VaultRequest;
+
 const deleteRequest = {
   ...protectedAccess,
   id: 'vrq_delete',
@@ -466,6 +481,89 @@ describe('VaultApprovalCard protected access approval', () => {
 
     await vi.waitFor(() => expect(screen.getByRole('button', { name: en.vaults.avaultAuthorization.action })).toBeTruthy());
     expect(screen.queryByText(/avault key authorize/)).toBeNull();
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it('shows the whole Solana message and its address, then approves with that message', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      ok: true,
+      secrets: [{ name: 'SOLANA_KEY', signing_addresses: { solana: solanaAddress } }],
+    });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={solanaSignRequest} onResolved={onResolved} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    // The approver sees every byte that will be signed, labelled as a message and not as a hash.
+    expect(screen.getByText(solanaMessage)).toBeTruthy();
+    expect(screen.getByText(en.vaults.approval.message)).toBeTruthy();
+    expect(screen.queryByText(en.vaults.approval.digest)).toBeNull();
+    expect(screen.getByText('ed25519')).toBeTruthy();
+    // The signing identity is the Solana address only, never an EVM or Bitcoin one.
+    await vi.waitFor(() => expect(screen.getByText(solanaAddress)).toBeTruthy());
+    expect(screen.getByText(en.vaults.addresses.solana)).toBeTruthy();
+    expect(screen.queryByText(en.vaults.addresses.eth)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
+
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    expect(api.signVaultDigest).toHaveBeenCalledTimes(1);
+    expect(api.signVaultDigest).toHaveBeenCalledWith({
+      name: 'SOLANA_KEY',
+      request_id: 'vrq_solana',
+      message_hex: solanaMessage,
+      scheme: 'ed25519',
+    });
+  });
+
+  it('approves an empty Solana message as an empty message, not as a missing one', async () => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard
+          request={{ ...solanaSignRequest, delivery: { message_hex: '', scheme: 'ed25519' } }}
+          onResolved={onResolved}
+          onCancel={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText(en.vaults.approval.emptyMessage)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
+
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalled());
+    expect(api.signVaultDigest).toHaveBeenCalledWith({
+      name: 'SOLANA_KEY',
+      request_id: 'vrq_solana',
+      message_hex: '',
+      scheme: 'ed25519',
+    });
+  });
+
+  it('refuses to approve a Solana request that lost its message', async () => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard
+          request={{ ...solanaSignRequest, delivery: { digest: '00'.repeat(32), scheme: 'ed25519' } }}
+          onResolved={onResolved}
+          onCancel={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    // A digest is never shown or sent in place of the message.
+    expect(screen.queryByText('00'.repeat(32))).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
+
+    await vi.waitFor(() => expect(screen.getByText(en.vaults.approval.errors.missingMessage)).toBeTruthy());
+    expect(api.signVaultDigest).not.toHaveBeenCalled();
     expect(onResolved).not.toHaveBeenCalled();
   });
 

@@ -824,7 +824,10 @@ class Agent:
                             self._run_tools = dict(zip(names, setup.tools))
                 if consume:
                     await self._consume(input)
-                self._outcome.primary(await self._loop(system, emit, selected, discard_silent_final=consume))
+                # A resumed transcript keeps its queue behind the next response (``resume``).
+                self._outcome.primary(
+                    await self._loop(system, emit, selected, discard_silent_final=consume, steerable=consume)
+                )
             except _Ended:
                 self._outcome.primary("ended_by_hook")
             except _Exhausted as error:
@@ -1004,13 +1007,14 @@ class Agent:
         compose: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
         purpose: Literal["conversation", "side_turn"] = "conversation",
         after: Sequence[Message] = (),
+        steerable: bool = False,
     ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
         """One model request with its transient retries.
 
         ``compose(selection)`` is the request pipeline: it returns the final request, which is sent unchanged.
-        A conversation request's pipeline is ``_compose``. Every attempt enters the run's attempt ledger. A
-        conversation request the provider rejects as overflow goes back through the pipeline with the ladder
-        told to shrink (C-9 section 8). A side turn's attempt is never context.
+        A conversation request's pipeline is ``_compose``, which admits queued steers when ``steerable``. Every
+        attempt enters the run's attempt ledger. A conversation request the provider rejects as overflow goes back
+        through the pipeline with the ladder told to shrink (C-9 section 8). A side turn's attempt is never context.
 
         Admission is here, for every purpose: the response the caller receives (or a partial with content) is
         valid after the committed rows and ``after``, the messages the request carried beyond them (a side turn's
@@ -1020,7 +1024,7 @@ class Agent:
         if compose is None:
 
             async def compose(selection: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
-                return await self._compose(system, selection, emit, ladder)
+                return await self._compose(system, selection, emit, ladder, steerable=steerable)
 
         first = len(self._attempts)
         failure: Optional[BaseException] = None
@@ -1285,12 +1289,15 @@ class Agent:
         selected: ModelSelection,
         *,
         discard_silent_final: bool,
+        steerable: bool,
     ) -> RunEndReason:
+        """``steerable``: the first request may take queued steers. Each later request may when the boundary before
+        it drained them, so one that arrives before the request is sent still makes it (``_compose``)."""
         first_selection: Optional[ModelSelection] = selected
         length_tool_retries = 0
         while True:
             malformed_recovery: Optional[tuple[ProviderError, dict[str, Tool], ContextEntry]] = None
-            async with self._model(system, emit, first_selection) as (terminal, tools):
+            async with self._model(system, emit, first_selection, steerable=steerable) as (terminal, tools):
                 first_selection = None
                 if isinstance(terminal, ProviderError):
                     malformed = terminal.malformed_tool_calls
@@ -1473,6 +1480,7 @@ class Agent:
                         )
                         return "error"
                     await self._drain_steers(emit)
+                    steerable = True
                     continue
                 self._open = False
                 if not failed:
@@ -1490,6 +1498,7 @@ class Agent:
                     return "ended_by_hook"
                 if final:
                     return "completed"
+                steerable = True  # the pending input was committed behind this response
                 continue
 
             terminate, step_end = await self._calls(
@@ -1502,7 +1511,8 @@ class Agent:
                 return "completed"
             # Anthropic has not run these server tools yet. A steer after the client results would end its open
             # turn (and produce a 400), so admit it after the deferred result, not inside this continuation.
-            if not pending_hosted(message):
+            steerable = not pending_hosted(message)
+            if steerable:
                 await self._drain_steers(emit)
 
     async def _drain_steers(self, emit: Callable[..., Awaitable[None]]) -> None:
@@ -1765,10 +1775,22 @@ class Agent:
         return "context_relief"
 
     async def _compose(
-        self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
+        self,
+        system: str,
+        selected: ModelSelection,
+        emit: Callable[..., Awaitable[None]],
+        ladder: _Ladder,
+        *,
+        steerable: bool = False,
     ) -> tuple[ModelRequest, dict[str, Tool]]:
-        """Prepare, apply any required context transition, and prepare again."""
+        """Prepare, apply any required context transition, and prepare again.
+
+        ``steerable``: a steer queued since the last boundary, while the route was resolved, an attempt was retried,
+        or the context was compacted, enters the request about to be sent (C-3 section 4).
+        """
         while True:
+            if steerable:
+                await self._drain_steers(emit)
             prepared = await self._prepare_conversation(system, selected)
             if prepared.budget is None or not await self._stage(
                 system, selected, prepared.request, prepared.view, prepared.budget, emit, ladder,

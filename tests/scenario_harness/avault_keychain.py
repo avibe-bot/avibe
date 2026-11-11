@@ -125,7 +125,8 @@ def use_fake_avault_on_mac(monkeypatch, root: Path, **options) -> FakeAvault:
 
     avault = make_fake_avault(root, **options)
     monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(api, "_process_cannot_show_macos_dialogs", lambda: False)
+    # The desktop session is pinned, so the host's real session is never probed.
+    monkeypatch.setattr(api, "macos_login_session_state", lambda **_kwargs: "healthy")
     monkeypatch.setattr(api, "_resolve_avault_cli_path", lambda: str(avault.script))
     monkeypatch.setattr(avault_authorization, "_ATTEMPT", None)
     return avault

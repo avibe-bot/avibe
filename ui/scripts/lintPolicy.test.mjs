@@ -84,7 +84,7 @@ describe('the complete policy is independently pinned', () => {
     const config = readConfig();
     expect(policyDifferences(config)).toEqual([]);
     expect(config).not.toBe(EXPECTED_CONFIG);
-    expect(OXLINT_VERSION).toBe('1.91.0');
+    expect(OXLINT_VERSION).toBe('1.92.0');
     expect(config.globals).toEqual(Object.fromEntries(Object.entries(EXPECTED_BROWSER_GLOBALS)
       .map(([key, writable]) => [key, writable ? 'writable' : 'readonly'])));
   });

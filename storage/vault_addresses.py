@@ -115,7 +115,11 @@ def _normalize_compressed(public_key_hex: str) -> bytes:
 
 def _b58check(payload: bytes) -> str:
     checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
-    data = payload + checksum
+    return base58_encode(payload + checksum)
+
+
+def base58_encode(data: bytes) -> str:
+    """Plain base58 (Bitcoin alphabet, no checksum); leading zero bytes become ``1``."""
     n = int.from_bytes(data, "big")
     out = ""
     while n > 0:

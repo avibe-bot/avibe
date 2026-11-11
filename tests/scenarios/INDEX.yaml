@@ -9,16 +9,14 @@ navigation:
   - Read the listed scenario test files before changing production code.
 capabilities:
   - id: memory_upgrade_compatibility
-    name: Memory retirement and official release upgrade compatibility
+    name: Memory retirement config and data preservation
     status: active
     catalog: tests/scenarios/memory_upgrade_compatibility/catalog.yaml
     observations: tests/scenarios/memory_upgrade_compatibility/observations.yaml
     scenario_tests:
       - tests/scenarios/memory_upgrade_compatibility/test_catalog.py
-      - tests/e2e/test_retired_updater_bridge.py
-      - tests/test_memory_removal.py
     unit_or_contract_tests:
-      - tests/test_release_verification.py
+      - tests/test_memory_removal.py
   - id: model_hub
     name: Model Hub configured routes and turn outcomes
     status: active
@@ -53,6 +51,12 @@ capabilities:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
+      - tests/test_model_hub_engine_channel.py
+      - tests/test_model_hub_engine_channel_client.py
+      - tests/test_model_hub_engine_channel_producer.py
+      - tests/test_model_hub_engine_qualification.py
+      - tests/test_model_hub_engine_release_guard.py
+      - tests/test_release_mirror.py
       - tests/test_model_hub_hosted_tools_resolution.py
       - tests/test_model_hub_hosted_tools_config.py
       - tests/test_model_hub_capability_evidence.py

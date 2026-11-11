@@ -546,6 +546,36 @@ def test_uninstall_without_an_installation_says_so(layout):
 
 
 @posix_only
+@pytest.mark.parametrize("home", ["default", "explicit"])
+def test_uninstall_removes_the_default_homes_login_agent_and_no_other(installed, home):
+    layout, first, second, foreign, legacy_home, env = installed
+    # What `vibe autostart on` writes, beside someone else's agent.
+    agents = layout.home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    agent = _foreign(agents / "bot.avibe.autostart.plist", "<plist/>\n")
+    other = _foreign(agents / "com.example.other.plist", "<plist/>\n")
+    # Found before the host's own, which would act on the developer's real desktop session.
+    _foreign(layout.path_dirs[2] / "launchctl", '#!/bin/sh\nprintf "launchctl %s\\n" "$*" >> "$VIBE_TEST_LOG"\n')
+    if home == "explicit":
+        instance = layout.tmp / "instance"
+        (instance / "runtime").mkdir(parents=True)
+        env = {**env, "AVIBE_HOME": str(instance)}
+
+    result = _installer_shell(layout, "main --uninstall", **env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert other.is_file()
+    unloads = [call for call in _calls(layout) if call.startswith("launchctl ")]
+    if home == "explicit":
+        # The agent starts the default home, so another home's uninstall leaves it.
+        assert agent.is_file() and unloads == []
+        return
+    assert not agent.exists()
+    assert unloads == [f"launchctl bootout gui/{os.getuid()}/bot.avibe.autostart"]
+    assert f"Removed the launch-at-login agent {agent}" in result.stdout
+
+
+@posix_only
 @pytest.mark.parametrize(
     "options, message",
     [

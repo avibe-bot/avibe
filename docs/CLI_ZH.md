@@ -47,9 +47,9 @@ vibe stop         # 停止所有服务
   输出精简的观察格式（`--json` 返回驱动的原始负载），`vibe vault run` 原样转出所运行
   命令的输出，`vibe debug prompt export` 输出它的导出文档。
 - **运维命令**面向终端前的用户，输出文本。`version`、`check-update`、`doctor`、
-  `runtime`、`remote` 子命令、`screenshot` 和 `data retention` 加 `--json` 时输出
-  JSON 信封。服务生命周期命令 `start`、`stop`、`restart`、`upgrade` 以及引导式
-  `vibe remote` 配置只输出进度文本，不接受 `--json`。
+  `runtime`、`remote` 和 `autostart` 子命令、`screenshot` 和 `data retention` 加
+  `--json` 时输出 JSON 信封。服务生命周期命令 `start`、`stop`、`restart`、`upgrade`
+  以及引导式 `vibe remote` 配置只输出进度文本，不接受 `--json`。
 - **语言。** CLI 的帮助、错误、提示和通知始终是英文，与配置的界面语言无关。IM、
   Web UI 和通知遵循配置的语言；Web 诊断面板用该语言显示与 `vibe doctor` 相同的诊断。
 
@@ -72,7 +72,7 @@ URL）、`path`（要编辑的工作目录）和 `updated_at`。Agent 的列表�
 另带 `enabled: false`。Vault 的列表行在 `vibe vault list` 和 `vibe vault find` 中
 相同，包括 secret 的 `name`、`kind`、`protection`、`fields`（多字段 secret 另带
 `default_field`，即单写 `NAME` 时选中的字段）、`tags`、`description`、`policy`、
-keypair 的 `signing_addresses`，以及 `vibe vault sign` 可用该密钥时的
+keypair 的 `signing_curve` 和 `signing_addresses`，以及 `vibe vault sign` 可用该密钥时的
 `per_use_sign: true`；行中从不包含 secret 值。`vibe task show`、`vibe watch show`、
 `vibe runs show`、`vibe session get`、`vibe agent show` 和 `vibe show status` 输出完整
 记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。已删除的 Task 或 Watch 显示
@@ -164,6 +164,7 @@ vibe start --allow-downgrade
 - 使用 `--no-open-browser` 时，服务和 Web UI 的启动/复用逻辑不变，但不会额外拉起系统浏览器窗口
 - **保留已运行的进程** — 需要明确重启时请使用 `vibe restart`
 - `vibe start` 和 `vibe restart` 会拒绝运行比最近一次激活更旧的安装，例如 `PATH` 中更靠前的旧 `vibe`。错误信息会写明两个版本以及应改用的启动器；如确实要运行旧版本，请加 `--allow-downgrade`。桌面应用只给出警告。
+- 在 macOS 和 Linux 上，如果调用方的 `PATH` 缺少登录 shell `PATH` 中的任何一项（例如通过非交互 SSH 或 cron 启动），`vibe start` 和 `vibe restart` 会让 Avibe 以及所有 Agent Session 使用登录 shell 的 `PATH`。调用方已包含全部条目时（例如终端），其 `PATH` 保持不变；调用方放在系统目录之前的条目（例如服务单元的虚拟环境）仍排在最前。每次启动只以 `$SHELL -l -i -c` 运行一次登录 shell，只读取 `PATH`；10 秒内没有结果时，Avibe 使用调用方的 `PATH` 启动并给出提示。
 - 由桌面应用启动时，只复用或替换该应用自己 Runtime 的主服务和 Web UI。如果这里运行的是另一个 Avibe，会说明原因并以状态码 3 退出，那个 Avibe 继续运行。
 
 ### `vibe stop`
@@ -179,6 +180,22 @@ vibe stop
 - 停止 Web UI 服务器
 - **终止 OpenCode 服务器** — 当你需要重启 OpenCode 时使用此命令
 - 在桌面应用的 Runtime 内运行时（例如由它启动的 Agent），`vibe stop` 和 `vibe restart` 只作用于该 Runtime。如果这里运行的是另一个 Avibe，则什么都不停止，说明原因并以状态码 3 退出；在 Web UI 中重启也会显示同样的拒绝，而不会重启。
+
+### `vibe restart`
+
+重启 Avibe（主服务 + Web UI）。重启过程中会终止 OpenCode 服务器。
+
+```bash
+vibe restart
+vibe restart --delay-seconds 60
+vibe restart --allow-downgrade
+```
+
+**行为：**
+- 停止主服务和 Web UI，然后重新启动
+- 使用 `--delay-seconds N` 时，重启会在 `N` 秒后执行，让当前对话先收到回复
+- 在 macOS 上，Avibe 运行在启动它的进程所在的登录会话中，而只有桌面会话可以访问钥匙串。因此，从桌面会话之外发起的重启（例如通过 SSH），会交给正在运行且位于桌面会话内的 Avibe 来执行：命令会打印任务 ID，并说明由正在运行的 Avibe 执行重启；重启后的 Avibe 仍在桌面会话内，并沿用原有的环境变量。正在运行的 Avibe 使用它自己的启动器重启：调用方不传入任何路径，其环境变量也不会生效；如需更改其中任何一项，请在这台 Mac 桌面上的终端中重启。
+- 如果没有位于桌面会话内的 Avibe 可以执行（没有 Avibe 在运行、正在运行的 Avibe 本身就在桌面会话之外、它的版本早于这一行为，或调用方的 `vibe` 不是它重启所用的那份安装，例如虚拟环境或源码目录），重启仍由调用方执行，并给出警告：Avibe 将运行在桌面会话之外，保存在钥匙串中的凭据（GitHub CLI、Vault）不可用，直到在这台 Mac 桌面上的终端中运行 `vibe restart`。从桌面会话之外用 `vibe start` 启动 Avibe 时会给出同样的警告。由桌面应用管理的 Runtime 不受影响。
 
 ### `vibe status`
 
@@ -203,6 +220,33 @@ vibe status
 如果正在运行的服务比最近一次激活的安装更旧，输出还会包含 `generation_downgrade`
 对象：其中有正在运行的 `version` 和 `generation`、`activated_version` 和
 `activated_generation`，以及选中较新安装的 `launcher`。通过这个启动器重启即可运行新版本。
+
+### `vibe autostart`
+
+在 macOS 上，每次登录桌面时启动 Avibe。默认关闭，适用于 CLI 安装。
+
+```bash
+vibe autostart on
+vibe autostart status
+vibe autostart off
+```
+
+**行为：**
+- `on` 写入一个用户级 LaunchAgent：`~/Library/LaunchAgents/bot.avibe.autostart.plist`，并把它加载到你的桌面会话。加载时它会运行一次，和登录时一样。通过 SSH 运行时，只要你有桌面会话，仍会加载到桌面会话；没有打开的桌面会话时，下次登录桌面后生效。这个文件本身就是开关，没有对应的配置项。
+- 每次登录桌面时，这个 agent 运行一次然后退出：
+  - 没有 Avibe 在运行：按 `vibe start --no-open-browser` 的方式启动 Avibe；
+  - Avibe 已在当前桌面会话中运行：什么都不做；
+  - Avibe 所在的登录会话已经结束，或它运行在另一个会话中（注销后重新登录，或通过 SSH 启动）：重启 Avibe，重启后它运行在桌面会话中，可以重新访问钥匙串；
+  - 无法判断 Avibe 运行在哪个会话，或正在运行的 Avibe 属于桌面应用：什么都不做，并把原因写入 `~/.avibe/logs/autostart.log`。
+- 两次登录之间不会运行任何东西。用 `vibe stop` 停止的 Avibe 会保持停止，直到下次登录桌面；Avibe 自己退出后也不会被重新拉起。
+- launchd 启动这个 agent 时只提供最小的环境变量。Avibe 仍会取得你登录 shell 的 `PATH`（见 `vibe start`）；shell 配置文件导出的其他变量不会生效。
+- 这个 agent 运行的是升级时始终指向当前安装的 `vibe` 启动器，所以 `vibe upgrade` 不会改动它。
+- `off` 只卸载并删除这一个 LaunchAgent，不动其他任何东西。正在运行的 Avibe 继续运行。用安装脚本卸载 Avibe 时也会删除它。
+- `status` 显示登录启动是否开启、agent 是否已加载到你的桌面会话、它运行的启动器，以及 macOS 把它归属到的解释器。
+- **隐私权限。** 登录时启动的 Avibe 不是由终端启动的，所以不具备你授予终端的权限（例如“完全磁盘访问权限”）。macOS 把它归属到运行 `vibe` 的 Python 解释器。如果工作区位于受保护的文件夹（桌面、文稿、下载）或外接卷上，请把 `vibe autostart status` 给出的解释器添加到“系统设置 > 隐私与安全性 > 完全磁盘访问权限”。升级把 Avibe 换到另一个 Python 版本后，这个路径会变，请再看一次 `status`。
+- 以下情况会拒绝执行且不做任何改动：在 Linux 和 Windows 上；在桌面应用管理的 Runtime 内（桌面应用有自己的登录启动设置）；`AVIBE_HOME` 指向另一个 home 时（agent 启动的是默认 home）；以及 `vibe` 从某个安装代（install generation）或虚拟环境内部运行时（升级会替换它们）。
+
+这些子命令加 `--json` 时输出 JSON 信封。
 
 ### `vibe skill`
 
@@ -690,8 +734,8 @@ Run 记录替换它；旧记录中的 callback 字段仍可读取。
 向调用方 Session 发送未完成通知。
 
 信息告知可在已有 `--session-id` 或 `--bot` 消息上加 `--no-reply`：接收方看到
-`[No reply needed.]`，这条消息不打开、不关闭、不重新激活委派，也不产生已读回执。
-它不禁用失败通知，也不影响已有的反向委派。它不能与 `--sync` 或新建/fork Session 一起使用。
+`[No reply needed.]`，这条消息不会打开或重新激活委派，但会关闭已有的反向委派，也不产生已读回执。
+它不禁用失败通知，不能与 `--sync` 或新建/fork Session 一起使用。
 
 `--callback`、`--callback-session-id` 和 `--no-callback` 仍然接受，但不改变行为；stderr
 输出一行弃用说明，stdout 仍是 JSON。升级前待发送的 callback 兑现一次，内部失败投递
