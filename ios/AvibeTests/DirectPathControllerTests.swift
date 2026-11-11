@@ -13,36 +13,59 @@ final class DirectPathControllerTests: XCTestCase {
 
     // MARK: Inactive without a transport
 
+    /// Counted, not inferred from the end state: no listening socket is
+    /// ever created and `proxyConfigurations` is never written, on any
+    /// store, at any step. `testTheRouteIsInstalledOnlyWhile...` shows the
+    /// same counters and the same observer do move when a route is used.
     @MainActor
-    func testWithoutATransportNothingBindsASocketOrWritesARoute() async throws {
-        let listening = listeningLoopbackPorts()
+    func testWithoutATransportNoListenerIsCreatedAndNoRouteIsEverWritten() async throws {
+        try assertSocketScanSeesListeners()
+        let listening = try listeningSockets()
         let harness = try Harness(transport: nil, test: self)
 
-        // A whole session's worth of lifecycle.
+        func assertUntouched(_ step: String) throws {
+            XCTAssertEqual(harness.routeWrites, 0, step)
+            XCTAssertEqual(harness.observedRouteWrites, 0, step)
+            XCTAssertEqual(harness.listenersCreated, 0, step)
+            XCTAssertEqual(try newListeners(since: listening), [], step)
+            XCTAssertEqual(harness.routedStoreCount, 0, step)
+            XCTAssertEqual(harness.changes, [], step)
+            XCTAssertEqual(
+                harness.controller.status(for: harness.origin("instance-1")),
+                .initial,
+                step
+            )
+        }
+
+        try assertUntouched("the controller exists")
         try await harness.signIn()
         try harness.select("instance-1")
+        try assertUntouched("a runtime opened")
         harness.enterBackground()
+        try assertUntouched("background")
         harness.enterForeground()
+        try assertUntouched("foreground")
         try harness.select("instance-2")
+        try assertUntouched("the instance was switched")
         _ = try await harness.coordinator.refresh()
+        try assertUntouched("the account was refreshed")
         try harness.select("instance-1")
+        await harness.websiteDataStore.rotate()
+        try assertUntouched("the store rotated under an open runtime")
         _ = try await harness.coordinator.logout()
+        try assertUntouched("signed out")
         try await Task.sleep(for: .milliseconds(200))
-
-        XCTAssertEqual(harness.routedStoreCount, 0)
-        XCTAssertEqual(harness.changes, [])
-        XCTAssertEqual(
-            harness.controller.status(for: harness.origin("instance-1")),
-            DirectPathStatus(transport: .tunnel, sequence: 0)
-        )
-        XCTAssertEqual(listeningLoopbackPorts().subtracting(listening), [])
+        try assertUntouched("afterwards")
+        // Every store the account ever had was watched, the rotated ones
+        // included.
+        XCTAssertGreaterThan(harness.observedStoreCount, 2)
     }
 
     // MARK: Activation and fallback
 
     @MainActor
     func testTheRouteIsInstalledOnlyWhileTheTransportReportsAUsablePath() async throws {
-        let listening = listeningLoopbackPorts()
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         try await harness.signIn()
         try harness.select("instance-1")
@@ -55,12 +78,20 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(target.storeIdentifier, harness.websiteDataStore.identifier)
         // Selecting is not activating.
         XCTAssertEqual(harness.routedStoreCount, 0)
-        XCTAssertEqual(listeningLoopbackPorts().subtracting(listening), [])
+        XCTAssertEqual(try newListeners(since: listening), [])
+        XCTAssertEqual(harness.routeWrites, 0)
+        XCTAssertEqual(harness.observedRouteWrites, 0)
+        XCTAssertEqual(harness.listenersCreated, 0)
 
         harness.transport?.report(.usable(generation: "g1"), for: target)
         try await eventually { harness.changes == [self.direct] }
         XCTAssertEqual(harness.currentStoreRouteCount, 1)
-        XCTAssertEqual(listeningLoopbackPorts().subtracting(listening).count, 1)
+        XCTAssertEqual(try newListeners(since: listening).map(\.address), ["127.0.0.1"])
+        // One listener, and one write that both the App's counter and the
+        // observer of the real setter saw.
+        XCTAssertEqual(harness.listenersCreated, 1)
+        XCTAssertEqual(harness.routeWrites, 1)
+        XCTAssertEqual(harness.observedRouteWrites, 1)
         XCTAssertEqual(
             harness.controller.status(for: harness.origin("instance-1")),
             DirectPathStatus(transport: .direct, sequence: 1)
@@ -75,11 +106,13 @@ final class DirectPathControllerTests: XCTestCase {
         harness.transport?.report(.lost, for: target)
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(harness.changes, [direct, tunnel])
+        XCTAssertEqual(harness.routeWrites, 2)
+        XCTAssertEqual(harness.observedRouteWrites, 2)
         XCTAssertEqual(
             harness.controller.status(for: harness.origin("instance-1")),
             DirectPathStatus(transport: .tunnel, sequence: 2)
         )
-        try await eventually { listeningLoopbackPorts().subtracting(listening).isEmpty }
+        try await eventually { try newListeners(since: listening).isEmpty }
 
         // The same path, found again, is accepted again.
         harness.transport?.report(.usable(generation: "g1"), for: target)
@@ -87,11 +120,14 @@ final class DirectPathControllerTests: XCTestCase {
             harness.changes == [self.direct, self.tunnel, self.direct]
         }
         XCTAssertEqual(harness.currentStoreRouteCount, 1)
+        XCTAssertEqual(harness.listenersCreated, 2)
+        XCTAssertEqual(harness.routeWrites, 3)
+        XCTAssertEqual(harness.observedRouteWrites, 3)
     }
 
     @MainActor
     func testAPathThatCannotServeAConnectionReturnsToTheTunnelAtOnce() async throws {
-        let listening = listeningLoopbackPorts()
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         let transport = try XCTUnwrap(harness.transport)
         try await harness.signIn()
@@ -100,8 +136,8 @@ final class DirectPathControllerTests: XCTestCase {
         transport.report(.usable(generation: "g1"), for: target)
         try await eventually { harness.changes == [self.direct] }
         let port = try XCTUnwrap(
-            listeningLoopbackPorts().subtracting(listening).first
-                .flatMap(NWEndpoint.Port.init(rawValue:))
+            try newListeners(since: listening).first
+                .flatMap { NWEndpoint.Port(rawValue: $0.port) }
         )
         let head = "CONNECT instance-one.example:443 HTTP/1.1\r\nHost: instance-one.example:443\r\n\r\n"
 
@@ -128,7 +164,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(transport.failedTags, [tag])
         // The listener and the connection it was still carrying are closed.
-        try await eventually { listeningLoopbackPorts().subtracting(listening).isEmpty }
+        try await eventually { try newListeners(since: listening).isEmpty }
         try await eventually { stream.isCancelled }
         let rest = try await served.receiveUntilClosed()
         XCTAssertEqual(rest, Data())
@@ -176,7 +212,7 @@ final class DirectPathControllerTests: XCTestCase {
         ]
 
         for transition in transitions {
-            let listening = listeningLoopbackPorts()
+            let listening = try listeningSockets()
             let harness = try Harness(test: self)
             let transport = try XCTUnwrap(harness.transport)
             try await harness.signIn()
@@ -189,7 +225,7 @@ final class DirectPathControllerTests: XCTestCase {
 
             XCTAssertEqual(harness.routedStoreCount, 0, transition.name)
             XCTAssertEqual(harness.changes, [], transition.name)
-            XCTAssertEqual(listeningLoopbackPorts().subtracting(listening), [], transition.name)
+            XCTAssertEqual(try newListeners(since: listening), [], transition.name)
 
             // The report was dropped for its tags, not because nothing can
             // activate: the selection that replaced it still can.
@@ -202,13 +238,13 @@ final class DirectPathControllerTests: XCTestCase {
                 XCTAssertEqual(harness.currentStoreRouteCount, 1, transition.name)
             }
             harness.controller.runtimeDidStop()
-            try await eventually { listeningLoopbackPorts().subtracting(listening).isEmpty }
+            try await eventually { try newListeners(since: listening).isEmpty }
         }
     }
 
     @MainActor
     func testAListenerThatIsReadyAfterItsSelectionEndedInstallsNothing() async throws {
-        let listening = listeningLoopbackPorts()
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         let transport = try XCTUnwrap(harness.transport)
         try await harness.signIn()
@@ -223,7 +259,7 @@ final class DirectPathControllerTests: XCTestCase {
 
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(harness.changes, [])
-        try await eventually { listeningLoopbackPorts().subtracting(listening).isEmpty }
+        try await eventually { try newListeners(since: listening).isEmpty }
 
         // The selection that replaced it activates once, for its own host,
         // and the abandoned listener is not the one left listening.
@@ -239,7 +275,7 @@ final class DirectPathControllerTests: XCTestCase {
             .tunnel
         )
         try await eventually {
-            listeningLoopbackPorts().subtracting(listening).count == 1
+            try newListeners(since: listening).count == 1
         }
         XCTAssertEqual(harness.changes, [direct])
     }
@@ -249,7 +285,7 @@ final class DirectPathControllerTests: XCTestCase {
     /// route that is ready in that window is not installed.
     @MainActor
     func testARouteThatIsReadyWhileTheAccountCoordinatorIsBusyIsNotInstalled() async throws {
-        let listening = listeningLoopbackPorts()
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         let transport = try XCTUnwrap(harness.transport)
         try await harness.signIn()
@@ -276,7 +312,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(harness.changes, [])
         try await eventually {
-            listeningLoopbackPorts().subtracting(listening).isEmpty
+            try newListeners(since: listening).isEmpty
         }
 
         // The request ends; the transport reports again and is admitted.
@@ -341,7 +377,7 @@ final class DirectPathControllerTests: XCTestCase {
 
     @MainActor
     func testANewRendezvousGenerationReplacesTheRouteAndTheOldOneIsNotAcceptedAgain() async throws {
-        let listening = listeningLoopbackPorts()
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         let transport = try XCTUnwrap(harness.transport)
         try await harness.signIn()
@@ -362,11 +398,11 @@ final class DirectPathControllerTests: XCTestCase {
         }
         // The first listener is closed; only the new route's remains.
         try await eventually {
-            listeningLoopbackPorts().subtracting(listening).count == 1
+            try newListeners(since: listening).count == 1
         }
         let port = try XCTUnwrap(
-            listeningLoopbackPorts().subtracting(listening).first
-                .flatMap(NWEndpoint.Port.init(rawValue:))
+            try newListeners(since: listening).first
+                .flatMap { NWEndpoint.Port(rawValue: $0.port) }
         )
         let client = LoopbackClient(port: port)
         try await client.send(
@@ -388,7 +424,7 @@ final class DirectPathControllerTests: XCTestCase {
 
     @MainActor
     func testTheBackgroundReturnsToTheTunnelAndTheForegroundSelectsAgain() async throws {
-        let listening = listeningLoopbackPorts()
+        let listening = try listeningSockets()
         let harness = try Harness(test: self)
         let transport = try XCTUnwrap(harness.transport)
         try await harness.signIn()
@@ -403,7 +439,7 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.routedStoreCount, 0)
         XCTAssertEqual(harness.changes, [direct, tunnel])
         XCTAssertEqual(transport.deselectCount, 1)
-        try await eventually { listeningLoopbackPorts().subtracting(listening).isEmpty }
+        try await eventually { try newListeners(since: listening).isEmpty }
 
         // A runtime that opens in the background selects nothing yet.
         try harness.select("instance-2")
@@ -418,6 +454,12 @@ final class DirectPathControllerTests: XCTestCase {
         try await eventually {
             harness.changes == [self.direct, self.tunnel, self.direct]
         }
+
+        // Once the runtime has stopped, a foreground selects nothing.
+        harness.controller.runtimeDidStop()
+        harness.enterBackground()
+        harness.enterForeground()
+        XCTAssertEqual(transport.selections.count, 2)
     }
 
     // MARK: WebKit
@@ -481,9 +523,15 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(page.failure)
         let title = try await webView.evaluateJavaScript("document.title")
         XCTAssertEqual(title as? String, "direct")
+        // WebKit decides how many connections a load takes (a second one
+        // has been seen). Every stream was opened for this route.
+        let opened = transport.openedTags.values
+        XCTAssertFalse(opened.isEmpty)
         XCTAssertEqual(
-            transport.openedTags.values,
-            [DirectRouteTag(target: target, rendezvousGeneration: "g1")]
+            opened.filter {
+                $0 != DirectRouteTag(target: target, rendezvousGeneration: "g1")
+            },
+            []
         )
     }
 
@@ -508,6 +556,8 @@ private final class Harness {
     let transport: StandInDirectTransport?
     private let stores = InMemoryAccountStores()
     private let notifications = NotificationCenter()
+    private let routeWritesAtStart = DirectRouteOwner.writeCount
+    private let listenersAtStart = DirectConnectListener.socketsCreated
     private(set) var statuses: [DirectPathStatus] = []
 
     private(set) lazy var controller: DirectPathController = DirectPathController(
@@ -582,6 +632,27 @@ private final class Harness {
         // Each change has the next sequence number.
         XCTAssertEqual(statuses.map(\.sequence), Array(1..<(statuses.count + 1)))
         return statuses.map(\.transport)
+    }
+
+    /// Writes of `proxyConfigurations` since this harness was made, as the
+    /// App counts them at its one assignment.
+    var routeWrites: Int {
+        DirectRouteOwner.writeCount - routeWritesAtStart
+    }
+
+    /// The same writes as the real setter saw them, on every store this
+    /// account has had.
+    var observedRouteWrites: Int {
+        stores.observer.writes
+    }
+
+    var observedStoreCount: Int {
+        stores.created.count
+    }
+
+    /// Listening sockets the App has created since this harness was made.
+    var listenersCreated: Int {
+        DirectConnectListener.socketsCreated - listenersAtStart
     }
 
     /// How many account stores, current or rotated away, have a route.
@@ -679,12 +750,14 @@ private final class PageLoad: NSObject, WKNavigationDelegate {
 @MainActor
 private final class InMemoryAccountStores {
     private(set) var created: [WKWebsiteDataStore] = []
+    let observer = RouteWriteObserver()
 
     var operations: AccountWebsiteDataStoreOperations {
         AccountWebsiteDataStoreOperations(
             makeDataStore: { [self] _ in
                 let store = WKWebsiteDataStore.nonPersistent()
                 created.append(store)
+                observer.observe(store)
                 return store
             },
             removeIdentifier: { _ in
@@ -777,6 +850,39 @@ private final class StandInAccountTransport: MobileAuthTransporting {
             resumed = true
             continuation?.resume()
             continuation = nil
+        }
+    }
+}
+
+/// Counts real calls of the `proxyConfigurations` setter on the stores it is
+/// given, by key-value observing them. It sees a write wherever it comes
+/// from, including one that sets the value the store already had.
+final class RouteWriteObserver: NSObject {
+    private(set) var writes = 0
+    private var stores: [WKWebsiteDataStore] = []
+
+    func observe(_ store: WKWebsiteDataStore) {
+        stores.append(store)
+        store.addObserver(
+            self,
+            forKeyPath: "proxyConfigurations",
+            options: [],
+            context: nil
+        )
+    }
+
+    override func observeValue(
+        forKeyPath keyPath: String?,
+        of object: Any?,
+        change: [NSKeyValueChangeKey: Any]?,
+        context: UnsafeMutableRawPointer?
+    ) {
+        writes += 1
+    }
+
+    deinit {
+        for store in stores {
+            store.removeObserver(self, forKeyPath: "proxyConfigurations")
         }
     }
 }

@@ -2,7 +2,8 @@ import Foundation
 
 // The seam between the direct transport (iroh, the rendezvous, probing: not
 // in the App yet) and the parts that route WebKit onto it. Nothing in the App
-// implements `DirectTransporting`, so nothing below it ever activates.
+// implements `DirectTransporting`, so the path never activates: no listener
+// is created and no route is written.
 // Design: docs/plans/remote-direct-ios.md.
 
 /// The one authority a direct route serves: the selected instance's exact

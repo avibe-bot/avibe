@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import os
 
 /// Bounds on one loopback CONNECT listener. The head limits are the
 /// instance's own (docs/plans/remote-direct-ingress.md section 3).
@@ -243,6 +244,16 @@ actor DirectConnectListener {
     private var relays: [UUID: Task<Void, Never>] = [:]
     private var isStopped = false
 
+    /// How many listening sockets this process has asked the system for on
+    /// behalf of the direct path. Counted in `start()`, the one place that
+    /// makes one, so a build that never activates the path leaves it at
+    /// zero, and a test can read that.
+    static var socketsCreated: Int {
+        createdSockets.withLock { $0 }
+    }
+
+    private static let createdSockets = OSAllocatedUnfairLock(initialState: 0)
+
     init(
         authority: DirectAuthority,
         limits: DirectConnectLimits = .standard,
@@ -268,6 +279,7 @@ actor DirectConnectListener {
             port: .any
         )
         let listener = try NWListener(using: parameters, on: .any)
+        Self.createdSockets.withLock { $0 += 1 }
         self.listener = listener
         listener.newConnectionHandler = { [weak self, queue] connection in
             guard let self else {
@@ -343,11 +355,11 @@ actor DirectConnectListener {
             return
         }
         guard relays.count < limits.maxConnections else {
+            // Closed at once, with no answer and no task of its own, so the
+            // limit bounds every connection this listener holds and `stop()`
+            // has nothing else to end.
+            connection.cancel()
             onFailure(.capacity)
-            Task {
-                await Self.refuse(connection, status: 503, within: 1)
-                connection.cancel()
-            }
             return
         }
         let id = UUID()
@@ -425,12 +437,12 @@ actor DirectConnectListener {
             guard !Task.isCancelled else {
                 return
             }
+            // The answer is written before the failure is reported: the
+            // report makes the owner stop this listener, which cancels this
+            // task, and WebKit should still read a status.
+            await answerRefusal(connection, status: gatewayStatus(for: error))
             onFailure(.streamUnavailable)
-            await refuse(
-                connection,
-                status: gatewayStatus(for: error),
-                within: limits.headSeconds
-            )
+            await awaitClose(connection, within: limits.headSeconds)
             return
         }
         defer {
@@ -452,22 +464,22 @@ actor DirectConnectListener {
             }
             stream.cancel()
             // The instance's refusal reaches WebKit as a failed proxy
-            // connection with the same status.
+            // connection with the same status. As above, it is written
+            // before the failure is reported.
             if case DirectConnectError.refused(let status) = error {
+                await answerRefusal(
+                    connection,
+                    status: (400...599).contains(status) ? status : 502
+                )
                 onFailure(.instanceRefused(status))
-                await refuse(
-                    connection,
-                    status: (400...599).contains(status) ? status : 502,
-                    within: limits.headSeconds
-                )
             } else {
-                onFailure(.noAnswer)
-                await refuse(
+                await answerRefusal(
                     connection,
-                    status: gatewayStatus(for: error),
-                    within: limits.headSeconds
+                    status: gatewayStatus(for: error)
                 )
+                onFailure(.noAnswer)
             }
+            await awaitClose(connection, within: limits.headSeconds)
             return
         }
 
@@ -608,17 +620,36 @@ actor DirectConnectListener {
     }
 
     /// Answers a request that will not be tunnelled, then gives the client
-    /// `seconds` to read the answer and close. Closing first, with bytes of
-    /// the client's still unread, would reset the connection and could cost
-    /// it the answer.
+    /// `seconds` to read the answer and close.
     private static func refuse(
         _ connection: NWConnection,
         status: Int,
         within seconds: TimeInterval
     ) async {
-        _ = try? await withDeadline(seconds) {
+        await answerRefusal(connection, status: status)
+        await awaitClose(connection, within: seconds)
+    }
+
+    /// Writes the refusal and finishes sending. A short write to a socket
+    /// that was just accepted; bounded in case the client is not reading.
+    private static func answerRefusal(
+        _ connection: NWConnection,
+        status: Int
+    ) async {
+        _ = try? await withDeadline(0.25) {
             try await connection.sendAll(DirectConnectWire.refusal(status))
             try await connection.finishSending()
+        }
+    }
+
+    /// Gives the client `seconds` to read the answer and close. Closing
+    /// first, with bytes of the client's still unread, would reset the
+    /// connection and could cost it the answer.
+    private static func awaitClose(
+        _ connection: NWConnection,
+        within seconds: TimeInterval
+    ) async {
+        _ = try? await withDeadline(seconds) {
             while try await !connection.receiveChunk(maximumLength: 4096).isComplete {}
         }
     }

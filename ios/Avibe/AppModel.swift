@@ -61,7 +61,8 @@ final class AppModel: ObservableObject {
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
     /// The direct transport, when this build has one. Without it the direct
-    /// path never activates: no listener, no route, always the tunnel.
+    /// path never activates: no listener, no route write, no event, always
+    /// the tunnel. The path controller itself exists either way.
     private let directTransport: DirectTransporting?
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
@@ -196,6 +197,11 @@ final class AppModel: ObservableObject {
                 controller.invalidateForAccountTransition()
             )
             if route == .browser(runtime) {
+                // This browser is abandoned without `stopRuntime()`, so the
+                // direct selection made for it ends here. A WebView that
+                // arrives late for an older runtime does not reach this
+                // branch and leaves the newer runtime's selection alone.
+                directPathController.runtimeDidStop()
                 route = .onboarding(.instances)
             }
             return

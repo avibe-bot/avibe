@@ -275,20 +275,19 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
-    func testRefusesConnectionsBeyondItsLimitAndReportsIt() async throws {
+    func testClosesAConnectionBeyondItsLimitAtOnceAndReportsIt() async throws {
         let fixture = try await makeListener(limits: limits(maxConnections: 2))
         let first = LoopbackClient(port: fixture.port)
         let firstStream = try await establish(first, fixture)
         let second = LoopbackClient(port: fixture.port)
         _ = try await establish(second, fixture)
 
+        // The third sends a valid head and keeps its side open. It gets no
+        // answer and no wait: the listener closes it at once.
         let third = LoopbackClient(port: fixture.port)
-        try await third.send(canonicalHead)
+        try? await third.send(canonicalHead)
         let answer = try await third.receiveUntilClosed()
-        XCTAssertTrue(
-            String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "),
-            String(decoding: answer, as: UTF8.self)
-        )
+        XCTAssertEqual(answer, Data())
         try await eventually { fixture.failures.values == [.capacity] }
         XCTAssertEqual(fixture.streams.opened.count, 2)
 
@@ -299,37 +298,108 @@ final class DirectConnectListenerTests: XCTestCase {
         try await eventually {
             let retry = LoopbackClient(port: fixture.port)
             defer { retry.close() }
-            try await retry.send(self.canonicalHead)
+            try? await retry.send(self.canonicalHead)
             // Served: a third stream is opened for it. Still over the
-            // limit: it is answered and closed.
-            let refusal = Recorder<Data>()
+            // limit: it is closed.
+            let closed = Recorder<Data>()
             let reading = Task {
-                refusal.record(try await retry.receiveUntilClosed())
+                closed.record(try await retry.receiveUntilClosed())
             }
             defer { reading.cancel() }
             try await eventually {
-                fixture.streams.opened.count >= 3 || !refusal.values.isEmpty
+                fixture.streams.opened.count >= 3 || !closed.values.isEmpty
             }
             return fixture.streams.opened.count >= 3
         }
         second.close()
     }
 
+    func testStoppingClosesARefusalThatIsStillWaitingForItsClient() async throws {
+        // The client has up to a minute to read a refusal and close.
+        let fixture = try await makeListener(limits: limits(headSeconds: 60))
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send("CONNECT other.example:443 HTTP/1.1\r\n\r\n")
+        let refusal = DirectConnectWire.refusal(403)
+        let answer = try await client.receive(count: refusal.count)
+        XCTAssertEqual(answer, refusal)
+
+        // The client keeps its side open, so the refusal is still in flight
+        // when the listener stops. Stopping ends it.
+        let clock = ContinuousClock()
+        let stopped = clock.now
+        await fixture.listener.stop()
+        let rest = try await client.receiveUntilClosed()
+        XCTAssertEqual(rest, Data())
+        XCTAssertLessThan(clock.now - stopped, .seconds(10))
+    }
+
+    func testTheStatusIsWrittenBeforeTheFailureIsReportedSoAStopCannotCostIt() async throws {
+        // What the path controller does on a failure: stop the listener.
+        for attempt in 0..<20 {
+            let streams = StandInStreamSource(mode: attempt % 2 == 0 ? .fail : .open)
+            let holder = Recorder<DirectConnectListener>()
+            let listener = DirectConnectListener(
+                authority: authority,
+                limits: .patient,
+                openStream: {
+                    try await streams.open()
+                },
+                onFailure: { _ in
+                    Task {
+                        await holder.values.first?.stop()
+                    }
+                }
+            )
+            holder.record(listener)
+            let port = try await listener.start()
+            let client = LoopbackClient(port: port)
+            try await client.send(canonicalHead)
+            let expected: Int
+            if attempt % 2 == 0 {
+                // The stream cannot be opened.
+                expected = 502
+            } else {
+                // The instance refuses the CONNECT.
+                let stream = try await streams.waitForStream()
+                stream.instanceSends(
+                    Data("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".utf8)
+                )
+                expected = 403
+            }
+
+            let answer = try await client.receiveUntilClosed()
+            XCTAssertTrue(
+                String(decoding: answer, as: UTF8.self)
+                    .hasPrefix("HTTP/1.1 \(expected) "),
+                "attempt \(attempt): \(String(decoding: answer, as: UTF8.self))"
+            )
+            client.close()
+            await listener.stop()
+        }
+    }
+
     func testListensOnTheLoopbackAddressOnlyOnAPortTheSystemChooses() async throws {
+        try assertSocketScanSeesListeners()
+        let before = try listeningSockets()
         let fixture = try await makeListener()
         let another = try await makeListener()
 
-        // The scan reports only sockets bound to 127.0.0.1, so a listener on
-        // the wildcard address would not be in it.
-        let listening = listeningLoopbackPorts()
-        XCTAssertTrue(listening.contains(fixture.port.rawValue))
-        XCTAssertTrue(listening.contains(another.port.rawValue))
+        // Exactly two new listeners, both on 127.0.0.1: nothing on the
+        // wildcard address and nothing on IPv6.
+        XCTAssertEqual(
+            try newListeners(since: before),
+            [fixture.socket, another.socket]
+        )
         XCTAssertNotEqual(fixture.port, another.port)
+    }
+
+    func testTheSocketScanSeesListenersOnLoopbackAndWildcardAddressesOfBothFamilies() throws {
+        try assertSocketScanSeesListeners()
     }
 
     func testStoppingClosesEveryConnectionAndItsStream() async throws {
         let fixture = try await makeListener()
-        XCTAssertTrue(listeningLoopbackPorts().contains(fixture.port.rawValue))
+        XCTAssertTrue(try listeningSockets().contains(fixture.socket))
         let client = LoopbackClient(port: fixture.port)
         let stream = try await establish(client, fixture)
         let pending = LoopbackClient(port: fixture.port)
@@ -349,7 +419,7 @@ final class DirectConnectListenerTests: XCTestCase {
         try await eventually {
             await !LoopbackClient.canConnect(to: fixture.port)
         }
-        XCTAssertFalse(listeningLoopbackPorts().contains(fixture.port.rawValue))
+        XCTAssertFalse(try listeningSockets().contains(fixture.socket))
     }
 
     // MARK: Parsing
@@ -456,6 +526,12 @@ final class DirectConnectListenerTests: XCTestCase {
     private struct Fixture {
         let listener: DirectConnectListener
         let port: NWEndpoint.Port
+
+        /// Where the listener must be found: the loopback address, and no
+        /// other.
+        var socket: ListeningSocket {
+            ListeningSocket(address: "127.0.0.1", port: port.rawValue)
+        }
         let streams: StandInStreamSource
         let failures: Recorder<DirectConnectFailure>
     }
@@ -541,8 +617,12 @@ extension DirectConnectLimits {
 
 struct DirectTestTimeout: Error {}
 
+/// Waits for `condition`. A wait that runs out fails at the line that
+/// asked for it, then throws.
 func eventually(
     timeout: Duration = .seconds(30),
+    file: StaticString = #filePath,
+    line: UInt = #line,
     _ condition: @escaping () async throws -> Bool
 ) async throws {
     let clock = ContinuousClock()
@@ -553,6 +633,11 @@ func eventually(
         }
         try await Task.sleep(for: .milliseconds(20))
     }
+    XCTFail(
+        "The condition did not become true within \(timeout).",
+        file: file,
+        line: line
+    )
     throw DirectTestTimeout()
 }
 
@@ -765,46 +850,233 @@ final class StandInDirectStream: DirectByteStream, @unchecked Sendable {
     }
 }
 
-/// The loopback TCP ports this process is listening on: bound stream
-/// sockets with no peer. This is how a test sees the listener from outside,
-/// both that one exists and that none does.
-func listeningLoopbackPorts() -> Set<UInt16> {
-    var ports = Set<UInt16>()
+/// One TCP socket this process is listening on.
+struct ListeningSocket: Hashable, CustomStringConvertible {
+    let address: String
+    let port: UInt16
+
+    var description: String {
+        "\(address):\(port)"
+    }
+}
+
+struct SocketScanError: Error, CustomStringConvertible {
+    let call: String
+    let descriptor: Int32
+    let code: Int32
+
+    var description: String {
+        "\(call) failed on descriptor \(descriptor) with errno \(code)"
+    }
+}
+
+/// Every TCP socket this process is listening on, on any address of either
+/// family, read from the kernel's own state for the socket. This is how a
+/// test sees a listener from outside, both that one exists and that none
+/// does. A descriptor that is not a socket, or that goes away during the
+/// scan, is skipped. Any other failure throws, so a scan that cannot see is
+/// never read as "nothing there"; `assertSocketScanSeesListeners` shows that
+/// it can.
+func listeningSockets() throws -> Set<ListeningSocket> {
+    // `TCPS_LISTEN` in <netinet/tcp_fsm.h>.
+    let listening: UInt8 = 1
+    var sockets = Set<ListeningSocket>()
     for descriptor in 0..<getdtablesize() {
         var type: Int32 = 0
         var length = socklen_t(MemoryLayout<Int32>.size)
-        guard
-            getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &type, &length) == 0,
-            type == SOCK_STREAM
-        else {
+        if getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &type, &length) != 0 {
+            let code = errno
+            guard code == EBADF || code == ENOTSOCK else {
+                throw SocketScanError(
+                    call: "getsockopt(SO_TYPE)",
+                    descriptor: descriptor,
+                    code: code
+                )
+            }
             continue
         }
-        var local = sockaddr_in()
-        var localLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let bound = withUnsafeMutablePointer(to: &local) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getsockname(descriptor, $0, &localLength)
-            }
-        }
-        var peer = sockaddr_storage()
-        var peerLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
-        let connected = withUnsafeMutablePointer(to: &peer) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getpeername(descriptor, $0, &peerLength)
-            }
-        }
-        guard
-            bound == 0,
-            connected != 0,
-            local.sin_family == sa_family_t(AF_INET),
-            local.sin_addr.s_addr == inet_addr("127.0.0.1"),
-            local.sin_port != 0
-        else {
+        guard type == SOCK_STREAM else {
             continue
         }
-        ports.insert(UInt16(bigEndian: local.sin_port))
+
+        var storage = sockaddr_storage()
+        var storageLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let named = withUnsafeMutablePointer(to: &storage) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(descriptor, $0, &storageLength)
+            }
+        }
+        if named != 0 {
+            let code = errno
+            // EINVAL: the socket has been shut down, so it is not listening.
+            guard code == EBADF || code == EINVAL else {
+                throw SocketScanError(
+                    call: "getsockname",
+                    descriptor: descriptor,
+                    code: code
+                )
+            }
+            continue
+        }
+        let family = Int32(storage.ss_family)
+        guard family == AF_INET || family == AF_INET6 else {
+            continue
+        }
+
+        var info = tcp_connection_info()
+        var infoLength = socklen_t(MemoryLayout<tcp_connection_info>.size)
+        if getsockopt(descriptor, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &infoLength) != 0 {
+            let code = errno
+            guard code == EBADF else {
+                throw SocketScanError(
+                    call: "getsockopt(TCP_CONNECTION_INFO)",
+                    descriptor: descriptor,
+                    code: code
+                )
+            }
+            continue
+        }
+        guard info.tcpi_state == listening else {
+            continue
+        }
+
+        var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        let port: UInt16
+        if family == AF_INET {
+            port = withUnsafePointer(to: &storage) {
+                $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    var address = $0.pointee.sin_addr
+                    inet_ntop(AF_INET, &address, &text, socklen_t(text.count))
+                    return UInt16(bigEndian: $0.pointee.sin_port)
+                }
+            }
+        } else {
+            port = withUnsafePointer(to: &storage) {
+                $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                    var address = $0.pointee.sin6_addr
+                    inet_ntop(AF_INET6, &address, &text, socklen_t(text.count))
+                    return UInt16(bigEndian: $0.pointee.sin6_port)
+                }
+            }
+        }
+        sockets.insert(ListeningSocket(address: String(cString: text), port: port))
     }
-    return ports
+    return sockets
+}
+
+/// The listeners that exist now and did not at `baseline`.
+func newListeners(
+    since baseline: Set<ListeningSocket>
+) throws -> Set<ListeningSocket> {
+    try listeningSockets().subtracting(baseline)
+}
+
+/// A plain listening socket made with the system calls, on a port the
+/// system chooses: something the scan must see.
+final class ControlListener {
+    struct Unavailable: Error {
+        let step: String
+        let code: Int32
+    }
+
+    let socket: ListeningSocket
+    private let descriptor: Int32
+
+    init(family: Int32, address: String) throws {
+        let descriptor = Darwin.socket(family, SOCK_STREAM, 0)
+        guard descriptor >= 0 else {
+            throw Unavailable(step: "socket", code: errno)
+        }
+        var bound: Int32 = -1
+        var storage = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        if family == AF_INET {
+            var name = sockaddr_in()
+            name.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            name.sin_family = sa_family_t(AF_INET)
+            inet_pton(AF_INET, address, &name.sin_addr)
+            bound = withUnsafePointer(to: &name) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        } else {
+            var name = sockaddr_in6()
+            name.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            name.sin6_family = sa_family_t(AF_INET6)
+            inet_pton(AF_INET6, address, &name.sin6_addr)
+            bound = withUnsafePointer(to: &name) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            }
+        }
+        guard bound == 0, listen(descriptor, 1) == 0 else {
+            let code = errno
+            Darwin.close(descriptor)
+            throw Unavailable(step: "bind or listen on \(address)", code: code)
+        }
+        let named = withUnsafeMutablePointer(to: &storage) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(descriptor, $0, &length)
+            }
+        }
+        guard named == 0 else {
+            let code = errno
+            Darwin.close(descriptor)
+            throw Unavailable(step: "getsockname", code: code)
+        }
+        let port: UInt16 = withUnsafePointer(to: &storage) {
+            family == AF_INET
+                ? $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    UInt16(bigEndian: $0.pointee.sin_port)
+                }
+                : $0.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                    UInt16(bigEndian: $0.pointee.sin6_port)
+                }
+        }
+        self.descriptor = descriptor
+        socket = ListeningSocket(address: address, port: port)
+    }
+
+    func close() {
+        Darwin.close(descriptor)
+    }
+}
+
+/// Shows that the scan sees a listener on the loopback and the wildcard
+/// address of both families, and stops seeing each when it closes. A test
+/// that relies on the scan finding nothing calls this first, so a scan that
+/// cannot see fails the test instead of passing it.
+func assertSocketScanSeesListeners(
+    file: StaticString = #filePath,
+    line: UInt = #line
+) throws {
+    let controls = try [
+        (AF_INET, "127.0.0.1"),
+        (AF_INET, "0.0.0.0"),
+        (AF_INET6, "::1"),
+        (AF_INET6, "::"),
+    ].map { try ControlListener(family: $0.0, address: $0.1) }
+    let open = try listeningSockets()
+    for control in controls {
+        XCTAssertTrue(
+            open.contains(control.socket),
+            "The socket scan does not see a listener on \(control.socket).",
+            file: file,
+            line: line
+        )
+        control.close()
+    }
+    let closed = try listeningSockets()
+    for control in controls {
+        XCTAssertFalse(
+            closed.contains(control.socket),
+            "The socket scan still reports \(control.socket) after it closed.",
+            file: file,
+            line: line
+        )
+    }
 }
 
 /// What a transport's `openStream` does in a test.

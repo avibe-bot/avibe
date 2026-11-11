@@ -815,11 +815,7 @@ final class WebViewController: UIViewController {
     func deliverDirectTransportChanged(_ status: DirectPathStatus) {
         guard
             !isInvalidatedForAccountTransition,
-            let data = try? JSONSerialization.data(
-                withJSONObject: status.jsonObject,
-                options: [.sortedKeys]
-            ),
-            let encoded = String(data: data, encoding: .utf8)
+            let script = status.eventScript(for: instanceOrigin)
         else {
             return
         }
@@ -829,13 +825,7 @@ final class WebViewController: UIViewController {
         where webView.url.flatMap({
             WebOrigin(url: $0, requiresHTTPS: false)
         }) == instanceOrigin {
-            webView.evaluateJavaScript(
-                """
-                window.dispatchEvent(new CustomEvent("avibe:native:direct.transportChanged", {
-                  detail: \(encoded)
-                }));
-                """
-            )
+            webView.evaluateJavaScript(script)
         }
     }
 

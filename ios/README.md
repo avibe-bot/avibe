@@ -269,10 +269,29 @@ go to a loopback HTTP CONNECT listener inside the App, which relays them over
 transport streams to the instance. TLS stays between WebKit and the instance;
 the shell adds no trust override and sees only ciphertext.
 
-**Nothing in this shell implements a transport**, so none of it runs: no
-socket is bound, `proxyConfigurations` is never written, `direct.status()`
-answers `tunnel`, and no event is emitted. `AppModel` takes the transport as
-an optional argument that `AvibeApp` does not pass.
+**Nothing in this shell implements a transport**, so the path never
+activates: no listener is created, `proxyConfigurations` is never written
+(not even cleared), `direct.status()` answers `tunnel`, and no event is
+emitted. `AppModel` takes the transport as an optional argument that
+`AvibeApp` does not pass.
+
+That is not the same as nothing existing. From launch, `AppModel` holds a
+`DirectPathController` and its route owner. The controller reads the
+application state once, sets `AccountWebsiteDataStore.onWillRotate`, and
+observes the App entering the background and the foreground; without a
+transport each of those callbacks returns without doing anything. The bridge
+advertises `direct: 1`.
+
+The tests hold the inactive state by counting, not by looking at the end
+state: `DirectRouteOwner.writeCount` counts every write of
+`proxyConfigurations` at the only assignment in the App, and
+`DirectConnectListener.socketsCreated` counts every listening socket at the
+only place one is made. Both must stay where they were across launch,
+opening and switching instances, background and foreground, rotation, and
+sign-out. A scan of the process's listening sockets, on any address of
+either family, is the second line, and the tests also observe the real
+setter on the account's stores. The tests that install a route show that the
+counters, the scan and the observer do move.
 
 - `DirectTransport.swift` is the seam: `DirectTransporting` is told which
   instance is selected, reports when its path is usable or lost, and opens
@@ -285,7 +304,11 @@ an optional argument that `AvibeApp` does not pass.
   head over 4 KiB or slower than 5 seconds. It writes the ingress contract's
   canonical head to the stream, never WebKit's bytes, passes the instance's
   status back, and then copies both directions with backpressure and
-  half-close. At most 64 connections; no idle timeout.
+  half-close. At most 64 connections: one more is closed at once, with no
+  answer, and returns the path to the tunnel. No idle timeout. When the path
+  cannot serve a connection, the status is written to WebKit before the
+  failure is reported, so stopping the listener does not cost WebKit the
+  answer.
 - `DirectPathController.swift` holds the state. It is `tunnel` unless a
   transport reported a usable path for the current tags, the listener is
   bound, and the route is installed. A stream that cannot be opened, a
@@ -297,6 +320,9 @@ an optional argument that `AvibeApp` does not pass.
   account data store, which the runtime WebViews and the hidden account
   transport share. The route matches the instance's exact host, with
   `allowFailover` off.
+- `AppModel` ends the selection wherever the browser for a runtime goes
+  away: in `stopRuntime()`, and in `registerRuntimeController` when it
+  refuses a WebView and returns to the picker.
 - Every route carries its tags: the selection, the `MobileRuntimeContext`
   lease (account, instance, account generation), the data-store identifier,
   the instance authority, and the rendezvous generation. Before a route is

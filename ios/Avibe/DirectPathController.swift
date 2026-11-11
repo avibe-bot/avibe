@@ -26,6 +26,34 @@ struct DirectPathStatus: Equatable {
             "sequence": sequence,
         ]
     }
+
+    /// The script that delivers `direct.transportChanged` to a document.
+    /// It dispatches only if the document it runs in is on `origin`. The
+    /// shell checks the WebView's URL before it sends the script, but a
+    /// navigation can commit before the script runs.
+    func eventScript(for origin: WebOrigin) -> String? {
+        guard
+            let data = try? JSONSerialization.data(
+                withJSONObject: [
+                    "origin": origin.serialized,
+                    "detail": jsonObject,
+                ],
+                options: [.sortedKeys]
+            ),
+            let payload = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        return """
+        (() => {
+          const event = \(payload);
+          if (window.location.origin !== event.origin) return;
+          window.dispatchEvent(new CustomEvent("avibe:native:direct.transportChanged", {
+            detail: event.detail
+          }));
+        })();
+        """
+    }
 }
 
 /// The only writer of `proxyConfigurations` on an account data store. The
@@ -33,6 +61,12 @@ struct DirectPathStatus: Equatable {
 /// set here applies to all of them, and nothing else may set one.
 @MainActor
 final class DirectRouteOwner {
+    /// How many times this process has written `proxyConfigurations`. Every
+    /// write goes through `write(_:to:)` below, the only assignment in the
+    /// App, so a build that never installs a route leaves this at zero, and
+    /// a test can read that.
+    private(set) static var writeCount = 0
+
     private let websiteDataStore: AccountWebsiteDataStore
     private weak var routedStore: WKWebsiteDataStore?
     private(set) var installedTag: DirectRouteTag?
@@ -56,7 +90,7 @@ final class DirectRouteOwner {
         route.matchDomains = [tag.target.authority.host]
         route.allowFailover = false
         let store = websiteDataStore.dataStore
-        store.proxyConfigurations = [route]
+        write([route], to: store)
         routedStore = store
         installedTag = tag
         return true
@@ -68,16 +102,31 @@ final class DirectRouteOwner {
         guard installedTag != nil else {
             return
         }
-        routedStore?.proxyConfigurations = []
+        if let routedStore {
+            write([], to: routedStore)
+        }
         routedStore = nil
         installedTag = nil
+    }
+
+    private func write(
+        _ configurations: [ProxyConfiguration],
+        to store: WKWebsiteDataStore
+    ) {
+        store.proxyConfigurations = configurations
+        Self.writeCount += 1
     }
 }
 
 /// Decides when the selected instance's origin travels the direct path. The
 /// state is `tunnel` unless a transport reported a usable path for the
 /// current tags, the listener is bound, and the route is installed; any
-/// failure returns to `tunnel` at once. Without a transport it does nothing.
+/// failure returns to `tunnel` at once.
+///
+/// Without a transport it creates no listener, writes no route, and reports
+/// no change. It still exists from launch: it reads the application state
+/// once, sets the store's `onWillRotate` hook, and observes the App
+/// entering the background and the foreground.
 @MainActor
 final class DirectPathController {
     private struct Activation {
