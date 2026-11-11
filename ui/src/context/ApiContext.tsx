@@ -3998,7 +3998,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }),
     unsubscribeWebPush: (endpoint, deviceId) =>
       deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),
-    sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}),
+    // `no_subscription`: this device's endpoint has no row on the instance yet; the
+    // notification control says what that means instead of a raw error toast.
+    sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}, {
+      expectedCodes: ['no_subscription'],
+    }),
     setShowPageAvailability: (sessionId, offline) => postJson(
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
       { offline },

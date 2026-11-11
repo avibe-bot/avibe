@@ -3831,6 +3831,7 @@
         "enable": "开启通知",
         "enabled": "通知已开启",
         "enabledPwa": "PWA 通知已开启",
+        "registering": "正在登记这台设备…",
         "disable": "关闭",
         "disablePending": "通知已关闭，设备清理仍在等待完成。",
         "disableFailed": "通知已关闭，但无法确认清理结果，请稍后重试。",
@@ -3840,6 +3841,7 @@
         "testBody": "通知已经准备好了。",
         "testSent": "测试通知已发送",
         "testFailed": "测试通知发送失败",
+        "testRegistering": "还在登记这台设备，稍等一下再试",
         "normalBlocked": "但普通通知当前会跳过你（{{policy}} 策略：{{disposition}}）"
       },
       "navUnread": "收件箱，{{count}} 条未读",
