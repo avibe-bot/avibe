@@ -981,9 +981,17 @@ final class MobileSessionCoordinator {
     }
 
     /// Whether `runtime` is still this account's selected instance, whatever
-    /// exclusive operation runs meanwhile (a push-management request keeps the
-    /// account, the store, and the selection as they are).
+    /// ordinary exclusive operation runs meanwhile (a push-management request
+    /// keeps the account, the store, and the selection as they are). Once a
+    /// sign-out or an account change has begun (push logout, a reset), it is
+    /// not: the account is on its way out.
     func isSelectedRuntime(_ runtime: MobileRuntimeContext) -> Bool {
+        switch phase {
+        case .ready, .operation:
+            break
+        case .resetting, .pushLogout:
+            return false
+        }
         guard
             runtime.generation == generation,
             runtime.websiteDataStoreIdentifier == websiteDataStore.identifier,
