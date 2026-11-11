@@ -1366,6 +1366,7 @@
           "guardSubtitleInUse": "Agents still use these models. They cannot run until you choose another model for them.",
           "empty": "No models yet. Add the first one.",
           "noMatch": "No model matches this search",
+          "searchAdd": "Search providers and the model catalog for \"{{query}}\"",
           "legacy": "This model engine build does not offer an editable model list yet. These are the models it currently exposes.",
           "baselineUnavailable": "This backend's model list could not be read.",
           "save": "Save",
@@ -1400,12 +1401,17 @@
           "groupBuiltin": "{{backend}} built-in",
           "groupProviders": "From your providers",
           "groupListed": "Already in the list",
-          "noMatch": "No model matches.",
+          "noMatch": "Neither your providers nor the model catalog has this model.",
           "unavailable": "The models you can add could not be read.",
-          "customFromQuery": "Add \"{{query}}\" as a custom model…",
+          "customFromQuery": "Add \"{{query}}\" as a custom model",
           "custom": "Add custom model…",
           "confirm_one": "Add {{count}} model",
-          "confirm_other": "Add {{count}} models"
+          "confirm_other": "Add {{count}} models",
+          "groupCatalog": "Model catalog",
+          "catalogNote": "No provider lists these. Once added, the ID is sent to your provider as is; the chat tells you if the provider doesn't serve it.",
+          "notListed": "Not listed by a provider",
+          "customFromQueryNote": "Uses the ID exactly as typed, with default parameters. You can change them later in Manage models.",
+          "searchingCatalog": "Searching the model catalog"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · Model list",
@@ -2472,7 +2478,7 @@
         "summary_other": "{{host}} · {{count}} models",
         "action": {
           "refetch": "Refetch",
-          "addModel": "Add model"
+          "addModel": "Add model ID"
         },
         "manage": {
           "label": "Manage {{source}}",

@@ -207,10 +207,10 @@ export const heldRowFor = (
  * beside it is what keeps true.
  */
 export const draftRowFor = (
-  candidate: ModelCandidate,
+  pick: ChosenCandidate,
   held: readonly BackendModel[],
   saved: readonly BackendModel[],
-): BackendModel => heldRowFor(candidate.id, held, saved) ?? candidateBackendModel(candidate);
+): BackendModel => heldRowFor(pick.candidate.id, held, saved) ?? pick.row ?? candidateBackendModel(pick.candidate);
 
 /**
  * One picked candidate, and the projection it was picked against.
@@ -227,6 +227,51 @@ export type ChosenCandidate = {
   candidate: ModelCandidate;
   /** The suppliers on screen, in the shape the write sends them. */
   expected_suppliers: RouteHop[];
+  /** The row a pick the server did not propose lands as: a model the catalog knows
+   *  but no provider lists, described by the catalog, or an ID the user typed, on
+   *  the editor's defaults. A server candidate has none, so its row is built from
+   *  the proposal alone (`candidateBackendModel`). */
+  row?: BackendModel;
+};
+
+/**
+ * A model the catalog knows that no provider lists, as a pick: the row is the
+ * catalog's description under the model's own ID — the same fill the custom-model
+ * editor's lookup applies — and nothing supplies it, so the agreement is an empty
+ * supplier list. If the provider does not serve the ID, the chat says so on use.
+ */
+export const catalogPick = (match: ModelsDevMatch, backend: AgentBackend): ChosenCandidate => {
+  const row = applyModelsDevMatch(blankBackendModel(), match, 'models_dev', backend);
+  return {
+    candidate: {
+      id: row.id,
+      display_name: row.display_name,
+      reasoning_efforts: [...row.reasoning_efforts],
+      suppliers: [],
+      origin: 'models_dev',
+      ...(row.native_protocol ? { native_protocol: row.native_protocol } : {}),
+    },
+    expected_suppliers: [],
+    row,
+  };
+};
+
+/** An ID the user typed, as a pick: the row the custom-model editor would save
+ *  had it been confirmed untouched — its defaults, under the resolved ID. */
+export const typedPick = (typed: string, backend: AgentBackend): ChosenCandidate => {
+  const row = draftWithId(blankBackendModel(), typed, backend);
+  return {
+    candidate: {
+      id: row.id,
+      display_name: null,
+      reasoning_efforts: [],
+      suppliers: [],
+      origin: 'manual',
+      ...(row.native_protocol ? { native_protocol: row.native_protocol } : {}),
+    },
+    expected_suppliers: [],
+    row,
+  };
 };
 
 /** A candidate paired with the suppliers displayed for it — the agreement, taken

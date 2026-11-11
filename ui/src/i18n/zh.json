@@ -1366,6 +1366,7 @@
           "guardSubtitleInUse": "仍有 Agent 在使用这些模型。移除后，需要为这些 Agent 改选其他模型才能继续运行。",
           "empty": "还没有模型，先添加一个。",
           "noMatch": "没有匹配的模型",
+          "searchAdd": "在供应商和模型目录里搜索「{{query}}」",
           "legacy": "当前模型引擎版本还不支持编辑模型列表，以下是它当前提供的模型。",
           "baselineUnavailable": "没能读取这个后端的模型列表。",
           "save": "保存",
@@ -1400,12 +1401,17 @@
           "groupBuiltin": "{{backend}} 内置",
           "groupProviders": "来自你的供应商",
           "groupListed": "已在列表中",
-          "noMatch": "没有匹配的模型。",
+          "noMatch": "你的供应商和模型目录里都没有这个模型。",
           "unavailable": "没能读取可添加的模型。",
-          "customFromQuery": "把「{{query}}」添加为自定义模型…",
+          "customFromQuery": "把「{{query}}」添加为自定义模型",
           "custom": "添加自定义模型…",
           "confirm_one": "添加 {{count}} 个模型",
-          "confirm_other": "添加 {{count}} 个模型"
+          "confirm_other": "添加 {{count}} 个模型",
+          "groupCatalog": "模型目录",
+          "catalogNote": "你的供应商没有列出这些模型。添加后按原 ID 发给供应商；供应商不支持时，对话里会告诉你。",
+          "notListed": "供应商未列出",
+          "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
+          "searchingCatalog": "正在搜索模型目录"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · 模型列表",
@@ -2472,7 +2478,7 @@
         "summary_other": "{{host}} · {{count}} 个模型",
         "action": {
           "refetch": "重新拉取",
-          "addModel": "添加模型"
+          "addModel": "补充模型 ID"
         },
         "manage": {
           "label": "管理 {{source}}",

@@ -112,7 +112,7 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
       const supply = (await agentReads.readValue()).find((row) => row.backend === backend);
       if (!supply) throw new Error('supply_unread');
       const baseline = supply.catalog_models ?? [];
-      const row = draftRowFor(pick.candidate, [], baseline);
+      const row = draftRowFor(pick, [], baseline);
       efforts = row.reasoning_efforts;
       if (!baseline.some((held) => held.id === model)) {
         await models.putAgentModels(backend, {

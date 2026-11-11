@@ -961,7 +961,7 @@ describe('SettingsModelsPage surface branches', () => {
     const sourceOpener = (await screen.findByText('Retained source')).closest('button') as HTMLButtonElement;
     await user.click(sourceOpener);
     const sourceDialog = await screen.findByRole('dialog', { name: 'Retained source' });
-    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model$|^添加模型$/i }));
+    await user.click(within(sourceDialog).getByRole('button', { name: /^Add model ID$|^补充模型 ID$/i }));
     const manualDraft = sourceDialog.querySelector('[data-manual-model-draft]');
     const modelIdInput = within(manualDraft as HTMLElement).getByPlaceholderText(/^Model ID$|^模型 ID$/i);
     await user.type(modelIdInput, 'draft-model');
