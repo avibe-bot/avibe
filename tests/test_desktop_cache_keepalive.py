@@ -102,6 +102,26 @@ def test_only_the_master_warmup_saves_and_every_build_restores_an_exact_key():
         assert package_step(save)["with"]["key"] == f"${{{{ steps.{package_step(restore)['id']}.outputs.cache-primary-key }}}}"
 
 
+def test_the_rust_cache_is_saved_without_first_party_output():
+    """The key pins third-party sources only, so first-party output must not be in the entry.
+
+    A workspace crate missing from the clean, or a clean that runs on fewer
+    builds than the save, puts Avibe's own compiled code into release input.
+    """
+    steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
+    clean, save = package_step("Remove first-party build output before saving"), package_step("Save Rust build cache")
+    assert steps.index(clean) + 1 == steps.index(save) and clean["if"] == save["if"]
+    assert clean["working-directory"] == "desktop"
+    manifest = (ROOT / "desktop/Cargo.toml").read_text(encoding="utf-8")
+    members = re.search(r"^members = \[(.*)\]$", manifest, re.M).group(1).replace('"', "").split(", ")
+    crates = [
+        re.search(r'^name = "([^"]+)"$', (ROOT / "desktop" / member / "Cargo.toml").read_text(encoding="utf-8"), re.M).group(1)
+        for member in members
+    ]
+    assert len(crates) == 2
+    assert clean["run"] == "cargo clean --locked --release " + " ".join(f"-p {crate}" for crate in sorted(crates))
+
+
 def test_the_signpath_test_lane_reads_the_entry_the_windows_warmup_saves():
     """It restores the package job's Windows entry, which is matched by key and path list together."""
     lane = workflow("desktop-signpath-test.yml")["jobs"]["signpath-test-build"]["steps"]

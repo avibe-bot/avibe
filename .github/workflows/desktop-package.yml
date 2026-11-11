@@ -336,6 +336,14 @@ jobs:
             --binary "$app/Contents/Helpers/cua-driver=13.0" \
             --minimum-sdk 26.0
 
+      # The entry holds third-party output only, and Cargo.lock in its key pins
+      # every third-party source by checksum. Avibe's own crates are removed
+      # here, so no build can take first-party code from a cache.
+      - name: Remove first-party build output before saving
+        if: ${{ !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        working-directory: desktop
+        run: cargo clean --locked --release -p avibe-desktop -p avibe-runtime-host
+
       - name: Save Rust build cache
         if: ${{ !inputs.release_tag && env.DESKTOP_CACHE_WARMUP == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
