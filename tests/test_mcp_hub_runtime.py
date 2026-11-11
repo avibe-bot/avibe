@@ -119,6 +119,17 @@ def test_failed_replace_keeps_new_definition_without_old_publication(generated):
     assert repository.summarize("echo")["state"] == "not_generated"
 
 
+def test_identical_saved_definition_retries_discovery_without_rewrite(runtime):
+    item = {"name": "retry", "server": {"command": "/nonexistent/mcp-retry"}}
+    first = _run(runtime, "add", {"servers": [item]})
+    assert first["ok"] is True and first["added"][0]["warning"]
+    second = _run(runtime, "add", {"servers": [item]})
+    assert second["ok"] is True
+    assert second["added"][0]["name"] == "retry"
+    assert second["added"][0]["warning"]
+    assert repository.summarize("retry")["state"] == "not_generated"
+
+
 def test_malformed_existing_definition_does_not_abort_batch_add(runtime):
     path = repository.package_dir("broken") / "definition.json"
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -660,11 +660,13 @@ class McpRuntime:
                     outcome = await asyncio.to_thread(self._existing_add, name, definition)
                     if outcome == "unchanged":
                         return {"name": name.name, "status": "unchanged"}
+                    retry = outcome == "retry"
                     if outcome == "exists":
                         raise McpHubError("exists", f"{name} already exists with a different definition.")
                 # Calls take this same lock only for admission. Already admitted calls
                 # may finish; no revision-bound OAuth/secret snapshot is promised.
-                await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace or repository.is_project(name))
+                if not retry:
+                    await asyncio.to_thread(mcp_scope.write_server, name, item["server"], replace=replace or repository.is_project(name))
                 await asyncio.to_thread(repository.unlist, name)
                 await self._cancel_login(name)
                 await self._retire_package(name)
@@ -737,7 +739,7 @@ class McpRuntime:
         # admit it again so add reruns discovery instead of trapping the user in
         # an ``exists`` result. Published identical definitions remain unchanged.
         if same_input and published is None:
-            return None
+            return "retry"
         return "unchanged" if same_input and same_publication else "exists"
 
     async def _refresh(self, payload: dict[str, Any]) -> bytes:
