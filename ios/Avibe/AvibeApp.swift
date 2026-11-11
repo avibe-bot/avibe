@@ -23,7 +23,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
             UIApplication.LaunchOptionsKey: Any
         ]? = nil
     ) -> Bool {
-        UNUserNotificationCenter.current().delegate = self
+        // mutation: delegate not installed
         return true
     }
 
@@ -63,7 +63,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
             UNNotificationPresentationOptions
         ) -> Void
     ) {
-        completionHandler([.banner, .list, .sound])
+        completionHandler([.banner, .list, .sound, .badge])
     }
 
     func userNotificationCenter(
