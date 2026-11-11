@@ -43,7 +43,9 @@ export async function addModelsToBackend(
       const agent = await api.putAgentModels(backend, {
         baseline: held,
         models: [...held, ...fresh.map((pick) => draftRowFor(pick, [], held))],
-        expected_suppliers: Object.fromEntries(fresh.map((pick) => [pick.candidate.id, pick.expected_suppliers])),
+        // Only what a row showed is promised; a catalog or typed pick showed nothing.
+        expected_suppliers: Object.fromEntries(fresh.flatMap((pick) => (
+          pick.expected_suppliers ? [[pick.candidate.id, pick.expected_suppliers] as const] : []))),
       });
       return { ok: true, agent, ids };
     } catch (error) {

@@ -17,7 +17,7 @@ import type { AgentBackend, AgentSupply, BackendModel } from './types';
 const NOTHING: ReadonlySet<string> = new Set();
 const NO_MODELS: readonly BackendModel[] = [];
 
-/** A row written in the editor, as a pick: nothing supplies it on screen. */
+/** A row written in the editor, as a pick: no supplier was shown, so none is promised. */
 const editedPick = (row: BackendModel): ChosenCandidate => ({
   candidate: {
     id: row.id,
@@ -27,7 +27,6 @@ const editedPick = (row: BackendModel): ChosenCandidate => ({
     origin: row.origin,
     ...(row.native_protocol ? { native_protocol: row.native_protocol } : {}),
   },
-  expected_suppliers: [],
   row,
 });
 

@@ -33,7 +33,7 @@ describe('addModelsToBackend', () => {
     const [, body] = api.putAgentModels.mock.calls[0];
     expect(body.baseline.map((model: BackendModel) => model.id)).toEqual(['held']);
     expect(body.models.map((model: BackendModel) => model.id)).toEqual(['held', 'new-a', 'new-b']);
-    expect(body.expected_suppliers).toEqual({ 'new-a': [{ source_id: 'src_a', model_id: 'new-a' }], 'new-b': [] });
+    expect(body.expected_suppliers).toEqual({ 'new-a': [{ source_id: 'src_a', model_id: 'new-a' }] });
   });
 
   it('writes nothing when every pick is already in the list', async () => {
