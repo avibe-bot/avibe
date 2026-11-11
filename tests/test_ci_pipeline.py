@@ -660,7 +660,7 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
 # The PR browser selection before parallelization: preserve these exact callers,
 # including spec filters, rather than deriving expected coverage from the matrix.
 _BROWSER_COMMANDS = (
-    "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts",
+    "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts mobile-otp.spec.ts",
     "run test:home-media",
     "run test:voice-shortcut",
     "run test:vault-integrity",
