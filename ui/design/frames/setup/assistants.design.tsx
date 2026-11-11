@@ -45,6 +45,10 @@ const designFrames = frames([
     assistants: { ...ticked, vibey: { model: null } },
     api: candidatesApi,
   }),
+  screen('vibey-no-model-phone', '设置向导 · AI 助手 · Vibey 还没有模型，卡内选择（手机）', {
+    assistants: { ...ticked, vibey: { model: null } },
+    api: candidatesApi,
+  }, { width: 390, height: 844 }),
   screen('nothing-ready', '设置向导 · AI 助手 · Vibey 没有模型、助手都未勾选', {
     assistants: { vibey: { model: null } },
     api: candidatesApi,

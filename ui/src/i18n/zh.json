@@ -6725,6 +6725,7 @@
       "noteNoSource": "还没有模型来源供给 {{name}}。",
       "pickModelNamed": "为 {{name}} 选择模型",
       "allModels": "全部模型…",
+      "recommended": "推荐",
       "modelsUnreadable": "未能读取模型",
       "noModelsToPick": "还没有供应商提供模型",
       "suppliersChanged": "该模型的供应商已变化，请重新选择",

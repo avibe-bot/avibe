@@ -1038,4 +1038,26 @@ scenarios:
       fresh-install Incus environment.
     supporting_tests:
       - ui/src/components/home/HomeGuide.test.tsx
+  - id: AUTH-SETUP-162
+    name: The model picked for Vibey in setup is the main Bot's too while it still follows Vibey, and setup suggests current flagships first
+    status: covered
+    kind: historical_regression
+    layer: contract
+    backend: web
+    test:
+      - "ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 the main Bot on the model Vibey had takes the model picked for Vibey"
+      - "ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 the main Bot given one while Vibey had none takes the model picked for Vibey"
+      - "ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 the main Bot with no model of its own yet takes the model picked for Vibey"
+      - ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 leaves a main Bot someone set to another model alone
+      - ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 holds the choice for Retry when the main Bot did not take it
+      - ui/src/components/onboarding/useBuiltinModelChoice.test.ts::AUTH-SETUP-162 carries the main Bot into another pick after a half-done choice
+    reason: >-
+      Covered is bounded to the setup choice owner against a fake server that
+      reproduces the controller's fill of an Agent with no model. The flagship
+      order is pinned at the server by MH-VIBEY-007's ordering case; the live
+      journey (pick for Vibey, the main Bot's model after entry) was run once in a
+      fresh-install Incus environment.
+    supporting_tests:
+      - tests/test_model_hub_vibey_consumer.py::test_vibey_offers_and_starts_on_the_flagship_rather_than_a_listings_first_row
+      - ui/src/components/onboarding/BuiltinAssistant.test.tsx
 next_priority: []

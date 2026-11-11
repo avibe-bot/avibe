@@ -6615,6 +6615,10 @@ class ModelHubService:
                 provider_ids.append(candidate_id)
 
         providers = []
+        # Current flagships first, as the built-in menus list them, rather than in
+        # whatever order a provider's listing happens to use (often alphabetical,
+        # which puts the oldest models on top).
+        provider_ids = self._flagship_first(provider_ids)
         described = self._models_dev_descriptions(provider_ids)
         for model_id in provider_ids:
             candidate = self._provider_candidate(
@@ -6914,6 +6918,9 @@ class ModelHubService:
                 if not model.retired
             )
         )
+        # The flagship among them when the built-in menus know one, so a new install
+        # starts on what the wizard recommends rather than on a listing's first row.
+        listed = self._flagship_first(listed)
         described = self._models_dev_descriptions(listed, fetch_catalog=fetch_catalog)
         for model_id in listed:
             match = described.get(model_id)
@@ -8268,6 +8275,38 @@ class ModelHubService:
                 sort_keys=True,
             ).encode()
         ).hexdigest()
+
+    def _flagship_first(self, model_ids: Iterable[str]) -> list[str]:
+        """``model_ids`` with the models the built-in menus know first, newest first.
+
+        Claude Code's and Codex's bundled menus already list each vendor's models
+        flagship first; a model's place there is its rank, matched on the bare id
+        a gateway prefix may carry. Models neither menu knows keep their order,
+        after the ranked ones, and ranked models from two vendors tie on rank and
+        keep their order too.
+        """
+
+        ranks: dict[str, int] = {}
+        # Every native CLI's bundled menu; one without a menu (OpenCode) lists nothing.
+        for backend in sorted(NATIVE_CLI_BACKENDS):
+            for index, item in enumerate(self._current_builtin_models(cast(BackendName, backend))):
+                model_id = item.get("id")
+                if isinstance(model_id, str):
+                    ranks.setdefault(model_id, index)
+
+        def rank(model_id: str) -> int | None:
+            return ranks.get(model_id, ranks.get(model_id.rsplit("/", 1)[-1]))
+
+        ordered = list(dict.fromkeys(model_ids))
+        positions = {model_id: index for index, model_id in enumerate(ordered)}
+        return sorted(
+            ordered,
+            key=lambda model_id: (
+                rank(model_id) is None,
+                rank(model_id) or 0,
+                positions[model_id],
+            ),
+        )
 
     def _current_builtin_models(
         self,

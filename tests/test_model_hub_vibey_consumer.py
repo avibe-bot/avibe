@@ -1925,3 +1925,32 @@ def test_loading_and_cloning_model_hub_config_reads_no_catalog_file(monkeypatch)
         config = ModelHubConfig.from_payload(copy.deepcopy(released), repairing=True)
         ModelHubConfig.from_payload(config.to_payload())
     assert reads == []
+
+
+FLAGSHIP_LISTING = (
+    # An Anthropic listing in its own (alphabetical) order: the oldest model first.
+    "claude-3-5-haiku-20241022", "claude-fable-5", "claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5",
+)
+FLAGSHIP_CATALOG = {"anthropic": {"name": "Anthropic", "models": {
+    model_id: {"name": model_id, "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}}
+    for model_id in FLAGSHIP_LISTING
+}}}
+
+
+@pytest.mark.asyncio
+async def test_vibey_offers_and_starts_on_the_flagship_rather_than_a_listings_first_row(tmp_path):
+    """MH-VIBEY-007: setup suggests current flagships first, and a new install starts on the first of them.
+
+    The order is the bundled Claude Code menu's own newest-first order; a model that
+    menu does not know keeps its listing place, after the ones it does.
+    """
+    payload = ModelHubConfig().to_payload()
+    payload["sources"] = [
+        _seed_source("src_flagship01", 1, *FLAGSHIP_LISTING, vendor="anthropic", protocol="anthropic").to_payload(),
+    ]
+    service, store, _announced = _seed_service(tmp_path, payload, [("codex", "gpt-6-astra")])
+    service.models_dev_catalog = lambda: FLAGSHIP_CATALOG
+
+    assert await service.seed_vibey_supply() == ["claude-fable-5-2"]
+    providers = [candidate["id"] for candidate in service.agent_model_candidates("vibey")["providers"]]
+    assert providers == ["claude-fable-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-3-5-haiku-20241022"]
