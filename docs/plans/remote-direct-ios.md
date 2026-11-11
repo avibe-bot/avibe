@@ -128,6 +128,7 @@ On devices, in the Phase 1 matrix (A5): Local Network permission states, suspens
 3. **Background policy.** Returning to the tunnel on every background is the conservative reading of TN2277. If a brief app switch should keep the route, that needs device evidence first.
 4. **The capability's name and payload**, before the Web UI half spreads to instances.
 5. **Admission while the coordinator is busy** (section 3). Reusing `isCurrentRuntime` unchanged means a route that is ready during a push management request is refused once. Admitting on the lease alone needs a coordinator check without the `phase` term, which is the iOS owner's to add or refuse.
+6. **A navigation in flight when the direct path fails.** A request in flight on the direct path fails with it and is not replayed (section 4). For the primary's main-frame navigation that means a failed load: the App shows its load-failure view, and Retry then loads over the tunnel. Nothing reloads by itself. Should the shell reload the primary once when the transport returns to the tunnel while its load has just failed? It matters only once a transport exists, and the listener, route, and bridge pull request does not do it.
 
 ## 10. Pull requests
 
