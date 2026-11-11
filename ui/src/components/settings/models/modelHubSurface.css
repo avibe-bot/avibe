@@ -855,10 +855,11 @@
   font-size: var(--model-hub-add-key-input-size);
 }
 .model-hub-add-key-secret { width: 100%; }
+/* Hints are prose, in the dialog's own face; only literal values such as URLs are mono. */
 .model-hub-add-key-hint {
   color: var(--model-hub-muted-b3);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: var(--model-hub-add-key-hint-size);
+  font-size: var(--model-hub-add-key-strip-title-size);
+  line-height: 1.5;
 }
 .model-hub-add-key-protocol-area {
   display: flex;

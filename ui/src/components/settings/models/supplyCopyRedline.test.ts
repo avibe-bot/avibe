@@ -21,7 +21,8 @@ import { SUPPLY_WARNINGS } from './sufficiency';
 
 const BUNDLES = { zh, en } as const;
 
-const DIRECT = /直连|\bdirect\b/i;
+// Direct mode reads as a backend's own login (Agent 管理) since 2026-11-12.
+const DIRECT = /直连|Agent 管理|\bdirect\b|\bown login\b/i;
 /** Verbs that turn a mention of Direct into a claim about falling back to it. */
 const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert|switch(?:es|ed)? back|stays? on/i;
 

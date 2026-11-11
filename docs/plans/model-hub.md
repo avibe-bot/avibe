@@ -144,8 +144,10 @@ of user-facing copy; it supersedes the Source and Gateway rows and the
 - Only copy changes: wire values (`hub | direct`, `source_id`), API fields, and
   code identifiers keep the Source / Gateway names, and this spec keeps them as
   technical prose.
-- Open: the per-backend mode labels (Gateway / Direct) and the Native hop label
-  keep their current words until the owner picks a replacement.
+- Per-backend mode words (owner chose option B the same day): Gateway mode reads
+  模型网关管理 / **Managed** (“Managed · Ready”), Direct mode and a native hop
+  both read Agent 管理 / **Own login**; the switches read “Let Model Hub manage”
+  and “Use own login”. The wire values stay `hub | direct` and `native_cli`.
 
 | Concept | zh | en | Notes |
 | --- | --- | --- | --- |

@@ -299,7 +299,7 @@ const renderPage = (
 const switchFirstGatewayAgentToDirect = async () => {
   await userEvent.click((await screen.findAllByRole('button', { name: /Runtime mode:|运行模式[:：]/i }))[0]);
   const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
-  await userEvent.click(within(modeGroup).getByRole('button', { name: /Switch to direct|切到直连|Retry|重试/i }));
+  await userEvent.click(within(modeGroup).getByRole('button', { name: /Use own login|改为 Agent 管理|Retry|重试/i }));
 };
 
 const closeSourceDetails = async () => {
@@ -347,7 +347,7 @@ describe('SettingsModelsPage surface branches', () => {
     const setMode = vi.spyOn(modelsApi, 'setAgentMode').mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
     renderPage([], [directAgent('claude')]);
 
-    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
     expect(within(dialog).getByText(/migration does not test keys online|迁移时不联网校验 Key/)).toBeTruthy();
@@ -372,7 +372,7 @@ describe('SettingsModelsPage surface branches', () => {
       .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
     renderPage([], [directAgent('claude')]);
 
-    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
     await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
     expect(apply).not.toHaveBeenCalled();
   });
@@ -383,7 +383,7 @@ describe('SettingsModelsPage surface branches', () => {
       .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
     renderPage([], [directAgent('claude')]);
 
-    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
     await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
     expect(screen.queryByRole('dialog')).toBeNull();
   });
@@ -401,12 +401,12 @@ describe('SettingsModelsPage surface branches', () => {
       .mockResolvedValueOnce({ ...directAgent('claude'), mode: 'hub' });
     renderPage([...sources], [directAgent('claude')]);
 
-    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
 
-    expect(await screen.findByText(/^The switch to gateway did not go through$|^没能切换到模型网关$/)).toBeTruthy();
+    expect(await screen.findByText(/^The switch to Model Hub did not go through$|^没能交给模型网关管理$/)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/ }));
     await waitFor(() => expect(setMode).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByText(/^The switch to gateway did not go through$|^没能切换到模型网关$/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/^The switch to Model Hub did not go through$|^没能交给模型网关管理$/)).toBeNull());
   });
 
   it('opens the same migration dialog from an existing Hub user entry', async () => {
@@ -696,8 +696,8 @@ describe('SettingsModelsPage surface branches', () => {
   it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
     renderPage([], [directAgent('claude'), directAgent('codex'), directAgent('opencode')]);
 
-    expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
+    expect(await screen.findByText(/^Currently: own login$|^当前:直连$/i)).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     expect(screen.getByText(/^Switch to Model Hub and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeTruthy();
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
@@ -725,7 +725,7 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
     expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
   });
 
@@ -756,7 +756,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeTruthy();
     expect(screen.queryByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeNull();
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledOnce();
   });
@@ -797,7 +797,7 @@ describe('SettingsModelsPage surface branches', () => {
     const user = userEvent.setup();
     await user.click(retry);
 
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeTruthy();
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledTimes(2);
   });
 
@@ -933,12 +933,12 @@ describe('SettingsModelsPage surface branches', () => {
     expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
     await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
-    expect(within(modeGroup).queryByRole('button', { name: /Switch to direct|切到直连/i })).toBeNull();
+    expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为 Agent 管理/i })).toBeNull();
     await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
     if (!configured) {
-      expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
+      expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     }
   });
 
@@ -997,8 +997,8 @@ describe('SettingsModelsPage surface branches', () => {
     await screen.findByText('Retained source');
     await userEvent.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
     const picker = await screen.findByRole('menu');
-    expect(within(picker).getByText(/Native recommended|推荐由 Agent 管理/i)).toBeTruthy();
-    expect(within(picker).getByText(/Model Hub recommended|推荐由模型网关管理/i)).toBeTruthy();
+    expect(within(picker).getByText(/Own login recommended|推荐由 Agent 管理/i)).toBeTruthy();
+    expect(within(picker).getByText(/Managed recommended|推荐由模型网关管理/i)).toBeTruthy();
     expect(within(picker).queryByText(/Claude Pro \/ Max|ChatGPT Plus \/ Pro/i)).toBeNull();
     await userEvent.click(within(picker).getByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
@@ -1026,7 +1026,7 @@ describe('SettingsModelsPage surface branches', () => {
     }
     // A hub-held vendor recommends nothing — its only custody is the hub — so it
     // draws no recommendation badge, while the two with a channel choice do.
-    const badges = rows.map((row) => /Native recommended|Model Hub recommended|推荐由/i.test(row.textContent ?? ''));
+    const badges = rows.map((row) => /Own login recommended|Managed recommended|推荐由/i.test(row.textContent ?? ''));
     expect(badges).toEqual(SUBSCRIPTION_VENDORS.map(hasNativeSubscriptionCustody));
   });
 
@@ -1126,7 +1126,7 @@ describe('SettingsModelsPage surface branches', () => {
     await user.click(screen.getByRole('button', { name: /Add subscription|添加订阅/i }));
     await user.click(await screen.findByRole('menuitem', { name: /Claude subscription|Claude 订阅/i }));
 
-    const native = await screen.findByRole('radio', { name: /Native|原生/i });
+    const native = await screen.findByRole('radio', { name: /Own login|原生/i });
     const hub = screen.getByRole('radio', { name: /Model Hub|模型供应商/i });
     expect(native.getAttribute('aria-disabled')).toBe('true');
     expect(hub.getAttribute('aria-checked')).toBe('true');
@@ -1286,8 +1286,8 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
+    expect(await screen.findByText(/^Currently: own login$|^当前:直连$/i)).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     expect(events).not.toHaveBeenCalled();
   });
 
@@ -1675,7 +1675,7 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(chainRead).toHaveBeenCalledOnce());
     await switchFirstGatewayAgentToDirect();
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeTruthy();
 
     await act(async () => {
       pendingChains.resolve([takeoverChain]);
@@ -1854,14 +1854,14 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$/i }));
-    expect(await screen.findByText(/^Currently: direct$/i)).toBeTruthy();
+    expect(await screen.findByText(/^Currently: own login$/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Retry$/i })).toBeNull();
     expect(modelsApi.listSources).toHaveBeenCalledTimes(2);
     await flushRouteFocus();
     expect(document.activeElement?.closest('.model-hub-shell')).toBeTruthy();
     await act(async () => { sources.resolve([]); });
     await flushRouteFocus();
-    expect(screen.getByText(/^Currently: direct$/i)).toBeTruthy();
+    expect(screen.getByText(/^Currently: own login$/i)).toBeTruthy();
     expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
   });
 
@@ -2128,7 +2128,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     const retry = screen.getByRole('button', { name: /^Retry$/i }) as HTMLButtonElement;
     expect(retry.disabled).toBe(false);
-    expect(screen.queryByText(/^Currently: direct$/i)).toBeNull();
+    expect(screen.queryByText(/^Currently: own login$/i)).toBeNull();
     if (!empty) expect(screen.getByText('Refreshed source')).toBeTruthy();
     expect(modelsApi.getAgentChains).toHaveBeenCalledTimes(chainReads);
     const agentsBeforeRetry = vi.mocked(modelsApi.listAgents).mock.calls.length;
@@ -2139,7 +2139,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(modelsApi.listSources).toHaveBeenCalledTimes(sourcesBeforeRetry + 1);
     expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
     if (empty) {
-      expect(await screen.findByText(/^Currently: direct$/i)).toBeTruthy();
+      expect(await screen.findByText(/^Currently: own login$/i)).toBeTruthy();
     } else {
       // M6 settlement releases its backend again; an unrelated ready read must
       // not leave the backend silently excluded from all future chain probes.
@@ -2379,7 +2379,7 @@ describe('SettingsModelsPage surface branches', () => {
 
     await switchFirstGatewayAgentToDirect();
 
-    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeTruthy();
     expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
     expect(setMode).toHaveBeenCalledOnce();
     expect(agentRead).toHaveBeenCalledTimes(2);
