@@ -165,6 +165,14 @@ const formatNames = (names: readonly string[], separator: string): string =>
  */
 export type ProvidersScreenProps = SetupScreenProps & {
   agentReads?: CollectionReadAuthority<AgentSupply[]>;
+  /**
+   * Finish setup now, without a provider: the way out for someone who has no
+   * subscription or key yet. The Wizard owns what finishing means; absent, the
+   * screen offers no way out (a host that is not the setup journey).
+   */
+  onLater?: () => void;
+  /** The finish `onLater` started is still being written. */
+  laterPending?: boolean;
 };
 
 export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScreenProps>(
@@ -179,6 +187,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     onActionChange,
     onNavigate,
     agentReads: sharedAgentReads,
+    onLater,
+    laterPending = false,
   }, ref) {
     const { t } = useTranslation();
     const motion = useOnboardingMotion();
@@ -780,6 +790,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     const warnNothingPassed = summary.kind !== 'error' && sourceRead === 'read' && hubAdmitted
       && nothingPassed(sources, checks);
     const summaryTone = summary.kind === 'error' || warnNothingPassed ? 'error' : null;
+    const offerLater = onLater !== undefined && !hasSource;
     const summaryText = warnNothingPassed
       ? t('onboarding.providers.nothingPassed')
       : summary.kind === 'pending'
@@ -858,17 +869,33 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
 
             <DestinationRow />
 
+            {/* Offered while there is nothing to continue with: someone who has a
+                provider continues, and the way out is for someone who has none yet. */}
             <p
               className="setup-provider-summary"
               {...(summaryTone ? { 'data-tone': summaryTone } : {})}
+              {...(offerLater ? { 'data-later': '' } : {})}
               role="status"
               aria-live="polite"
             >
-              {summaryText}
-              {summary.kind === 'error' && (
-                <Button type="button" variant="outline" size="sm" className="setup-summary-retry" onClick={retrySupply}>
-                  {t('common.retry')}
-                </Button>
+              <span>{summaryText}</span>
+              {(summary.kind === 'error' || offerLater) && (
+                <span className="setup-summary-actions">
+                  {summary.kind === 'error' && (
+                    <Button type="button" variant="outline" size="sm" className="setup-summary-retry" onClick={retrySupply}>
+                      {t('common.retry')}
+                    </Button>
+                  )}
+                  {/* The way out for someone with nothing to add yet: quiet, in the
+                      sentence above the action rather than a second control beside it,
+                      the way the assistants step offers its rescan. */}
+                  {offerLater && (
+                    <Button type="button" variant="link" size="xs" className="setup-summary-later h-auto p-0"
+                      disabled={!active || laterPending} onClick={onLater}>
+                      {t('onboarding.providers.later')}
+                    </Button>
+                  )}
+                </span>
               )}
             </p>
           </div>

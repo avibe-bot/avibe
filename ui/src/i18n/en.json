@@ -6865,6 +6865,7 @@
       "actionRetryImport_other": "Review migration status for {{count}}",
       "actionContinue": "Continue to assistants",
       "actionAdd": "Add subscription or API Key",
+      "later": "Set up later",
       "actionConnecting": "Connecting…",
       "actionChecking": "Checking connection…",
       "addTitle": "Add subscription or API Key",
