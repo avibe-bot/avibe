@@ -98,3 +98,69 @@ Offline browser tests do not claim a live deployment, physical iOS/PWA user-
 activation acceptance or a real passkey ceremony. Those are separate release
 checks after explicit authorization. Existing dependency-audit findings in the
 sandbox's development toolchain are not silently fixed by integrity pinning.
+
+## Protected Solana backend integration boundary (held Avibe slice)
+
+The Avibe Python API/service/storage path accepts the sandbox-generated opaque
+protected Ed25519 record without opening it. The record name is the outer DB
+identity; value-free `wrap_meta.record_meta` must be exactly a keypair with
+curve `ed25519` and the lower-case 32-byte public key matching the request's
+pinned metadata. Python does **not** authenticate the envelope's AAD, derive a
+DEK, generate/import a seed, call `avault`, or treat a standard keypair spec or
+blind-box import as a protected fallback. The sandbox authenticates the name
+through the existing v2 AAD at decrypt/key use.
+
+Protected pending signing is intentionally narrow. The request must use
+`scheme: "ed25519"` and the exact non-empty, lower-case, even-hex
+`{kind: "solana-transaction-v1", messageHex}` context matching outer
+`message_hex`, bounded to 1 MiB before traversal or copies. The sandbox remains
+the authority for canonical legacy/v0 Solana message parsing, packet bounds,
+and required-signer checks; Python does not duplicate that decoder. The
+persisted request is the sole binding source, including its server-derived
+`signing_key` snapshot (record ID and public key); replacing either refuses
+completion rather than adopting a new key. Caller delivery cannot populate that
+snapshot. The signed v2 release is exactly
+`{name, scheme, messageHex, publicKey, signingContext}` and every copy must
+match the persisted record, message, scheme, and full context. Completion
+accepts one 64-byte Ed25519 signature with absent/null `recovery_id` only after
+expiry/state/replay and cryptographic verification against the persisted
+message and record public key.
+
+This backend slice does not add a UV assertion or claim that a returned public
+signature proves a particular passkey ceremony. Fresh R3 UV, protected key use,
+whole-operation challenge, sandbox parsing, and the authenticated v2 AAD remain
+sandbox-owned. A valid signature is public proof over message and key only.
+**A historical valid signature can settle another new,
+unexpired pending request for identical key/message/context**, without a fresh
+UV proof. This is explicitly exercised by the backend test; replaying the same
+completed request still fails. The signature is not evidence that the envelope
+was decrypted, the sandbox parser ran, or this particular ceremony happened.
+The existing API's request-state and binding checks still
+prevent a changed key/message/context/scheme, expired request, replayed request,
+missing context, malformed message encoding, empty/oversize protected message,
+or invalid signature from settling successfully.
+
+Merging the backend slice while the currently packaged sandbox pin is installed
+exposes structurally checked protected-record ingestion, creation of fully bound
+pending requests, and **completion with an externally supplied valid public
+signature**, subject to the checks above. The old pin still rejects Ed25519 and
+`solana-transaction-v1` before protected key use, so it cannot produce a new
+protected signature; the old UI cannot create or execute the protected Solana
+flow. The pin is not an API-completion attestation gate. No dynamic capability/
+version field, server feature flag, mutable resource fallback, pin change,
+deployment, or downgrade is introduced. The
+approved Avibe package plus its exact reviewed sandbox pin is the feature cohort.
+A later rollout must ship the compatible sandbox parser/key-use release, refresh
+the package pin, and have the protected UI consume the exact request/release
+wire before user-facing support is enabled.
+
+The held backend tests cover real Python API/service/SQLite paths for valid and
+invalid protected metadata, no protected `avault` custody call, exact pending
+binding and release shape, one valid completion, changed binding/expiry/replay,
+missing context, empty/oversize input, invalid signatures, standard empty and
+150-byte regressions, and unchanged legacy secp behavior. They do not claim
+fresh WebAuthn UV or final sandbox parser/key-use acceptance; those belong to
+the sandbox final-head review and coordinated release acceptance. The
+`use-avibe-vault` Skill still does not advertise protected Solana support; Vault
+request/provide keypair creation remains unsupported. This backend-only change
+does not alter standard generation/import or legacy secp256k1 envelope/AAD bytes.

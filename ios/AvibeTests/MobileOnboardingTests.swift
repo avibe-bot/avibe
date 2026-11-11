@@ -1838,6 +1838,54 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    func testARemovedStoreThatComesBackIsRemovedAgainAndForgottenOnlyOnceGone() async {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        let oldIdentifier = store.identifier
+        // WebKit reports the removal as done, and the store's directory comes
+        // back while its network session finishes closing (#3418).
+        registry.returningIdentifiers.insert(oldIdentifier)
+
+        await store.rotate()
+
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+        XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(store.ownedIdentifiers.contains(oldIdentifier))
+
+        // The next launch removes it again, its session long closed.
+        registry.returningIdentifiers.remove(oldIdentifier)
+        let relaunched = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        await relaunched.sweepOrphans()
+
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier, oldIdentifier])
+        XCTAssertFalse(registry.identifiers.contains(oldIdentifier))
+        XCTAssertTrue(relaunched.ownedIdentifiers.contains(oldIdentifier))
+
+        // Gone now: the launch after forgets it, without removing it again.
+        let gone = AccountWebsiteDataStore(
+            defaults: defaults,
+            operations: registry.operations
+        )
+        await gone.sweepOrphans()
+
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier, oldIdentifier])
+        XCTAssertEqual(gone.ownedIdentifiers, [gone.identifier])
+        XCTAssertEqual(
+            AccountWebsiteDataStore(
+                defaults: defaults,
+                operations: registry.operations
+            ).ownedIdentifiers,
+            [gone.identifier]
+        )
+    }
+
     func testLaunchSweepIgnoresUnownedStoresAndPreservesTheCurrentStore() async {
         let defaults = makeDefaults()
         let registry = FakeNamedDataStoreRegistry()
@@ -2270,6 +2318,9 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
 private final class FakeNamedDataStoreRegistry {
     var identifiers = Set<UUID>()
     var failingIdentifiers = Set<UUID>()
+    /// Stores whose removal reports success while their directory stays (or
+    /// comes straight back), as WebKit's do while their session closes.
+    var returningIdentifiers = Set<UUID>()
     var removalAttempts: [UUID] = []
     var beforeRemoval: ((UUID) -> Void)?
 
@@ -2288,8 +2339,13 @@ private final class FakeNamedDataStoreRegistry {
                         code: 1
                     )
                 }
-                identifiers.remove(identifier)
+                if !returningIdentifiers.contains(identifier) {
+                    identifiers.remove(identifier)
+                }
                 return nil
+            },
+            listIdentifiers: { [self] in
+                identifiers
             }
         )
     }

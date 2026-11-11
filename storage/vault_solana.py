@@ -5,11 +5,12 @@ module owns the public, value-free side of that contract: the message encoding,
 the pinned public key, the typed ``solana-transaction-v1`` signing context, and
 verification of a returned signature. It never parses a Solana transaction;
 Python treats the message as opaque bytes, and decoding belongs to the sandbox.
-Key material and signing stay in avault.
+Key material and signing stay in avault (standard) or the sandbox (protected).
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -84,7 +85,7 @@ def validate_context(context: Any, *, message_hex: str) -> dict[str, Any]:
         raise SolanaSigningError("signing_context must be an object")
     if context.get("kind") != CONTEXT_KIND:
         raise SolanaSigningError(f"ed25519 signing accepts only a {CONTEXT_KIND} signing_context")
-    if set(context) != {"kind", "messageHex"}:
+    if len(context) != 2 or "messageHex" not in context:
         # Field names are not echoed: they are caller-supplied and unbounded.
         raise SolanaSigningError(f"a {CONTEXT_KIND} signing_context has exactly the fields kind and messageHex")
     context_message = context["messageHex"]
@@ -97,6 +98,54 @@ def validate_context(context: Any, *, message_hex: str) -> dict[str, Any]:
     if context_message != message_hex:
         raise SolanaSigningError(f"{CONTEXT_KIND} messageHex must equal the sign request message_hex exactly")
     return {"kind": CONTEXT_KIND, "messageHex": context_message}
+
+
+def declares_protected_solana_record(envelope: Any) -> bool:
+    """Return whether opaque metadata explicitly declares an Ed25519 record."""
+    wrap_meta = getattr(envelope, "wrap_meta", None)
+    if not isinstance(wrap_meta, str) or not wrap_meta:
+        return False
+    try:
+        parsed = json.loads(wrap_meta)
+    except (TypeError, ValueError):
+        return False
+    record_meta = parsed.get("record_meta") if isinstance(parsed, dict) else None
+    return isinstance(record_meta, dict) and record_meta.get("curve") == CURVE
+
+
+def validate_protected_record_envelope(name: Any, envelope: Any, signing_key: Any) -> None:
+    """Validate value-free protected keypair metadata, not opaque AAD authenticity.
+
+    The sandbox authenticates the outer record name through the existing v2 AAD when
+    it unwraps the envelope. Python only checks the supplied metadata pairing.
+    """
+    if not isinstance(name, str) or not name:
+        raise SolanaSigningError("protected Solana record requires a name")
+    wrap_meta = getattr(envelope, "wrap_meta", None)
+    if not isinstance(wrap_meta, str) or not wrap_meta:
+        raise SolanaSigningError("protected Solana record requires wrap metadata")
+    try:
+        parsed = json.loads(wrap_meta)
+    except (TypeError, ValueError) as exc:
+        raise SolanaSigningError("protected Solana record wrap metadata is invalid") from exc
+    if not isinstance(parsed, dict):
+        raise SolanaSigningError("protected Solana record wrap metadata must be an object")
+    if type(parsed.get("v")) is not int or parsed["v"] != 1 or parsed.get("scheme") != "machine-aesgcm-v1":
+        raise SolanaSigningError("protected Solana record wrap metadata has an unsupported version or scheme")
+    record_meta = parsed.get("record_meta")
+    if not isinstance(record_meta, dict):
+        raise SolanaSigningError("protected Solana record metadata is missing")
+    if set(record_meta) != {"kind", "curve", "public_key"}:
+        raise SolanaSigningError("protected Solana record metadata requires exactly kind, curve, and public_key")
+    if record_meta["curve"] != CURVE:
+        raise SolanaSigningError("protected Solana record metadata must use ed25519")
+    public_key = require_public_key(signing_key)
+    if set(signing_key) != {"curve", "chain", "public_key"}:
+        raise SolanaSigningError("protected Solana public metadata requires exactly curve, chain, and public_key")
+    if record_meta["kind"] != "keypair":
+        raise SolanaSigningError("protected Solana record metadata must describe a keypair")
+    if record_meta["public_key"] != public_key:
+        raise SolanaSigningError("protected Solana record metadata public key does not match the pinned key")
 
 
 def verify_signature(public_key: str, message_hex: str, signature: Any) -> None:
