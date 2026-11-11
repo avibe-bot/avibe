@@ -2,6 +2,7 @@ export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
   | 'app'
+  | 'badge'
   | 'haptics'
   | 'keyboardResizesViewport'
   | 'push'
@@ -143,6 +144,19 @@ export async function setNativeAccountActionAvailable(
   } catch {
     return false;
   }
+}
+
+/**
+ * Sets the native App's icon badge to `count`, the Inbox total; 0 clears it.
+ * Fire-and-forget: true when the shell has the `badge` capability and the call
+ * went out, false where the shell predates it (or there is no shell), which
+ * leaves the badge to whatever else sets it.
+ */
+export function setNativeBadge(count: number): boolean {
+  if (!hasNativeCapability('badge')) return false;
+  const value = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  void callNative<null>('badge', 'badge.set', { count: value }).catch(() => {});
+  return true;
 }
 
 export async function nativeHapticImpact(style: NativeImpactStyle): Promise<boolean> {

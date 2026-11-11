@@ -4333,7 +4333,10 @@ scenarios:
     # APScheduler's physical job generation retains its registered run_at,
     # timezone, and definition revision. The misfire records schedule_missed only
     # while all still match an enabled at schedule; an event from a replacement
-    # that resolves to the same instant still cannot retire it.
+    # that resolves to the same instant still cannot retire it. Retirement now
+    # atomically records a failed Run and durable creator notice; replaying the
+    # event cannot duplicate either. The actual executor also tolerates a late
+    # tick within the explicit five-minute grace (test_one_shot_late_executor).
     test: tests/test_scheduled_tasks.py::test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed
   - id: HFR-479
     name: Watch retirement outcome has one cycle owner

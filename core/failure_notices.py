@@ -407,8 +407,9 @@ def turn_notification_delivered(notice: Optional[dict[str, Any]]) -> bool:
 def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
     """Whether this notice is delivered per-run, outside the failure streak.
 
-    Three lanes qualify because each carries its own bound:
+    Each qualifying lane carries its own bound:
 
+    * a missed one-shot fire is bounded by its retired schedule generation;
     * a Turn fallback elects one Run across all definitions linked to that Turn;
     * an interruption hits a run at most once, so per-run notices are self-bounding;
     * a binding change is already scoped by ``SessionBindingChange.signature`` — one
@@ -425,6 +426,7 @@ def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
 
     return (
         is_interruption(notice)
+        or bool((notice or {}).get("schedule_missed"))
         or is_binding_change(notice)
         or bool(notice_turn_id(notice))
     )
@@ -508,6 +510,9 @@ def decide(
         if fallback_run_id and fallback_run_id != run_id:
             return NoticeDecision(ACTION_SKIP, f"turn_fallback_owned:{fallback_run_id}")
         return NoticeDecision(ACTION_DELIVER, "turn_fallback")
+
+    if (notice or {}).get("schedule_missed"):
+        return NoticeDecision(ACTION_DELIVER, "schedule_missed")
 
     if is_interruption(notice):
         # Per-run, always, with no suppression scope and no deferral: the streak is
