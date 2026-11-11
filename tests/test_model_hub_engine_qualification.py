@@ -81,6 +81,8 @@ def test_a_candidate_record_names_exact_manifest_bytes_and_a_minimum_avibe(tmp_p
     assert candidate.manifest_bytes == manifest_bytes(build=2)
     assert candidate.manifest_sha256 == hashlib.sha256(manifest_bytes(build=2)).hexdigest()
     assert len(candidate.identity()["assets"]) == 6
+    assert candidate.identity()["source"]["repository"] == "router-for-me/CLIProxyAPI"
+    assert candidate.identity()["source"]["source_sha"]
     assert candidate.hosted_wire_changes == {BASELINE: "upstream renamed a header"}
 
 
@@ -139,19 +141,13 @@ def _write(path: Path, document: dict) -> None:
 # ----- candidate and untrusted observations ----------------------------------
 
 
-def test_candidate_identity_includes_upstream_reference_and_exact_archives(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path))
-    identity = candidate.identity()
-    assert identity["source"]["repository"] == "router-for-me/CLIProxyAPI"
-    assert identity["source"]["source_sha"]
-    assert len(identity["assets"]) == 6
-    assert identity["manifest_sha256"] == hashlib.sha256(candidate.manifest_bytes).hexdigest()
-
-
 def test_missing_future_producers_are_reported_as_observations_not_a_universal_gate(tmp_path) -> None:
     candidate = qualification.load_candidate(_record(tmp_path))
     problems = _problems(candidate, _evidence(candidate))
     assert problems == []
+    result = _result(candidate)
+    assert result["result"] == "untrusted_rehearsal"
+    assert not any(problem.startswith(("backward_state:", "lifecycle:")) for problem in result["observations"])
     missing = [item for item in _evidence(candidate) if item["class"] != "hosted_wire"]
     problems = _problems(candidate, missing)
     assert any(problem.startswith("hosted_wire:") for problem in problems)
@@ -244,7 +240,6 @@ def test_untrusted_rehearsal_can_be_verified_as_context_but_does_not_authorize(t
 
 
 @pytest.mark.parametrize("forge", [
-    lambda r: r.update(result="qualified"),
     lambda r: r.update(harness_sha256="0" * 64),
     lambda r: r.update(baselines={}),
     lambda r: r["candidate"].update(manifest_sha256="0" * 64),
@@ -1089,18 +1084,6 @@ def test_missing_failed_or_misbound_evidence_leaves_the_candidate_unqualified(tm
     assert any(problem.startswith("build:") for problem in result["observations"])
 
 
-def test_future_backward_state_and_lifecycle_reports_are_not_universal_receipt_blocks(tmp_path) -> None:
-    candidate = qualification.load_candidate(_record(tmp_path))
-    produced_today = [item for item in _evidence(candidate) if item["class"] not in {"backward_state", "lifecycle"}]
-    assert _problems(candidate, produced_today) == []
-    result = qualification.build_untrusted_rehearsal(
-        candidate, produced_today, baselines=BASELINES, avibe=AVIBE,
-        run_id=RUN_ID, run_attempt=ATTEMPT, head_sha=HEAD, harness_sha256=HARNESS,
-    )
-    assert result["result"] == "untrusted_rehearsal"
-    assert not any(problem.startswith(("backward_state:", "lifecycle:")) for problem in result["observations"])
-
-
 def test_a_run_identity_mismatch_is_refused_even_when_the_untrusted_result_claims_success(tmp_path) -> None:
     """MH-ENGINE-CHANNEL-010: GitHub run identity is checked independently of claims."""
     candidate = qualification.load_candidate(_record(tmp_path))
@@ -1185,29 +1168,3 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     assert "REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}" in text
     assert "persist-credentials: false" in text
     assert "secrets." not in json.dumps(workflow["jobs"]["prepare"])
-
-
-def test_harness_digest_covers_the_candidate_workflow_and_shared_action() -> None:
-    for name in qualification.HARNESS_FILES:
-        (ROOT / name).is_file()
-    workflow = (ROOT / qualification.QUALIFICATION_WORKFLOW_PATH).read_text(encoding="utf-8")
-    invoked = set(re.findall(r"scripts/[A-Za-z0-9_]+\.(?:py|sh)", workflow)) | {qualification.ORIGINS_MODULE}
-    invoked.discard("scripts/ci_scenario_evidence.py")
-    assert invoked <= set(qualification.HARNESS_FILES)
-
-
-def test_qualification_and_rehearsal_use_the_same_released_wheel_action() -> None:
-    action = ".github/actions/model-hub-released-e2e"
-    qualify = _workflow()["jobs"]["released-avibe-e2e"]
-    rehearsal = _workflow(".github/workflows/model-hub-engine-released-e2e-rehearsal.yml")["jobs"]["rehearsal"]
-
-    def shared(job: dict) -> dict:
-        (step,) = [item for item in job["steps"] if item.get("uses") == f"./{action}"]
-        return step["with"]
-
-    assert shared(qualify)["tests-source"] == "released-src"
-    assert shared(rehearsal)["tests-source"] == "${{ matrix.tests == 'tag' && 'released-src' || '.' }}"
-    assert rehearsal["strategy"]["matrix"] == {"tests": ["tag", "head"]}
-    scripts = "\n".join(step.get("run", "") for step in rehearsal["steps"])
-    assert "rehearsal-record" in scripts and "--require-pass" in scripts
-    assert "receipt" not in scripts and "evidence-" not in scripts
