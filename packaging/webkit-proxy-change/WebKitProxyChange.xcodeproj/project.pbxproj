@@ -1,0 +1,85 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* ProbeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ProbeApp.swift */; };
+		A10000000000000000000002 /* WebKitProxyChangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* WebKitProxyChangeTests.swift */; };
+		A10000000000000000000003 /* matrix.json in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* matrix.json */; };
+		A10000000000000000000004 /* Anchor.der in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* Anchor.der */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* ProbeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* WebKitProxyChangeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebKitProxyChangeTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* matrix.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = matrix.json; sourceTree = "<group>"; };
+		A20000000000000000000004 /* Anchor.der */ = {isa = PBXFileReference; lastKnownFileType = file; path = generated/Anchor.der; sourceTree = "<group>"; };
+		A20000000000000000000005 /* ProbeHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ProbeHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000006 /* WebKitProxyChangeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WebKitProxyChangeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000007 /* ProbeHost-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ProbeHost-Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A30000000000000000000001 /* ProbeHost Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000002 /* Tests Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A40000000000000000000001 = {isa = PBXGroup; children = (A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005); sourceTree = "<group>"; };
+		A40000000000000000000002 /* Sources */ = {isa = PBXGroup; children = (A20000000000000000000001, A20000000000000000000007); path = .; sourceTree = "<group>"; };
+		A40000000000000000000003 /* Tests */ = {isa = PBXGroup; children = (A20000000000000000000002, A20000000000000000000003, A20000000000000000000004); path = .; sourceTree = "<group>"; };
+		A40000000000000000000004 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000005, A20000000000000000000006); name = Products; sourceTree = "<group>"; };
+		A40000000000000000000005 /* WebKit Proxy Change */ = {isa = PBXGroup; children = (A40000000000000000000001); name = "WebKit Proxy Change"; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* ProbeHost */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000001; buildPhases = (A30000000000000000000003, A30000000000000000000001, A30000000000000000000004); buildRules = ( ); dependencies = ( ); name = ProbeHost; productName = ProbeHost; productReference = A20000000000000000000005; productType = "com.apple.product-type.application"; };
+		A50000000000000000000002 /* WebKitProxyChangeTests */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000002; buildPhases = (A30000000000000000000005, A30000000000000000000002, A30000000000000000000006); buildRules = ( ); dependencies = (A70000000000000000000001); name = WebKitProxyChangeTests; productName = WebKitProxyChangeTests; productReference = A20000000000000000000006; productType = "com.apple.product-type.bundle.unit-test"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A80000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = {LastUpgradeCheck = 2600; TargetAttributes = {A50000000000000000000001 = {CreatedOnToolsVersion = 26.0;}; A50000000000000000000002 = {CreatedOnToolsVersion = 26.0; TestTargetID = A50000000000000000000001;};};}; buildConfigurationList = A60000000000000000000003; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A40000000000000000000005; productRefGroup = A40000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001, A50000000000000000000002); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A30000000000000000000004 /* ProbeHost Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000006 /* Tests Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003, A10000000000000000000004); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A30000000000000000000003 /* ProbeHost Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000005 /* Tests Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A70000000000000000000001 = {isa = PBXTargetDependency; target = A50000000000000000000001; targetProxy = A70000000000000000000002; };
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		A70000000000000000000002 = {isa = PBXContainerItemProxy; containerPortal = A80000000000000000000001; proxyType = 1; remoteGlobalIDString = A50000000000000000000001; remoteInfo = ProbeHost; };
+/* End PBXContainerItemProxy section */
+
+/* Begin XCBuildConfiguration section */
+		A90000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = "ProbeHost-Info.plist"; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = "com.avibe.webkit-probe"; PRODUCT_NAME = ProbeHost; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; };
+		A90000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; INFOPLIST_FILE = "ProbeHost-Info.plist"; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = "com.avibe.webkit-probe"; PRODUCT_NAME = ProbeHost; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = "1,2"; };
+		A90000000000000000000003 /* Test Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = "com.avibe.webkit-probe.tests"; PRODUCT_NAME = WebKitProxyChangeTests; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ProbeHost.app/ProbeHost"; TEST_TARGET_NAME = ProbeHost; };
+		A90000000000000000000004 /* Test Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = "com.avibe.webkit-probe.tests"; PRODUCT_NAME = WebKitProxyChangeTests; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ProbeHost.app/ProbeHost"; TEST_TARGET_NAME = ProbeHost; };
+		A90000000000000000000005 /* Project Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 5.0; }; };
+		A90000000000000000000006 /* Project Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SWIFT_VERSION = 5.0; }; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A60000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (A90000000000000000000001, A90000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A60000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (A90000000000000000000003, A90000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A60000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (A90000000000000000000005, A90000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A80000000000000000000001;
+}

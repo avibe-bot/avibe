@@ -1,0 +1,18 @@
+[
+  {"id":"idle-h1","origin":"h1","proxy":"h1","action":"idle"},
+  {"id":"idle-h2","origin":"h2","proxy":"h1","action":"idle"},
+  {"id":"sse-h2","origin":"h2","proxy":"h1","action":"live"},
+  {"id":"remove-open-h1","origin":"h1","proxy":"h1","action":"removeOpen"},
+  {"id":"remove-open-h2","origin":"h2","proxy":"h2","action":"removeOpen"},
+  {"id":"remove-close-h1","origin":"h1","proxy":"h1","action":"removeClose"},
+  {"id":"remove-close-h2","origin":"h2","proxy":"h2","action":"removeClose"},
+  {"id":"inflight-install-h1","origin":"h1","proxy":"h1","action":"flightInstall"},
+  {"id":"inflight-install-h2","origin":"h2","proxy":"h1","action":"flightInstall"},
+  {"id":"inflight-remove-h1","origin":"h1","proxy":"h1","action":"flightRemove"},
+  {"id":"inflight-remove-h2","origin":"h2","proxy":"h2","action":"flightRemove"},
+  {"id":"restart-empty-h1","origin":"h1","proxy":"h1","action":"restartEmpty"},
+  {"id":"restart-empty-h2","origin":"h2","proxy":"h2","action":"restartEmpty"},
+  {"id":"restart-placeholder-h1","origin":"h1","proxy":"h1","action":"restartPlaceholder"},
+  {"id":"restart-placeholder-h2","origin":"h2","proxy":"h2","action":"restartPlaceholder"},
+  {"id":"constant-proxy-h2","origin":"h2","proxy":"h2","action":"constantProxy"}
+]
