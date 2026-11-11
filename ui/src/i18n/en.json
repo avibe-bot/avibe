@@ -352,6 +352,27 @@
     },
     "errors": {
       "network": "Could not reach avibe.bot. Check your connection and retry."
+    },
+    "licenses": {
+      "about": "About",
+      "title": "Open-source licenses",
+      "intro": "The Avibe app includes the open-source components below. Thanks to their authors.",
+      "sourceTitle": "Source code for MPL-2.0 components",
+      "sourceBody": "These components are distributed unmodified under the Mozilla Public License 2.0. Get their source code from the crates.io archive or the upstream source.",
+      "family": "{{name}} and {{related}} related crates, {{version}}",
+      "archives": "crates.io archives: ",
+      "archive": "crates.io archive",
+      "archiveFor": "crates.io archive of {{name}}",
+      "sourceCode": "Source code",
+      "sourceFor": "Source code of {{name}}",
+      "texts": "License texts",
+      "covers": "Covers",
+      "generated": "This list is generated when the app is built.",
+      "components_one": "{{count}} component",
+      "components_other": "{{count}} components",
+      "crate": "{{name}} {{version}}",
+      "withAuthors": "{{crate}} ({{authors}})",
+      "separator": ", "
     }
   },
   "common": {

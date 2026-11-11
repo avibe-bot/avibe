@@ -457,6 +457,7 @@ jobs:
           # Ordinary UI changes still validate the bundled phone app on Linux;
           # only native/bridge/contract changes allocate the iOS simulator.
           npm run build:mobile
+          python3 ../ios/scripts/app_licenses.py generate --bundle ../ios/Avibe/Resources/MobileApp
           ../ios/scripts/verify_mobile_bundle.sh ../ios/Avibe/Resources/MobileApp
 
       # What a phone downloads before the first screen draws (docs/plans/web-ui-first-load.md).
