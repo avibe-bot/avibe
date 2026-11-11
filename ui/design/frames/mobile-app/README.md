@@ -314,3 +314,43 @@ no console errors), production build, and a light/dark inspection of every
 password capture. A screenshot proves layout only. Keychain suggestions and
 saving, keyboard insets, focus and announcements, and real Supabase answers
 belong to the implementation PR and a device check.
+
+## Open-source licenses — approved
+
+Status: **approved** by 产品伙伴 on 2026-11-11 at 19:38 Asia/Shanghai, as the
+implementation contract (the owner delegated this page's review; no further
+owner review). A build of the App that contains iroh ships several hundred
+open-source components, and the MPL-2.0 ones (attohttpc and the uniffi family)
+need a visible offer of their source code (`packaging/iroh-apple`, #3551). The
+App's own surface is Account, so its new About section opens 开源许可 /
+Open-source licenses. The page reuses the A composition (`CloudScreen`,
+`Brand`, `PageTitle`, the raised card) and adds no tokens or assets.
+`LicensesPage` and Account's `licenses` flag live in
+`ui/design/kit/mobile-app.tsx`.
+
+| File / surface | States |
+| --- | --- |
+| `licenses` | `entry` (Account with the About row), `default` (first screen), `group-open` (390 × 2400 whole page, MIT group expanded) |
+
+6 frames / 12 theme captures (3 states × zh/en × light/dark).
+
+Approved decisions (revised after 产品伙伴's review on 2026-11-11):
+
+- Entry stays Account → About → Open-source licenses.
+- The MPL-2.0 source offer stays at the top. A crate family sharing one version
+  and upstream commit is one line: "uniffi and 8 related crates, 0.31.2", the
+  crate names in small type (each linking its crates.io archive), and one
+  Source code link.
+- Links are labels (crates.io archive / Source code) with an external-link
+  icon; raw URLs are never shown and the targets are unchanged.
+- Each distinct license text appears once, with the components it covers
+  ("MIT · 214 components"), collapsed until opened.
+- License texts are reflowed: hard wraps become spaces and a blank line ends a
+  paragraph. No monospace.
+
+Fixture names and counts are illustrative; the App renders the published
+notices. Implementation keeps two invariants the frames cannot show: texts
+group only when substantively identical (two MIT texts with different
+copyright lines are two groups, both titled MIT, each keeping its components,
+versions and attribution), and reflowing never merges a heading underline
+(`----`, `====`) into the text or alters license terms or copyright lines.
