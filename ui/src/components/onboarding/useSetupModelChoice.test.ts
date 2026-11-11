@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { chosenCandidate } from '../settings/models/backendCatalog';
 import { ApiCallError } from '../settings/models/modelsApi';
 import type { AgentSupply, BackendModel, BackendModelCandidates, ModelCandidate } from '../settings/models/types';
-import { useBuiltinModelChoice, type BuiltinModelChoiceDeps } from './useBuiltinModelChoice';
+import { useSetupModelChoice, type SetupModelChoiceDeps } from './useSetupModelChoice';
 
 const candidate = (id: string, reasoning_efforts: string[] = []): ModelCandidate => ({
   id, display_name: null, reasoning_efforts, origin: 'provider',
@@ -56,19 +56,19 @@ function server(initial: { catalog?: string[]; model?: string | null; effort?: s
   return { state, api, models, agentReads };
 }
 
-function mount(fixture: ReturnType<typeof server>, overrides: Partial<BuiltinModelChoiceDeps> = {}) {
+function mount(fixture: ReturnType<typeof server>, overrides: Partial<SetupModelChoiceDeps> = {}) {
   let epoch = 1;
   const onSettled = vi.fn();
-  const props = (): BuiltinModelChoiceDeps => ({
-    api: fixture.api as unknown as BuiltinModelChoiceDeps['api'],
-    models: fixture.models as unknown as BuiltinModelChoiceDeps['models'],
+  const props = (): SetupModelChoiceDeps => ({
+    api: fixture.api as unknown as SetupModelChoiceDeps['api'],
+    models: fixture.models as unknown as SetupModelChoiceDeps['models'],
     agentReads: fixture.agentReads,
     epoch: () => epoch,
     target: () => 'vibey',
     onSettled,
     ...overrides,
   });
-  const view = renderHook(() => useBuiltinModelChoice(props()));
+  const view = renderHook(() => useSetupModelChoice(props()));
   return {
     view, onSettled,
     leaveAndReturn: () => { epoch += 1; view.rerender(); },

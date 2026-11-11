@@ -80,7 +80,7 @@ describe('BackendSupplyModeCard', () => {
   });
 
   it.each([
-    ['en', 'On the gateway · no source enabled yet, the next turn will fail. Add or enable a source on the Models page to bring it back.'],
+    ['en', 'On Model Hub · no provider enabled yet, the next turn will fail. Add or enable a provider on the Models page to bring it back.'],
     ['zh', '已接入模型网关 · 还没有启用任何供应商，下一个回合会失败。去「模型」页添加或启用供应商即可恢复。'],
   ])('punctuates the warning and its fix as one %s sentence pair', async (language, banner) => {
     await i18n.changeLanguage(language);
@@ -104,7 +104,7 @@ describe('BackendSupplyModeCard', () => {
     renderCard();
 
     if (radio) await userEvent.click(await screen.findByRole('radio', { name: radio }));
-    else await userEvent.click(await screen.findByRole('button', { name: /Import to gateway/ }));
+    else await userEvent.click(await screen.findByRole('button', { name: /Import to Model Hub/ }));
     const dialog = await screen.findByRole('dialog');
     await waitFor(() => expect(within(dialog).getByText('Anthropic')).toBeTruthy());
     expect(setMode).not.toHaveBeenCalled();

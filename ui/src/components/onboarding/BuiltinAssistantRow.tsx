@@ -9,7 +9,7 @@ import type { HubSupplyBlock } from '../settings/models/featureFlags';
 import type { ModelCandidate } from '../settings/models/types';
 import { RouteChoice, type AssistantRouteView } from './AssistantRow';
 import { INLINE_CANDIDATES, inlineCandidates, type BuiltinModelOffer } from './builtinModelOffer';
-import type { BuiltinChoiceFailure } from './useBuiltinModelChoice';
+import type { SetupChoiceFailure } from './useSetupModelChoice';
 
 export interface BuiltinAssistantRowProps {
   backend: BuiltinBackend;
@@ -21,7 +21,7 @@ export interface BuiltinAssistantRowProps {
   /** The candidate whose pick is being written, if any. */
   picking?: string | null;
   /** Why the last choice did not stand, if it did not. */
-  failure?: BuiltinChoiceFailure | null;
+  failure?: SetupChoiceFailure | null;
   onRetryChoice?: () => void;
   connectionPending?: boolean;
   connectionError?: string;

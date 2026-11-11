@@ -124,7 +124,7 @@ const fillCredentials = async () => {
 
 /** Named by its label AND its own contents, so the name starts with 服务商 and
  *  continues with whichever vendor is currently chosen. */
-const vendorField = () => screen.getByRole('combobox', { name: /^(Vendor|服务商)(\s|$)/ });
+const vendorField = () => screen.getByRole('combobox', { name: /^(Provider|供应商)(\s|$)/ });
 const baseUrlInput = () => screen.getByRole('textbox', { name: /^Base URL$/i }) as HTMLInputElement;
 
 /** A catalog row read from the shipped file, so the case does not restate an id,
@@ -777,7 +777,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     const user = userEvent.setup();
 
     await user.click(vendorField());
-    const search = screen.getByPlaceholderText(/Search vendors|搜索服务商/);
+    const search = screen.getByPlaceholderText(/Search providers|搜索供应商/);
     await user.type(search, entry.label);
     await waitFor(() => expect(screen.getAllByRole('option').map((row) => row.textContent))
       .toEqual([expect.stringContaining(entry.label)]));
@@ -788,7 +788,7 @@ describe('AddApiKeyDialog · vendor accessibility', () => {
     await user.clear(search);
     await user.type(search, 'not-a-vendor');
     await waitFor(() => expect(screen.queryAllByRole('option')).toEqual([]));
-    expect(screen.getByText(/No vendor by that name|没有同名的服务商/)).toBeTruthy();
+    expect(screen.getByText(/No provider by that name|没有同名的供应商/)).toBeTruthy();
   });
 
 });

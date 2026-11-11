@@ -827,7 +827,7 @@ describe('the registered journey', () => {
     expectNoForwardWrite();
 
     await act(async () => confirmSources([]));
-    const recover = await screen.findByRole('button', { name: 'Add model source' });
+    const recover = await screen.findByRole('button', { name: 'Add a provider' });
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
     expect(within(error).getByRole('button', { name: 'Retry' }).hasAttribute('disabled')).toBe(true);
     fireEvent.click(recover);
@@ -846,7 +846,7 @@ describe('the registered journey', () => {
       application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct',
     }));
     fireEvent.click(primaryAction());
-    const recover = await screen.findByRole('button', { name: 'Add model source' });
+    const recover = await screen.findByRole('button', { name: 'Add a provider' });
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
     fireEvent.click(primaryAction());
     expect(screenId()).toBe('assistants');

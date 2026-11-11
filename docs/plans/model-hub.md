@@ -125,6 +125,28 @@ operations console.
 
 ## 3. Vocabulary (v3 recut; UI copy uses only these nouns)
 
+**Provider / Model Hub amendment — owner 2026-11-12.** The new-user review found
+one thing under four English names (source, upstream source, vendor, provider)
+and a second name for the hub in English only. The owner chose the full rename
+of user-facing copy; it supersedes the Source and Gateway rows and the
+“Provider (as a UI noun) — Banned” ruling below:
+
+- What the tables call a Source is 供应商 / **provider** in every UI string,
+  including the setup wizard and the API-key form (which previously said
+  来源, 服务商, Vendor). The Models tab is 供应商与路由 / **Providers & routing**.
+- The hub is 模型网关 / **Model Hub**; English no longer uses “gateway” as a
+  noun. The routing module heading is 路由 / **Routes**.
+- The API-key form says **API format** for the interface type, and its custom
+  choice is “Other provider · enter its address” instead of 兼容端点 / 钉死接口.
+- In the wizard, the assistant card's default-model control opens the model
+  picker and writes the Agent's model; route chains are edited only in
+  Settings › Models.
+- Only copy changes: wire values (`hub | direct`, `source_id`), API fields, and
+  code identifiers keep the Source / Gateway names, and this spec keeps them as
+  technical prose.
+- Open: the per-backend mode labels (Gateway / Direct) and the Native hop label
+  keep their current words until the owner picks a replacement.
+
 | Concept | zh | en | Notes |
 | --- | --- | --- | --- |
 | The settings surface | 模型 | Models | Single nav entry between 通讯平台 and 后端 |
