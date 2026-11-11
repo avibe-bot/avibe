@@ -927,6 +927,7 @@ const NON_KEY_LITERALS = [
   'haptics.impact',
   'haptics.notify',
   'haptics.selection',
+  'direct.transportChanged',
   'session.bootstrap',
   'session.logout',
   'session.refresh',
