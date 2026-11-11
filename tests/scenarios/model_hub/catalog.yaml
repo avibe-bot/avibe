@@ -35,6 +35,7 @@ capability:
     - tests/test_model_hub_inference_wait.py
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
+    - tests/test_model_hub_unlisted_backoff.py
     - tests/test_model_hub_retry_lifecycle.py
     - tests/test_model_hub_streamed_overload.py
     - tests/test_model_hub_streamed_overload_lifecycle.py
