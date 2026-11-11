@@ -672,6 +672,8 @@ ORPHANED_RESERVATIONS_METADATA_KEY = "orphaned_reservations"
 #: enough that a wedged child cannot hold a run row ``running`` forever. A stored
 #: ``0`` is NOT this default -- it flows through the runner as "no timeout".
 COMMAND_TASK_DEFAULT_TIMEOUT_SECONDS = 21600.0
+# Allow ordinary ticks and service restarts, but never replay arbitrarily stale work.
+ONE_SHOT_MISFIRE_GRACE_SECONDS = 300
 
 #: Retained bytes per output stream for one command run. The runner keeps draining
 #: the child past the cap, so a chatty command is truncated in the run row rather
@@ -2679,6 +2681,7 @@ class TaskExecutionStore:
         expected_updated_at: Optional[str] = None,
         expected_job_id: Optional[str] = None,
         terminal_error: Optional[str] = None,
+        schedule_missed: bool = False,
     ) -> Optional[TaskExecutionRequest]:
         if task is None:
             request = TaskExecutionRequest(
@@ -2732,6 +2735,7 @@ class TaskExecutionStore:
             ),
             expected_job_id=expected_job_id,
             terminal_error=terminal_error,
+            schedule_missed=schedule_missed,
         )
 
     def enqueue_definition_run(
@@ -2757,6 +2761,7 @@ class TaskExecutionStore:
         expected_updated_at: Optional[str] = None,
         expected_job_id: Optional[str] = None,
         terminal_error: Optional[str] = None,
+        schedule_missed: bool = False,
     ) -> Optional[TaskExecutionRequest]:
         run_metadata = dict(metadata or {})
         if drop_definition_resource_context:
@@ -2796,6 +2801,7 @@ class TaskExecutionStore:
             expected_updated_at=expected_updated_at,
             expected_job_id=expected_job_id,
             terminal_error=terminal_error,
+            schedule_missed=schedule_missed,
             drop_definition_resource_context=drop_definition_resource_context,
         )
         if snapshot is None:
@@ -4285,6 +4291,7 @@ class ScheduledTaskService:
         self.scheduler.add_listener(
             self._on_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR
         )
+        self._scheduler_event_tasks: set[asyncio.Task[None]] = set()
         self._reconcile_task: Optional[asyncio.Task] = None
         self._service_teardown_task: Optional["asyncio.Task[None]"] = None
         self._request_recovery_token: RuntimeWorkRegistrationToken | None = None
@@ -5583,6 +5590,9 @@ class ScheduledTaskService:
 
     async def stop(self) -> None:
         request_recovery_stop = self._begin_stop()
+        # An observed terminal event must commit its retirement and notice together.
+        if self._scheduler_event_tasks:
+            await asyncio.gather(*self._scheduler_event_tasks, return_exceptions=True)
         legacy_probes = tuple(self._legacy_probe_tasks.values())
         self._legacy_probe_tasks.clear()
         if legacy_probes:
@@ -5987,6 +5997,10 @@ class ScheduledTaskService:
                     replace_existing=True,
                     coalesce=True,
                     max_instances=1,
+                    **(
+                        {"misfire_grace_time": ONE_SHOT_MISFIRE_GRACE_SECONDS}
+                        if task.schedule_type == "at" else {}
+                    ),
                     args=[
                         task.id,
                         task.run_at if task.schedule_type == "at" else None,
@@ -6035,6 +6049,18 @@ class ScheduledTaskService:
         raise ValueError(f"unknown schedule type: {task.schedule_type}")
 
     def _on_scheduler_event(self, event: JobExecutionEvent) -> None:
+        if str(event.job_id) not in self._one_shot_job_identities:
+            return
+        task = asyncio.create_task(self._handle_scheduler_event(event))
+        self._scheduler_event_tasks.add(task)
+        task.add_done_callback(self._scheduler_event_finished)
+
+    def _scheduler_event_finished(self, task: asyncio.Task[None]) -> None:
+        self._scheduler_event_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("Failed to record scheduler event", exc_info=error)
+
+    async def _handle_scheduler_event(self, event: JobExecutionEvent) -> None:
         """Persist an APScheduler-observed one-shot misfire or callback failure.
 
         A clock comparison cannot tell whether the scheduler consumed a fire.
@@ -6064,27 +6090,26 @@ class ScheduledTaskService:
                 scheduled,
             )
             return
-        changed = False
-        if event.code == EVENT_JOB_ERROR:
-            detail = str(event.exception or "unknown scheduler callback error")
-            changed = self._recover_failed_one_shot_fire(
-                task_id,
-                expected_run_at=expected_run_at,
-                expected_timezone=expected_timezone,
-                expected_updated_at=expected_updated_at,
-                expected_job_id=job_id,
-                error=self._t("harness.task.schedulerCallbackFailed", detail=detail),
+        missed = event.code == EVENT_JOB_MISSED
+        error = (
+            self._t("harness.task.scheduleMissed", run_at=expected_run_at)
+            if missed
+            else self._t(
+                "harness.task.schedulerCallbackFailed",
+                detail=str(event.exception or "unknown scheduler callback error"),
             )
-        else:
-            self.store.refresh_task(task_id)
-            changed = self.store.retire_missed_one_shot(
-                task_id,
-                expected_run_at=expected_run_at,
-                expected_timezone=expected_timezone,
-                expected_updated_at=expected_updated_at,
-            )
+        )
+        changed = await self._run_runtime_sync(
+            self._recover_failed_one_shot_fire,
+            task_id,
+            expected_run_at=expected_run_at,
+            expected_timezone=expected_timezone,
+            expected_updated_at=expected_updated_at,
+            expected_job_id=job_id,
+            error=error,
+            schedule_missed=missed,
+        )
         if changed:
-            self._job_signatures.pop(task_id, None)
             _publish_task_definitions_updated()
         if self._job_ids.get(task_id) == job_id:
             self._job_ids.pop(task_id, None)
@@ -6105,6 +6130,7 @@ class ScheduledTaskService:
         expected_updated_at: str,
         expected_job_id: str,
         error: str,
+        schedule_missed: bool = False,
     ) -> bool:
         """Atomically retire an exact fire with a failed owner Run."""
 
@@ -6128,6 +6154,7 @@ class ScheduledTaskService:
             expected_updated_at=expected_updated_at,
             expected_job_id=expected_job_id,
             terminal_error=error,
+            schedule_missed=schedule_missed,
         )
         if recovered is None:
             return False

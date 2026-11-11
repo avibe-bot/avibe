@@ -69,6 +69,9 @@ final class AppModel: ObservableObject {
     private let pushNotificationCenter: PushNotificationCentering?
     private let pushOpenedNow: () -> Date
     private let pushOpenedLifetime: TimeInterval
+    /// The App icon badge: the selected instance's Inbox total, which its Web
+    /// UI sets through `badge.set` (and a push sets while the App is away).
+    private let nativeBadge: NativeBadge
     private weak var runtimeController: WebViewController?
     private var pendingRuntimeReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
@@ -89,6 +92,9 @@ final class AppModel: ObservableObject {
             self?.prepareForAccountTransition() ?? []
         },
         onPreparePushLogout: { [weak self] in
+            // Signing out or another account: the badge counted this
+            // account's Inbox. (A session refresh of the same account keeps it.)
+            self?.nativeBadge.clear()
             await self?.nativePushCoordinator.prepareForLogout()
         }
     )
@@ -156,7 +162,8 @@ final class AppModel: ObservableObject {
             UserDefaultsPushInstallationMarkerStore(),
         pushNotificationCenter: PushNotificationCentering? = nil,
         pushOpenedNow: @escaping () -> Date = Date.init,
-        pushOpenedLifetime: TimeInterval = 120
+        pushOpenedLifetime: TimeInterval = 120,
+        badgeCenter: AppBadgeCentering? = nil
     ) {
         self.defaults = defaults
         self.controlPlane = controlPlane
@@ -167,6 +174,7 @@ final class AppModel: ObservableObject {
         self.pushNotificationCenter = pushNotificationCenter
         self.pushOpenedNow = pushOpenedNow
         self.pushOpenedLifetime = pushOpenedLifetime
+        nativeBadge = NativeBadge(center: badgeCenter ?? SystemAppBadgeCenter())
         websiteDataStore = AccountWebsiteDataStore(defaults: defaults)
         _ = nativePushCoordinator
         _ = directPathController
@@ -338,6 +346,22 @@ final class AppModel: ObservableObject {
             return false
         }
         clearPendingPushOpened()
+        return true
+    }
+
+    /// `badge.set` from a runtime page: only the selected instance's page
+    /// sets the badge, the rule `push.*` follows. A push-management request
+    /// in flight changes neither, so it does not hold the badge back.
+    @discardableResult
+    func setBadgeCount(_ count: Int, origin: WebOrigin) -> Bool {
+        guard
+            let runtime = route.runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            WebOrigin(url: runtime.instance.url)?.serialized == origin.serialized
+        else {
+            return false
+        }
+        nativeBadge.set(count)
         return true
     }
 

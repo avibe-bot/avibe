@@ -761,6 +761,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.openExternal",
                 "app.setAccountActionAvailable",
                 "app.showAccount",
+                "badge.set",
                 "haptics.impact",
                 "haptics.notify",
                 "haptics.selection",
@@ -942,6 +943,62 @@ final class MobileOnboardingTests: XCTestCase {
             events,
             ["push.logout", "push.management", "account.transition"]
         )
+    }
+
+    /// What the App icon badge checks before a runtime page sets it: an
+    /// ordinary push-management request keeps the runtime selected; once
+    /// signing out has begun (push revocation first), it is not.
+    func testARuntimeStaysSelectedThroughPushManagementButNotOnceSignOutBegins()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        var runtime: MobileRuntimeContext?
+        var coordinator: MobileSessionCoordinator!
+        var duringManagement: [Bool] = []
+        var duringPushLogout: [Bool] = []
+        management.pushManagementHandler = { _ in
+            duringManagement.append(coordinator.isSelectedRuntime(runtime!))
+            duringManagement.append(coordinator.isCurrentRuntime(runtime!))
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [
+                first,
+                management,
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+            ],
+            onOpen: { runtime = $0 },
+            onPreparePushLogout: {
+                duringPushLogout.append(coordinator.isSelectedRuntime(runtime!))
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let opened = try XCTUnwrap(runtime)
+        XCTAssertTrue(coordinator.isSelectedRuntime(opened))
+
+        _ = try await coordinator.pushManagementRequest(
+            PushManagementRequest(
+                method: "POST",
+                path: "/api/push/apns/installations",
+                headers: [:],
+                body: nil
+            )
+        )
+        // Selected, though not idle, while the request runs.
+        XCTAssertEqual(duringManagement, [true, false])
+        XCTAssertTrue(coordinator.isSelectedRuntime(opened))
+
+        _ = try await coordinator.logout()
+        XCTAssertEqual(duringPushLogout, [false])
+        XCTAssertFalse(coordinator.isSelectedRuntime(opened))
     }
 
     func testOtherAccountBootstrapUsesTheSamePushLogoutPreparation()

@@ -3759,6 +3759,9 @@ def test_main_rejects_missing_auth_without_claiming_the_state_file(tmp_path) -> 
 
     assert rc == 2
     assert "GitHub authentication is required" in stderr.getvalue()
+    # An Avibe outside the macOS desktop session cannot read the GitHub CLI's
+    # Keychain token; "run gh auth login" alone sent Agents to the wrong repair.
+    assert "run 'vibe doctor' first" in stderr.getvalue()
     assert not state_file.exists()
 
 

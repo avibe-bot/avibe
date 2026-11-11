@@ -582,6 +582,7 @@ GitHub-specific notes:
   loop asleep
 - self-authored comments are ignored by default when the current authenticated GitHub user can be resolved; pass `--include-self-comments` to keep them
 - authentication is preferred; unauthenticated polling is slower and more fragile
+- a waiter that finds no GitHub token on macOS may be running in an Avibe outside the user's desktop session, where the GitHub CLI's Keychain token is out of reach; check `vibe doctor` for a login-session warning before asking anyone to run `gh auth login`
 
 New PRs in a repository:
 

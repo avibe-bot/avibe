@@ -20,6 +20,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let showAccount: () -> Void
     let directStatus: (WebOrigin) -> DirectPathStatus
     let pushOpenedAck: (String, WebOrigin) -> Bool
+    let setBadgeCount: (Int, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let didCreateController: (WebViewController) -> Void
@@ -35,6 +36,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         showAccount: @escaping () -> Void,
         directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
+        setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         didCreateController: @escaping (WebViewController) -> Void,
@@ -49,6 +51,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.showAccount = showAccount
         self.directStatus = directStatus
         self.pushOpenedAck = pushOpenedAck
+        self.setBadgeCount = setBadgeCount
         self.accountFallbackVisibilityChanged =
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
@@ -71,6 +74,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             showAccount: showAccount,
             directStatus: directStatus,
             pushOpenedAck: pushOpenedAck,
+            setBadgeCount: setBadgeCount,
             accountFallbackVisibilityChanged:
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,

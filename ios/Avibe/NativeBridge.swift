@@ -17,6 +17,7 @@ struct NativeShellMetadata: Equatable {
     static let capabilities = [
         "accountPresentation": 2,
         "app": 1,
+        "badge": 1,
         "haptics": 1,
         "direct": 1,
         "keyboardResizesViewport": 1,
@@ -74,6 +75,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case appOpenExternal = "app.openExternal"
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
+    case badgeSet = "badge.set"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
     case hapticsSelection = "haptics.selection"
@@ -228,6 +230,12 @@ enum NativeBridgeConfiguration {
             WebOrigin
         ) -> Bool = { _, _ in
             false
+        },
+        setBadgeCount: @escaping @MainActor (
+            Int,
+            WebOrigin
+        ) -> Bool = { _, _ in
+            false
         }
     ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
@@ -245,7 +253,8 @@ enum NativeBridgeConfiguration {
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
             pushUnsubscribe: pushUnsubscribe,
-            pushOpenedAck: pushOpenedAck
+            pushOpenedAck: pushOpenedAck,
+            setBadgeCount: setBadgeCount
         )
         controller.addScriptMessageHandler(
             handler,
@@ -519,6 +528,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         String,
         WebOrigin
     ) -> Bool
+    private let setBadgeCount: @MainActor (
+        Int,
+        WebOrigin
+    ) -> Bool
 
     init(
         policy: NativeBridgePolicy,
@@ -544,6 +557,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         pushOpenedAck: @escaping @MainActor (
             String,
             WebOrigin
+        ) -> Bool,
+        setBadgeCount: @escaping @MainActor (
+            Int,
+            WebOrigin
         ) -> Bool
     ) {
         self.policy = policy
@@ -558,6 +575,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.pushSubscribe = pushSubscribe
         self.pushUnsubscribe = pushUnsubscribe
         self.pushOpenedAck = pushOpenedAck
+        self.setBadgeCount = setBadgeCount
     }
 
     func userContentController(
@@ -809,6 +827,23 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             DispatchQueue.main.async { [showAccount] in
                 showAccount()
             }
+        case .badgeSet:
+            guard let count = NativeBadgeCount.parse(request.params) else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "badge.set requires a count number."
+                    )
+                )
+                return
+            }
+            // The instance this WebView was made for, which the App checks
+            // is still the selected one (as push.* does).
+            guard setBadgeCount(count, policy.instanceOrigin) else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            reply(replyHandler, result: NSNull())
         case .navigationHistoryChanged:
             guard request.params.isEmpty else {
                 reply(

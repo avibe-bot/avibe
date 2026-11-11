@@ -3116,7 +3116,9 @@ final class NavigationPolicyTests: XCTestCase {
             pushGenerationStore: InMemoryPushGenerationStore(),
             pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
             pushNotificationCenter: NavigationTestPushNotificationCenter(),
-            pushOpenedNow: pushOpenedNow
+            pushOpenedNow: pushOpenedNow,
+            // Never the test host's own badge.
+            badgeCenter: NavigationTestBadgeCenter()
         )
     }
 
@@ -3415,6 +3417,14 @@ final class NavigationPolicyTests: XCTestCase {
 }
 
 @MainActor
+private final class NavigationTestBadgeCenter: AppBadgeCentering {
+    func badgeAllowed() async -> Bool {
+        true
+    }
+
+    func setBadgeCount(_ count: Int) async throws {}
+}
+
 private final class NavigationTestPushNotificationCenter:
     PushNotificationCentering
 {
