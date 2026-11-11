@@ -93,8 +93,9 @@ def test_only_the_master_warmup_saves_and_every_build_restores_an_exact_key():
     triggers = workflow("desktop-package.yml")["on"]
     assert triggers["push"]["branches"] == ["master"] and "tags" not in triggers["push"]
     warmup = workflow("desktop-package.yml")["jobs"]["package"]["env"]["DESKTOP_CACHE_WARMUP"]
-    assert warmup == ("${{ !inputs.release_tag && (github.event_name == 'push' || "
-                         "github.event_name == 'schedule') && github.ref == 'refs/heads/master' }}")
+    assert warmup == ("${{ !inputs.release_tag && github.ref == 'refs/heads/master' && "
+                         "((github.event_name == 'push' || github.event_name == 'schedule') || "
+                         "(github.event_name == 'workflow_dispatch' && inputs.warmup)) }}")
     # Restore and save name the same paths, or the saved entry is not the one a build looks up.
     for restore, save in (("Restore Rust build cache", "Save Rust build cache"),
                           ("Restore prepared Cua Driver", "Save prepared Cua Driver")):
@@ -277,3 +278,49 @@ def test_keepalive_reports_every_entry_a_release_could_not_rely_on(tmp_path):
         assert seen == f"${{{{ steps.keys.outputs.{name}_seen }}}}"
         assert hit == f"${{{{ steps.{name}.outputs.cache-hit }}}}"
     assert len(report["env"]["ENTRIES"].splitlines()) == 4
+
+
+def test_warmup_maintenance_retries_failures_and_prunes_only_owned_namespaces():
+    document = workflow("desktop-cache-maintenance.yml")
+    triggers = document["on"]
+    assert triggers["workflow_run"] == {
+        "workflows": ["desktop-self-contained-package"],
+        "types": ["completed"],
+    }
+    assert "workflow_dispatch" in triggers
+    assert document["permissions"] == {"actions": "write", "contents": "read"}
+    assert document["concurrency"] == {
+        "group": "desktop-cache-maintenance", "cancel-in-progress": False,
+    }
+    retry = document["jobs"]["retry-master-warmup"]
+    assert "conclusion == 'failure'" in retry["if"]
+    assert "head_branch == 'master'" in retry["if"]
+    assert "workflow_run.event == 'push'" in retry["if"]
+    assert "workflow_run.event == 'schedule'" in retry["if"]
+    retry_run = next(step for step in retry["steps"] if step.get("name") == "Retry the unsigned master warm-up")
+    assert "workflow run desktop-package.yml" in retry_run["run"]
+    assert "--field warmup=true" in retry_run["run"]
+    prune_run = document["jobs"]["prune-desktop-caches"]["steps"][0]["run"]
+    for prefix in (
+        "cua-driver-aarch64-apple-darwin-",
+        "cua-driver-x86_64-apple-darwin-",
+        "macOS-aarch64-apple-darwin-desktop-package-",
+        "macOS-x86_64-apple-darwin-desktop-package-",
+        "Windows-x86_64-pc-windows-msvc-desktop-package-",
+    ):
+        assert prefix in prune_run
+    assert "Deleting superseded" in prune_run
+    assert "desktop-cargo-" in prune_run
+    assert "gh cache delete \"$id\"" in prune_run
+    assert "--all" not in prune_run
+    assert "RELEASE_CACHE_BUDGET" in prune_run
+    assert "10000000000" in prune_run
+
+
+def test_pr_shell_cache_is_restore_only_and_cannot_create_pr_entries():
+    shell = workflow("desktop-shell.yml")
+    cache = next(item for item in shell["jobs"]["shell"]["steps"] if "cache/restore@" in item.get("uses", ""))
+    assert cache["uses"].startswith("actions/cache/restore@")
+    assert "restore-keys" not in cache["with"]
+    text = (ROOT / ".github/workflows/desktop-shell.yml").read_text(encoding="utf-8")
+    assert "actions/cache@" not in text

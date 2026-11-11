@@ -18,12 +18,24 @@ updater signatures, source provenance, digest checks, and immutable attachment.
   installer aliases; those require a complete three-platform stable set.
 - Cua Driver reuse remains verified. Trusted master warming covers both Macs;
   releases only restore caches, warn visibly on misses, and rebuild when needed.
-  Exact-source compile keys also bind lockfile, target, compiler, and SDK.
-  Cached compile outputs never stand in for final version stamping, packaging,
-  signing, notarization, or verification.
+  Exact-source compile keys also bind the lockfile (Cargo's third-party source
+  checksums), target, compiler, and SDK. Cached compile outputs never stand in
+  for final version stamping, packaging, signing, notarization, or verification.
+  The master warm-up is the only cache writer; release and PR builds are
+  restore-only. After a successful warm-up, maintenance retains one newest
+  entry per release target and deletes superseded entries plus retired PR shell
+  caches. The retained release set is budgeted at 1.6 GB (about 0.2 GB above
+  the observed 1.4 GB set), leaving the rest of the repository's 10 GB cache
+  budget for other workflows; maintenance reports total usage and headroom.
+  A failed push/schedule warm-up gets one workflow-dispatch retry, and release
+  cache misses remain visible warnings rather than a correctness bypass.
 - Do not add an Intel runner to every RC indirectly through mandatory prewarming.
   Document the early Intel build signal and the remaining stable-only signing
   coverage. Cache warming is an optimization, not a new release correctness gate.
+  The Intel warm-up is restricted to `desktop/**` (excluding Markdown), `uv.lock`,
+  and release helper/workflow inputs, runs with concurrency one and cancels a
+  superseded master warm-up. A real master run must confirm that the Ubuntu
+  lookup-only touch refreshes `last_accessed_at` and can read macOS entries.
 
 ## Scope and delivery
 

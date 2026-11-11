@@ -37,6 +37,11 @@ on:
         description: SemVer version stamped into the desktop application and installer
         required: true
         type: string
+      warmup:
+        description: Retry the unsigned master cache warm-up (maintenance use only)
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       version:
@@ -59,6 +64,12 @@ on:
         type: string
         default: ""
 
+concurrency:
+  group: desktop-package-${{ inputs.release_tag || github.ref }}
+  # Only master cache warm-ups may cancel an older warm-up. Release and manual
+  # non-warm-up builds must not cancel one another.
+  cancel-in-progress: ${{ (github.event_name == 'push' || github.event_name == 'schedule' || inputs.warmup) && github.ref == 'refs/heads/master' && !inputs.release_tag }}
+
 permissions:
   contents: read
 
@@ -75,7 +86,7 @@ jobs:
     environment: desktop-updater
     env:
       # Never a release: a release build always carries its tag.
-      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/master' }}
+      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && github.ref == 'refs/heads/master' && ((github.event_name == 'push' || github.event_name == 'schedule') || (github.event_name == 'workflow_dispatch' && inputs.warmup)) }}
       DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
       DEVELOPER_DIR: ${{ contains(matrix.target, '-apple-') && '/Applications/Xcode_26.6.app/Contents/Developer' || '' }}
       DESKTOP_BUNDLE: ${{ contains(matrix.target, '-apple-') && 'app' || 'nsis' }}

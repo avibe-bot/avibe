@@ -788,7 +788,8 @@ def test_workflow_signs_every_macos_layer_before_recording():
     # Every macOS build but the unsigned cache warm-up imports: a tag build fails
     # there without the complete set, and a build carrying a tag is never a warm-up.
     warmup = build["env"]["DESKTOP_CACHE_WARMUP"]
-    assert warmup.startswith("${{ !inputs.release_tag && (")
+    assert warmup.startswith("${{ !inputs.release_tag && github.ref == 'refs/heads/master' &&")
+    assert "github.event_name == 'workflow_dispatch' && inputs.warmup" in warmup
     identity = step("Import Apple signing identity")
     assert identity["if"] == "runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'"
     # Only reruns of the same tag could read a cache a release build saved.
