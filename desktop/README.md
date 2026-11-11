@@ -665,14 +665,15 @@ For a TEST RC, the release resolver selects Apple silicon macOS and Windows;
 Intel macOS is deliberately not built by the RC. Stable releases still require
 all three targets and their complete signed asset sets. The unsigned master
 warm-up is also the early Intel signal: pushes changing `desktop/**` (excluding
-Markdown), `uv.lock`, or release helpers, plus a nightly run, build Intel on
-master. This catches Intel compile, SDK, launch-smoke, and DMG regressions before
-stable, but Intel-specific Developer ID signing, notarization, stapling,
-Gatekeeper, and updater-signature failures still first appear on a stable
-release. The first real master run must confirm that the Ubuntu lookup-only
-keep-alive refreshes `last_accessed_at` and can read the macOS entries; the
-workflow reports missing, unreadable, or unrefreshed entries without claiming
-that unverified retention is guaranteed.
+Markdown), `uv.lock`, or release helpers, plus the existing scheduled warm-up,
+build Intel on master. This catches Intel compile, SDK, launch-smoke, and DMG
+regressions before stable, but Intel-specific Developer ID signing,
+notarization, stapling, Gatekeeper, and updater-signature failures still first
+appear on a stable release. `.github/workflows/desktop-cache-keepalive.yml` is
+the retention mechanism: it performs lookup-only reads on master pushes and on a
+five-day schedule. Its warnings explicitly tell the operator to run the next
+warm-up when an entry is missing, unreadable, or not refreshed; it does not
+silently dispatch a build.
 
 A separate manual workflow, `.github/workflows/desktop-signpath-test.yml`, runs
 the SignPath TEST-signing integration test with `signpath_test=true` and a
