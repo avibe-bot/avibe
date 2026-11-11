@@ -189,6 +189,25 @@ def _scenario_ids() -> frozenset[str]:
     return frozenset(row["id"] for catalog in _catalogs() for row in _rows(catalog) if isinstance(row.get("id"), str))
 
 
+def test_every_scenario_id_names_one_row_across_all_catalogs() -> None:
+    """A scenario ID is the handle tests, docstrings and PRs cite, so it names one row.
+
+    Two rows sharing an ID let each one's citations pass for the other: a test titled
+    with the ID is evidence for whichever row a reader happens to find first.
+    """
+
+    seen: dict[str, list[str]] = {}
+    for catalog in _catalogs():
+        for row in _rows(catalog):
+            scenario_id = row.get("id")
+            if isinstance(scenario_id, str):
+                seen.setdefault(scenario_id, []).append(str(catalog.relative_to(REPO_ROOT)))
+    duplicated = {scenario_id: where for scenario_id, where in seen.items() if len(where) > 1}
+    assert not duplicated, "scenario IDs used by more than one row:\n" + "\n".join(
+        f"{scenario_id}: {', '.join(where)}" for scenario_id, where in sorted(duplicated.items())
+    )
+
+
 @pytest.mark.parametrize("catalog", _catalogs(), ids=lambda path: path.parent.name)
 def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
     dead: list[str] = []
