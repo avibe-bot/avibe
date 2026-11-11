@@ -1585,6 +1585,50 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
     assert rejected["reason"] == "model_hub_engine_archive_checksum_mismatch"
 
 
+@pytest.mark.parametrize("lost", ["missing", "malformed"])
+def test_channel_state_loss_does_not_replace_installed_engine_integrity_checks(tmp_path: Path, lost: str) -> None:
+    """KEEP with unavailable channel history permits no install and cannot bless tampered bytes.
+
+    Channel-only tests cannot prove the disk engine remains independently
+    verifiable. Use a real installed fixture and the production manager's
+    pointer/metadata/binary validation, without starting a provider engine.
+    """
+    from tests.engine_channel_support import LocalVerifier, Signer
+    from vibe.model_hub_runtime.engine_channel import EngineChannel
+    from core.model_hub_engine_channel import ResolutionAction
+
+    archive, binary = _write_fixture_archive(tmp_path / "fixture")
+    manifest = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
+    installed = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest).ensure()
+    assert installed["ok"] is True
+    binary_path = Path(installed["path"])
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    signer = Signer()
+    fetches = []
+
+    def unavailable_fetch():
+        fetches.append(True)
+        raise OSError("test network unavailable")
+
+    channel = EngineChannel(manager, roots=signer.roots(), verifier=LocalVerifier(), fetch=unavailable_fetch)
+    if lost == "malformed":
+        channel.store.directory.mkdir(parents=True)
+        channel.store.state_path.write_bytes(b"{lost channel history")
+    assert channel.refresh().state == "offline"
+    assert fetches == []
+    kept = channel.resolve(current="model-hub-engine-v7.2.95-1")
+    assert (kept.action, kept.target, kept.download_authorized) == (ResolutionAction.KEEP, None, False)
+    assert kept.reason == ("no_index" if lost == "missing" else "state_unreadable")
+    assert manager.resolve_engine_path() == binary_path
+    assert manager.status()["installed"] is True
+
+    # The same restrictive channel KEEP is not proof of independent integrity.
+    binary_path.write_bytes(binary_path.read_bytes() + b"\n# test tampering\n")
+    assert channel.resolve(current="model-hub-engine-v7.2.95-1").action is ResolutionAction.KEEP
+    assert manager.resolve_engine_path() is None
+    assert manager.status()["installed"] is False
+
+
 def test_engine_status_rehashes_binary_only_after_file_identity_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

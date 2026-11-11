@@ -16,10 +16,13 @@ known here. Two things stop an index from bringing in anything new, and
 neither is its age: offline mode, and a sequence floor a later Avibe raised
 above it.
 
-A withdrawal this machine recorded outlives the ability to check it. When the
-recorded index cannot be authenticated, because avault cannot run or because
-this Avibe build ships no readable key, an engine recorded as withdrawn is
-blocked, not kept. Only a manifest override leaves the channel entirely.
+A withdrawal this machine recorded outlives the ability to check it **while
+its one local history file remains readable**. When that index cannot be
+authenticated because avault cannot run or this Avibe ships no readable key,
+a recorded withdrawal blocks the engine, not keeps it. Missing or unreadable
+history authorizes no channel change; a later authenticated fetch may replace
+it with an older list and reopen a lost withdrawal. Only a manifest override
+leaves the channel entirely.
 
 Nothing in Avibe calls this yet. Adoption, activation, scheduling and recovery
 belong to the engine lifecycle, which decides when to act on a resolution. A
@@ -182,7 +185,13 @@ class EngineChannel:
         return None
 
     def refresh(self) -> ChannelStatus:
-        """Download, authenticate and record the index. Never raises."""
+        """Download, authenticate and record the index. Never raises.
+
+        An authenticated fetch may replace missing/unreadable history. Its
+        old floor and withdrawals are then lost, not recovered. Offline or
+        failed fetches leave the file untouched and authorize no new adoption
+        when no readable index remains.
+        """
 
         reason = self.opt_out_reason()
         if reason is not None:
@@ -209,9 +218,10 @@ class EngineChannel:
     def snapshot(self) -> ChannelSnapshot | None:
         """The last accepted index, re-authenticated from disk; no network.
 
-        ``None`` when this installation is outside the channel or has accepted
-        nothing yet. Raises ``ChannelError`` when what is on disk cannot be
-        trusted, including when avault cannot verify it right now.
+        ``None`` when this installation is outside the channel or local
+        history is missing, not proof that it never accepted an index. Raises
+        ``ChannelError`` when what is on disk cannot be trusted, including
+        when avault cannot verify it right now.
         """
 
         if self.opt_out_reason() is not None:
@@ -239,7 +249,10 @@ class EngineChannel:
         the resolution's reason says which. An Avibe build with no readable
         key, such as a downgrade to a release that ships none, reads the
         record and nothing else. A manifest override is the one documented way
-        out of the channel, withdrawals included.
+        out of the channel, withdrawals included. Missing/unreadable history
+        returns restrictive KEEP, not a claim the installed engine is verified
+        or healthy; its owner still checks identity/integrity before use. No
+        new channel adoption is authorized until a signed fetch succeeds.
         """
 
         reason = self.opt_out_reason()

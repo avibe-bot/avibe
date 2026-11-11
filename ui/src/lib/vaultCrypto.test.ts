@@ -333,6 +333,17 @@ describe('vaultCrypto blind boxes', () => {
     await expect(openBlindBox(box, blindBoxAad(standardCreateBlindBoxContext('OTHER_SECRET')))).rejects.toThrow();
   });
 
+  // The HPKE dependency supplies X25519: a valid-length but low-order recipient
+  // must fail in encapsulation, not produce a box with a predictable shared secret.
+  // AAD/fingerprint negatives above do not exercise this primitive boundary.
+  it.each([0, 1])('rejects low-order X25519 recipient u=%i before producing a blind box', async (u) => {
+    const publicKey = new Uint8Array(32);
+    publicKey[0] = u;
+    await expect(
+      sealBlindBox('synthetic secret', bytesToBase64(publicKey), standardCreateBlindBoxContext('TEST_SECRET')),
+    ).rejects.toThrow('invalid private or public key received');
+  });
+
   it('rejects a substituted avault public key when a fingerprint is pinned', async () => {
     await expect(
       sealBlindBox('x', {

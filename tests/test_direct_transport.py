@@ -9,10 +9,12 @@ import json
 import logging
 import os
 import socket
+import sys
 import textwrap
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -556,6 +558,75 @@ async def test_stop_closes_listener_and_reaps_well_behaved_child(sidecar):
     finally:
         os.environ.clear()
         os.environ.update(old_env)
+
+
+@pytest.mark.asyncio
+async def test_sidecar_exits_when_owner_control_pipe_closes(sidecar):
+    """The child does not outlive the owner when its control pipe closes."""
+    path, events, env = sidecar
+    env["DIRECT_TEST_MODE"] = "wait"
+    old_env = os.environ.copy()
+    os.environ.update(env)
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), RecordingRendezvous())
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: supervisor.running)
+        await _wait_until(lambda: any(item["kind"] == "start" for item in _events(events)))
+        pid = next(item["pid"] for item in _events(events) if item["kind"] == "start")
+        process = supervisor._process
+        assert process is not None and process.stdin is not None
+        process.stdin.close()
+        await process.stdin.wait_closed()
+        await _wait_until(lambda: _process_gone(pid))
+    finally:
+        await supervisor.stop()
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+@pytest.mark.asyncio
+async def test_child_exits_when_owner_is_killed_without_stop(sidecar):
+    """Real parent death closes the control pipe, without any Python cleanup."""
+    path, events, env = sidecar
+    code = '''
+import asyncio, sys
+from vibe.direct_transport import DirectTransportSupervisor
+from vibe.direct_rendezvous import DirectRendezvous
+async def main():
+    supervisor = DirectTransportSupervisor(sys.argv[1], None, DirectRendezvous())
+    await supervisor.start()
+    await asyncio.Event().wait()
+asyncio.run(main())
+'''
+    parent = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", code, str(path),
+        env={**os.environ, **env}, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    child = None
+    try:
+        await _wait_until(lambda: any(item["kind"] == "start" for item in _events(events)))
+        child = psutil.Process(next(item["pid"] for item in _events(events) if item["kind"] == "start"))
+        parent.kill()
+        await asyncio.wait_for(parent.wait(), 3)
+        await _wait_until(lambda: not child.is_running() or child.status() == psutil.STATUS_ZOMBIE)
+    finally:
+        if parent.returncode is None:
+            parent.kill()
+            await parent.wait()
+        if child is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+                    child.kill()  # Only this test's captured PID/creation identity.
+
+
+def _process_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
 
 
 @pytest.mark.asyncio
