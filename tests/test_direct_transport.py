@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import json
 import os
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from vibe import direct_transport
 from vibe.direct_ingress import DirectIngress
 from vibe.direct_rendezvous import DirectEndpoint, DirectRendezvous
 from vibe.direct_transport import (
@@ -166,7 +168,7 @@ SIDECAR = textwrap.dedent(
         send({"type": "unknown"})
         wait_for_stop()
     elif mode == "oversized_line":
-        sys.stdout.write("x" * 4097 + "\n")
+        sys.stdout.write("x" * (1024 * 1024) + "\n")
         sys.stdout.flush()
         wait_for_stop()
     elif mode == "invalid_line":
@@ -451,6 +453,47 @@ async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar):
         assert any(endpoint is not None for endpoint, _reason in rendezvous.published[fatal_index + 1 :])
     finally:
         await supervisor.stop()
+        os.environ.clear()
+        os.environ.update(old_env)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_stops_supervisor(sidecar, monkeypatch):
+    """Protect cancellation after the supervisor task exists."""
+    path, _events_path, env = sidecar
+    env["DIRECT_TEST_MODE"] = "wait"
+    old_env = os.environ.copy()
+    os.environ.update(env)
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), RecordingRendezvous())
+    original_sleep = asyncio.sleep
+    gate = asyncio.Event()
+
+    async def hold_initial_yield(delay):
+        if delay == 0:
+            await gate.wait()
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(direct_transport.asyncio, "sleep", hold_initial_yield)
+    start_task = asyncio.create_task(supervisor.start())
+    try:
+        for _ in range(100):
+            if supervisor._supervisor_task is not None:
+                break
+            await original_sleep(0)
+        assert supervisor._supervisor_task is not None
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert supervisor._supervisor_task is None
+        assert not supervisor._started
+        assert not supervisor.running
+    finally:
+        gate.set()
+        if not start_task.done():
+            start_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await start_task
         os.environ.clear()
         os.environ.update(old_env)
 

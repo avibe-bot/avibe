@@ -189,10 +189,13 @@ class DirectRendezvous:
                 },
                 "client": {"endpoint_id": client_endpoint_id, "admitted_until": expires_at},
             }
-        if listener is not None:
-            for endpoint_id, ttl_seconds in notifications:
-                listener(endpoint_id, ttl_seconds)
-        return response
+            if listener is not None:
+                # The supervisor listener only schedules onto its loop; keep it
+                # inside the mutation lock so concurrent offers cannot reorder
+                # the notices that define the sidecar's admission state.
+                for endpoint_id, ttl_seconds in notifications:
+                    listener(endpoint_id, ttl_seconds)
+            return response
 
     def is_admitted(self, client_endpoint_id: str) -> bool:
         """Whether a transport peer with this endpoint ID may open streams now."""

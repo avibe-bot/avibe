@@ -208,7 +208,13 @@ class DirectTransportSupervisor:
             # to a lifecycle caller, without waiting for sidecar readiness.
             await asyncio.sleep(0)
         except BaseException:
+            assert self._stop_event is not None
+            self._stop_event.set()
             await self._close_stream_listener()
+            task = self._supervisor_task
+            if task is not None:
+                await task
+            self._supervisor_task = None
             self._started = False
             self._running = False
             self._reason = "listener_start_failed"
@@ -613,36 +619,71 @@ class DirectTransportSupervisor:
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
 
+    async def _drain_stdout(self, reader: asyncio.StreamReader | None) -> None:
+        if reader is None:
+            return
+        try:
+            while await reader.read(4096):
+                pass
+        except (asyncio.CancelledError, ConnectionError, OSError):
+            return
+
     async def _stop_process(self, process: Any) -> None:
         if process is None:
             return
-        if process.returncode is None:
-            stdin = process.stdin
-            if stdin is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(
-                        self._write_control(stdin, {"type": "stop"}, interruptible=False),
-                        timeout=CONTROL_WRITE_TIMEOUT_SECONDS,
-                    )
-                with contextlib.suppress(Exception):
-                    stdin.close()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(stdin.wait_closed(), timeout=CONTROL_WRITE_TIMEOUT_SECONDS)
-            try:
-                await asyncio.wait_for(process.wait(), timeout=self._stop_grace_seconds)
-            except asyncio.TimeoutError:
-                pid = process.pid
-                if pid is not None and process.returncode is None:
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        if os.name == "nt":
-                            process.kill()
-                        else:
-                            os.kill(pid, signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await process.wait()
+        stdout_task = asyncio.create_task(
+            self._drain_stdout(process.stdout),
+            name="direct-transport-sidecar-stdout",
+        )
+        wait_task = asyncio.create_task(process.wait(), name="direct-transport-sidecar-wait")
+        try:
+            if process.returncode is None:
+                stdin = process.stdin
+                if stdin is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            self._write_control(stdin, {"type": "stop"}, interruptible=False),
+                            timeout=CONTROL_WRITE_TIMEOUT_SECONDS,
+                        )
+                    with contextlib.suppress(Exception):
+                        stdin.close()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(stdin.wait_closed(), timeout=CONTROL_WRITE_TIMEOUT_SECONDS)
+                done, _pending = await asyncio.wait(
+                    (wait_task, stdout_task),
+                    timeout=self._stop_grace_seconds,
+                    return_when=asyncio.ALL_COMPLETED,
+                )
+                if wait_task not in done:
+                    pid = process.pid
+                    if pid is not None and process.returncode is None:
+                        with contextlib.suppress(ProcessLookupError, PermissionError):
+                            if os.name == "nt":
+                                process.kill()
+                            else:
+                                os.kill(pid, signal.SIGKILL)
+
+            for task in (wait_task, stdout_task):
+                if not task.done():
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(asyncio.shield(task), timeout=CONTROL_WRITE_TIMEOUT_SECONDS)
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(wait_task, stdout_task, return_exceptions=True)
+        finally:
+            for task in (wait_task, stdout_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(wait_task, stdout_task, return_exceptions=True)
+
         stderr_task = self._stderr_task
         self._stderr_task = None
         if stderr_task is not None:
+            if not stderr_task.done():
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(stderr_task), timeout=CONTROL_WRITE_TIMEOUT_SECONDS)
+            if not stderr_task.done():
+                stderr_task.cancel()
             with contextlib.suppress(Exception):
                 await stderr_task
 
