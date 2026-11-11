@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import 'fake-indexeddb/auto';
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
@@ -269,6 +269,7 @@ beforeEach(() => {
   mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
   mocks.api.onSessionArchived.mockReturnValue(() => {});
   mocks.api.probeShowPageAccess.mockReturnValue(new Promise(() => {}));
+  mocks.api.sendQueuedNow.mockReturnValue(new Promise(() => {}));
   mocks.apiFetch.mockReturnValue(new Promise(() => {}));
 });
 
@@ -306,5 +307,25 @@ describe("a Bot's queue strip", () => {
 
     await screen.findByText('my next step');
     expect(screen.getByText('[Harness: watch result]')).toBeTruthy();
+  });
+
+  // The queue is in the order it was sent, so a hidden Harness row can be its head.
+  // Send now acts on that real head, never on the first row drawn.
+  it('sends the real queue head now even when it is hidden', async () => {
+    mocks.bot = bot(true);
+    mount([watchResult, mine]);
+
+    await screen.findByText('my next step');
+    act(() => screen.getByRole('button', { name: 'chat.queue.sendNow' }).click());
+
+    expect(mocks.api.sendQueuedNow).toHaveBeenCalledWith(SESSION, 'q2');
+  });
+
+  it('keeps Send now busy while a hidden head is being steered in', async () => {
+    mocks.bot = bot(true);
+    mount([{ ...watchResult, state: 'steering' } as WorkbenchMessage, mine]);
+
+    await screen.findByText('my next step');
+    expect((screen.getByRole('button', { name: /chat\.queue\.sendingNow/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
