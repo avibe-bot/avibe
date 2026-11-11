@@ -1,11 +1,12 @@
 // The chat conversation: the header, the transcript, and the composer, rendered by the shipped ChatPage.
 // ui/design: chat/conversation/* — the empty states, a Bot's conversation, a fork, an archived chat, the
 // named senders of an Organization instance's shared transcript, a message the reader just sent (on
-// screen at once as sending, then the server's row in its place), and the phone app drawn edge to edge.
+// screen at once as sending, then the server's row in its place), what waits for a Bot's Turn with
+// "Hide details" on and off, and the phone app drawn edge to edge.
 import { frames } from '../../frame';
-import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
+import { IOS_APP_CAPABILITIES, IPHONE_17_PRO, demoBots } from '../../shell/fixtures';
 import { UNANSWERED } from '../../shell/network';
-import { CHAT_ID, agentSays, at, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, userSays } from './fixtures';
+import { CHAT_ID, agentSays, at, chatDesktop, chatFixtures, chatPhone, chatRoute, chatSession, message, runningTurn, userSays } from './fixtures';
 
 const messages = [
   userSays('帮我把 avibe 工作台适配移动端，交互可以和 PC 不一样，但功能要完备。', 62),
@@ -32,6 +33,21 @@ const sent = { [sendPath]: { ...userSays(answer, 0), id: 'msg_sent_answer', sess
 const bot = chatSession({ id: 'ses_cso', project_id: null, scope_id: null, title: '首席安全官', agent_name: 'cso' });
 // The main Bot, whose Agent description is written for Agents and never shows here.
 const mainBot = chatSession({ id: 'ses_main', project_id: null, scope_id: null, title: null, agent_name: 'main' });
+
+// While the Bot works, the user's next message and a Watch result wait for its Turn. "Hide details"
+// (docs/plans/bots.md D5) keeps the Watch result out of sight; the user's message stays.
+const botAsk = [userSays('看一下这周新增依赖有没有高危漏洞。', 4)];
+const botQueue = [
+  message('user', 'user', '顺便把 avault 的审计也带上。', 1, { state: 'queued' }),
+  message('harness', 'harness', 'Watch「依赖审计」：npm audit 发现 1 个中危项。', 0, { state: 'queued', author_name: 'watch', author_id: 'watch_audit' }),
+];
+const botWaiting = (hideDetails: boolean) => chatFixtures({
+  session: bot,
+  messages: botAsk,
+  queued: botQueue,
+  turnState: { ...runningTurn, pending_input_count: botQueue.length },
+  extra: { bots: demoBots.map((each) => ({ ...each, hide_details: hideDetails })) },
+});
 
 const archived = [
   userSays('把 avault 升到 0.7.0，跑一遍依赖审计。', 60 * 26),
@@ -86,6 +102,26 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(bot.id),
     fixtures: chatFixtures({ session: bot }),
+    render: chatDesktop,
+  },
+  {
+    name: 'bot-queue',
+    title: '会话 · 伙伴工作中 · 隐藏细节：只留用户自己待送达的消息',
+    width: 1192,
+    height: 640,
+    status: 'shipped',
+    route: chatRoute(bot.id),
+    fixtures: botWaiting(true),
+    render: chatDesktop,
+  },
+  {
+    name: 'bot-queue-details',
+    title: '会话 · 伙伴工作中 · 显示细节：Harness 输入也在队列里',
+    width: 1192,
+    height: 640,
+    status: 'shipped',
+    route: chatRoute(bot.id),
+    fixtures: botWaiting(false),
     render: chatDesktop,
   },
   {
@@ -197,6 +233,26 @@ const designFrames = frames([
     status: 'shipped',
     route: chatRoute(bot.id),
     fixtures: chatFixtures({ session: bot }),
+    render: chatPhone,
+  },
+  {
+    name: 'phone-bot-queue',
+    title: '会话 · 伙伴工作中 · 隐藏细节 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(bot.id),
+    fixtures: botWaiting(true),
+    render: chatPhone,
+  },
+  {
+    name: 'phone-bot-queue-details',
+    title: '会话 · 伙伴工作中 · 显示细节 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(bot.id),
+    fixtures: botWaiting(false),
     render: chatPhone,
   },
   {
