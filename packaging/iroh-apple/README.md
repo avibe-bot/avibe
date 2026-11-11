@@ -148,9 +148,11 @@ Release assets and layout:
   wrapper by itself.
 - `IrohLib-support.zip` contains the matching `IrohLib.swift`, upstream
   `LICENSE-APACHE` and `LICENSE-MIT` under `LICENSES/iroh-ffi/`, and license/NOTICE
-  texts from locked dependencies indexed by `LICENSES/packages.json`, plus the
-  Rust distribution's copyright notices and installed `licenses/` directory.
-  This deliberately includes build/host dependencies too. Consumers must obtain
+  texts from the union of the resolved iOS target graphs, indexed by
+  `LICENSES/packages.json`, plus Rust distribution copyright notices and the
+  installed `licenses/` directory. All dependency kinds are retained, including
+  build/proc-macro and dev dependencies; unrelated platforms and workspace
+  roots are not collected. Consumers must obtain
   and preserve this bundle's notices with the redistributed binary and wrapper.
   The binding is also published as `IrohLib.swift`; both forms are checksummed.
 - `iroh-apple-release.json` records tag, binary URL/checksum, upstream commit,
@@ -172,6 +174,50 @@ The existing hourly release mirror naturally retains this full release and its
 assets; its `latest/` installer selection requires product tags and desktop
 installers, so this release cannot replace those aliases. GitHub URLs remain
 the pin; no new mirror guard or backup infrastructure is added.
+
+## Notice collection policy
+
+`scripts/cargo_notices.py` accepts a `Cargo.lock`, repeated `--target` values,
+`--package`, `--toolchain`, `--policy` and an empty `--output` directory. It is
+shared tooling for binary packagers, not an Apple-only dependency scanner.
+Configure Cargo's locked vendor source first, as this gate does; it verifies
+vendor package checksums against the supplied lockfile. It traverses the selected
+workspace root through `cargo metadata --locked --filter-platform` for each
+target, rather than treating every entry in metadata or Cargo.lock as shipped.
+
+`license-sources.json` owns the reviewed expression-to-selected-license allowlist
+and per-crate/version/checksum supplemental sources. Collection refuses unknown
+expressions, unknown missing texts, mismatched crate or notice checksums, API
+failures, and mutable upstream URLs. Each `OR` expression has an explicit option;
+none selects a GPL/LGPL license. Existing bundled notices are always retained,
+including third-party notices such as iroh's BSD text.
+
+Source preference is bundled text, then checksum-pinned text at the crate's
+exact upstream commit, then an individually reviewed canonical SPDX text where
+the upstream only declares or links the license. The last class is explicitly
+labeled `standard` in the inventory, retains Cargo.toml, declared expressions,
+authors and repository, and never invents a copyright holder. Canonical texts
+are references, not claimed upstream copyright notices. The current exceptions
+are block2 0.6.2, dispatch2 0.3.1, enum-assoc 1.4.1, objc2 0.6.5,
+objc2-core-foundation 0.3.2, objc2-encode 4.1.0, objc2-security 0.3.2 and
+objc2-system-configuration 0.3.2. Pin bumps must review this list again.
+
+`LICENSES/provenance.json` records targets, policy/lockfile hashes, classes,
+counts, selected expressions and source URLs/checksums. `LICENSES/NOTICE.md`
+tells recipients how to obtain every MPL-2.0 crate's covered source via its
+versioned registry archive and exact upstream commit, stating that the crate
+source is unmodified (checked against vendor file hashes). It also supplies
+those pointers for the unmodified UniFFI generator/templates used to generate
+`IrohLib.swift`; the generated file is not described as an unmodified upstream
+file. The iOS graph includes attohttpc 0.30.1 and nine uniffi-family 0.31.2 crates
+under MPL-2.0. This packaging evidence is **not legal clearance**; first
+publication remains an owner decision.
+
+The qualification's existing cargo-tree artifacts provide an independent graph
+cross-check. A local, build-free audit of those graphs and checksum-verified
+crate archives found 330 packages including iroh-ffi: 303 bundled, 19 upstream
+supplements and eight standard-text exceptions. The CI-produced provenance
+must confirm the actual graph and counts before publication.
 
 ## Bumping the pin
 

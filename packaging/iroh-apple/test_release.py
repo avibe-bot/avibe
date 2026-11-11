@@ -57,8 +57,16 @@ class ReleaseTests(unittest.TestCase):
                 archive.writestr(f"LICENSES/iroh-ffi/{name}", "fixture license")
             for name in ("licenses/Apache-2.0.txt", "licenses/MIT.txt", "COPYRIGHT.html"):
                 archive.writestr(f"LICENSES/rust-1.91.0/{name}", "fixture Rust notice")
-            archive.writestr("LICENSES/packages.json", json.dumps([{"name": "iroh-ffi", "version": "1.2.0",
-                "files": ["LICENSES/iroh-ffi/LICENSE-MIT"]}]))
+            inventory = [{"name": "iroh-ffi", "version": "1.2.0",
+                          "files": ["LICENSES/iroh-ffi/LICENSE-MIT"]}]
+            archive.writestr("LICENSES/packages.json", json.dumps(inventory))
+            archive.writestr("LICENSES/NOTICE.md", "Generated IrohLib.swift binding: registry-source upstream-source")
+            archive.writestr("LICENSES/provenance.json", json.dumps({
+                "targets": list(release.IOS_TARGETS), "packages": inventory,
+                "policy_sha256": release.digest(Path(__file__).with_name("license-sources.json")),
+                "mpl_sources": [{"name": "uniffi_bindgen", "modification_status": "unmodified",
+                                 "registry_url": "registry-source", "upstream_url": "upstream-source"}],
+            }))
 
     def test_manifest_matches_actual_files_and_keeps_pin_pending(self):
         self.fixture()
@@ -128,32 +136,67 @@ class ReleaseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "deployment mismatch"):
                     release.prepare(self.directory, self.tag, self.sha, "123")
 
-    def test_support_collects_licenses_and_rejects_missing_notice_source(self):
+    def test_support_preserves_rust_layout_and_generated_binding_source_pointer(self):
+        # The shared collector owns graph/license refusals. This boundary adds
+        # Rust distribution notices and the generated Swift template pointer.
         self.fixture()
         source = self.directory / "upstream"
         source.mkdir()
         for name in ("LICENSE-APACHE", "LICENSE-MIT"):
             (source / name).write_text("upstream license fixture")
-        package = self.directory / "dependency"
-        package.mkdir()
-        (package / "LICENSE").write_text("dependency license fixture")
-        metadata = {"packages": [{"name": "dependency", "version": "1.0.0", "license": "MIT",
-                                  "manifest_path": str(package / "Cargo.toml")}]}
         rust_notices = self.directory / "share/doc/rust"
         (rust_notices / "licenses").mkdir(parents=True)
         for name in ("licenses/Apache-2.0.txt", "licenses/MIT.txt", "licenses/LLVM-exception.txt",
                      "COPYRIGHT.html", "COPYRIGHT-library.html"):
             (rust_notices / name).write_text("Rust distribution notice fixture")
-        with patch.object(release.subprocess, "check_output", side_effect=[json.dumps(metadata), str(self.directory)] * 2):
-            release.support_bundle(source, self.directory)
-            with zipfile.ZipFile(self.directory / release.SUPPORT_NAME) as archive:
-                self.assertEqual(archive.read("LICENSES/dependency-1.0.0/LICENSE"), b"dependency license fixture")
-                self.assertEqual(archive.read("LICENSES/rust-1.91.0/licenses/LLVM-exception.txt"),
-                                 b"Rust distribution notice fixture")
-                self.assertIn("LICENSES/rust-1.91.0/COPYRIGHT-library.html", archive.namelist())
-            (package / "LICENSE").unlink()
-            with self.assertRaisesRegex(ValueError, "no redistribution license"):
-                release.support_bundle(source, self.directory)
+        binding_source = {"name": "uniffi_bindgen", "version": "0.31.2",
+                          "registry_url": "https://example.test/uniffi_bindgen-0.31.2.crate",
+                          "upstream_url": "https://example.test/tree/exact-commit"}
+
+        def collect(lockfile, targets, toolchain, package, policy, output):
+            self.assertEqual(lockfile, source / "Cargo.lock")
+            self.assertEqual(targets, list(release.IOS_TARGETS))
+            self.assertEqual(package, "iroh-ffi")
+            output.mkdir(parents=True)
+            (output / "NOTICE.md").write_text("MPL covered sources\n")
+            return {"counts": {"upstream": 1}, "mpl_sources": [binding_source]}
+
+        with patch.object(release, "collect_notices", side_effect=collect), \
+             patch.object(release.subprocess, "check_output", return_value=str(self.directory)):
+            release.support_bundle(source, self.directory, source / "Cargo.lock", list(release.IOS_TARGETS))
+        with zipfile.ZipFile(self.directory / release.SUPPORT_NAME) as archive:
+            self.assertEqual(archive.read("LICENSES/rust-1.91.0/licenses/LLVM-exception.txt"),
+                             b"Rust distribution notice fixture")
+            self.assertIn("LICENSES/rust-1.91.0/COPYRIGHT-library.html", archive.namelist())
+            self.assertEqual(archive.read("IrohLib.swift"), (self.directory / "IrohLib.swift").read_bytes())
+            notice = archive.read("LICENSES/NOTICE.md").decode()
+            self.assertIn(binding_source["registry_url"], notice)
+            self.assertIn(binding_source["upstream_url"], notice)
+            self.assertIn("Generated IrohLib.swift binding", notice)
+
+    def test_missing_mpl_pointer_or_wrong_notice_scope_refuses_candidate(self):
+        # Package license text alone must not replace the source-obtainment
+        # statement, and a sidecar/other-target bundle is not an iOS bundle.
+        for fault in ("pointer", "targets", "policy"):
+            with self.subTest(fault=fault):
+                self.fixture()
+                path = self.directory / release.SUPPORT_NAME
+                with zipfile.ZipFile(path) as archive:
+                    files = {name: archive.read(name) for name in archive.namelist()}
+                if fault == "pointer":
+                    files["LICENSES/NOTICE.md"] = b"License texts without source pointers"
+                else:
+                    provenance = json.loads(files["LICENSES/provenance.json"])
+                    if fault == "targets":
+                        provenance["targets"] = ["x86_64-unknown-linux-gnu"]
+                    else:
+                        provenance["policy_sha256"] = "0" * 64
+                    files["LICENSES/provenance.json"] = json.dumps(provenance).encode()
+                with zipfile.ZipFile(path, "w") as archive:
+                    for name, data in files.items():
+                        archive.writestr(name, data)
+                with self.assertRaises(ValueError):
+                    release.prepare(self.directory, self.tag, self.sha, "123")
 
     def test_publication_commands_require_backstop_but_pr_dry_run_does_not(self):
         # A healthy Apple artifact is insufficient if its master backstop fails.

@@ -17,6 +17,8 @@ on:
       - .github/workflows/iroh-apple-gate.yml
       - packaging/iroh-apple/**
       - scripts/ci_release_backstop.py
+      - scripts/cargo_notices.py
+      - tests/test_cargo_notices.py
 
 permissions:
   contents: read
@@ -136,7 +138,9 @@ jobs:
       - name: Collect redistribution notices and matching Swift binding
         run: |
           python3 "$IROH_GATE_DIR/release.py" support \
-            --source "$IROH_SOURCE" --directory "$IROH_OUTPUT"
+            --source "$IROH_SOURCE" --directory "$IROH_OUTPUT" \
+            --lockfile "$IROH_SOURCE/Cargo.lock" \
+            --target aarch64-apple-ios --target aarch64-apple-ios-sim --target x86_64-apple-ios
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

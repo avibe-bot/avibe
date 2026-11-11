@@ -16,9 +16,13 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[1]))
+from scripts.cargo_notices import collect_notices  # noqa: E402
+
 REPOSITORY = "avibe-bot/avibe"
 ZIP_NAME = "IrohLib.xcframework.zip"
 SUPPORT_NAME = "IrohLib-support.zip"
@@ -57,18 +61,30 @@ def validate_tag(tag: str, config: dict[str, str]) -> None:
     require(tag == expected_tag(config), "tag does not match pinned upstream version and revision")
 
 
-def support_bundle(source: Path, output: Path) -> None:
-    """Carry license/NOTICE files from the locked vendor tree alongside bindings."""
-    metadata = json.loads(subprocess.check_output(
-        ["cargo", f"+{pins()['RUST_VERSION']}", "metadata", "--locked", "--format-version", "1"],
-        cwd=source, text=True,
-    ))
+def support_bundle(source: Path, output: Path, lockfile: Path, targets: list[str]) -> None:
+    """Keep the qualified zip unchanged and carry its target-resolved notices."""
     sysroot = Path(subprocess.check_output(
         ["rustc", f"+{pins()['RUST_VERSION']}", "--print", "sysroot"], text=True,
     ).strip())
     rust_notices = sysroot / "share/doc/rust"
-    inventory = []
-    with zipfile.ZipFile(output / SUPPORT_NAME, "w", zipfile.ZIP_DEFLATED) as archive:
+    with tempfile.TemporaryDirectory(prefix="iroh-notices-") as temporary:
+        notices = Path(temporary) / "LICENSES"
+        result = collect_notices(lockfile, targets, pins()["RUST_VERSION"], "iroh-ffi",
+                                 HERE / "license-sources.json", notices)
+        binding_sources = [p for p in result["mpl_sources"] if p["name"] == "uniffi_bindgen"]
+        require(len(binding_sources) == 1, "generated binding requires one exact UniFFI source pointer")
+        binding = binding_sources[0]
+        with (notices / "NOTICE.md").open("a") as text:
+            text.write("\n## Generated IrohLib.swift binding\n\n"
+                       f"Generated using unmodified uniffi_bindgen {binding['version']} (MPL-2.0). "
+                       "The generated file is not an unmodified upstream source file. "
+                       "Obtain the generator and covered template source here:\n"
+                       f"{binding['registry_url']}\n{binding['upstream_url']}\n")
+        with zipfile.ZipFile(output / SUPPORT_NAME, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(notices.rglob("*")):
+                if path.is_file():
+                    archive.write(path, f"LICENSES/{path.relative_to(notices).as_posix()}")
+    with zipfile.ZipFile(output / SUPPORT_NAME, "a", zipfile.ZIP_DEFLATED) as archive:
         archive.write(output / "IrohLib.swift", "IrohLib.swift")
         for name in ("LICENSE-APACHE", "LICENSE-MIT"):
             archive.write(source / name, f"LICENSES/iroh-ffi/{name}")
@@ -84,26 +100,7 @@ def support_bundle(source: Path, output: Path) -> None:
         for path in rust_files:
             if path.is_file():
                 archive.write(path, f"{rust_prefix}/{path.relative_to(rust_notices).as_posix()}")
-        for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
-            root = Path(package["manifest_path"]).parent
-            names = set()
-            for path in root.rglob("*"):
-                if path.is_file() and re.match(r"(?i)^(licen[cs]e|copying|copyright|notice)([._-]|$)", path.name):
-                    names.add(path)
-            if package.get("license_file"):
-                names.add(root / package["license_file"])
-            require(bool(names), f"no redistribution license text found: {package['name']} {package['version']}")
-            prefix = f"LICENSES/{package['name']}-{package['version']}"
-            files = []
-            for path in sorted(names):
-                require(path.is_file() and path.resolve().is_relative_to(root.resolve()), f"unsafe license file: {path}")
-                target = f"{prefix}/{path.relative_to(root).as_posix()}"
-                archive.write(path, target)
-                files.append(target)
-            inventory.append({"name": package["name"], "version": package["version"],
-                              "license": package.get("license"), "files": files})
-        archive.writestr("LICENSES/packages.json", json.dumps(inventory, indent=2) + "\n")
-    print(f"Collected notices for {len(inventory)} locked packages (including build/host dependencies).")
+    print(f"Collected target-resolved notices: {result['counts']}")
 
 
 def qualification_files(directory: Path) -> list[Path]:
@@ -164,6 +161,17 @@ def prepare(directory: Path, tag: str, source_sha: str, run_id: str) -> dict:
                      f"LICENSES/rust-{config['RUST_VERSION']}/COPYRIGHT.html"):
             require(bool(archive.read(name)), f"missing upstream license: {name}")
         inventory = json.loads(archive.read("LICENSES/packages.json"))
+        provenance = json.loads(archive.read("LICENSES/provenance.json"))
+        require(set(provenance["targets"]) == set(IOS_TARGETS), "notice target coverage mismatch")
+        require(provenance["policy_sha256"] == digest(HERE / "license-sources.json"), "notice policy mismatch")
+        require(provenance["packages"] == inventory, "notice inventory/provenance mismatch")
+        notice = archive.read("LICENSES/NOTICE.md").decode()
+        require("Generated IrohLib.swift binding" in notice and
+                any(p["name"] == "uniffi_bindgen" for p in provenance["mpl_sources"]),
+                "missing generated binding source pointer")
+        for source in provenance["mpl_sources"]:
+            require(source["modification_status"] == "unmodified" and source["registry_url"] in notice
+                    and source["upstream_url"] in notice, "missing MPL covered-source pointer")
         require(bool(inventory), "empty dependency license inventory")
         for package in inventory:
             require(bool(package["files"]), "empty package license inventory")
@@ -176,6 +184,8 @@ def prepare(directory: Path, tag: str, source_sha: str, run_id: str) -> dict:
         "upstream_commit": config["IROH_FFI_COMMIT"], "iroh_core_version": config["IROH_CORE_VERSION"],
         "patch_sha256": digest(HERE / "iroh-ffi-no-private-apple-datapath.patch"),
         "build_recipe_sha256": digest(HERE / "build-iroh-apple.sh"),
+        "license_policy_sha256": digest(HERE / "license-sources.json"),
+        "notice_collector_sha256": digest(HERE.parents[1] / "scripts/cargo_notices.py"),
         "deployment_target": target, "tested_runtime": runtime["runtime_version"],
         "runtime_identifier": runtime["runtime_identifier"], "source_commit": source_sha,
         "qualification_run_id": run_id,
@@ -225,11 +235,16 @@ def main() -> None:
     parser.add_argument("command", choices=("support", "prepare", "preflight"))
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--source", type=Path)
+    parser.add_argument("--lockfile", type=Path)
+    parser.add_argument("--target", action="append")
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
     if args.command == "support":
-        require(args.source is not None, "support requires --source")
-        support_bundle(args.source, args.directory)
+        require(args.source is not None and args.lockfile is not None and bool(args.target),
+                "support requires --source, --lockfile and --target")
+        require(args.lockfile.resolve() == (args.source / "Cargo.lock").resolve(), "lockfile/source mismatch")
+        require(set(args.target) == set(IOS_TARGETS), "Apple support requires every qualified iOS target")
+        support_bundle(args.source, args.directory, args.lockfile, args.target)
         return
     tag = args.tag or expected_tag(pins())
     if args.command == "preflight":
