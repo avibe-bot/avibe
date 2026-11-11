@@ -1387,7 +1387,7 @@ def test_machine_error_family_product_is_complete_across_transports() -> None:
     # Each code is listed once; the set comparison below would collapse a duplicate.
     assert len(fixture_codes) == len(expected_codes)
     assert expected_codes == set(UPSTREAM_MACHINE_ERROR_CODES)
-    assert set(MACHINE_ERROR_CODES) - expected_codes == {"engine_down"}
+    assert set(MACHINE_ERROR_CODES) - expected_codes == {"engine_down", "engine_withdrawn"}
     observed: set[tuple[str, str, str]] = set()
     for family, codes in MACHINE_ERROR_FAMILY_FIXTURES.items():
         for code, transport in product(codes, ERROR_TRANSPORT_SHAPES):

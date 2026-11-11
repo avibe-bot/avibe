@@ -1385,6 +1385,18 @@ class Controller:
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
 
+        adapter = getattr(self, "model_hub_engine_adapter", None)
+        recover_engine = getattr(adapter, "recover_lifecycle", None)
+        if callable(recover_engine):
+            try:
+                await recover_engine()
+            except Exception:
+                logger.exception("Model Hub engine journal recovery failed; starts stay fenced")
+            finally:
+                schedule_engine = getattr(adapter, "start_lifecycle_scheduler", None)
+                if callable(schedule_engine):
+                    schedule_engine()
+
         model_hub_service = getattr(self, "model_hub_service", None)
         recover_model_hub = getattr(
             model_hub_service,
@@ -2219,6 +2231,7 @@ class Controller:
         service_stops: list[tuple[str, asyncio.Task[None]]] = []
         for service_name in (
             "model_hub_service",
+            *(("model_hub_engine_adapter",) if getattr(self, "model_hub_service", None) is None else ()),
             "scheduled_task_service",
             "watch_service",
         ):

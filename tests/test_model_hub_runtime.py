@@ -921,6 +921,7 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
         "name": "cliproxyapi",
         "resolution": "resolved",
         "version": "v8.0.63",
+        "asset_release_tag": "model-hub-engine-v8.0.63-1",
         "source_sha": "6db7d4b839d86c5b24e17bbe73bcd4db18ef1b1a",
         "assets": [
             {
@@ -1586,7 +1587,9 @@ def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: P
 
 
 @pytest.mark.parametrize("lost", ["missing", "malformed"])
-def test_channel_state_loss_does_not_replace_installed_engine_integrity_checks(tmp_path: Path, lost: str) -> None:
+def test_channel_state_loss_does_not_replace_installed_engine_integrity_checks(
+    tmp_path: Path, lost: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """KEEP with unavailable channel history permits no install and cannot bless tampered bytes.
 
     Channel-only tests cannot prove the disk engine remains independently
@@ -1603,6 +1606,9 @@ def test_channel_state_loss_does_not_replace_installed_engine_integrity_checks(t
     assert installed["ok"] is True
     binary_path = Path(installed["path"])
     manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    # This test-owned manifest stands in for the release's bundled baseline.
+    # A pointer alone no longer authorizes an unrelated non-packaged install.
+    monkeypatch.setattr(manager, "bundled_manifest_bytes", manifest.read_bytes)
     signer = Signer()
     fetches = []
 
@@ -3977,6 +3983,18 @@ while True:
     path.chmod(0o755)
 
 
+class _StandaloneClaimInstaller(EngineRuntimeManager):
+    """Legacy claim-protocol fixture: fake files, no engine-owner semantics.
+
+    Production lifecycle/required-engine consumers are exercised separately by
+    test_model_hub_engine_lifecycle/admission/consumers, not these fake ensures.
+    """
+
+    @property
+    def lifecycle_enabled(self):
+        return False
+
+
 class _FixtureInstaller:
     def __init__(self, binary: Path, install_dir: Path) -> None:
         self.binary = binary
@@ -4830,27 +4848,19 @@ def test_supervisor_never_signals_a_recycled_pid_from_its_record(tmp_path: Path)
         stranger.wait(timeout=5)
 
 
-def test_supervisor_ignores_a_corrupt_engine_record(tmp_path: Path) -> None:
+@pytest.mark.parametrize("damaged", [b"{not json", b'{"engines": [\xff\xfe', b'{}', b'{"engines": []}'])
+def test_supervisor_preserves_ambiguous_ownership_and_refuses_a_second_engine(tmp_path: Path, damaged: bytes) -> None:
+    # A damaged ownership record must not become permission to overlap a real-
+    # auth engine. Existing survivor tests have intact marker/pid records.
     supervisor, store = _fixture_supervisor(tmp_path)
     store.root.mkdir(parents=True, exist_ok=True)
-    (store.root / "engine-process.json").write_text("{not json", encoding="utf-8")
-
-    supervisor.ensure_running()
-
-    assert supervisor._process is not None
-    supervisor.stop()
-
-
-def test_supervisor_ignores_an_engine_record_that_is_not_utf8(tmp_path: Path) -> None:
-    supervisor, store = _fixture_supervisor(tmp_path)
-    store.root.mkdir(parents=True, exist_ok=True)
-    (store.root / "engine-process.json").write_bytes(b'{"engines": [\xff\xfe')
-
-    supervisor.ensure_running()
-
-    assert supervisor._process is not None
-    supervisor.stop()
-    assert not (store.root / "engine-process.json").exists()
+    record = store.root / "engine-process.json"
+    record.write_bytes(damaged)
+    with pytest.raises(EngineUnavailableError) as failure:
+        supervisor.ensure_running()
+    assert failure.value.reason == "previous_engine_alive"
+    assert supervisor._process is None
+    assert record.read_bytes() == damaged
 
 
 def test_supervisor_records_the_launch_before_spawning(tmp_path: Path) -> None:
@@ -6149,7 +6159,7 @@ def test_direct_ensure_lock_contention_is_transient(
 def test_runtime_install_state_survives_adapter_reload_and_settles_once(
     tmp_path: Path,
 ) -> None:
-    class BlockingInstaller(EngineRuntimeManager):
+    class BlockingInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.release = threading.Event()
@@ -6241,7 +6251,7 @@ def test_runtime_install_state_survives_adapter_reload_and_settles_once(
 def test_cancelled_install_admission_keeps_owned_worker_and_shutdown_joins_it(
     tmp_path: Path,
 ) -> None:
-    class BlockingInstaller(EngineRuntimeManager):
+    class BlockingInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.claim_entered = threading.Event()
@@ -6332,7 +6342,7 @@ def test_cancelled_install_admission_keeps_owned_worker_and_shutdown_joins_it(
 def test_install_finalization_never_projects_a_verified_installing_state(
     tmp_path: Path,
 ) -> None:
-    class FinalizingInstaller(EngineRuntimeManager):
+    class FinalizingInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.clear_entered = threading.Event()
@@ -6410,7 +6420,7 @@ def test_install_finalization_never_projects_a_verified_installing_state(
 def test_orphaned_install_state_is_reclaimed_before_runtime_status(
     tmp_path: Path,
 ) -> None:
-    class RecoveringInstaller(EngineRuntimeManager):
+    class RecoveringInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.ensure_calls = 0
@@ -6489,7 +6499,7 @@ def test_recovery_retries_a_transient_shared_install_lock_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class RetryingInstaller(EngineRuntimeManager):
+    class RetryingInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.ensure_calls = 0
@@ -6590,7 +6600,7 @@ def test_recovery_lock_wait_exhaustion_settles_terminal_with_backoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class CollidingInstaller(EngineRuntimeManager):
+    class CollidingInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.ensure_calls = 0
@@ -6719,7 +6729,7 @@ def test_platform_refusal_never_creates_or_settles_an_install_claim(
 def test_every_pre_resolution_failure_persists_unless_platform_is_unsupported(
     tmp_path: Path,
 ) -> None:
-    class FailedBeforeResolutionInstaller(EngineRuntimeManager):
+    class FailedBeforeResolutionInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path, reason: str) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.failure_reason = reason
@@ -6802,7 +6812,7 @@ def test_runtime_start_after_install_obeys_latest_explicit_lifecycle_action(
     tmp_path: Path,
     stop_wins: bool,
 ) -> None:
-    class BlockingInstaller(EngineRuntimeManager):
+    class BlockingInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.release = threading.Event()
@@ -6939,7 +6949,7 @@ def test_runtime_start_after_install_obeys_latest_explicit_lifecycle_action(
 
 
 def test_runtime_install_failure_persists_closed_error_key(tmp_path: Path) -> None:
-    class FailedInstaller(EngineRuntimeManager):
+    class FailedInstaller(_StandaloneClaimInstaller):
         def __init__(self, runtime_dir: Path) -> None:
             super().__init__(runtime_dir=runtime_dir, offline=True)
             self.ensure_calls = 0

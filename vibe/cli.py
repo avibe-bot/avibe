@@ -15224,6 +15224,11 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             "reason": f"{target}_invalid_result",
             "error": i18n_t("doctor.value.unknownError"),
         }
+    if target == "model-hub-engine" and result.get("ok") and result.get("reason") == "waiting_for_controller":
+        return _doctor_repair_result(
+            target, "skipped", i18n_t("doctor.repair.dependencyStaged"),
+            reason="waiting_for_controller", state="staged", path=result.get("path"), version=result.get("version"),
+        )
     if result.get("ok"):
         version = result.get("version")
         detail = (
@@ -18106,6 +18111,8 @@ def cmd_runtime(args) -> int:
                 print(
                     "Model Hub engine: skipped ({reason}).".format(reason=model_hub_engine.get("reason") or "skipped")
                 )
+            elif model_hub_engine.get("ok") and model_hub_engine.get("reason") == "waiting_for_controller":
+                print("Model Hub engine files staged; waiting for the controller. Execution was not changed.")
             elif model_hub_engine.get("ok"):
                 print(
                     "Model Hub engine installed."
@@ -18600,7 +18607,7 @@ def _ensure_model_hub_engine_during_prepare(
     offline: bool = False,
     force: bool = False,
 ) -> dict:
-    """Converge CPA to the Avibe pin without making upgrade success depend on it."""
+    """Stage/repair required CPA files without making upgrade success depend on it."""
     from vibe import api
 
     try:

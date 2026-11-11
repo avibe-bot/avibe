@@ -373,6 +373,15 @@ class ModelHubRemoteService:
     async def migration_apply(self, item_ids: object, clean_api_keys: object = False) -> dict:
         return await _rpc("migration_apply", {"item_ids": item_ids, "clean_api_keys": clean_api_keys})
 
+    async def engine_status(self) -> dict:
+        return await _rpc("engine_status")
+
+    async def engine_check(self) -> dict:
+        return await _rpc("engine_check")
+
+    async def engine_update(self) -> dict:
+        return await _rpc("engine_update")
+
     async def runtime_status(self) -> dict:
         return await _rpc("runtime_status")
 

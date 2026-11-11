@@ -165,6 +165,10 @@ class EngineChannel:
         )
         self.store = ChannelStateStore(self.manager.runtime_dir / "channel")
         self._fetch = fetch
+        # A verified withdrawal learned in THIS process may block execution even
+        # when its state publication fails. This is volatile, not another
+        # channel-history authority or a promise after history loss/restart.
+        self._restrictive_payload = None
         if avibe_version is None:
             from vibe import __version__ as avibe_version
         self._avibe_version = avibe_version
@@ -206,7 +210,9 @@ class EngineChannel:
             return ChannelStatus("unavailable", "network", type(exc).__name__)
         try:
             envelope, payload = authenticate(raw, roots=self.roots, verifier=self.verifier)
+            self._restrictive_payload = payload
             changed = self.store.accept(envelope, payload, floor=self.roots.sequence_floor)
+            self._restrictive_payload = None
         except ChannelError as exc:
             logger.warning("Model Hub engine channel index rejected: %s", exc)
             return ChannelStatus("rejected", exc.reason, exc.detail)
@@ -229,7 +235,7 @@ class EngineChannel:
         return self.store.cached(roots=self.roots, verifier=self.verifier)
 
     def bundled_release_tag(self) -> str | None:
-        manifest = self.manager.load_manifest_for_diagnostics()
+        manifest = self.manager.bundled_manifest()
         tag = manifest.payload.get("asset_release_tag") if manifest is not None else None
         return tag if isinstance(tag, str) else None
 
@@ -258,6 +264,10 @@ class EngineChannel:
         reason = self.opt_out_reason()
         if reason == "manifest_override":
             return Resolution(ResolutionAction.KEEP, reason)
+        if self._restrictive_payload is not None:
+            withdrawal = self._restrictive_payload.tombstone(current)
+            if withdrawal is not None:
+                return Resolution(ResolutionAction.BLOCKED, "channel_state_write_failed", None, withdrawal)
         if reason is not None:
             return self._unverifiable(current, reason)
         try:

@@ -414,7 +414,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert build.get("needs") == "changes"
     assert set(jobs["unit-tests"]["needs"]) == {
         "changes", "unit-test-shards", "scenario-evidence", "ui-checks", "ui-tests",
-        "ui-browser-checks", "model-hub-hosted-wire", "manifest-consistency", "python-smoke",
+        "ui-browser-checks", "model-hub-hosted-wire", "model-hub-lifecycle-native", "manifest-consistency", "python-smoke",
         "ios-shell", "desktop-shell", "ruff", "memory-insight-contract",
         "show-router-integration", "build-linux-artifacts", "migration-release-guard", "npm-wrapper",
     }

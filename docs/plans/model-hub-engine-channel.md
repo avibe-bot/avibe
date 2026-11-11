@@ -3,10 +3,14 @@
 **Status:** design approved by the owner, with minimum-only compatibility;
 target Avibe **3.2.6**. Delivery is four PRs (section 6), each needing owner
 merge approval. Step 1 shipped as avault 0.1.10. Step 2, the channel contract
-and its producer, is described under "Step 2 as built" at the end. Steps 3 and
-4 are not built: **no installed Avibe adopts an engine from the channel, and
-the channel is not commissioned.** This note authorizes no publication, key
-creation, or rollout.
+and its producer, is described under "Step 2 as built" at the end. Step 3a's
+single-file channel recovery is merged; Step 3b implements lifecycle ownership
+and its consumers in this change. Step 4's new UI/CLI/policy surfaces remain
+future work. **The channel is not commissioned.** This note authorizes no
+publication, key creation, or rollout. The owner-selected Job split keeps
+`untrusted_rehearsal` informational and owner approval as promotion authority;
+publication/receipt cleanup is a separate follow-up, not a prerequisite restored
+by the lifecycle implementation.
 
 **The index has no expiry and is never renewed** (owner decision, 2026-11-11;
 section 2 says what that means for a machine that misses a withdrawal). The
@@ -17,7 +21,8 @@ serve them are gone from the design and from the code.
 
 Example: publish `model-hub-engine-v8.0.63-2` with minimum Avibe `3.2.6`.
 An installed 3.2.6 or later discovers it without an Avibe release, verifies it,
-and changes only CPA at a safe boundary. An older Avibe stays on its own engine.
+and changes only CPA at a safe boundary. An older Avibe does not adopt channel C;
+released compatibility exposure is described in section 3.
 A failed activation restores the previous working engine. A withdrawn release
 cannot be selected again while the local channel history remembers its withdrawal.
 Loss of that history has the explicit limitation in section 2. This is an
@@ -25,11 +30,12 @@ example, not approval of that engine build.
 
 Independent **artifacts already exist**: the builder produces six deterministic
 archives and the guard publishes `model-hub-engine-v…` releases. What is missing
-is independent, authenticated **adoption**. Today the installer, Dependencies,
-startup reconciliation, and hosted-tool evidence all use the packaged pin.
-The publish workflow does not depend on full Model Hub E2E. The November 10
-v8.0.63 adoption (#3460, followed by E2E expectation fixes in #3464) demonstrated
-why a successful build/hosted-wire check is not full release qualification.
+is independent, authenticated **adoption**. The lifecycle below now resolves
+startup, repair, Dependencies payloads and producing evidence from the committed
+engine rather than the packaged pin. The publication workflow remains a
+separate boundary; a build/hosted-wire check is not full end-to-end assurance.
+The November 10 v8.0.63 adoption (#3460, followed by E2E expectation fixes in
+#3464) demonstrated that distinction.
 
 Sources: [CPA lifecycle](model-hub-cpa-dependency.md), [release workflow](../release.md),
 [download mirror](release-download-mirror.md), `scripts/build_model_hub_engine.py`,
@@ -278,35 +284,61 @@ install-claim schema unless an additive migration is actually needed.
 | `idle -> checking` | Authenticate index and select compatible candidate; active engine keeps serving. |
 | `downloading -> staged` | Hold one update reservation; download/verify into a distinct immutable generation. Do not move `current.json` or hold the routing lock during download. |
 | `preflight` | Run candidate with isolated temporary config/auth and loopback fixtures; validate startup, management ownership/config and gateway contract without provider traffic or user credentials. |
-| `waiting_for_idle` | Wait for a quiet boundary. Under the routing lock, count all inference transports **and** OAuth/management/config operations. Briefly gate new admissions and drain existing work; after 30 seconds reopen admission and defer five minutes instead of killing a stream. |
-| `activating` | Journal old/candidate identities and run intent durably; stop only the owned old CPA, select candidate, start if previously running, validate the real local health/ownership/config contract within a 30-second budget. No new request reaches a half-activated generation. |
-| `applied` | Commit active/previous selection and success only after health passes; release admission, update effective engine evidence identity, then permit cleanup. A stopped Model Hub stays stopped after isolated preflight/selection. |
+| `waiting_for_idle` | Engine-only leases cover inference, OAuth flow continuations and management/config/credential work. Gate fresh admissions without holding routing or installation locks needed by admitted continuations. After 30 seconds, routine updates reopen and defer five minutes; they never kill/replay work. |
+| `activating` | Durably journal old/candidate identities and run intent before stopping old CPA. Start only through the owner's fenced resolver, if previously running, and validate the real local health/ownership/config contract. No request can acquire a provisional generation. |
+| `applied` | Commit active/previous before publishing running identity, and publish identity before reopening admission. A stopped engine remains stopped; its first real start has a confirmation transaction and authorized rollback. |
 | `rolling_back -> rolled_back` | Stop candidate; restore previous verified selection and run intent; health-check it before resuming. Keep the failure visible and quarantine the candidate identity until explicit retry or a different build. |
 | `blocked` | Neither candidate nor a safe fallback can run: report an actionable dependency error and stop Model Hub only; Avibe and unrelated backends continue. |
 
-Reuse `_routing_lock`, `_transports_idle`, installer claims and the supervisor,
-but split existing `ensure` into staging and activation: today it changes the
-pointer before restart and does not roll back a failed restart. Do not layer a
-second updater around that behavior. Durability order is explicit:
+Reuse the adapter's routing and installation serialization and the supervisor,
+but keep network/staging and drains outside the swap fence. The engine-specific
+lifecycle does not teach generic managed runtimes channel semantics. Durability
+order is explicit:
 
-1. Persist the verified candidate and both generations' manifests/archives.
-2. Durably write `intent(old, candidate, run_intent)` **before** stopping old CPA.
-3. Write the candidate pointer; start/health-check only under the activation fence.
-4. Durably commit `(active=candidate, previous=old)` **before** success/admission
-   or cleanup. A pointer is a projection, not the recovery source of truth.
+1. Stage exact verified manifests/archives into immutable generations, with
+   digest-addressed cache names. Stage-only callers execute no version probe.
+2. Isolated preflight uses empty test-owned home/config/auth inputs. Its own
+   durable launch witness allows recovery to reap a child even if its temporary
+   process record is missing/malformed; it is not another real-auth engine.
+3. Durably write `intent(old, candidate, run_intent)` **before** stopping old CPA.
+   Fence the provisional start/health check; no compatibility pointer selects it.
+4. Durably commit `(active=candidate, previous=old)` **before** publishing running
+   identity, reopening admission or allowing role-based cleanup.
+5. Afterwards project `current.json` to an eligible, already installed **actual
+   current package B_new**, or remove it. Never write channel C there and never
+   install/start an extra bundle merely to fill the hint.
 
-On restart, intent without commit restores old; durable commit repairs a stale
-pointer to candidate; no pending intent uses the last committed generation. A
-revoked/incompatible recovery target is never restarted; use the permitted safe
-fallback or block Model Hub. Stop surviving owned CPA processes only after checking
-recorded process identity. The **activation journal**, independently of the
-single-file channel history, requires file fsync, atomic replacement and
-parent-directory fsync on POSIX, and tested native flush/write-through semantics
-on Windows. An unsupported journal primitive blocks automatic activation rather
-than claiming power-loss safety. Inject failure at every journal write/flush/
-stop/start boundary, including commit-with-stale-pointer recovery. This does not
-upgrade the channel record into a second authority: loss of its history retains
-section 2's deliberately weaker recovery contract.
+On restart, intent without commit restores an authorized old target; durable
+commit keeps that exact generation regardless of a stale legacy hint. `KEEP`
+is not start authorization. Recovery and every fresh start check installed
+identity/integrity, minimum, provenance, changed package identity and currently
+available withdrawal history. A corrupt/missing committed C requires repair of
+C, not repinning to B. Re-evaluating a newer shipped baseline is a separate owner
+selection, not candidate adoption by ordinary repair. Config reload/credential
+invalidation can restart only the committed generation. Ordinary supervisor
+start resolves a previously authorized identity without network/recovery
+recursion under its lock. Recorded process identity and durable launch witnesses,
+not missing/malformed process records, settle survivor ownership.
+
+The **activation journal**, independently of the single-file channel history,
+uses file fsync, atomic replacement and parent-directory fsync on POSIX, final
+native full flush on Darwin, and native flush/write-through publication on
+Windows. Unsupported/completion-failed primitives block activation. Fault tests
+cover write/flush/stop/start/health/commit boundaries. Dedicated native CI kills
+an actual test owner and recovers real fixture children, separately from injected
+failures. Neither native process-crash tests nor successful native syscalls are
+physical power-loss certification. Provenance, launch witnesses and transaction
+intents never recreate a lost sequence floor or withdrawal: section 2's older
+signed-list acceptance and lost-withdrawal reopening remain intentional.
+
+`available`, `staged`, `committed`, `running` and `legacy` are separate identities.
+A failed compatibility projection is visible as pending and retried by the owner;
+stale/unreadable retained exposure is reported, never falsely called absent or
+used for new-client execution. Released v3.2.5 understands neither channel minimums
+nor withdrawals. Its OAuth/reauth can start retained B_new before successful
+prepare, but cannot discover C through this hint. Ordinary successfully prepared
+old demand can run B_old. Upgrade-back uses committed C without repinning. There
+is no release fence or claim that an old client enforces new policy.
 
 Do not automatically replay a request already sent upstream, especially one
 that streamed or invoked a hosted tool. Existing transports drain unchanged;
@@ -316,18 +348,26 @@ activity. OAuth flows and credential mutations share admission leases, not only
 inference calls. Do not run two real-auth CPA processes side by side.
 
 Rollback restores binaries/selection, **not** a stale snapshot of live credentials.
-Backward-state compatibility is an eligibility gate: run the exact candidate on
-synthetic Avibe-rendered config and CPA credential documents, exercise supported
-writes/refresh through loopback mocks with external egress denied, then read/use
-those resulting files with each retained rollback/bundled baseline in the minimum
-and current-stable qualification set. No production secrets or restored old-token
-snapshots. Missing or failing round-trip evidence forbids promotion. An engine
-requiring irreversible data migration needs an Avibe-coordinated change, not this
-channel. Cleanup preserves bundled, active, previous, staged and journal-referenced
-generations/archives.
-Hosted-tool capability/refusal stamps must use the actual admitted engine identity,
-not the current cached packaged-manifest stamp; swap and rollback invalidate new
-resolutions without rewriting completed evidence.
+An engine requiring irreversible data migration needs an Avibe-coordinated
+change, not this channel. Publication/backward-state rehearsal belongs to the
+owner-selected Job split, not a receipt/missing-producer runtime hard gate.
+Cleanup protects bundled, committed, previous, staged and pending/launch/preflight
+roles and their archives; unreadable lifecycle state fails the whole cleanup
+plan closed. Settled/quarantined/superseded stages retire rather than becoming
+permanent roots. Content-addressed archives retain cleanup ownership even when
+their unused install was removed while the archive was still too young.
+Hosted-tool capability/refusal/result stamps carry the admitted producing engine
+through later persistence, even after a swap. An unknown identity/manifest stays
+unknown: no renderer or evidence writer substitutes the packaged/current engine.
+
+For a known signed withdrawal the loop gates new admissions immediately, without
+waiting for routing or a metadata/status I/O worker. A single nonrenewing deadline
+of at most five minutes explicitly fails remaining work once, including stuck
+transport close; leases stay fenced until mutable cleanup joins. Routine updates
+never use this interruption path. No upstream replay is automatic. Recalled CPA
+is paused before fallback download/preflight, so a slow fallback cannot extend
+its execution. A pause records run intent, **not withdrawal history**; accepted
+history loss can reopen the generation as section 2 permits.
 
 ## 4. Publication gate and emergency withdrawal
 
@@ -385,6 +425,15 @@ revocation until it can, and until then it follows the index it has, which
 may still let it install the withdrawn release (section 2).
 
 ## 5. Dependencies, API and CLI
+
+**PR3b boundary:** existing Dependencies/status, prepare, Doctor, clean and runtime
+payload consumers now use the effective manifest and lifecycle identities.
+Stage-only results say `waiting_for_controller`, not installed/running/applied.
+Internal authenticated service/IPC status/check/update operations are shared;
+the current owner deduplicates concurrent requests and reports an operation ID.
+PR3b adds no new CLI command, persisted policy switch or Dependencies redesign.
+The following UI/CLI/policy surface remains **PR4 work**, not an existing API
+promise; routine adoption already has an internal provider for that integration.
 
 Keep the existing **Model Hub engine (CPA)** Dependencies row, not a new settings
 page. Show upstream **and Avibe build revision**, active/default/available version,
@@ -452,7 +501,8 @@ Avibe upgrades/downgrades and offline restart do not accidentally repin; rejecte
 candidates do not loop; revocation beats a stale promotion and cannot be undone by
 mirror recovery; production data never enters hermetic tests. Use focused owning-
 boundary tests, CI native-platform smokes, and the repository local Incus runner.
-No install, deploy, load test or restart on the owner's desktop.
+No owner-service install/deploy, synthetic load test or service restart on the
+owner's desktop. Hermetic fixture children are distinct from that live service.
 
 **Estimate:** 7–10 focused engineering days after design approval and verifier/
 release-signer decisions, plus review/CI and owner-held publication time. The

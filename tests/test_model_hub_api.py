@@ -1075,22 +1075,33 @@ def test_runtime_status_observes_engine_without_starting_it(tmp_path):
     assert runtime["status"]["verified"] is True
 
 
-def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
-    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+@pytest.mark.parametrize("known", [False, True])
+def test_runtime_status_carries_effective_manifest_without_packaged_fallback(tmp_path, known):
+    # A standalone renderer cannot discover the engine that served this status.
+    # The production adapter carries its worker snapshot; unknown stays unknown.
+    from dataclasses import replace
 
-    service, _store, _adapter = _service(tmp_path)
+    service, _store, adapter = _service(tmp_path)
+    effective = {
+        "name": "cliproxyapi", "resolution": "resolved", "version": "v8.0.64",
+        "asset_release_tag": "model-hub-engine-v8.0.64-7", "source_sha": "f" * 40,
+        "assets": [],
+    }
+    original = adapter.status
 
+    async def status():
+        return replace(
+            await original(), manifest=effective if known else None,
+            committed_release=effective["asset_release_tag"] if known else None,
+            running_release=effective["asset_release_tag"] if known else None,
+        )
+
+    adapter.status = status
     runtime = asyncio.run(service.runtime_status())
-
-    assert runtime["manifest"] == EngineRuntimeManager(offline=True).contract_manifest()
-    assert [asset["platform"] for asset in runtime["manifest"]["assets"]] == [
-        "darwin-arm64",
-        "darwin-x64",
-        "linux-amd64",
-        "linux-arm64",
-        "windows-amd64",
-        "windows-arm64",
-    ]
+    assert runtime["manifest"] == (effective if known else {"name": "cliproxyapi", "resolution": "unresolved", "assets": []})
+    assert runtime["committed_release"] == (effective["asset_release_tag"] if known else None)
+    assert runtime["running_release"] == (effective["asset_release_tag"] if known else None)
+    _assert_valid("runtime-dependency.schema.json", runtime)
 
 
 def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
