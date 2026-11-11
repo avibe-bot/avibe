@@ -172,7 +172,7 @@ export interface MobileSourceOffer { crates: MobileSourceCrate[]; version: strin
 export interface MobileLicenseGroup { license: string; components: string[]; text: string; open?: boolean }
 export interface MobileLicensesFixture { sources: MobileSourceOffer[]; groups: MobileLicenseGroup[] }
 
-/** Account's About section: the App's own information, not the instance's. Proposed. */
+/** Account's About section: the App's own information, not the instance's. Approved. */
 function AboutSection() {
   const t = useCopy();
   return <section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('关于', 'About')}</h2><button type="button" className={cn(raised, 'flex w-full items-center gap-3 text-left')}><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft"><ScrollText className="size-5 text-mint-ink" /></span><span className="min-w-0 flex-1 text-base font-semibold">{t('开源许可', 'Open-source licenses')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></button></section>;
@@ -185,7 +185,7 @@ const textLink = 'inline-flex items-center gap-1 text-sm font-medium text-foregr
 /**
  * Open-source licenses, generated from the notices collected with the App
  * binary: the MPL-2.0 source offer first, then each distinct license text once
- * with the components it covers. Proposed.
+ * with the components it covers. Approved.
  */
 export function LicensesPage({ fixture }: { fixture: MobileLicensesFixture }) {
   const t = useCopy();

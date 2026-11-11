@@ -315,16 +315,18 @@ password capture. A screenshot proves layout only. Keychain suggestions and
 saving, keyboard insets, focus and announcements, and real Supabase answers
 belong to the implementation PR and a device check.
 
-## Open-source licenses — proposed
+## Open-source licenses — approved
 
-Status: **proposed**, for 产品伙伴's review; not approved and not implemented.
-A build of the App that contains iroh ships several hundred open-source
-components, and the MPL-2.0 ones (attohttpc and the uniffi family) need a
-visible offer of their source code (`packaging/iroh-apple`, #3551). The App's
-own surface is Account, so its new About section opens 开源许可 / Open-source
-licenses. The page reuses the A composition (`CloudScreen`, `Brand`,
-`PageTitle`, the raised card) and adds no tokens or assets. `LicensesPage`
-and Account's `licenses` flag live in `ui/design/kit/mobile-app.tsx`.
+Status: **approved** by 产品伙伴 on 2026-11-11 at 19:38 Asia/Shanghai, as the
+implementation contract (the owner delegated this page's review; no further
+owner review). A build of the App that contains iroh ships several hundred
+open-source components, and the MPL-2.0 ones (attohttpc and the uniffi family)
+need a visible offer of their source code (`packaging/iroh-apple`, #3551). The
+App's own surface is Account, so its new About section opens 开源许可 /
+Open-source licenses. The page reuses the A composition (`CloudScreen`,
+`Brand`, `PageTitle`, the raised card) and adds no tokens or assets.
+`LicensesPage` and Account's `licenses` flag live in
+`ui/design/kit/mobile-app.tsx`.
 
 | File / surface | States |
 | --- | --- |
@@ -332,8 +334,7 @@ and Account's `licenses` flag live in `ui/design/kit/mobile-app.tsx`.
 
 6 frames / 12 theme captures (3 states × zh/en × light/dark).
 
-Revised after 产品伙伴's review on 2026-11-11 (direction approved; the
-revision goes to implementation without a further owner review):
+Approved decisions (revised after 产品伙伴's review on 2026-11-11):
 
 - Entry stays Account → About → Open-source licenses.
 - The MPL-2.0 source offer stays at the top. A crate family sharing one version
@@ -347,5 +348,9 @@ revision goes to implementation without a further owner review):
 - License texts are reflowed: hard wraps become spaces and a blank line ends a
   paragraph. No monospace.
 
-Fixture names and counts are illustrative; the App renders the generated
-notices.
+Fixture names and counts are illustrative; the App renders the published
+notices. Implementation keeps two invariants the frames cannot show: texts
+group only when substantively identical (two MIT texts with different
+copyright lines are two groups, both titled MIT, each keeping its components,
+versions and attribution), and reflowing never merges a heading underline
+(`----`, `====`) into the text or alters license terms or copyright lines.
