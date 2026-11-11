@@ -2308,7 +2308,7 @@
           "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again.",
           "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to.",
           "cantConnect": "After you sign in, the page may say it can't connect. That's expected: copy the full address from the address bar and paste it here.",
-          "auto": "Signed in with a browser on this computer? This continues by itself.",
+          "auto": "Signing in on the computer running Avibe? This will continue on its own.",
           "pasteInstead": "Paste the address instead"
         },
         "deviceCode": {

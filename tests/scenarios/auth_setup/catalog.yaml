@@ -1086,6 +1086,7 @@ scenarios:
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 offers the sign-in page as a button and a copyable link, never the raw URL as text
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 folds the paste for a loopback redirect, and opens it on request with the real address and what to expect
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 opens the paste once the person is back with the link used and nothing has arrived for 10 s
+      - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 keeps the paste open on a page reached from another device
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 keeps the paste open where nothing can arrive by itself
       - ui/src/components/settings/models/OAuthConnectDialog.test.ts::AUTH-SETUP-165 leaves a pasted-code sign-in as it was, apart from the link
     reason: >-

@@ -448,6 +448,17 @@ describe('AUTH-SETUP-165 the sign-in link and the callback step', () => {
     expect(field()).not.toBeNull();
   });
 
+  it('AUTH-SETUP-165 keeps the paste open on a page reached from another device', async () => {
+    const location = vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, hostname: 'alex-app.avibe.bot' } as Location);
+    try {
+      await startWith(awaiting(loopbackUrl));
+      expect(field()?.getAttribute('placeholder')).toBe('http://localhost:1455/auth/callback?code=…');
+      expect(screen.queryByText(i18n.t('settings.models.oauth.callback.auto'))).toBeNull();
+    } finally {
+      location.mockRestore();
+    }
+  });
+
   it('AUTH-SETUP-165 keeps the paste open where nothing can arrive by itself', async () => {
     await startWith(awaiting('https://auth.example/authorize?redirect_uri=https%3A%2F%2Fapp.example%2Fcallback'));
     expect(field()?.getAttribute('placeholder')).toBe('https://app.example/callback?code=…');

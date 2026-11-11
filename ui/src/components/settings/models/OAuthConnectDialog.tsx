@@ -25,7 +25,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
-import { callbackRedirect } from './oauthCallback';
+import { callbackRedirect, pageOnAvibeMachine } from './oauthCallback';
 import {
   classifyOAuthFailure,
   createFlowAuthority,
@@ -729,7 +729,9 @@ export const OAuthConnectDialog: React.FC<{
   const callback = expects === 'paste_callback_url' ? callbackRedirect(presentation?.auth_url) : null;
   // Folded only where the redirect can arrive by itself: a loopback address the
   // gateway listens on. Anywhere else the paste is the only way back.
-  const foldable = callback?.loopback === true;
+  // ...and only on a page opened on the Avibe machine itself; one reached remotely
+  // signs in on another device, so the paste is the way back from the start.
+  const foldable = callback?.loopback === true && pageOnAvibeMachine();
   const flowId = flow?.flow_id ?? null;
   const pasteOpen = !foldable || (flowId !== null && pasteOpenFor === flowId);
   const isDevice = expects === 'none';
