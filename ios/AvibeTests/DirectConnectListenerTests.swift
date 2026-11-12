@@ -2,20 +2,19 @@ import Network
 import XCTest
 @testable import Avibe
 
-/// The loopback CONNECT listener, driven over real loopback sockets. A
-/// stand-in stream plays the instance, so nothing here needs a transport or
-/// a network.
+/// The loopback CONNECT proxy, driven over real loopback sockets. Stand-in
+/// streams play the direct path and the public origin, and a stand-in plan
+/// plays the path controller, so nothing here needs a transport or a
+/// network.
 final class DirectConnectListenerTests: XCTestCase {
-    private let authority = DirectAuthority(
-        instanceURL: URL(string: "https://instance.example")!
-    )!
+    private let host = "instance.example"
     private let canonicalHead =
         "CONNECT instance.example:443 HTTP/1.1\r\nHost: instance.example:443\r\n\r\n"
     private let established = "HTTP/1.1 200 Connection Established\r\n\r\n"
 
     // MARK: Refusals
 
-    func testAnswersConnectOnlyForTheInstanceAuthorityOnPort443() async throws {
+    func testAnswersConnectOnlyForAnAllowedHostOnPort443() async throws {
         let oversized = "CONNECT instance.example:443 HTTP/1.1\r\nX-Padding: "
             + String(repeating: "a", count: 4096) + "\r\n\r\n"
         let refusals: [(name: String, head: String, status: Int)] = [
@@ -38,6 +37,7 @@ final class DirectConnectListenerTests: XCTestCase {
             ("a header without a name", "CONNECT instance.example:443 HTTP/1.1\r\n: value\r\n\r\n", 400),
             ("bytes that are not HTTP", "\u{01}\u{02}\u{03} instance.example:443\r\n\r\n", 400),
             ("an oversized head", oversized, 400),
+            ("an ownership check with another nonce", "OWNER not-this-listener HTTP/1.1\r\n\r\n", 405),
         ]
         let fixture = try await makeListener()
 
@@ -53,10 +53,35 @@ final class DirectConnectListenerTests: XCTestCase {
             client.close()
         }
 
-        // A refused request never reaches the transport, and is the
-        // client's fault, not the path's.
-        XCTAssertEqual(fixture.streams.opened.count, 0)
-        XCTAssertEqual(fixture.failures.values, [])
+        // A refused request never reaches the plan or either backend.
+        XCTAssertEqual(fixture.plans.planCount, 0)
+        XCTAssertEqual(fixture.direct.opened.count, 0)
+        XCTAssertEqual(fixture.publicOrigin.opened.count, 0)
+    }
+
+    func testAHostIsRefusedUntilItIsAllowed() async throws {
+        let fixture = try await makeListener(allowedHosts: [])
+        let refused = LoopbackClient(port: fixture.port)
+        try await refused.send(canonicalHead)
+        let answer = try await refused.receiveUntilClosed()
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 403 "))
+
+        await fixture.listener.setAllowedHosts([host])
+        let served = LoopbackClient(port: fixture.port)
+        _ = try await establish(served, fixture)
+        served.close()
+    }
+
+    func testAPlanThatRefusesTheHostAnswers403() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(refuse: true)
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 403 "))
+        XCTAssertEqual(fixture.direct.opened.count, 0)
+        XCTAssertEqual(fixture.publicOrigin.opened.count, 0)
     }
 
     func testAHeadThatNeverCompletesIsClosedWithoutAnAnswer() async throws {
@@ -67,11 +92,23 @@ final class DirectConnectListenerTests: XCTestCase {
         let answer = try await client.receiveUntilClosed()
 
         XCTAssertEqual(answer, Data())
-        XCTAssertEqual(fixture.streams.opened.count, 0)
-        XCTAssertEqual(fixture.failures.values, [])
+        XCTAssertEqual(fixture.plans.planCount, 0)
     }
 
-    // MARK: Relay
+    func testBytesBeyondTheEarlyLimitCloseTheConnectionBeforeAnyBackendIsDialled() async throws {
+        let fixture = try await makeListener(limits: limits(earlyBytes: 8))
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead + String(repeating: "E", count: 64))
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertEqual(answer, Data())
+        XCTAssertEqual(fixture.plans.planCount, 0)
+        XCTAssertEqual(fixture.direct.opened.count, 0)
+        XCTAssertEqual(fixture.publicOrigin.opened.count, 0)
+    }
+
+    // MARK: Direct relay
 
     func testRelaysAnAcceptedConnectBehindTheCanonicalHead() async throws {
         let fixture = try await makeListener()
@@ -82,7 +119,7 @@ final class DirectConnectListenerTests: XCTestCase {
         try await client.send(
             "CONNECT Instance.Example:443 HTTP/1.1\r\nHost: instance.example\r\nUser-Agent: test\r\nProxy-Connection: keep-alive\r\n\r\nEARLY"
         )
-        let stream = try await fixture.streams.waitForStream()
+        let stream = try await fixture.direct.waitForStream()
         try await eventually {
             stream.written.count >= self.canonicalHead.utf8.count
         }
@@ -116,7 +153,10 @@ final class DirectConnectListenerTests: XCTestCase {
         stream.instanceSends(Data("pong".utf8))
         let pong = try await client.receive(count: 4)
         XCTAssertEqual(String(decoding: pong, as: UTF8.self), "pong")
-        XCTAssertEqual(fixture.failures.values, [])
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+        XCTAssertEqual(fixture.publicOrigin.opened.count, 0)
+        let committed = await fixture.listener.committedCount(backend: .direct)
+        XCTAssertEqual(committed, 1)
         client.close()
     }
 
@@ -220,36 +260,36 @@ final class DirectConnectListenerTests: XCTestCase {
         client.close()
     }
 
-    // MARK: Failures of the path
+    // MARK: Selection and the commit point
 
-    func testAPathThatCannotServeAConnectionIsReportedAndAnsweredAsAFailedProxy() async throws {
+    func testADirectCandidateThatFailsAndAPublicOriginThatFailsAreAnsweredAsAFailedProxy() async throws {
         struct Case {
             let name: String
             let streams: StandInStreamSource.Mode
             let answer: StandInInstanceAnswer
             let status: Int
-            let failure: DirectConnectFailure
             var limits = DirectConnectLimits.patient
         }
         let cases = [
-            Case(name: "the stream cannot be opened", streams: .fail, answer: .none, status: 502, failure: .streamUnavailable),
-            Case(name: "the stream does not open in time", streams: .hang, answer: .none, status: 504, failure: .streamUnavailable, limits: limits(openSeconds: 0.3)),
-            Case(name: "the instance refuses the authority", streams: .open, answer: .bytes("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), status: 403, failure: .instanceRefused(403)),
-            Case(name: "the ingress is stopped", streams: .open, answer: .bytes("HTTP/1.1 503 Service Unavailable\r\n\r\n"), status: 503, failure: .instanceRefused(503)),
-            Case(name: "the answer is not HTTP", streams: .open, answer: .bytes("\u{16}\u{03}\u{01}\r\n\r\n"), status: 502, failure: .noAnswer),
-            Case(name: "the instance closes without answering", streams: .open, answer: .finish, status: 502, failure: .noAnswer),
-            Case(name: "the instance never answers", streams: .open, answer: .none, status: 504, failure: .noAnswer, limits: limits(answerSeconds: 0.3)),
+            Case(name: "the stream cannot be opened", streams: .fail, answer: .none, status: 502),
+            Case(name: "the stream does not open in time", streams: .hang, answer: .none, status: 504, limits: limits(openSeconds: 0.3)),
+            Case(name: "the instance refuses the authority", streams: .open, answer: .bytes("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"), status: 403),
+            Case(name: "the ingress is stopped", streams: .open, answer: .bytes("HTTP/1.1 503 Service Unavailable\r\n\r\n"), status: 503),
+            Case(name: "the answer is not HTTP", streams: .open, answer: .bytes("\u{16}\u{03}\u{01}\r\n\r\n"), status: 502),
+            Case(name: "the instance closes without answering", streams: .open, answer: .finish, status: 502),
+            Case(name: "the instance never answers", streams: .open, answer: .none, status: 504, limits: limits(answerSeconds: 0.3)),
         ]
 
         for testCase in cases {
             let fixture = try await makeListener(
                 limits: testCase.limits,
-                streams: testCase.streams
+                direct: testCase.streams,
+                publicOrigin: .fail
             )
             let client = LoopbackClient(port: fixture.port)
             try await client.send(canonicalHead)
             if testCase.streams == .open {
-                let stream = try await fixture.streams.waitForStream()
+                let stream = try await fixture.direct.waitForStream()
                 switch testCase.answer {
                 case .bytes(let text):
                     stream.instanceSends(Data(text.utf8))
@@ -266,8 +306,11 @@ final class DirectConnectListenerTests: XCTestCase {
                     .hasPrefix("HTTP/1.1 \(testCase.status) "),
                 "\(testCase.name): \(String(decoding: answer, as: UTF8.self))"
             )
-            try await eventually { fixture.failures.values == [testCase.failure] }
-            if let stream = fixture.streams.opened.first {
+            // The failure reaches the controller once, and the public
+            // origin was tried as soon as direct had settled.
+            try await eventually { fixture.plans.directFailures == 1 }
+            XCTAssertEqual(fixture.publicOrigin.attempts, 1, testCase.name)
+            if let stream = fixture.direct.opened.first {
                 try await eventually { stream.isCancelled }
             }
             client.close()
@@ -275,7 +318,164 @@ final class DirectConnectListenerTests: XCTestCase {
         }
     }
 
-    func testClosesAConnectionBeyondItsLimitAtOnceAndReportsIt() async throws {
+    func testAFailedDirectCandidateFallsBackToThePublicOriginBeforeTheCommitPoint() async throws {
+        let fixture = try await makeListener(direct: .fail)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead + "HELLO")
+        let publicStream = try await fixture.publicOrigin.waitForStream()
+        let answer = try await client.receive(count: established.utf8.count)
+
+        // The App answers the CONNECT itself; the public origin gets
+        // WebKit's own bytes and never a CONNECT head.
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        try await eventually { publicStream.written.count == 5 }
+        XCTAssertEqual(String(decoding: publicStream.written, as: UTF8.self), "HELLO")
+        XCTAssertEqual(fixture.plans.directFailures, 1)
+        let committed = await fixture.listener.committedCount(backend: .publicOrigin)
+        XCTAssertEqual(committed, 1)
+
+        publicStream.instanceSends(Data("WORLD".utf8))
+        let reply = try await client.receive(count: 5)
+        XCTAssertEqual(String(decoding: reply, as: UTF8.self), "WORLD")
+        client.close()
+    }
+
+    func testAPlanWithoutADirectCandidateGoesStraightToThePublicOrigin() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(direct: false)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        let publicStream = try await fixture.publicOrigin.waitForStream()
+        let answer = try await client.receive(count: established.utf8.count)
+
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(fixture.direct.attempts, 0)
+        XCTAssertEqual(publicStream.written, Data())
+        client.close()
+    }
+
+    func testTheHedgeDialsThePublicOriginWhenDirectIsSlowAndTheFirstReadyWins() async throws {
+        let fixture = try await makeListener(
+            limits: limits(hedgeSeconds: 0.2),
+            direct: .hang
+        )
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        _ = try await fixture.publicOrigin.waitForStream()
+        let answer = try await client.receive(count: established.utf8.count)
+
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertEqual(fixture.direct.attempts, 1)
+        // The loser was cancelled, and a cancelled candidate is not a
+        // failure of the path.
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+        let direct = await fixture.listener.committedCount(backend: .direct)
+        let publicCount = await fixture.listener.committedCount(backend: .publicOrigin)
+        XCTAssertEqual(direct, 0)
+        XCTAssertEqual(publicCount, 1)
+        client.close()
+    }
+
+    func testAFencedPlanIsReplannedOnceAndThenRefusedWithoutA200() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(current: false)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        stream.instanceSends(Data(established.utf8))
+        let second = try await fixture.direct.waitForStream(count: 2)
+        second.instanceSends(Data(established.utf8))
+        let answer = try await client.receiveUntilClosed()
+
+        XCTAssertTrue(String(decoding: answer, as: UTF8.self).hasPrefix("HTTP/1.1 503 "))
+        XCTAssertEqual(fixture.plans.planCount, 2)
+        try await eventually { stream.isCancelled && second.isCancelled }
+        // No byte of WebKit's reached either fenced stream past the head.
+        XCTAssertEqual(String(decoding: stream.written, as: UTF8.self), canonicalHead)
+        XCTAssertEqual(String(decoding: second.written, as: UTF8.self), canonicalHead)
+    }
+
+    func testAPlanFencedOnceIsServedByItsReplacement() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(current: false)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        stream.instanceSends(Data(established.utf8))
+        try await eventually { fixture.plans.planCount == 2 }
+        fixture.plans.set(current: true)
+        let second = try await fixture.direct.waitForStream(count: 2)
+        second.instanceSends(Data(established.utf8))
+        let answer = try await client.receive(count: established.utf8.count)
+
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        try await eventually { stream.isCancelled }
+        XCTAssertFalse(second.isCancelled)
+        client.close()
+    }
+
+    func testACommittedTunnelIsNeverRedialledOrReplayed() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+        try await client.send("request")
+        try await eventually {
+            String(decoding: stream.written, as: UTF8.self).hasSuffix("request")
+        }
+
+        // The direct stream breaks after the commit point.
+        stream.cancel()
+        let rest = try await client.receiveUntilClosed()
+
+        XCTAssertEqual(rest, Data())
+        XCTAssertEqual(fixture.plans.planCount, 1)
+        XCTAssertEqual(fixture.direct.attempts, 1)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+    }
+
+    func testClosingRelaysCountsCommittedOnesPerHostAndKeepsTheOtherBackend() async throws {
+        let fixture = try await makeListener()
+        let first = LoopbackClient(port: fixture.port)
+        let firstStream = try await establish(first, fixture)
+        let second = LoopbackClient(port: fixture.port)
+        let secondStream = try await establish(second, fixture)
+        fixture.plans.set(direct: false)
+        let third = LoopbackClient(port: fixture.port)
+        let publicStream = try await establishPublic(third, fixture)
+
+        let closed = await fixture.listener.closeRelays(backend: .direct)
+
+        XCTAssertEqual(closed, [host: 2])
+        try await eventually { firstStream.isCancelled && secondStream.isCancelled }
+        let firstRest = try await first.receiveUntilClosed()
+        XCTAssertEqual(firstRest, Data())
+        // The public relay is untouched and still carries bytes.
+        XCTAssertFalse(publicStream.isCancelled)
+        try await third.send("still")
+        try await eventually {
+            String(decoding: publicStream.written, as: UTF8.self) == "still"
+        }
+        let remaining = await fixture.listener.committedCount(backend: .publicOrigin)
+        XCTAssertEqual(remaining, 1)
+
+        // Nothing left to close is an empty count, not a closure.
+        let again = await fixture.listener.closeRelays(backend: .direct)
+        XCTAssertEqual(again, [:])
+        let all = await fixture.listener.closeRelays(backend: nil)
+        XCTAssertEqual(all, [host: 1])
+        try await eventually { publicStream.isCancelled }
+        second.close()
+        third.close()
+    }
+
+    // MARK: Limits and lifecycle
+
+    func testClosesAConnectionBeyondItsLimitAtOnce() async throws {
         let fixture = try await makeListener(limits: limits(maxConnections: 2))
         let first = LoopbackClient(port: fixture.port)
         let firstStream = try await establish(first, fixture)
@@ -288,8 +488,7 @@ final class DirectConnectListenerTests: XCTestCase {
         try? await third.send(canonicalHead)
         let answer = try await third.receiveUntilClosed()
         XCTAssertEqual(answer, Data())
-        try await eventually { fixture.failures.values == [.capacity] }
-        XCTAssertEqual(fixture.streams.opened.count, 2)
+        XCTAssertEqual(fixture.direct.opened.count, 2)
 
         // A connection that ends gives its slot back.
         first.close()
@@ -307,9 +506,9 @@ final class DirectConnectListenerTests: XCTestCase {
             }
             defer { reading.cancel() }
             try await eventually {
-                fixture.streams.opened.count >= 3 || !closed.values.isEmpty
+                fixture.direct.opened.count >= 3 || !closed.values.isEmpty
             }
-            return fixture.streams.opened.count >= 3
+            return fixture.direct.opened.count >= 3
         }
         second.close()
     }
@@ -333,51 +532,6 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertLessThan(clock.now - stopped, .seconds(10))
     }
 
-    func testTheStatusIsWrittenBeforeTheFailureIsReportedSoAStopCannotCostIt() async throws {
-        // What the path controller does on a failure: stop the listener.
-        for attempt in 0..<20 {
-            let streams = StandInStreamSource(mode: attempt % 2 == 0 ? .fail : .open)
-            let holder = Recorder<DirectConnectListener>()
-            let listener = DirectConnectListener(
-                authority: authority,
-                limits: .patient,
-                openStream: {
-                    try await streams.open()
-                },
-                onFailure: { _ in
-                    Task {
-                        await holder.values.first?.stop()
-                    }
-                }
-            )
-            holder.record(listener)
-            let port = try await listener.start()
-            let client = LoopbackClient(port: port)
-            try await client.send(canonicalHead)
-            let expected: Int
-            if attempt % 2 == 0 {
-                // The stream cannot be opened.
-                expected = 502
-            } else {
-                // The instance refuses the CONNECT.
-                let stream = try await streams.waitForStream()
-                stream.instanceSends(
-                    Data("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".utf8)
-                )
-                expected = 403
-            }
-
-            let answer = try await client.receiveUntilClosed()
-            XCTAssertTrue(
-                String(decoding: answer, as: UTF8.self)
-                    .hasPrefix("HTTP/1.1 \(expected) "),
-                "attempt \(attempt): \(String(decoding: answer, as: UTF8.self))"
-            )
-            client.close()
-            await listener.stop()
-        }
-    }
-
     func testListensOnTheLoopbackAddressOnlyOnAPortTheSystemChooses() async throws {
         try assertSocketScanSeesListeners()
         let before = try listeningSockets()
@@ -397,6 +551,138 @@ final class DirectConnectListenerTests: XCTestCase {
         try assertSocketScanSeesListeners()
     }
 
+    func testABindOnAPortSomeoneElseHoldsFails() async throws {
+        let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
+        defer { control.close() }
+        let listener = DirectConnectListener(
+            limits: .patient,
+            planner: { _ in nil },
+            onListenerFailure: {}
+        )
+        addTeardownBlock {
+            await listener.stop()
+        }
+
+        do {
+            let port = try await listener.bind(port: control.socket.port)
+            XCTFail("Bound \(port), which another socket holds.")
+        } catch {}
+    }
+
+    func testTheOwnershipCheckIsAnsweredOnlyByThisListenerWithItsNonce() async throws {
+        let fixture = try await makeListener()
+        let nonce = await fixture.listener.ownershipNonce
+
+        let owned = await DirectConnectListener.ownershipCheck(
+            port: fixture.port.rawValue,
+            nonce: nonce,
+            within: 10
+        )
+        XCTAssertTrue(owned)
+        let otherNonce = await DirectConnectListener.ownershipCheck(
+            port: fixture.port.rawValue,
+            nonce: "another-nonce",
+            within: 10
+        )
+        XCTAssertFalse(otherNonce)
+
+        // A socket that accepts and never answers is not this listener.
+        let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
+        defer { control.close() }
+        let silent = await DirectConnectListener.ownershipCheck(
+            port: control.socket.port,
+            nonce: nonce,
+            within: 0.5
+        )
+        XCTAssertFalse(silent)
+        XCTAssertEqual(fixture.plans.planCount, 0)
+    }
+
+    func testClosingTheListeningSocketKeepsCommittedRelays() async throws {
+        let fixture = try await makeListener()
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establish(client, fixture)
+
+        await fixture.listener.closeListeningSocket()
+        try await eventually {
+            await !LoopbackClient.canConnect(to: fixture.port)
+        }
+        XCTAssertFalse(try listeningSockets().contains(fixture.socket))
+        // The committed relay still carries bytes both ways.
+        try await client.send("ping")
+        try await eventually {
+            String(decoding: stream.written, as: UTF8.self).hasSuffix("ping")
+        }
+        stream.instanceSends(Data("pong".utf8))
+        let pong = try await client.receive(count: 4)
+        XCTAssertEqual(String(decoding: pong, as: UTF8.self), "pong")
+        XCTAssertFalse(stream.isCancelled)
+        client.close()
+    }
+
+    func testAPortThatNeverCarriedAConnectionCanBeBoundAgainAndPassesTheOwnershipCheck() async throws {
+        let fixture = try await makeListener()
+        await fixture.listener.closeListeningSocket()
+
+        let port = try await fixture.listener.bind(port: fixture.port.rawValue)
+
+        XCTAssertEqual(port, fixture.port.rawValue)
+        let nonce = await fixture.listener.ownershipNonce
+        let owned = await DirectConnectListener.ownershipCheck(
+            port: port,
+            nonce: nonce,
+            within: 10
+        )
+        XCTAssertTrue(owned)
+        let client = LoopbackClient(port: fixture.port)
+        _ = try await establish(client, fixture)
+        client.close()
+    }
+
+    /// What B2 meets on a return from the background: the port still has
+    /// connections of this listener (a committed relay, and one the App
+    /// closed itself). Whether an exclusive bind succeeds then is not
+    /// established. This test holds the safety property either way, and
+    /// logs which way it went: a failed bind throws and costs the live
+    /// relay nothing; a successful one is this listener's own.
+    func testReBindingAPortThatStillHasConnectionsNeverPretendsAndKeepsTheRelay() async throws {
+        let fixture = try await makeListener()
+        // One relay the App closes itself, as the background does...
+        let closed = LoopbackClient(port: fixture.port)
+        _ = try await establish(closed, fixture)
+        let closedCount = await fixture.listener.closeRelays(backend: nil)
+        XCTAssertEqual(closedCount, [host: 1])
+        // ...and one that stays committed, as a public relay does.
+        let live = LoopbackClient(port: fixture.port)
+        let stream = try await establish(live, fixture)
+        await fixture.listener.closeListeningSocket()
+
+        let outcome: String
+        do {
+            let port = try await fixture.listener.bind(port: fixture.port.rawValue)
+            XCTAssertEqual(port, fixture.port.rawValue)
+            let nonce = await fixture.listener.ownershipNonce
+            let owned = await DirectConnectListener.ownershipCheck(
+                port: port,
+                nonce: nonce,
+                within: 10
+            )
+            XCTAssertTrue(owned)
+            outcome = "bound again"
+        } catch {
+            outcome = "refused: \(error)"
+        }
+        print("B2 re-bind with live and closed connections on the port: \(outcome)")
+
+        try await live.send("ping")
+        try await eventually {
+            String(decoding: stream.written, as: UTF8.self).hasSuffix("ping")
+        }
+        XCTAssertFalse(stream.isCancelled)
+        live.close()
+        closed.close()
+    }
+
     func testStoppingClosesEveryConnectionAndItsStream() async throws {
         let fixture = try await makeListener()
         XCTAssertTrue(try listeningSockets().contains(fixture.socket))
@@ -412,8 +698,6 @@ final class DirectConnectListenerTests: XCTestCase {
         let unanswered = try await pending.receiveUntilClosed()
         XCTAssertEqual(unanswered, Data())
         try await eventually { stream.isCancelled }
-        // Stopping is not a failure of the path.
-        XCTAssertEqual(fixture.failures.values, [])
 
         // The port no longer accepts.
         try await eventually {
@@ -425,12 +709,14 @@ final class DirectConnectListenerTests: XCTestCase {
     // MARK: Parsing
 
     func testTheRequestHeadIsAcceptedOnlyWhenCompleteAndWithinItsLimit() {
+        let allowed: Set<String> = [host]
+        let authority = DirectAuthority(host: host)!
         let head = Data(canonicalHead.utf8)
         for prefix in 0..<head.count {
             XCTAssertEqual(
                 DirectConnectRequest.parse(
                     head.prefix(prefix),
-                    authority: authority,
+                    allowedHosts: allowed,
                     limit: 4096
                 ),
                 .incomplete,
@@ -438,28 +724,40 @@ final class DirectConnectListenerTests: XCTestCase {
             )
         }
         XCTAssertEqual(
-            DirectConnectRequest.parse(head, authority: authority, limit: 4096),
-            .accepted(earlyData: Data())
+            DirectConnectRequest.parse(head, allowedHosts: allowed, limit: 4096),
+            .accepted(authority, earlyData: Data())
         )
         XCTAssertEqual(
             DirectConnectRequest.parse(
                 head + Data("early".utf8),
-                authority: authority,
+                allowedHosts: allowed,
                 limit: 4096
             ),
-            .accepted(earlyData: Data("early".utf8))
+            .accepted(authority, earlyData: Data("early".utf8))
+        )
+        XCTAssertEqual(
+            DirectConnectRequest.parse(head, allowedHosts: [], limit: 4096),
+            .refused(403)
+        )
+        XCTAssertEqual(
+            DirectConnectRequest.parse(
+                Data("OWNER abc HTTP/1.1\r\n\r\n".utf8),
+                allowedHosts: [],
+                limit: 4096
+            ),
+            .ownershipCheck(nonce: "abc")
         )
 
         // The limit counts the head up to its blank line.
         let exact = head.count - 4
         XCTAssertEqual(
-            DirectConnectRequest.parse(head, authority: authority, limit: exact),
-            .accepted(earlyData: Data())
+            DirectConnectRequest.parse(head, allowedHosts: allowed, limit: exact),
+            .accepted(authority, earlyData: Data())
         )
         XCTAssertEqual(
             DirectConnectRequest.parse(
                 head,
-                authority: authority,
+                allowedHosts: allowed,
                 limit: exact - 1
             ),
             .refused(400)
@@ -468,7 +766,7 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(
             DirectConnectRequest.parse(
                 Data(repeating: UInt8(ascii: "a"), count: 4097),
-                authority: authority,
+                allowedHosts: allowed,
                 limit: 4096
             ),
             .refused(400)
@@ -519,6 +817,11 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertNil(authority("https://[fd12::1]"))
         XCTAssertNil(authority("https://alex_app.avibe.bot"))
         XCTAssertNil(authority("https://alex-app..avibe.bot"))
+
+        XCTAssertEqual(DirectAuthority(host: "alex-app.avibe.bot")?.connectTarget, "alex-app.avibe.bot:443")
+        XCTAssertNil(DirectAuthority(host: "127.0.0.1"))
+        XCTAssertNil(DirectAuthority(host: "owner@alex-app.avibe.bot"))
+        XCTAssertNil(DirectAuthority(host: "alex-app.avibe.bot:443"))
     }
 
     // MARK: Fixture
@@ -526,14 +829,15 @@ final class DirectConnectListenerTests: XCTestCase {
     private struct Fixture {
         let listener: DirectConnectListener
         let port: NWEndpoint.Port
+        let plans: StandInPlans
+        let direct: StandInStreamSource
+        let publicOrigin: StandInStreamSource
 
         /// Where the listener must be found: the loopback address, and no
         /// other.
         var socket: ListeningSocket {
             ListeningSocket(address: "127.0.0.1", port: port.rawValue)
         }
-        let streams: StandInStreamSource
-        let failures: Recorder<DirectConnectFailure>
     }
 
     /// The standard sizes, with deadlines a loaded simulator cannot miss.
@@ -544,7 +848,9 @@ final class DirectConnectListenerTests: XCTestCase {
         answerSeconds: TimeInterval = 60,
         maxConnections: Int = 64,
         lingerSeconds: TimeInterval = 60,
-        chunkBytes: Int = 64 * 1024
+        chunkBytes: Int = 64 * 1024,
+        earlyBytes: Int = 16 * 1024,
+        hedgeSeconds: TimeInterval = 60
     ) -> DirectConnectLimits {
         DirectConnectLimits(
             headBytes: 4096,
@@ -553,47 +859,64 @@ final class DirectConnectListenerTests: XCTestCase {
             answerSeconds: answerSeconds,
             maxConnections: maxConnections,
             lingerSeconds: lingerSeconds,
-            chunkBytes: chunkBytes
+            chunkBytes: chunkBytes,
+            earlyBytes: earlyBytes,
+            hedgeSeconds: hedgeSeconds
         )
     }
 
     private func makeListener(
         limits: DirectConnectLimits = .patient,
-        streams mode: StandInStreamSource.Mode = .open
+        allowedHosts: Set<String>? = nil,
+        direct: StandInStreamSource.Mode = .open,
+        publicOrigin: StandInStreamSource.Mode = .open
     ) async throws -> Fixture {
-        let streams = StandInStreamSource(mode: mode)
-        let failures = Recorder<DirectConnectFailure>()
+        let directStreams = StandInStreamSource(mode: direct)
+        let publicStreams = StandInStreamSource(mode: publicOrigin)
+        let plans = StandInPlans(direct: directStreams, publicOrigin: publicStreams)
         let listener = DirectConnectListener(
-            authority: authority,
             limits: limits,
-            openStream: {
-                try await streams.open()
+            planner: { authority in
+                plans.plan(for: authority)
             },
-            onFailure: {
-                failures.record($0)
-            }
+            onListenerFailure: {}
         )
-        let port = try await listener.start()
+        await listener.setAllowedHosts(allowedHosts ?? [host])
+        let bound = try await listener.bind(port: nil)
         addTeardownBlock {
             await listener.stop()
         }
         return Fixture(
             listener: listener,
-            port: port,
-            streams: streams,
-            failures: failures
+            port: NWEndpoint.Port(rawValue: bound)!,
+            plans: plans,
+            direct: directStreams,
+            publicOrigin: publicStreams
         )
     }
 
-    /// Completes one CONNECT and returns the stream it is carried on.
+    /// Completes one CONNECT on the direct path and returns its stream.
     private func establish(
         _ client: LoopbackClient,
         _ fixture: Fixture
     ) async throws -> StandInDirectStream {
-        let before = fixture.streams.opened.count
+        let before = fixture.direct.opened.count
         try await client.send(canonicalHead)
-        let stream = try await fixture.streams.waitForStream(count: before + 1)
+        let stream = try await fixture.direct.waitForStream(count: before + 1)
         stream.instanceSends(Data(established.utf8))
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        return stream
+    }
+
+    /// Completes one CONNECT on the public origin and returns its stream.
+    private func establishPublic(
+        _ client: LoopbackClient,
+        _ fixture: Fixture
+    ) async throws -> StandInDirectStream {
+        let before = fixture.publicOrigin.opened.count
+        try await client.send(canonicalHead)
+        let stream = try await fixture.publicOrigin.waitForStream(count: before + 1)
         let answer = try await client.receive(count: established.utf8.count)
         XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
         return stream
@@ -603,7 +926,9 @@ final class DirectConnectListenerTests: XCTestCase {
 // MARK: - Stand-ins shared with the path controller tests
 
 extension DirectConnectLimits {
-    /// The standard sizes, with deadlines a loaded simulator cannot miss.
+    /// The standard sizes, with deadlines a loaded simulator cannot miss and
+    /// a hedge long enough that the public origin is dialled only when the
+    /// direct candidate has settled.
     static let patient = DirectConnectLimits(
         headBytes: 4096,
         headSeconds: 60,
@@ -611,8 +936,90 @@ extension DirectConnectLimits {
         answerSeconds: 60,
         maxConnections: 64,
         lingerSeconds: 60,
-        chunkBytes: 64 * 1024
+        chunkBytes: 64 * 1024,
+        earlyBytes: 16 * 1024,
+        hedgeSeconds: 60
     )
+}
+
+/// The path controller's side of the listener in a test: what each plan
+/// offers, whether it is current, and what it was told.
+final class StandInPlans: @unchecked Sendable {
+    private let lock = NSLock()
+    private let direct: StandInStreamSource
+    private let publicOrigin: StandInStreamSource
+    private var offersDirect = true
+    private var isCurrent = true
+    private var refuses = false
+    private var plans = 0
+    private var failures = 0
+
+    init(direct: StandInStreamSource, publicOrigin: StandInStreamSource) {
+        self.direct = direct
+        self.publicOrigin = publicOrigin
+    }
+
+    var planCount: Int {
+        lock.withLock { plans }
+    }
+
+    var directFailures: Int {
+        lock.withLock { failures }
+    }
+
+    func set(direct: Bool? = nil, current: Bool? = nil, refuse: Bool? = nil) {
+        lock.withLock {
+            if let direct {
+                offersDirect = direct
+            }
+            if let current {
+                isCurrent = current
+            }
+            if let refuse {
+                refuses = refuse
+            }
+        }
+    }
+
+    func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
+        let (refuse, offerDirect) = lock.withLock { () -> (Bool, Bool) in
+            plans += 1
+            return (refuses, offersDirect)
+        }
+        guard !refuse else {
+            return nil
+        }
+        let direct = direct
+        let publicOrigin = publicOrigin
+        var openDirect: (@Sendable () async throws -> any DirectByteStream)?
+        if offerDirect {
+            openDirect = {
+                try await direct.open()
+            }
+        }
+        return DirectConnectPlan(
+            openDirect: openDirect,
+            openPublic: {
+                try await publicOrigin.open()
+            },
+            isCurrent: { [weak self] in
+                self?.currentNow() ?? false
+            },
+            directFailed: { [weak self] in
+                self?.recordDirectFailure()
+            }
+        )
+    }
+
+    private func currentNow() -> Bool {
+        lock.withLock { isCurrent }
+    }
+
+    private func recordDirectFailure() {
+        lock.withLock {
+            failures += 1
+        }
+    }
 }
 
 struct DirectTestTimeout: Error {}
@@ -972,7 +1379,9 @@ func newListeners(
 }
 
 /// A plain listening socket made with the system calls, on a port the
-/// system chooses: something the scan must see.
+/// system chooses or on `port`: something the scan must see, or something
+/// that holds a port. `reuseAddress` sets `SO_REUSEADDR`, so the socket can
+/// take a port that only has connections in TIME_WAIT left on it.
 final class ControlListener {
     struct Unavailable: Error {
         let step: String
@@ -982,10 +1391,19 @@ final class ControlListener {
     let socket: ListeningSocket
     private let descriptor: Int32
 
-    init(family: Int32, address: String) throws {
+    init(
+        family: Int32,
+        address: String,
+        port requested: UInt16 = 0,
+        reuseAddress: Bool = false
+    ) throws {
         let descriptor = Darwin.socket(family, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw Unavailable(step: "socket", code: errno)
+        }
+        if reuseAddress {
+            var on: Int32 = 1
+            setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
         }
         var bound: Int32 = -1
         var storage = sockaddr_storage()
@@ -994,6 +1412,7 @@ final class ControlListener {
             var name = sockaddr_in()
             name.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             name.sin_family = sa_family_t(AF_INET)
+            name.sin_port = requested.bigEndian
             inet_pton(AF_INET, address, &name.sin_addr)
             bound = withUnsafePointer(to: &name) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -1004,6 +1423,7 @@ final class ControlListener {
             var name = sockaddr_in6()
             name.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
             name.sin6_family = sa_family_t(AF_INET6)
+            name.sin6_port = requested.bigEndian
             inet_pton(AF_INET6, address, &name.sin6_addr)
             bound = withUnsafePointer(to: &name) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -1093,6 +1513,7 @@ final class StandInStreamSource: @unchecked Sendable {
     private let lock = NSLock()
     private var mode: Mode
     private var streams: [StandInDirectStream] = []
+    private var calls = 0
 
     init(mode: Mode = .open) {
         self.mode = mode
@@ -1102,6 +1523,11 @@ final class StandInStreamSource: @unchecked Sendable {
         lock.withLock { streams }
     }
 
+    /// Every `open()` call, whatever came of it.
+    var attempts: Int {
+        lock.withLock { calls }
+    }
+
     func setMode(_ mode: Mode) {
         lock.withLock {
             self.mode = mode
@@ -1109,7 +1535,11 @@ final class StandInStreamSource: @unchecked Sendable {
     }
 
     func open() async throws -> any DirectByteStream {
-        switch lock.withLock({ mode }) {
+        let mode = lock.withLock { () -> Mode in
+            calls += 1
+            return self.mode
+        }
+        switch mode {
         case .open:
             let stream = StandInDirectStream()
             lock.withLock {

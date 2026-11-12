@@ -57,7 +57,7 @@ What follows: **changing the route is not a way to switch paths**, and clearing 
 | Bridge | `direct.status()` and `direct.transportChanged`. | A4 |
 | Web UI | Reconnects the SSE stream and reattachable terminals once for each new closure the shell reports. | I4 |
 
-**Without a registered transport, nothing of this runs**: no listener is created, no route is written, the status is always `tunnel`, and no event fires (rule). The first build that registers a transport is the owner's to approve.
+**Without a registered transport, nothing of this runs**: no path controller and no listener are created, no route is written, the `direct` capability is absent and `direct.status()` is unsupported, no event fires, and a runtime opens as before (rule). The first build that registers a transport is the owner's to approve.
 
 ## 4. The listener and its port
 
@@ -384,8 +384,8 @@ Open-source notices for iroh are shipped by the licenses work, a separate task, 
 
 | PR | Content | Status |
 | --- | --- | --- |
-| #3530 | This document, the bridge contract, and the Phase 1 and parent-plan rows that describe the App | Draft until reviewed |
-| #3537 | Swift: listener, backends, routes, controller, bridge. Inactive without a transport. | Draft; reworked against this contract after #3530 lands |
-| #3532 | Web UI: the closure watermark and the reconnect action (section 10) | Draft; reworked after #3530 lands |
+| #3530 | This document, the bridge contract, and the Phase 1 and parent-plan rows that describe the App | Merged |
+| #3537 | Swift: listener, backends, routes, controller, bridge. Inactive without a transport. | Draft; reworked against this contract |
+| #3532 | Web UI: the closure watermark and the reconnect action (section 10) | Merged |
 | Transport (A1, A2) | iroh, rendezvous, probe | After the iroh pin is `published` and the owner approves the first transport build |
 | Device validation (A5) | Section 11 | The iOS owner or the owner |

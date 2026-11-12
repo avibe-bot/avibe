@@ -76,7 +76,7 @@ private struct BrowserScreen: View {
                         websiteDataStore: appModel.runtimeWebsiteDataStore,
                         pushCoordinator: appModel.pushCoordinator,
                         showAccount: appModel.showAccount,
-                        directStatus: appModel.directPaths.status(for:),
+                        directStatus: appModel.directStatusProvider,
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
                         accountFallbackVisibilityChanged: {

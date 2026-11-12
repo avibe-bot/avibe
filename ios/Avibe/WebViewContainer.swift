@@ -18,7 +18,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let websiteDataStore: WKWebsiteDataStore
     let pushCoordinator: NativePushCoordinator?
     let showAccount: () -> Void
-    let directStatus: (WebOrigin) -> DirectPathStatus
+    let directStatus: DirectStatusProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
     let accountFallbackVisibilityChanged: (Bool) -> Void
@@ -34,7 +34,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         websiteDataStore: WKWebsiteDataStore,
         pushCoordinator: NativePushCoordinator? = nil,
         showAccount: @escaping () -> Void,
-        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
+        directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,

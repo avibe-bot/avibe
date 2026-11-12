@@ -60,9 +60,9 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
-    /// The direct transport, when this build has one. Without it the direct
-    /// path never activates: no listener, no route write, no event, always
-    /// the tunnel. The path controller itself exists either way.
+    /// The direct transport, when this build has one. Without it there is no
+    /// path controller: no `direct` capability, no listener, no route write,
+    /// no event, and runtimes open exactly as they did before.
     private let directTransport: DirectTransporting?
     private let pushKeychain: PushKeychainStoring
     private let pushGenerationStore: PushGenerationStoring
@@ -124,23 +124,42 @@ final class AppModel: ObservableObject {
         }
     )
 
-    private lazy var directPathController: DirectPathController = DirectPathController(
-        websiteDataStore: websiteDataStore,
-        transport: directTransport,
-        isCurrentRuntime: { [weak self] runtime in
-            self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
-        },
-        onStatusChanged: { [weak self] status in
-            self?.runtimeController?.deliverDirectTransportChanged(status)
+    private lazy var directPathController: DirectPathController? =
+        directTransport.map { transport in
+            DirectPathController(
+                websiteDataStore: websiteDataStore,
+                transport: transport,
+                isCurrentRuntime: { [weak self] runtime in
+                    self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
+                },
+                onStatusChanged: { [weak self] in
+                    self?.deliverDirectStatus()
+                }
+            )
         }
-    )
 
     var mobileSessionCoordinator: MobileSessionCoordinator {
         sessionCoordinator
     }
 
-    var directPaths: DirectPathController {
+    /// The path controller; `nil` without a direct transport.
+    var directPaths: DirectPathController? {
         directPathController
+    }
+
+    /// Answers `direct.status` for the runtime's WebViews; `nil` without a
+    /// direct transport, so they offer no `direct` capability.
+    var directStatusProvider: DirectStatusProvider? {
+        guard directPathController != nil else {
+            return nil
+        }
+        return { [weak self] origin, reply in
+            guard let controller = self?.directPathController else {
+                reply(nil)
+                return
+            }
+            controller.status(for: origin, reply: reply)
+        }
     }
 
     var pushCoordinator: NativePushCoordinator {
@@ -201,7 +220,7 @@ final class AppModel: ObservableObject {
                 // direct selection made for it ends here. A WebView that
                 // arrives late for an older runtime does not reach this
                 // branch and leaves the newer runtime's selection alone.
-                directPathController.runtimeDidStop()
+                directPathController?.runtimeDidStop()
                 route = .onboarding(.instances)
             }
             return
@@ -279,7 +298,7 @@ final class AppModel: ObservableObject {
     }
 
     private func stopRuntime() {
-        directPathController.runtimeDidStop()
+        directPathController?.runtimeDidStop()
         if let runtimeController {
             recordRuntimeReleaseBarrier(
                 runtimeController.invalidateForAccountTransition()
@@ -301,8 +320,51 @@ final class AppModel: ObservableObject {
         nativePushCoordinator.resumeAfterAccountActivation()
         stopRuntime()
         runtimeIdentity += 1
-        route = .browser(runtime)
-        directPathController.runtimeDidOpen(runtime)
+        guard let directPathController else {
+            route = .browser(runtime)
+            return
+        }
+        // The route for the instance's host must be in place before the
+        // runtime's first load (docs/plans/remote-direct-ios.md section 5).
+        // Preparing it waits at most the listener bound; an open that
+        // something newer replaced while it waited loads nothing.
+        let identity = runtimeIdentity
+        route = .loading
+        let stillWanted = { [weak self] () -> Bool in
+            guard let self else {
+                return false
+            }
+            return self.runtimeIdentity == identity
+                && self.route == .loading
+                && self.sessionCoordinator.isCurrentRuntime(runtime)
+        }
+        Task { [weak self] in
+            await directPathController.prepareRoute(
+                for: runtime,
+                stillWanted: stillWanted
+            )
+            guard let self, self.runtimeIdentity == identity, self.route == .loading else {
+                // Something newer took the route while this one waited.
+                return
+            }
+            guard self.sessionCoordinator.isCurrentRuntime(runtime) else {
+                // The selection ended underneath; do not leave the spinner.
+                self.route = .onboarding(.instances)
+                return
+            }
+            self.route = .browser(runtime)
+            directPathController.runtimeDidOpen(runtime)
+        }
+    }
+
+    /// Sends the current `direct` state to the runtime's documents.
+    private func deliverDirectStatus() {
+        guard let directPathController else {
+            return
+        }
+        runtimeController?.deliverDirectTransportChanged(
+            statusFor: directPathController.currentStatus(for:)
+        )
     }
 
     func didFinishRuntimeLoading() {

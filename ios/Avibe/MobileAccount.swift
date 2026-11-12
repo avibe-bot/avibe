@@ -368,8 +368,9 @@ final class AccountWebsiteDataStore {
     private(set) var dataStore: WKWebsiteDataStore
     private(set) var ownedIdentifiers: Set<UUID>
     /// Runs first in `rotate()`, while the store that is going away is still
-    /// `dataStore`. What is installed on that store, the direct route, is
-    /// removed here, so it leaves with the store and never reaches the next.
+    /// `dataStore`: an account transition. The direct path controller closes
+    /// every relay here. It writes no route: the old store keeps its route
+    /// and is discarded with it, and the new store starts with none.
     var onWillRotate: (@MainActor () -> Void)?
 
     init(

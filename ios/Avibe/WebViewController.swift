@@ -328,7 +328,7 @@ final class WebViewFactory {
     private let historyDidChange: (WKWebView) -> Bool
     private let colorSchemeDidChange: (WKWebView, PageColorScheme?) -> Bool
     private let showAccount: () -> Void
-    private let directStatus: (WebOrigin) -> DirectPathStatus
+    private let directStatus: DirectStatusProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -391,7 +391,7 @@ final class WebViewFactory {
         historyDidChange: @escaping (WKWebView) -> Bool = { _ in false },
         colorSchemeDidChange: @escaping (WKWebView, PageColorScheme?) -> Bool = { _, _ in false },
         showAccount: @escaping () -> Void = {},
-        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
+        directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         pushCoordinator: NativePushCoordinator? = nil
@@ -556,7 +556,7 @@ final class WebViewController: UIViewController {
     private(set) var pageColorScheme: PageColorScheme?
     private var websiteDataStore: WKWebsiteDataStore?
     private let showAccount: () -> Void
-    private let directStatus: (WebOrigin) -> DirectPathStatus
+    private let directStatus: DirectStatusProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -634,7 +634,7 @@ final class WebViewController: UIViewController {
         pushCoordinator: NativePushCoordinator? = nil,
         navigationPolicy: NavigationPolicy? = nil,
         showAccount: @escaping () -> Void = {},
-        directStatus: @escaping (WebOrigin) -> DirectPathStatus = { _ in .initial },
+        directStatus: DirectStatusProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
@@ -809,13 +809,15 @@ final class WebViewController: UIViewController {
     }
 
     /// Tells every instance-origin document this runtime shows, the primary
-    /// and instance-origin child windows, that the path carrying the
-    /// instance changed. A connection stays on the path it was opened on, so
-    /// the Web UI rebuilds its long-lived ones on this event.
-    func deliverDirectTransportChanged(_ status: DirectPathStatus) {
+    /// and instance-origin child windows, the current `direct` state for this
+    /// runtime's instance origin: what new connections prefer, and how many
+    /// times connections were closed because their path was lost.
+    func deliverDirectTransportChanged(
+        statusFor status: (WebOrigin) -> DirectPathStatus
+    ) {
         guard
             !isInvalidatedForAccountTransition,
-            let script = status.eventScript(for: instanceOrigin)
+            let script = status(instanceOrigin).eventScript(for: instanceOrigin)
         else {
             return
         }

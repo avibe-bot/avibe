@@ -1,3 +1,4 @@
+import Combine
 import Network
 import UIKit
 import WebKit
@@ -13,12 +14,14 @@ final class DirectPathAppTests: XCTestCase {
 
     // MARK: The App as shipped
 
-    /// Observed from before the App exists, and checked at every step:
-    /// WebKit's `proxyConfigurations` setter is never called, on any store,
-    /// and the App has no listening socket. The test with a transport,
-    /// below, shows the count and the scan do move.
+    /// Built exactly as `AvibeApp` builds it, with no transport argument.
+    /// Observed from before the App exists and at every step: no `direct`
+    /// capability, `direct.status` unsupported, no event, WebKit's
+    /// `proxyConfigurations` setter never called on any store, and no
+    /// listening socket. The next test, with a stand-in transport, is the
+    /// positive control: the same capability, count, and scan do move.
     @MainActor
-    func testTheAppAsShippedCreatesNoListenerAndNeverWritesARoute() async throws {
+    func testTheAppAsShippedHasNoDirectCapabilityNoListenerAndNoRouteWrite() async throws {
         try assertSocketScanSeesListeners()
         let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
@@ -32,19 +35,22 @@ final class DirectPathAppTests: XCTestCase {
             XCTAssertEqual(try newListeners(since: listening), [], step)
         }
 
-        // No transport is passed, as in `AvibeApp`. The baseline is taken
-        // once this test's own control plane listens and before the App
-        // exists.
         let app = try await makeApp(directTransport: nil) {
             listening = try listeningSockets()
         }
+        XCTAssertNil(app.directPaths)
+        XCTAssertNil(app.directStatusProvider)
         let firstStore = app.runtimeWebsiteDataStore
         try assertUntouched("launched and signed in")
 
-        let runtime = try select("instance-1", in: app)
+        // A runtime opens at once, as before: there is no route to prepare.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        guard case .browser(let runtime) = app.route else {
+            return XCTFail("The runtime did not open at once.")
+        }
         let page = try await showRuntimePage(app, runtime)
-        let status = try await page.directStatus()
-        XCTAssertEqual(status, #"{"sequence":0,"transport":"tunnel"}"#)
+        let surface = try await page.directSurface()
+        XCTAssertEqual(surface, #"{"capability":null,"status":"unsupported"}"#)
         try assertUntouched("a runtime opened and its page asked")
 
         NotificationCenter.default.post(
@@ -57,9 +63,12 @@ final class DirectPathAppTests: XCTestCase {
             object: nil
         )
         try assertUntouched("foreground")
+        try await Task.sleep(for: .milliseconds(200))
+        let changes = try await page.changes()
+        XCTAssertEqual(changes, "[]")
         page.close()
 
-        _ = try select("instance-2", in: app)
+        _ = try await select("instance-2", in: app)
         try assertUntouched("the instance was switched")
 
         // Signing out rotates the account's store.
@@ -72,13 +81,12 @@ final class DirectPathAppTests: XCTestCase {
 
         XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
         XCTAssertEqual(app.runtimeWebsiteDataStore.proxyConfigurations.count, 0)
-        XCTAssertEqual(app.directPaths.status(for: instance), .initial)
     }
 
     // MARK: The App with a transport
 
     @MainActor
-    func testATransportChangeReachesThePageAndTheRouteFollowsTheRuntime() async throws {
+    func testWithATransportTheRouteIsWrittenBeforeTheFirstLoadAndTheStatusReachesThePage() async throws {
         let transport = StandInDirectTransport()
         let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
@@ -86,64 +94,91 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         let firstStore = app.runtimeWebsiteDataStore
+        // What the store's route is each time a browser route is set.
+        var routesAtOpen: [[String]] = []
+        let opened = app.$route.sink { route in
+            if case .browser = route {
+                routesAtOpen.append(
+                    firstStore.proxyConfigurations.flatMap(\.matchDomains)
+                )
+            }
+        }
+        defer { opened.cancel() }
 
-        let runtime = try select("instance-1", in: app)
+        // The runtime waits for its route.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        XCTAssertEqual(app.route, .loading)
+        let runtime = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(routesAtOpen, [["instance-one.example"]])
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 1)
+        XCTAssertEqual(try newListeners(since: listening).map(\.address), ["127.0.0.1"])
+
         let page = try await showRuntimePage(app, runtime)
+        let surface = try await page.directSurface()
+        XCTAssertEqual(
+            surface,
+            #"{"capability":1,"status":{"closure":0,"preferred":"tunnel","sequence":0}}"#
+        )
         let target = try XCTUnwrap(transport.selections.last)
         XCTAssertEqual(target.runtime, runtime)
         XCTAssertEqual(target.storeIdentifier, app.websiteDataStore.identifier)
-        let before = try await page.directStatus()
-        XCTAssertEqual(before, #"{"sequence":0,"transport":"tunnel"}"#)
-        // Selecting is not activating: what the shipped-App test counts is
-        // still untouched here, with a transport present.
-        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        XCTAssertEqual(try newListeners(since: listening), [])
 
-        // The transport finds a path: the store gets the route, and the
-        // page is told after it has.
-        try await reportUsable(transport, for: target) {
-            firstStore.proxyConfigurations.count == 1
-        }
+        // The transport finds a path: the page is told, and asks.
+        transport.report(.usable(generation: "g1"), for: target)
         try await eventually {
-            try await page.changes() == #"[{"sequence":1,"transport":"direct"}]"#
+            try await page.changes()
+                == #"[{"closure":0,"preferred":"direct","sequence":1}]"#
         }
-        XCTAssertEqual(try newListeners(since: listening).map(\.address), ["127.0.0.1"])
-        // The same count and the same scan do move once a route is used.
-        XCTAssertGreaterThan(try ProxyConfigurationWrites.count(), routeWrites)
         let after = try await page.directStatus()
-        XCTAssertEqual(after, #"{"sequence":1,"transport":"direct"}"#)
+        XCTAssertEqual(after, #"{"closure":0,"preferred":"direct","sequence":1}"#)
         page.close()
 
-        // Another instance is selected: the route leaves with the runtime,
-        // and the next one starts on the tunnel.
-        let second = try select("instance-2", in: app)
-        XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
-        let secondTarget = try XCTUnwrap(transport.selections.last)
-        XCTAssertEqual(secondTarget.runtime, second)
+        // Another instance joins the same route; nothing is removed.
+        _ = try await select("instance-2", in: app)
         XCTAssertEqual(
-            secondTarget.authority.connectTarget,
-            "instance-two.example:443"
+            firstStore.proxyConfigurations.first?.matchDomains,
+            ["instance-one.example", "instance-two.example"]
         )
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites + 2)
         // A late report for the first instance changes nothing.
-        transport.report(.usable(generation: "g1"), for: target)
-        try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
+        transport.report(.lost, for: target)
+        XCTAssertEqual(
+            app.directPaths?.currentStatus(for: instance).sequence,
+            2
+        )
 
-        try await reportUsable(transport, for: secondTarget) {
-            firstStore.proxyConfigurations.count == 1
-        }
-
-        // Signing out rotates the store: the route leaves with the old
-        // one, and the new one starts with none.
+        // Signing out rotates the store; the new one starts with no route
+        // and the old one keeps its own until it is discarded.
+        let writes = try ProxyConfigurationWrites.count()
         _ = try await app.mobileSessionCoordinator.logout()
         trackStore(of: app)
-        XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
         XCTAssertFalse(app.runtimeWebsiteDataStore === firstStore)
         XCTAssertEqual(app.runtimeWebsiteDataStore.proxyConfigurations.count, 0)
-        transport.report(.usable(generation: "g1"), for: secondTarget)
-        try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(app.runtimeWebsiteDataStore.proxyConfigurations.count, 0)
-        try await eventually { try newListeners(since: listening).isEmpty }
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), writes)
+    }
+
+    @MainActor
+    func testAnOpenReplacedWhileItsRouteWasPreparedNeverShowsItsBrowser() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        var browsers: [String] = []
+        let opened = app.$route.sink { route in
+            if case .browser(let runtime) = route {
+                browsers.append(runtime.instance.id)
+            }
+        }
+        defer { opened.cancel() }
+
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        _ = try await waitForBrowser("instance-2", in: app)
+        try await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertEqual(browsers, ["instance-2"])
+        XCTAssertEqual(
+            transport.selections.map(\.runtime.instance.id),
+            ["instance-2"]
+        )
     }
 
     // MARK: A runtime abandoned when its WebView registers
@@ -151,26 +186,20 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testARuntimeAbandonedAtRegistrationEndsItsDirectSelection() async throws {
         let transport = StandInDirectTransport()
-        let firstHold = PushHold(path: "/api/push/hold-1")
-        let secondHold = PushHold(path: "/api/push/hold-2")
-        let routeWrites = try ProxyConfigurationWrites.count()
-        var listening: Set<ListeningSocket> = []
+        let hold = PushHold(path: "/api/push/hold-1")
         let app = try await makeApp(
             directTransport: transport,
-            pushHolds: [firstHold, secondHold]
-        ) {
-            listening = try listeningSockets()
-        }
-        let store = app.runtimeWebsiteDataStore
+            pushHolds: [hold]
+        )
 
-        let runtime = try select("instance-1", in: app)
+        let runtime = try await select("instance-1", in: app)
         let target = try XCTUnwrap(transport.selections.last)
         XCTAssertEqual(target.runtime, runtime)
 
         // An ordinary push-management request is in flight when the root
         // view's WebView arrives: the App refuses it and returns to the
         // instance picker, without the usual stop of a runtime.
-        let management = try await holdPushManagement(firstHold, in: app)
+        let management = try await holdPushManagement(hold, in: app)
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
         let deselected = transport.deselectCount
         app.registerRuntimeController(
@@ -182,8 +211,8 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(transport.deselectCount, deselected + 1)
 
         // The request ends. The account still has its instance, so only the
-        // ended selection stands between a report and a route.
-        firstHold.release.signal()
+        // ended selection stands between a report and the direct path.
+        hold.release.signal()
         try await management.value
         try await reportUsableWhileTheAccountIsIdle(
             transport,
@@ -192,11 +221,9 @@ final class DirectPathAppTests: XCTestCase {
             runtime: runtime,
             in: app
         )
-        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        XCTAssertEqual(store.proxyConfigurations.count, 0)
-        XCTAssertEqual(try newListeners(since: listening), [])
+        XCTAssertEqual(app.directPaths?.currentStatus(for: instance).preferred, .tunnel)
 
-        // A foreground does not select the abandoned runtime again.
+        // A return from the background does not select it again.
         let selections = transport.selections.count
         NotificationCenter.default.post(
             name: UIApplication.didEnterBackgroundNotification,
@@ -206,53 +233,18 @@ final class DirectPathAppTests: XCTestCase {
             name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
+        try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(transport.selections.count, selections)
-
-        // The same reports do install a route for a runtime that is open.
-        let second = try select("instance-2", in: app)
-        let secondTarget = try XCTUnwrap(transport.selections.last)
-        XCTAssertEqual(secondTarget.runtime, second)
-        try await reportUsable(transport, for: secondTarget) {
-            store.proxyConfigurations.count == 1
-        }
-        try await eventually { try newListeners(since: listening).count == 1 }
-
-        // Abandoned the same way with its route installed: the route is
-        // gone before registration returns, and the listener follows.
-        let secondManagement = try await holdPushManagement(secondHold, in: app)
-        app.registerRuntimeController(
-            try makeRuntimeController(app, second),
-            for: second
-        )
-        XCTAssertTrue(isOnInstancePicker(app))
-        XCTAssertEqual(store.proxyConfigurations.count, 0)
-        secondHold.release.signal()
-        try await secondManagement.value
-        try await eventually { try newListeners(since: listening).isEmpty }
-        let writes = try ProxyConfigurationWrites.count()
-        try await reportUsableWhileTheAccountIsIdle(
-            transport,
-            for: secondTarget,
-            generation: "g2",
-            runtime: second,
-            in: app
-        )
-        XCTAssertEqual(try ProxyConfigurationWrites.count(), writes)
-        XCTAssertEqual(store.proxyConfigurations.count, 0)
-        XCTAssertEqual(try newListeners(since: listening), [])
     }
 
     @MainActor
     func testALateControllerForAnOlderRuntimeLeavesTheNewerSelectionAlone() async throws {
         let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(directTransport: transport) {
-            listening = try listeningSockets()
-        }
-        let store = app.runtimeWebsiteDataStore
+        let app = try await makeApp(directTransport: transport)
+        let second = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
 
-        let older = try select("instance-1", in: app)
-        let newer = try select("instance-2", in: app)
+        let older = try await select("instance-1", in: app)
+        let newer = try await select("instance-2", in: app)
         let target = try XCTUnwrap(transport.selections.last)
         XCTAssertEqual(target.runtime, newer)
 
@@ -268,14 +260,12 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(shown, newer)
         XCTAssertEqual(transport.deselectCount, deselected)
-        try await reportUsable(transport, for: target) {
-            store.proxyConfigurations.count == 1
+        try await eventually {
+            if app.mobileSessionCoordinator.isCurrentRuntime(newer) {
+                transport.report(.usable(generation: "g1"), for: target)
+            }
+            return app.directPaths?.currentStatus(for: second).preferred == .direct
         }
-
-        _ = try await app.mobileSessionCoordinator.logout()
-        trackStore(of: app)
-        XCTAssertEqual(store.proxyConfigurations.count, 0)
-        try await eventually { try newListeners(since: listening).isEmpty }
     }
 
     // MARK: The bridge
@@ -288,9 +278,9 @@ final class DirectPathAppTests: XCTestCase {
             configuration: NativeBridgeConfiguration.make(
                 instanceOrigin: instance,
                 setOuterScrollLocked: { _, _ in false },
-                directStatus: { origin in
+                directStatus: { origin, reply in
                     askedFor = origin
-                    return DirectPathStatus(transport: .direct, sequence: 7)
+                    reply(DirectPathStatus(preferred: .direct, sequence: 7, closure: 2))
                 }
             )
         )
@@ -317,7 +307,8 @@ final class DirectPathAppTests: XCTestCase {
             }
             return JSON.stringify({
               capability: info.capabilities.direct,
-              status: [status.transport, status.sequence, Object.keys(status).length],
+              advertised: window.avibeNative.capabilities.direct,
+              status: [status.preferred, status.sequence, status.closure, Object.keys(status).length],
               refused
             });
             """,
@@ -328,7 +319,7 @@ final class DirectPathAppTests: XCTestCase {
 
         XCTAssertEqual(
             result as? String,
-            #"{"capability":1,"status":["direct",7,2],"refused":["invalid_argument","invalid_argument","invalid_argument"]}"#
+            #"{"capability":1,"advertised":1,"status":["direct",7,2,3],"refused":["invalid_argument","invalid_argument","invalid_argument"]}"#
         )
         XCTAssertEqual(askedFor, instance)
         // The whole surface: one call, and nothing that takes an address,
@@ -342,10 +333,50 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testAStatusWithNothingCurrentToAnswerForIsAnErrorNotATunnel() async throws {
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in
+                    reply(nil)
+                }
+            )
+        )
+        let loader = PageLoader()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML(
+            "<!doctype html><title>instance</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeNative.call("direct.status");
+              return "answered";
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+
+        XCTAssertEqual(result as? String, "failed")
+    }
+
+    @MainActor
     func testATransportChangeIsDeliveredOnlyToInstanceDocumentsOfALiveRuntime() async throws {
         let controller = WebViewController(
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent(),
+            directStatus: { _, reply in
+                reply(.initial)
+            },
             didStartLoading: {},
             didFinishLoading: {},
             didFailLoading: {}
@@ -357,39 +388,37 @@ final class DirectPathAppTests: XCTestCase {
             RuntimePage.recordingDocument,
             baseURL: instance.url
         )
-        controller.deliverDirectTransportChanged(
-            DirectPathStatus(transport: .direct, sequence: 3)
-        )
+        var asked: [WebOrigin] = []
+        controller.deliverDirectTransportChanged { origin in
+            asked.append(origin)
+            return DirectPathStatus(preferred: .direct, sequence: 3, closure: 1)
+        }
+        XCTAssertEqual(asked, [instance])
         try await eventually {
-            try await page.changes() == #"[{"sequence":3,"transport":"direct"}]"#
+            try await page.changes()
+                == #"[{"closure":1,"preferred":"direct","sequence":3}]"#
         }
 
         // A document on another origin has no bridge and is told nothing.
         try await page.load(
-            """
-            <!doctype html>
-            <script>
-              window.changes = [];
-              window.addEventListener(
-                "avibe:native:direct.transportChanged",
-                (event) => window.changes.push(event.detail)
-              );
-            </script>
-            """,
+            RuntimePage.listeningDocument(title: "Elsewhere"),
             baseURL: URL(string: "https://example.com/")!
         )
-        controller.deliverDirectTransportChanged(
-            DirectPathStatus(transport: .tunnel, sequence: 4)
-        )
+        controller.deliverDirectTransportChanged { _ in
+            DirectPathStatus(preferred: .tunnel, sequence: 4, closure: 1)
+        }
         try await Task.sleep(for: .milliseconds(300))
         let elsewhere = try await page.changes()
         XCTAssertEqual(elsewhere, "[]")
 
-        // A released runtime is told nothing either.
+        // A released runtime is not even asked.
         _ = controller.invalidateForAccountTransition()
-        controller.deliverDirectTransportChanged(
-            DirectPathStatus(transport: .direct, sequence: 5)
-        )
+        asked.removeAll()
+        controller.deliverDirectTransportChanged { origin in
+            asked.append(origin)
+            return DirectPathStatus(preferred: .direct, sequence: 5, closure: 1)
+        }
+        XCTAssertEqual(asked, [])
     }
 
     /// The event is sent after a check of the WebView's URL, and runs later,
@@ -400,10 +429,10 @@ final class DirectPathAppTests: XCTestCase {
         let elsewhere = try XCTUnwrap(
             WebOrigin.parseConfigured("https://example.com")
         )
-        let status = DirectPathStatus(transport: .direct, sequence: 3)
+        let status = DirectPathStatus(preferred: .direct, sequence: 3, closure: 0)
         let forInstance = try XCTUnwrap(status.eventScript(for: instance))
         let forElsewhere = try XCTUnwrap(status.eventScript(for: elsewhere))
-        let recorded = #"[{"sequence":3,"transport":"direct"}]"#
+        let recorded = #"[{"closure":0,"preferred":"direct","sequence":3}]"#
         let webView = WKWebView(frame: .zero)
         let loader = PageLoader()
         webView.navigationDelegate = loader
@@ -521,10 +550,10 @@ final class DirectPathAppTests: XCTestCase {
         try await eventually { await title(of: childWebView) == "Child" }
 
         // Both are told.
-        controller.deliverDirectTransportChanged(
-            DirectPathStatus(transport: .direct, sequence: 3)
-        )
-        let first = #"[{"sequence":3,"transport":"direct"}]"#
+        controller.deliverDirectTransportChanged { _ in
+            DirectPathStatus(preferred: .direct, sequence: 3, closure: 0)
+        }
+        let first = #"[{"closure":0,"preferred":"direct","sequence":3}]"#
         try await eventually { try await changes(in: primary) == first }
         try await eventually { try await changes(in: childWebView) == first }
 
@@ -532,12 +561,12 @@ final class DirectPathAppTests: XCTestCase {
         // child is not.
         childWebView.load(URLRequest(url: elsewhereURL))
         try await eventually { await title(of: childWebView) == "Elsewhere" }
-        controller.deliverDirectTransportChanged(
-            DirectPathStatus(transport: .tunnel, sequence: 4)
-        )
+        controller.deliverDirectTransportChanged { _ in
+            DirectPathStatus(preferred: .tunnel, sequence: 4, closure: 1)
+        }
         try await eventually {
             try await changes(in: primary)
-                == #"[{"sequence":3,"transport":"direct"},{"sequence":4,"transport":"tunnel"}]"#
+                == #"[{"closure":0,"preferred":"direct","sequence":3},{"closure":1,"preferred":"tunnel","sequence":4}]"#
         }
         try await Task.sleep(for: .milliseconds(300))
         let untold = try await changes(in: childWebView)
@@ -546,7 +575,7 @@ final class DirectPathAppTests: XCTestCase {
         // An event that was already on its way when the child left runs in
         // the new document, and dispatches nothing there.
         let late = try XCTUnwrap(
-            DirectPathStatus(transport: .direct, sequence: 5)
+            DirectPathStatus(preferred: .direct, sequence: 5, closure: 1)
                 .eventScript(for: origin)
         )
         childWebView.evaluateJavaScript(late, completionHandler: nil)
@@ -555,13 +584,13 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(afterLateEvent, "[]")
         // The document does listen: an event for its own origin arrives.
         let own = try XCTUnwrap(
-            DirectPathStatus(transport: .direct, sequence: 5)
+            DirectPathStatus(preferred: .direct, sequence: 5, closure: 1)
                 .eventScript(for: elsewhere)
         )
         childWebView.evaluateJavaScript(own, completionHandler: nil)
         try await eventually {
             try await changes(in: childWebView)
-                == #"[{"sequence":5,"transport":"direct"}]"#
+                == #"[{"closure":1,"preferred":"direct","sequence":5}]"#
         }
     }
 
@@ -670,25 +699,6 @@ final class DirectPathAppTests: XCTestCase {
         return app
     }
 
-    /// Reports the path usable until the route is installed. The App's own
-    /// push recovery can hold the account coordinator busy for a moment
-    /// after a runtime opens, and a route that is ready then is refused; a
-    /// transport reports again after `pathDidFail`, and so does this.
-    @MainActor
-    private func reportUsable(
-        _ transport: StandInDirectTransport,
-        for target: DirectTarget,
-        until installed: @escaping @MainActor () -> Bool
-    ) async throws {
-        try await eventually {
-            if installed() {
-                return true
-            }
-            transport.report(.usable(generation: "g1"), for: target)
-            return false
-        }
-    }
-
     /// Starts a push-management request and returns once the control plane
     /// is answering it. Until `hold.release` is signaled the request stays
     /// in flight, and the account coordinator is busy with it.
@@ -713,7 +723,7 @@ final class DirectPathAppTests: XCTestCase {
 
     /// Reports a usable path ten times, each at a moment the account
     /// coordinator is idle and still has `runtime` as its instance: the
-    /// moments at which the App's lease check would admit a route, so that
+    /// moments at which the App's lease check would admit direct, so that
     /// only an ended selection can be what refuses these.
     @MainActor
     private func reportUsableWhileTheAccountIsIdle(
@@ -748,18 +758,33 @@ final class DirectPathAppTests: XCTestCase {
         return false
     }
 
+    /// Selects an instance and waits for its browser. With a transport the
+    /// runtime opens once its route is prepared; without one, at once.
     @MainActor
     private func select(
         _ instanceID: String,
         in app: AppModel
-    ) throws -> MobileRuntimeContext {
+    ) async throws -> MobileRuntimeContext {
         _ = try app.mobileSessionCoordinator.selectInstance(id: instanceID)
-        guard case .browser(let runtime) = app.route else {
-            XCTFail("Selecting \(instanceID) opened no runtime.")
-            throw DirectTestTimeout()
+        return try await waitForBrowser(instanceID, in: app)
+    }
+
+    @MainActor
+    private func waitForBrowser(
+        _ instanceID: String,
+        in app: AppModel
+    ) async throws -> MobileRuntimeContext {
+        var opened: MobileRuntimeContext?
+        try await eventually {
+            if case .browser(let runtime) = app.route,
+               runtime.instance.id == instanceID
+            {
+                opened = runtime
+                return true
+            }
+            return false
         }
-        XCTAssertEqual(runtime.instance.id, instanceID)
-        return runtime
+        return try XCTUnwrap(opened)
     }
 
     /// The runtime controller the root view would create for `runtime`,
@@ -790,7 +815,7 @@ final class DirectPathAppTests: XCTestCase {
         return WebViewController(
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
-            directStatus: app.directPaths.status(for:),
+            directStatus: app.directStatusProvider,
             didStartLoading: {},
             didFinishLoading: {},
             didFailLoading: {}
@@ -911,6 +936,29 @@ private final class RuntimePage {
     func changes() async throws -> String? {
         try await webView?.evaluateJavaScript(
             "JSON.stringify(window.changes ?? null)"
+        ) as? String
+    }
+
+    /// The `direct` capability as the page sees it, and what
+    /// `direct.status()` answers: the status, or the error's code.
+    func directSurface() async throws -> String? {
+        try await webView?.callAsyncJavaScript(
+            """
+            let status;
+            try {
+              const answer = await window.avibeNative.call("direct.status");
+              status = Object.fromEntries(Object.keys(answer).sort().map((key) => [key, answer[key]]));
+            } catch (error) {
+              status = error.code;
+            }
+            return JSON.stringify({
+              capability: window.avibeNative.capabilities.direct ?? null,
+              status
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
         ) as? String
     }
 

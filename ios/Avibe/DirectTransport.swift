@@ -1,13 +1,14 @@
 import Foundation
 
 // The seam between the direct transport (iroh, the rendezvous, probing: not
-// in the App yet) and the parts that route WebKit onto it. Nothing in the App
-// implements `DirectTransporting`, so the path never activates: no listener
-// is created and no route is written.
+// in the App yet) and the local proxy that carries WebKit's connections.
+// Nothing in the App implements `DirectTransporting` and `AvibeApp` registers
+// none, so none of this runs: no listener, no route write, no `direct`
+// capability, no transport work.
 // Design: docs/plans/remote-direct-ios.md.
 
-/// The one authority a direct route serves: the selected instance's exact
-/// host, on port 443.
+/// An instance authority the local proxy may serve: an exact host, on port
+/// 443.
 struct DirectAuthority: Equatable, Sendable {
     let host: String
 
@@ -18,12 +19,19 @@ struct DirectAuthority: Equatable, Sendable {
     init?(instanceURL: URL) {
         guard
             let origin = WebOrigin(url: instanceURL),
-            origin.port == nil,
-            Self.isDNSName(origin.host)
+            origin.port == nil
         else {
             return nil
         }
-        host = origin.host
+        self.init(host: origin.host)
+    }
+
+    /// `nil` unless `host` is a lowercase DNS name (never an IP literal).
+    init?(host: String) {
+        guard Self.isDNSName(host) else {
+            return nil
+        }
+        self.host = host
     }
 
     /// The CONNECT request target, and the `Host` the instance requires.
@@ -66,19 +74,25 @@ struct DirectTarget: Equatable, Sendable {
     let authority: DirectAuthority
 }
 
-/// The tags one route carries. A route is installed only while every one of
-/// them is still current.
-struct DirectRouteTag: Equatable, Sendable {
+/// The tags one direct stream is opened under. A stream is used only while
+/// every one of them is still current.
+struct DirectStreamTag: Equatable, Sendable {
     let target: DirectTarget
     /// The `generation` of the rendezvous answer the path was found with.
     let rendezvousGeneration: String
+    /// Issued by `DirectPathController`. Advances at every event of the
+    /// path-generation table (docs/plans/remote-direct-ios.md section 7).
+    let pathGeneration: Int
 }
 
 enum DirectPathReport: Equatable, Sendable {
     /// A path to the target's instance is usable. `generation` is the
     /// rendezvous answer's.
     case usable(generation: String)
-    /// The path is gone, or was never found.
+    /// The network changed and the transport is validating the path again.
+    /// New connections prefer the public origin meanwhile; nothing is closed.
+    case verifying
+    /// The path is gone, or its validation failed.
     case lost
 }
 
@@ -114,15 +128,14 @@ protocol DirectTransporting: AnyObject, Sendable {
     @MainActor
     func deselect()
 
-    /// The App is on the tunnel although this transport reported the path
-    /// for `tag` usable: a stream did not open, the instance refused the
-    /// CONNECT, the listener failed, or the route could not be installed.
-    /// The transport decides when to probe again. Until it reports the path
-    /// usable once more, the App stays on the tunnel.
+    /// A direct candidate opened under `tag` failed before anything was
+    /// forwarded: the stream did not open, the instance refused the CONNECT,
+    /// or it did not answer in time. That connection went to the public
+    /// origin. The transport decides when to probe again.
     @MainActor
-    func pathDidFail(for tag: DirectRouteTag)
+    func pathDidFail(for tag: DirectStreamTag)
 
     /// Opens one stream over the path reported usable for `tag`. Throws when
     /// that path is gone, and promptly when its task is cancelled.
-    func openStream(for tag: DirectRouteTag) async throws -> any DirectByteStream
+    func openStream(for tag: DirectStreamTag) async throws -> any DirectByteStream
 }
