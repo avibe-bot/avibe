@@ -378,3 +378,27 @@ cleanup-failure case now covers the native store owner's retirement error: it
 first demonstrated a prohibited new account HTTP request, then passed after that
 error was retained by the existing cleanup owner. Successful sign-out retry clears
 the error; superseded presentation does not conceal an erasure failure.
+
+At product checkpoint `8626297ffc5a99f511959ca0e4ad6a8fdf7ebf43`, all nine new
+actual-window consumers passed, followed by the full twenty-case chain including
+the original eleven cases. The source-exact cookie probe passed once with strict
+attribute/isolation/readback and terminal erasure checks. Workspace fmt,
+all-target/all-feature Clippy, native tests and changed Python Ruff passed. The
+startup continuation and cleanup negative controls are included in the native
+suite; the remote-to-local record consumer reads the actual persisted record.
+
+The new real-window lifecycle tests call the validated lifecycle binding directly;
+they do not start the production bootstrap RuntimeHost. Production open_workbench
+and restore_bootstrap_view use the same serialized window guard in their actual
+source, and native compilation covers that glue. This distinction is retained in
+the handoff rather than treating a fixture callback as a full installed-shell
+bootstrap run. Actual update dialogs/download fencing and cookie retirement use
+the unchanged production owners. Windows execution and the existing signed-package,
+OS credential-store/passkey/associated-domain/live-account checks remain RC work.
+
+This final documentation checkpoint leaves the tested product/test source bytes
+unchanged. The PR body and immutable artifact provenance identify the pushed head,
+replay commands, exact peer inputs and final logs. Fresh exact-head Codex review,
+expected CI/CLEAN, zero all-head unresolved threads and Lead's independent real
+chain remain mandatory before Merge-ready. Original lane Watches and historical
+findings-bearing head count (two) remain unchanged.
