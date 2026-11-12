@@ -39,5 +39,18 @@ no optional statistics job or new migration is required.
 - Focused Activity and projection coverage: 97 passing tests, including full-window delivery
   EXPLAIN checks with and without ANALYZE. A 129-response fixture needs eight projection
   SELECTs, versus two per response plus the window/Turn reads before batching.
-- Shared 922 MB synthetic fixture preliminary result: 626 to 17 SQL statements with identical
-  summary/detail payload hashes. Final index-pinned, no-statistics measurement is pending.
+- Final no-statistics acceptance on a 922,296,320-byte synthetic database (55,699 messages,
+  452 Sessions, 7,302 Deliveries; SQLite 3.45.1, local Incus) used the full 500-message/
+  2,000-trace Activity window, including 300 canonical tool-calling responses.
+  - Summary: 626 to 17 SQL statements; median 149.696 ms to 99.126 ms.
+  - Detail: 626 to 17 SQL statements; median 141.268 ms to 89.174 ms.
+  - Summary/detail payload hashes match the unchanged baseline for every sample.
+  - Actual delivery EXPLAIN changes from `recovery_owner(state=?)` to
+    `ix_message_deliveries_message(message_id=?)`, with no statistics present.
+  - Three baseline and five final sequential samples; OS page cache uncontrolled,
+    no synthetic contention. Source-file hashes match the tested commit. Timing
+    results describe this fixture, not the original audit's production latency.
+- A prior planner-statistics experiment used the same synthetic database; its small
+  statistics/evidence export was retained before removing statistics and reopening
+  connections for final acceptance. Application counts, integrity and result hashes
+  were verified unchanged. No owner database, full database copy or 6 GB load was used.
