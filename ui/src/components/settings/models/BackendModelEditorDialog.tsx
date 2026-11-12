@@ -361,12 +361,27 @@ export const BackendModelEditorDialog: React.FC<{
     } else if (event.key === 'Enter') {
       event.preventDefault();
       chooseRow(activeRow);
-    } else if (event.key === 'Escape') {
-      // Only the list closes. Without this the dialog would take the same key
-      // and discard a row the user is still filling in.
+    }
+  };
+
+  // Escape closes the innermost open thing first: the ID's suggestion list, or
+  // the custom effort being typed, then the editor. It is decided here because
+  // the dialog hears Escape on the document's capture phase, before a field's own
+  // key handler could stop it — so a field cannot keep the key for itself.
+  const onEscapeKeyDown = (event: KeyboardEvent) => {
+    // The Escape that cancels an IME composition is the input method's, too.
+    if (busy || isComposingKey(event)) {
       event.preventDefault();
-      event.stopPropagation();
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (lookupOpen && target?.closest('[data-model-id-lookup]')) {
+      event.preventDefault();
       setLookup('');
+    } else if (customOpen && target?.closest('[data-custom-effort]')) {
+      event.preventDefault();
+      setCustomOpen(false);
+      setCustomEffort('');
     }
   };
 
@@ -406,7 +421,7 @@ export const BackendModelEditorDialog: React.FC<{
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
-        onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
+        onEscapeKeyDown={onEscapeKeyDown}
         keepOnOutsideClick
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
@@ -438,6 +453,7 @@ export const BackendModelEditorDialog: React.FC<{
                   // they refuse focus on mousedown to keep the caret in the
                   // field — so choosing one still runs.
                   onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLookup(''); }}
+                  data-model-id-lookup
                 >
                   <Input
                     id={id}
@@ -637,7 +653,7 @@ export const BackendModelEditorDialog: React.FC<{
                     </ChipButton>
                   ))}
                   {customOpen ? (
-                    <span className="model-hub-model-chip model-hub-model-chip--custom">
+                    <span className="model-hub-model-chip model-hub-model-chip--custom" data-custom-effort>
                       <Input
                         variant="bare"
                         autoFocus
@@ -653,11 +669,6 @@ export const BackendModelEditorDialog: React.FC<{
                           if (event.key === 'Enter') {
                             event.preventDefault();
                             addCustomEffort();
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            setCustomOpen(false);
-                            setCustomEffort('');
                           }
                         }}
                         onBlur={addCustomEffort}

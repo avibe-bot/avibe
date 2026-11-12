@@ -259,6 +259,8 @@ export const BackendModelPickerDialog: React.FC<{
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
       <DialogContent
+        // A search typed and rows ticked are work in progress, kept like a form's.
+        keepOnOutsideClick
         mobileSheetHeight="tall"
         closeLabel={t('common.close') as string}
         className="model-hub-catalog-dialog model-hub-picker flex h-[min(642px,calc(100dvh-32px))] w-[min(680px,calc(100vw-32px))] max-w-[680px] flex-col gap-0 overflow-hidden rounded-[14px] p-0 max-md:w-full max-md:max-w-none max-md:rounded-t-2xl max-md:p-0 max-md:pt-2"
