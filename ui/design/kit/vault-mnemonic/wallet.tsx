@@ -159,7 +159,7 @@ function DetailHeader({ accounts }: { accounts: number }) {
           <WalletBadges accounts={accounts} />
         </span>
         <span className="text-xs text-muted">
-          {d(`导入的 12 词助记词 · 已用 ${accounts} / 20 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致`, `Imported 12-word phrase · ${accounts} of 20 accounts · numbered as in MetaMask and Phantom`)}
+          {d(`已用 ${accounts} / 20 个账户 · 账户编号与 MetaMask、Phantom 的账户顺序一致`, `${accounts} of 20 accounts · numbered as in MetaMask and Phantom`)}
         </span>
       </div>
     </div>
