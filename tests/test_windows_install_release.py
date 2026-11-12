@@ -55,6 +55,11 @@ def test_powershell_failure_preserves_launcher_and_has_no_implicit_source_fallba
     log = tmp_path / "commands.jsonl"
     source = (ROOT / "install.ps1").read_text(encoding="utf-8").split("\n# Each option means one thing", 1)[0]
     harness = r'''
+# Windows may replace PROCESSOR_ARCHITECTURE when starting a differently
+# architected PowerShell process. Set the simulated hardware inside that
+# process, and stub CIM below, so both host architectures run the same cases.
+$env:PROCESSOR_ARCHITECTURE = if ($env:TEST_CASE -eq "arm64") { "ARM64" } else { "AMD64" }
+$env:PROCESSOR_ARCHITEW6432 = ""
 $originalNative = ${function:Invoke-NativeCommand}
 function Get-CimInstance { throw "No host hardware access in this test" }
 function Get-UvPythonInstallMirror {
@@ -101,8 +106,6 @@ Install-Vibe
         "HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home / "appdata"),
         "AVIBE_HOME": str(runtime), "UV_TOOL_BIN_DIR": str(stable),
         "UV_TOOL_DIR": str(tmp_path / "original-tools"),
-        "PROCESSOR_ARCHITECTURE": "ARM64" if case == "arm64" else "AMD64",
-        "PROCESSOR_ARCHITEW6432": "",
         "TEST_CASE": case, "TEST_LOG": str(log), "TEST_PYTHON": sys.executable,
         "HTTPS_PROXY": "http://secret-user:secret-password@127.0.0.1:7890",
         "UV_DEFAULT_INDEX": "https://secret-user:secret-password@trusted.example/simple",
