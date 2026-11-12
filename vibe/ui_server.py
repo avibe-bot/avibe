@@ -37,6 +37,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
 from starlette.routing import Match
+from starlette.websockets import WebSocketState
 
 from vibe.ui_compat import (
     CompatApp,
@@ -3784,6 +3785,10 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     finally:
         store.close()
 
+    if not await asyncio.to_thread(paths.get_show_page_dir(session_id).is_dir):
+        await websocket.close(code=1008)
+        return
+
     access_sub_id = None
     access_queue = None
     if authorization_context is not None:
@@ -3795,7 +3800,6 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=1008)
             return
 
-    await websocket.accept(subprotocol="vite-hmr")
     proxy_task = asyncio.create_task(_proxy_show_runtime_websocket(websocket, session_id))
     revocation_task = (
         asyncio.create_task(
@@ -3878,7 +3882,10 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
     finally:
         store.close()
 
-    await websocket.accept(subprotocol="vite-hmr")
+    if not await asyncio.to_thread(paths.get_show_page_dir(session_id).is_dir):
+        await websocket.close(code=1008)
+        return
+
     try:
         await _proxy_show_runtime_websocket(
             websocket,
@@ -4793,6 +4800,14 @@ async def _proxy_show_runtime_websocket(
     runtime_path = f"{external_prefix.rstrip('/')}/__vite_hmr"
     if websocket.url.query:
         runtime_path = f"{runtime_path}?{websocket.url.query}"
+    requested_protocols = {
+        part.strip()
+        for part in getattr(websocket, "headers", {}).get("sec-websocket-protocol", "").split(",")
+        if part.strip()
+    }
+    # Vite's restart probe offers vite-ping, not vite-hmr. Selecting a protocol
+    # the browser did not offer makes even a healthy runtime look unavailable.
+    protocol = "vite-ping" if "vite-ping" in requested_protocols else "vite-hmr"
     manager = get_show_runtime_manager()
     target = await manager.websocket_target(
         runtime_path,
@@ -4800,29 +4815,37 @@ async def _proxy_show_runtime_websocket(
     )
     async with ClientSession() as session:
         try:
-            upstream = await session.ws_connect(
-                target.url,
-                headers=target.headers,
-                protocols=["vite-hmr"],
-                autoping=True,
+            upstream = await asyncio.wait_for(
+                session.ws_connect(
+                    target.url,
+                    headers=target.headers,
+                    protocols=[protocol],
+                    autoping=True,
+                ),
+                timeout=5.0,
             )
         except (asyncio.TimeoutError, ClientConnectionError):
             await manager.invalidate_websocket_target(target)
             raise
         async with upstream:
+            # Refuse absent/evicted contexts and upstream errors before Upgrade.
+            # Do not retire the shared process for an HTTP handshake rejection.
+            if upstream.protocol != protocol:
+                raise RuntimeError("Show Runtime did not negotiate the requested WebSocket protocol")
+            await websocket.accept(subprotocol=protocol)
+
             async def client_to_upstream():
                 try:
                     while True:
                         message = await websocket.receive()
                         if message["type"] == "websocket.disconnect":
-                            await upstream.close()
                             return
                         if "text" in message:
                             await upstream.send_str(message["text"])
                         elif "bytes" in message:
                             await upstream.send_bytes(message["bytes"])
                 except WebSocketDisconnect:
-                    await upstream.close()
+                    return
 
             async def upstream_to_client():
                 async for message in upstream:
@@ -4831,10 +4854,23 @@ async def _proxy_show_runtime_websocket(
                     elif message.type == WSMsgType.BINARY:
                         await websocket.send_bytes(message.data)
                     elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
-                        await websocket.close()
                         return
 
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+            tasks = (asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client()))
+            try:
+                done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    await task
+                if websocket.client_state is WebSocketState.CONNECTED and websocket.application_state is WebSocketState.CONNECTED:
+                    code = upstream.close_code
+                    await websocket.close(code=code if code and code not in {1005, 1006, 1015} else 1011)
+            finally:
+                # gather() alone waits forever for the browser receive after the
+                # upstream iterator ends, and leaks pumps on route revocation.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @app.route("/api/doctor", methods=["GET"])
