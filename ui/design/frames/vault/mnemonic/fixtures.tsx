@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { VaultsPage } from '@/components/workbench/VaultsPage';
 
 import type { VaultHdAccount } from '@/context/ApiContext';
-import type { HdAccountAddresses, PhraseCheck } from '@/lib/vaultHdWallet';
+import type { HdAccountAddresses, HdQuestion, PhraseCheck } from '@/lib/vaultHdWallet';
 
 import { IMPORTED_ADDRESSES, IMPORTED_PASSPHRASE_ADDRESS_0, IMPORTED_WORDS, path } from '../../../kit/vault-mnemonic/data';
 import { DESIGN_NOW } from '../../../shell/clock';
@@ -104,4 +104,17 @@ export const importFixtures: Record<'valid' | 'passphrase' | 'unknownWord' | 'ch
     preview: null,
   },
   checksum: { text: IMPORTED_WORDS.map((w, i) => (i === 11 ? 'abandon' : w)).join(' '), check: { ok: false, reason: 'checksum' }, passphrase: '', preview: null },
+};
+
+/** The backup check's states, fixed: the three questions, what was picked, and whether it may create. */
+export type CheckFixture = { quiz: HdQuestion[]; chosen: Record<number, string>; canCreate: boolean };
+const QUIZ: HdQuestion[] = [
+  { position: 3, options: ['thank', 'theme', 'legal'], answer: 'thank' },
+  { position: 7, options: ['wave', 'useful', 'worth'], answer: 'worth' },
+  { position: 12, options: ['yellow', 'year', 'winner'], answer: 'yellow' },
+];
+export const checkFixtures: Record<'empty' | 'correct' | 'wrong', CheckFixture> = {
+  empty: { quiz: QUIZ, chosen: {}, canCreate: false },
+  correct: { quiz: QUIZ, chosen: { 3: 'thank', 7: 'worth', 12: 'yellow' }, canCreate: true },
+  wrong: { quiz: QUIZ, chosen: { 3: 'thank', 7: 'useful' }, canCreate: false },
 };
