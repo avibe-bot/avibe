@@ -6553,7 +6553,7 @@
         "title": "{{name}} 已创建",
         "body": "账户 #0 在三条链上的地址如下。往这些地址充值后，Agent 就能用它签名。",
         "verified": "已核对：avault 保存的地址和这些词算出的地址一致。",
-        "recovery": "这台电脑丢失时，抄下的词是唯一的恢复方式。",
+        "recovery": "这台电脑丢失时，只有这些词能找回资金（如果设置过 passphrase，还要一字不差的 passphrase）。只靠数据库备份无法恢复签名。",
         "howTitle": "Agent 这样用它",
         "howHint": "--chain 选 evm、bitcoin 或 solana；--account 选账户编号。",
         "finish": "完成"

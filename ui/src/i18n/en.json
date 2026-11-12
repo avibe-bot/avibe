@@ -6553,7 +6553,7 @@
         "title": "{{name}} is ready",
         "body": "Account #0 has these addresses on the three chains. Fund them and your Agents can sign with it.",
         "verified": "Checked: the addresses avault stored match the ones these words give.",
-        "recovery": "If this computer is lost, the words you wrote down are the only way back.",
+        "recovery": "If this computer is lost, only these words can recover the funds (plus the exact passphrase, if one was set). A database backup alone cannot restore signing.",
         "howTitle": "How an Agent uses it",
         "howHint": "--chain picks evm, bitcoin or solana; --account picks the account number.",
         "finish": "Done"
