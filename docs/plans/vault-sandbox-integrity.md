@@ -80,9 +80,10 @@ published release and changes no user's keys.
 
 ## Registration identity compatibility
 
-The source-generated pin selects sandbox #36, which validates supplied WebAuthn
-registration `user.id` encodings before credential creation. The daemon's
-per-instance registration ID travels through the existing `authzCreationOptions`
+The registration validation introduced in sandbox #36 remains in the pinned
+successor: it validates supplied WebAuthn registration `user.id` encodings before
+credential creation. The daemon's per-instance registration ID travels through
+the existing `authzCreationOptions`
 field; it is separate from `vault_user_handle` scope/AAD. Legacy registration IDs
 remain accepted and omitted options retain the historical compatibility path.
 No credential, RP, root metadata, unlock/sign policy or protocol migration is
@@ -91,6 +92,31 @@ the successor adds validation, not a capability gate. The owning identity contra
 is in `vault-crypto-sandbox.md` and `vault-sandbox/docs/integrity.md`. Reproduction,
 fixtures and public hosting equality do not prove real provider coexistence,
 passkey ceremonies or transaction acceptance.
+
+## RC13 display-only consumer selection
+
+The packaged pin and paired release fixture select sandbox #37's immutable build
+`2e88ccc707cd0eeeedacf77e87ae80b8e8a14dc769aab6eaf736d7860835e514`,
+from merged source `6edd2e1406008bc9a4665c82d706d630bdc5d464` (tree-equal
+reviewed head `7970b211a9c2219f5202977a09e5c58e55563443`). The official
+source-derived pin is shared by the UI verifier and daemon CSP; live publication
+is checked for equality, never used to choose the authority.
+
+This selects the reviewed Bitcoin payment, EVM/EIP-712 and common signing-card
+presentation changes, plus the exact System `AdvanceNonceAccount` decoder.
+The nonce review shows only the nonce account and authority encoded in the
+message; it does not verify the stored nonce value, current on-chain authority,
+execution success or expiry. Other valid undecoded instructions remain raw with
+a blind-signing notice. Transfer/nonce summaries do not resolve lookup tables or
+invent chain state. Bitcoin requester-selected network labels and EVM chain
+names are not network proof, and typed-data warnings are not contract-behavior
+verification. See the sandbox README for the owning display/decoder contract.
+
+No policy v1.1 authorization, protocol, key-custody, signing bounds, fallback or
+capability expansion is included. Source/fixture checks do not establish a real
+ceremony or protected transaction acceptance. The fresh pin requires its own
+exact-head approval before merge; installation and final protected acceptance
+remain separately authorized cohort gates.
 
 ## Evidence and scope
 
