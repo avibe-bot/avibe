@@ -210,3 +210,32 @@ Windows native execution, final quiescent integration, or signed-package gates.
 The current probe was rebuilt from the checkpoint's source before the two-case
 run. Earlier b50 chain results and the initial cookie erasure failure remain
 historical evidence and are not substituted for this candidate.
+
+### Updater and download candidate under validation
+
+The production presentation URL handler now has one shared native caller check
+used by the shell and the actual-window fixture. Trusted updater confirmation
+carries its client generation through download and checks it again immediately
+before the existing verified installer owner. A stale completion returns to
+Available without an install or a new error dialog. Ordinary startup/menu and
+remote-update mailbox ownership remain with the existing updater.
+
+Windows native downloads are guarded at WebView2 DownloadStarting rather than
+Tauri's on_download (the latter marks the event Handled and suppresses the
+existing native UI). Only the current committed document can start a matching
+origin download. Invalidation cancels its operations and closes their native
+presentation. This is awaiting native Windows CI/consumer verification; local
+macOS cannot supply the Windows SDK. macOS has no configured download handler
+in the existing shell, and this change does not add one.
+
+The runnable updater fixture build is
+`desktop/src-tauri/tests/instance_chain/build_native_probe.py`. It archives the
+specified native commit into a separate test-only directory, embeds the pinned
+U1 account archive, and records binary/source hashes. Its only source adaptation
+is the updater HTTP client's exact fixture proxy and certificate trust; the
+build uses the existing repository public test key. Production key configuration,
+signing files, user trust stores and installation paths are untouched. Discovery,
+manifest verification, the actual native three-choice dialog and the generation
+checks execute the candidate implementation. The signed artifact is the existing
+38-byte inert fixture, not an application package. This is a native presentation
+and cancellation probe, not release/package acceptance.

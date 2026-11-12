@@ -23,6 +23,7 @@ import backend
 import proxy
 import runtime as runtime_fixture
 import peer
+import updater_fixture
 
 
 @pytest.fixture
@@ -39,6 +40,8 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
     mapping_file.write_text("{}")
     runtime, local = runtime_fixture.start(monkeypatch, info, mapping_file)
     studio, studio_log, studio_instance = peer.start(tmp_path / "studio", info, mapping_file)
+    updater = updater_fixture.start(tmp_path)
+    runtime_fixture.publish_mapping(mapping_file, "dl.avibe.bot", updater["base"])
     tunnel, tunnel_url, fingerprint = proxy.start(tmp_path, mapping_file)
     fixture = tmp_path / "native.json"
     fixture.write_text(
@@ -59,6 +62,9 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
         path.mkdir(exist_ok=True)
         environment[key] = str(path)
     environment["AVIBE_FIXTURE_TLS_SHA256"] = fingerprint
+    update_config = tmp_path / "update-transport.json"
+    update_config.write_text(json.dumps({"proxy": tunnel_url, "certificate": str(tmp_path / "certificate.pem")}))
+    environment["AVIBE_FIXTURE_UPDATE_CONFIG"] = str(update_config)
     executable = Path(os.environ["DESKTOP_NATIVE_PROBE"]).resolve()
     native = subprocess.Popen(
         [str(executable), str(fixture)],
@@ -70,6 +76,7 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
         text=True,
     )
     events = queue.Queue()
+    updates = []
     native_log = (tmp_path / "native.log").open("w")
 
     def collect():
@@ -77,7 +84,10 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
             native_log.write(line)
             native_log.flush()
             try:
-                events.put(json.loads(line))
+                value = json.loads(line)
+                if value.get("event") == "update":
+                    updates.append(value["state"])
+                events.put(value)
             except ValueError:
                 pass
 
@@ -137,6 +147,8 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
             "root": tmp_path,
             "studio": studio_instance,
             "local": local,
+            "updater": updater,
+            "updates": updates,
         }
     finally:
         for process in (native, studio, producer):
@@ -149,6 +161,8 @@ def native_chain(desktop_host, monkeypatch, tmp_path):
                     process.wait(timeout=5)
         runtime.shutdown()
         tunnel.shutdown()
+        updater["release"].set()
+        updater["server"].shutdown()
         native_log.close()
         studio_log.close()
         log.close()
@@ -315,3 +329,62 @@ def studio_selector(f):
     state = f["state"](lambda state: state["account"]["status"] == "signed_in")["state"]
     name = next(item["name"] for item in state["catalog"]["instances"] if item["id"] == f["studio"]["id"])
     return "Array.from(document.querySelectorAll('main button')).find(button=>button.innerText.includes(" + json.dumps(name) + "))"
+
+
+@pytest.mark.skipif(os.environ.get("DESKTOP_FIXTURE_UPDATER") != "1", reason="requires signed updater transport fixture build")
+def test_actual_remote_footer_opens_native_confirmation_and_fences_download_completion(native_chain):
+    f = native_chain
+    login(f)
+    f["state"](lambda state: state["account"]["status"] == "signed_in")
+    select_studio(f)
+
+    def footer():
+        f["ready"]("return Boolean(document.querySelector('[data-version-trigger]'));")
+        f["js"]("document.querySelector('[data-version-trigger]').click(); return true;")
+        f["ready"]("return Boolean(document.querySelector('[data-update-menu] button'));")
+        f["js"]("document.querySelector('[data-update-menu] button').click(); return true;")
+
+    def dialog():
+        deadline = time.monotonic() + 15
+        while True:
+            f["send"](action="dialog")
+            value = f["wait"]("dialog")
+            if len(value["buttons"]) == 3:
+                assert set(value["buttons"]) == {"Download and Install", "Skip This Version", "Later"}
+                return value["buttons"]
+            assert time.monotonic() < deadline, {"dialog": value, "updates": f["updates"]}
+            time.sleep(0.1)
+
+    # The real U1 CTA is a presentation request. It must reach the actual native
+    # three-choice dialog, and Later must cause no artifact download.
+    footer()
+    buttons = dialog()
+    f["send"](action="dialog", choice=buttons.index("Later"))
+    f["wait"]("dialog")
+    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    assert not f["updater"]["requested"].is_set()
+
+    # A confirmation that survives a generation change cannot start download.
+    footer()
+    buttons = dialog()
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"] is True
+    f["send"](action="dialog", choice=buttons.index("Download and Install"))
+    f["wait"]("dialog")
+    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    assert not f["updater"]["requested"].is_set()
+
+    # The same real owner must fence an already accepted download whose bytes
+    # arrive after local escape. The inert signed fixture is never installed.
+    select_studio(f)
+    footer()
+    buttons = dialog()
+    f["send"](action="dialog", choice=buttons.index("Download and Install"))
+    f["wait"]("dialog")
+    assert f["updater"]["requested"].wait(timeout=10)
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"] is True
+    f["updater"]["release"].set()
+    f["wait"]("update", lambda event: event["state"]["phase"] == "available")
+    assert not any(update["phase"] in ("installing", "installed") for update in f["updates"])
+    assert f["state"](lambda state: state["connection"]["committed"]["kind"] == "local")["credential_count"] == 1

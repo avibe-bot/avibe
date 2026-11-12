@@ -22,7 +22,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -162,6 +162,7 @@ fn main() {
     context.config_mut().app.windows[0].proxy_url = Some(config.proxy.clone());
     let setup = config.clone();
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![desktop_client_request])
         .plugin(tauri::plugin::Builder::<_,()>::new("instance-fixture")
             .on_webview_ready(|view| {
@@ -181,10 +182,7 @@ fn main() {
                     emit(json!({"event":"javascript","value":serde_json::from_str::<Value>(&data).unwrap_or(Value::String(data))}));
                     return false;
                 }
-                if let Some(page)=presentation_view(url) {
-                    if view.url().is_ok_and(|current|instance_client::caller_can_present(view.app_handle(),view.label(),&current)) {
-                        instance_client::present(view.app_handle(),page);
-                    }
+                if instance_client::presentation_request(view.app_handle(),view.label(),view.url().ok().as_ref(),url) {
                     return false;
                 }
                 let allowed=instance_client::navigation(view.app_handle(),view.label(),url).unwrap_or_else(|| {
@@ -194,6 +192,12 @@ fn main() {
                 allowed
             }).build())
         .setup(move |app| {
+            assert!(app.path().app_local_data_dir()?.starts_with(&setup.root));
+            assert!(app.path().app_data_dir()?.starts_with(&setup.root));
+            avibe_desktop_lib::updater::init(app.handle())?;
+            app.listen_any(avibe_desktop_lib::updater::STATE_EVENT, |event| {
+                emit(json!({"event":"update","state":serde_json::from_str::<Value>(event.payload()).unwrap()}));
+            });
             let bundle:Url="tauri://localhost/".parse()?;
             let asset=app.asset_resolver().get("account/index.html".into()).expect("U1 bundle missing");
             assert!(std::str::from_utf8(asset.bytes()).unwrap().contains("avibe-desktop-client-version"));
@@ -229,6 +233,19 @@ fn main() {
                             emit(json!({"event":"control_ready"}));
                         },
                         "release"=> { controls.release.lock().unwrap().take().unwrap().send(()).unwrap(); },
+                        #[cfg(target_os="macos")]
+                        "dialog"=> {
+                            let choice=command["choice"].as_u64().map(|value|value as usize);
+                            handle.run_on_main_thread(move || emit(support::fixture_dialog::inspect(choice))).unwrap();
+                        },
+                        "escape"=> {
+                            let coordinator=coordinator.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let reply=coordinator.request(ClientRequest{version:1,request_id:"fixture-local-escape".into(),
+                                    expected_generation:coordinator.state().generation,action:ClientAction::ReturnLocal}).await;
+                                emit(json!({"event":"escaped","ok":reply.ok}));
+                            });
+                        },
                         "eval"=> { let window=handle.get_webview_window("main").expect("main"); window.eval(command["script"].as_str().unwrap()).unwrap(); },
                         "present"=>instance_client::present(&handle, match command["view"].as_str().unwrap() {
                             "instances"=>"instances","sign-out"=>"sign-out","account"=>"account",_=>panic!("unsupported view"),
@@ -252,6 +269,8 @@ fn main() {
     });
 }
 mod support {
+    #[cfg(target_os = "macos")]
+    pub mod fixture_dialog;
     #[cfg(target_os = "macos")]
     pub mod fixture_tls;
 }

@@ -24,6 +24,7 @@ use std::time::Duration;
 mod app_windows;
 pub mod instance_client;
 mod instance_credentials;
+mod instance_downloads;
 mod instance_passkeys;
 pub mod instance_store;
 mod native_frame;
@@ -31,7 +32,7 @@ mod notifications;
 mod pet;
 mod pet_native;
 mod update_install;
-mod updater;
+pub mod updater;
 
 #[cfg(target_os = "macos")]
 mod computer_use;
@@ -1830,6 +1831,11 @@ fn build_main_window(
         .initialization_script(macos_title_bar::inset_script())
         .initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
+    #[cfg(windows)]
+    if instance_downloads::install(&window).is_err() {
+        let _ = window.destroy();
+        return None;
+    }
     #[cfg(target_os = "macos")]
     {
         macos_new_context::install(&window);
@@ -2474,19 +2480,12 @@ pub fn run() {
                         return pet::navigation_allowed(webview.app_handle(), url);
                     }
                     if instance_client::enabled(webview.app_handle()) && webview.label() == MAIN_WINDOW {
-                        let caller = webview.url().ok().is_some_and(|current| {
-                            instance_client::caller_can_present(webview.app_handle(), webview.label(), &current)
-                        });
-                        if let Some(view) = avibe_runtime_host::instance_client::protocol::presentation_view(url) {
-                            if caller {
-                                instance_client::present(webview.app_handle(), view);
-                            }
-                            return false;
-                        }
-                        if url.as_str() == updater::OPEN_URL {
-                            if caller {
-                                updater::trusted_decision(webview.app_handle().clone());
-                            }
+                        if instance_client::presentation_request(
+                            webview.app_handle(),
+                            webview.label(),
+                            webview.url().ok().as_ref(),
+                            url,
+                        ) {
                             return false;
                         }
                         if let Some(allowed) = instance_client::navigation(webview.app_handle(), webview.label(), url) {

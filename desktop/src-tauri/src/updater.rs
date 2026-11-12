@@ -1084,7 +1084,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                             return;
                         }
                         match choice(&result, &c) {
-                            Choice::Install => install(confirmation, manifest),
+                            Choice::Install => install(confirmation, manifest, presentation),
                             Choice::Skip => {
                                 skip_version(&confirmation, &manifest.version);
                                 settle_update(&confirmation, None, Settlement::Completed);
@@ -1099,7 +1099,9 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                 set_state(&app, Phase::Current, None);
                 publish_check(&app);
                 settle_update(&app, None, Settlement::Completed);
-                if should_show_current_dialog(interactive, presentation, workbench_ready(&app)) {
+                if decision_current(&app, presentation)
+                    && should_show_current_dialog(interactive, presentation, workbench_ready(&app))
+                {
                     let latest = app
                         .state::<Updater>()
                         .state
@@ -1115,7 +1117,7 @@ fn check_with_presentation(app: AppHandle, interactive: bool, presentation: Chec
                 set_state(&app, Phase::Error, None);
                 publish_check(&app);
                 settle_update(&app, None, Settlement::Failed("check_failed"));
-                if interactive {
+                if interactive && decision_current(&app, presentation) {
                     show(&app, &catalog().check_failed, None);
                 }
             }
@@ -1451,8 +1453,12 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
     }
 }
 
-fn install(app: AppHandle, manifest: Manifest) {
-    install_with_context(app, manifest, None);
+fn install(app: AppHandle, manifest: Manifest, presentation: CheckPresentation) {
+    let generation = match presentation {
+        CheckPresentation::TrustedDecision(generation) => Some(generation),
+        _ => None,
+    };
+    install_in_generation(app, manifest, None, generation);
 }
 
 /// Claim the install transition before a timer/Ignore can settle the prompt.
@@ -1480,6 +1486,23 @@ fn begin_remote_download(state: &mut State, remote: &RemoteInstallContext, now: 
 }
 
 fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<RemoteInstallContext>) {
+    install_in_generation(app, manifest, remote, None);
+}
+
+fn install_generation_current(app: &AppHandle, generation: Option<u64>) -> Result<(), String> {
+    if generation.is_some_and(|generation| !crate::instance_client::epoch_matches(app, generation)) {
+        Err("stale_desktop_generation".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn install_in_generation(
+    app: AppHandle,
+    manifest: Manifest,
+    remote: Option<RemoteInstallContext>,
+    generation: Option<u64>,
+) {
     if let Some(remote) = &remote {
         let updater = app.state::<Updater>();
         // Claim the worker before rereading the mailbox: a second host action
@@ -1501,6 +1524,7 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
     set_state(&app, Phase::Downloading, None);
     tauri::async_runtime::spawn(async move {
         let result = async {
+            install_generation_current(&app, generation)?;
             let artifact = manifest
                 .validate(manifest.channel, &manifest.tag, &manifest.source_sha, TARGET)?
                 .clone();
@@ -1538,10 +1562,14 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
                 Err(error) => Err(error),
             };
             let handle = app.clone();
+            install_generation_current(&app, generation)?;
             let install_remote = remote.clone();
             let install_version = manifest.version.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 update::install_verified(download, &artifact, KEY, |data| {
+                    // Verification/download may finish after the user leaves
+                    // this account or instance. Recheck at the installer edge.
+                    install_generation_current(&handle, generation)?;
                     if let Some(remote) = &install_remote {
                         if let Err(error) = reread_remote_request(&handle, remote) {
                             let code = record_remote_gate_failure(&handle, remote, error);
@@ -1602,6 +1630,11 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
             }
             Err(error) => {
                 eprintln!("desktop update install: {error}");
+                if error == "stale_desktop_generation" {
+                    set_state(&app, Phase::Available, None);
+                    settle_update(&app, None, Settlement::Completed);
+                    return;
+                }
                 if error.strip_prefix("remote_request_gate:").is_some() {
                     return;
                 }

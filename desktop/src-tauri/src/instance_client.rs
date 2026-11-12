@@ -73,6 +73,23 @@ pub(crate) fn epoch(app: &AppHandle) -> Option<u64> {
 pub(crate) fn epoch_matches(app: &AppHandle, generation: u64) -> bool {
     epoch(app) == Some(generation)
 }
+#[cfg(windows)]
+pub(crate) fn download_epoch(app: &AppHandle, current: &Url, target: &Url) -> Option<Epoch> {
+    let client = app.try_state::<Client>()?;
+    let state = client.view.presentation.lock().expect("presentation");
+    if state.account || state.staging || state.pending_commit || current.origin() != target.origin() {
+        return None;
+    }
+    match (&state.remote, &state.state.connection.committed) {
+        (None, ClientTarget::Local { .. }) => {}
+        (Some(origin), ClientTarget::Remote { canonical_origin, .. })
+            if state.state.account.status == AccountStatus::SignedIn
+                && origin.origin().ascii_serialization() == *canonical_origin => {}
+        _ => return None,
+    }
+    drop(state);
+    caller_can_present(app, MAIN_WINDOW, current).then(|| client.coordinator.epoch())
+}
 /// Destroying the last WebView during a store replacement is not a request to
 /// quit the shell or stop its local Runtime. Explicit application exits retain
 /// their normal lifecycle owner.
@@ -339,6 +356,27 @@ pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
         .ok()
         .and_then(|origin| origin.clone())
         .is_some_and(|origin| origin.matches_url_origin(current))
+}
+/// Native presentation requests share one caller check in every shell assembly.
+/// Returning true means the URL was consumed, never that an action was approved.
+pub fn presentation_request(app: &AppHandle, label: &str, current: Option<&Url>, destination: &Url) -> bool {
+    if !enabled(app) || label != MAIN_WINDOW {
+        return false;
+    }
+    let allowed = current.is_some_and(|url| caller_can_present(app, label, url));
+    if let Some(view) = presentation_view(destination) {
+        if allowed {
+            present(app, view);
+        }
+        return true;
+    }
+    if destination.as_str() == crate::updater::OPEN_URL {
+        if allowed {
+            crate::updater::trusted_decision(app.clone());
+        }
+        return true;
+    }
+    false
 }
 pub fn present(app: &AppHandle, view: &'static str) {
     let Some(client) = app.try_state::<Client>() else {
@@ -692,6 +730,7 @@ impl ClientView for NativeView {
             crate::notifications::stop(&self.app);
         }
         crate::instance_passkeys::cancel(&self.app);
+        crate::instance_downloads::invalidate(&self.app);
     }
     async fn commit(
         &self,
