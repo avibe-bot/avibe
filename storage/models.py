@@ -1582,6 +1582,15 @@ vault_operation_challenges = Table(
     Index("ix_vault_operation_challenges_consumed", "consumed_at", "expires_at"),
 )
 
+# Reader-first storage for immutable audit ACL snapshots. Writers still inline
+# snapshots until the coordinated compatibility-epoch activation.
+vault_audit_access_snapshots = Table(
+    "vault_audit_access_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("snapshot", Text, nullable=False, unique=True),
+)
+
 # Append-only audit log. Secret VALUES never appear here — only names, requesters,
 # and delivery summaries.
 vault_audit = Table(
