@@ -6083,6 +6083,9 @@
         "source_missing": "供应商已不存在",
         "model_unsupported": "该供应商不提供此模型"
       }
+    },
+    "pendingSend": {
+      "sending": "发送中…"
     }
   },
   "vaults": {

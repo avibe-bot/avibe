@@ -149,6 +149,7 @@ import { useSkeletonHandover } from '../ui/skeleton-handover';
 import {
   clientMessageMetadata,
   newClientMessageId,
+  type PendingSendPlace,
   transcriptRowKey,
   usePendingSends,
 } from './usePendingSends';
@@ -1184,10 +1185,12 @@ export const ChatPage: React.FC = () => {
   const {
     rows: transcriptRows,
     queueRows,
+    undecidedRows: undecidedSendRows,
     pendingIds: pendingRowIds,
     add: addPendingSend,
+    move: movePendingSend,
     settle: settlePendingSend,
-  } = usePendingSends(sessionId, messages, queue);
+  } = usePendingSends(sessionId, messages, queue, { steeringInTranscript: botConversation });
   const [sentRowFollow, setSentRowFollow] = useState(0);
   // Sends the server queued, by client id. Each keeps its pending row until its
   // message is shown elsewhere: in the queue strip (a queue read begun after it
@@ -2388,15 +2391,25 @@ export const ChatPage: React.FC = () => {
       const clientId = newClientMessageId();
       const sentMetadata = { ...metadata, ...clientMessageMetadata(clientId) };
       const sentAt = new Date().toISOString();
-      // Sent while a turn runs, the server queues it (the controller either
-      // starts a turn or queues the input, atomically), so it goes straight to
-      // the queue strip. Only a confirmed run predicts that: the list's seeded
-      // ``working`` waits for the bootstrap, and a quick reply keeps its place
-      // under the question it answers. A turn ending in the same instant is the
-      // one misprediction, and the server's answer moves the row (below).
-      const place = !metadata?.quick_reply_for && workingRef.current && !workingSeededRef.current
-        ? 'queue'
-        : 'transcript';
+      // The row is drawn once, where the send goes (owner, 2026-11-12): it must
+      // not appear in one place and then jump to the other.
+      //  * A quick reply keeps its place under the question it answers.
+      //  * In a Bot's conversation the user's message is P1: an idle Bot starts
+      //    on it and a working one takes it into its Turn (steer), so it goes to
+      //    the transcript either way (usePendingSends draws its steering row there).
+      //  * Otherwise, sent while a turn is known to run, the server queues it
+      //    (the controller starts a turn or queues the input, atomically), so it
+      //    goes straight to the queue strip; known idle, to the transcript.
+      //  * While the turn state is not known yet (a chat just opened: only the
+      //    list's seed, or nothing), any guess can be wrong, so the row waits as
+      //    a neutral sending line by the composer until the answer places it.
+      // A turn ending in the same instant is the one remaining misprediction.
+      const turnStateKnown = turnKnownRef.current && !workingSeededRef.current;
+      const place: PendingSendPlace = metadata?.quick_reply_for || botConversation
+        ? 'transcript'
+        : !turnStateKnown
+          ? 'undecided'
+          : workingRef.current ? 'queue' : 'transcript';
       liveMessageIdsRef.current.add(clientId);
       addPendingSend({
         id: clientId,
@@ -2530,6 +2543,8 @@ export const ChatPage: React.FC = () => {
           // (queue.updated, a reconnect), so the message is never in neither
           // place. The composer is free again at once.
           settledLater = true;
+          // An undecided row now knows its place.
+          movePendingSend(clientId, 'queue');
           queuedSendsRef.current.set(clientId, {
             sessionId,
             deliveryId: String(body.id ?? ''),
@@ -2548,9 +2563,9 @@ export const ChatPage: React.FC = () => {
           await (latestWindow ?? (historicalWindowRef.current ? moveToLatest() : null));
           if (sessionId !== sessionIdRef.current) return;
           appendMessage(message);
-          // Drawn in the queue, it started a turn after all: it moves into the
-          // transcript in this render, and the transcript follows it there.
-          if (place === 'queue') setSentRowFollow((n) => n + 1);
+          // Not drawn in the transcript (undecided, or a queue guess a turn ending
+          // beat): it appears there in this render, and the transcript follows it.
+          if (place !== 'transcript') setSentRowFollow((n) => n + 1);
         }
       } catch (err) {
         if (!metadata?.quick_reply_for) {
@@ -2578,7 +2593,9 @@ export const ChatPage: React.FC = () => {
       api,
       appendMessage,
       addPendingSend,
+      movePendingSend,
       settlePendingSend,
+      botConversation,
       readerPrincipal,
       refreshQueue,
       markWorking,
@@ -3662,6 +3679,7 @@ export const ChatPage: React.FC = () => {
             so an archived chat loads with an empty queue. A stale tab can still be
             holding pre-archive rows, and every button here writes: Send now POSTs
             the flush, Recall appends into the disabled composer. */}
+        {writable && <PendingSendLine rows={undecidedSendRows} />}
         {writable && (
           <QueueStrip
             queue={queueRows}
@@ -4168,6 +4186,26 @@ const QueueOpenModels: React.FC = () => {
       {t('chat.queue.openModels')}
       <ArrowRight className="size-3" aria-hidden="true" />
     </Button>
+  );
+};
+
+/** Sends the server has not placed yet (usePendingSends' "undecided"): a quiet line by the composer,
+ *  so the message is visibly on its way without being drawn in a place it may not end up in. */
+const PendingSendLine: React.FC<{ rows: WorkbenchMessage[] }> = ({ rows }) => {
+  const { t } = useTranslation();
+  if (rows.length === 0) return null;
+  return (
+    <div className="shrink-0 px-4 md:px-8" role="status">
+      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-0.5 px-3 pb-1.5">
+        {rows.map((row) => (
+          <span key={transcriptRowKey(row)} className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted">
+            <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
+            <span className="shrink-0">{t('chat.pendingSend.sending')}</span>
+            <span className="min-w-0 truncate text-foreground/70">{row.text}</span>
+          </span>
+        ))}
+      </div>
+    </div>
   );
 };
 

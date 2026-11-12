@@ -6083,6 +6083,9 @@
         "source_missing": "Provider no longer exists",
         "model_unsupported": "Model not offered by this provider"
       }
+    },
+    "pendingSend": {
+      "sending": "Sending…"
     }
   },
   "vaults": {
