@@ -83,6 +83,18 @@ Partial-prefix counts are estimates/lower bounds; a fully retained request uses 
 
 ## 3. Projection
 
+`load()` remains the full canonical history API. Live execution instead uses
+`load_for_run() -> RunTranscript`: original rows in a projection-valid checkpoint
+dependency closure, plus response-end route clocks and response-only cache facts.
+The SQLite implementation certifies a released prefix once in optional checkpoint
+`metadata_json.vibey_runtime`, then resolves original row references and reads the
+new suffix. This metadata never enters model messages or replaces canonical
+content; old readers ignore it. Current messages, budget anchors, memo/skill
+inputs, state/refusals, and open-call recovery must match full history, including
+capped fork ancestry. Historical cuts and read-only previews continue using
+`load()`. See [runtime loading](../vibey-runtime-transcript-loading.md) for the
+closure, compatibility costs, metadata publication and validation contract.
+
 `project(session_id, fork_point=None) -> list[Message]`, a pure function of the rows:
 
 1. Collect the context rows: the Session's own, plus its fork ancestry (§4).
