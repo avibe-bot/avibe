@@ -1081,30 +1081,13 @@ export const VaultSecretForm: React.FC<{
   // Protection selector — two cards (Standard / Protected); ui/design: vault/secret-dialog/create.
   const protectionCards = (
     <div className="flex flex-col gap-1.5">
-      {/* One short line on each card; the full explanation of both levels is behind the ⓘ. */}
-      <span className="flex items-center gap-1.5">
-        <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
-        <InfoHint
-          hover
-          label={t('vaults.dialog.protectionInfo')}
-          contentClassName="w-72"
-          content={(
-            <span className="flex flex-col gap-2">
-              {(['standard', 'protected'] as const).map((tier) => (
-                <span key={tier} className="flex flex-col gap-0.5">
-                  <b className="font-semibold text-foreground">{t(`vaults.dialog.${tier}Protection`)}</b>
-                  <span>{t(`vaults.dialog.${tier}Help`)}</span>
-                </span>
-              ))}
-            </span>
-          )}
-        />
-      </span>
+      {/* The tier descriptions stay on the cards (owner, 2026-11-12): they are the choice. */}
+      <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
       <div className="grid grid-cols-2 gap-2.5">
         {(
           [
-            { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardShort') },
-            { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedShort') },
+            { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardHelp') },
+            { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedHelp') },
           ] as const
         ).map(({ key, icon: Icon, title, desc }) => {
           const selected = protection === key;
