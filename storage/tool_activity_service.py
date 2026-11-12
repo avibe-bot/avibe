@@ -49,6 +49,11 @@ def _response_results(conn, rows: list[Mapping[str, Any]]) -> dict[str, list[dic
         )).all())
         queries = []
         for row in batch:
+            if row["id"] not in boundaries:
+                # A concurrent delete may retire a response after the window was
+                # read. Missing is not an open interval: never borrow a retry's
+                # result when that response can no longer bound its own calls.
+                continue
             query = select(
                 literal(row["id"]).label("response_id"), agent_events.c.id,
                 agent_events.c.content_json, agent_events.c.metadata_json,
@@ -62,6 +67,8 @@ def _response_results(conn, rows: list[Mapping[str, Any]]) -> dict[str, list[dic
             if end is not None:
                 query = query.where(agent_events.c.context_seq < end)
             queries.append(select(query.order_by(agent_events.c.context_seq).limit(counts[row["id"]]).subquery()))
+        if not queries:
+            continue
         for result in conn.execute(union_all(*queries)).mappings():
             value = dict(result)
             results[value.pop("response_id")].append(value)

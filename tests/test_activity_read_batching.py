@@ -115,3 +115,12 @@ async def test_batch_boundary_outside_retained_ids_and_same_connection_refresh(e
         assert {step["response_id"]: step["status"] for step in corrected} == {
             first.row_id: "unknown", last.row_id: "failed",
         }
+        # A deletion between the window read and boundary lookup is not evidence
+        # of an open interval. In particular it cannot borrow the barrier's result.
+        snapshots = [dict(row) for row in conn.execute(select(messages).where(messages.c.id.in_(retained))).mappings()]
+        conn.execute(messages.delete().where(messages.c.id == first.row_id))
+        results = tool_activity_service._response_results(conn, snapshots)
+        assert results[first.row_id] == []
+        assert [row["id"] for row in results[last.row_id]] == ["last-result"]
+        conn.execute(messages.delete().where(messages.c.id == last.row_id))
+        assert tool_activity_service._response_results(conn, snapshots) == {row_id: [] for row_id in retained}
