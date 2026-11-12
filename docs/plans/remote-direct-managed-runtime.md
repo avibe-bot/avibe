@@ -25,10 +25,14 @@ Incus. The first operational exercise requires the lead's confirmation that
   It must remain responsive to opt-out, pairing changes and permission expiry
   while filesystem work is stalled. Late observations cannot restore an old
   generation. Default-off performs no binary inspection or installation.
-  Config is observed every 0.5 seconds; binary verification runs on changed
-  config and otherwise every five seconds, with a 15-second observation expiry
-  that withdraws the path even if its single retained worker is stuck. This is
-  bounded observation, not atomic exclusion of arbitrary filesystem changes.
+  Config has its own retained reader at 0.5-second intervals, independent of
+  the single retained binary worker. Binary verification runs on changed config
+  and otherwise every five seconds, with a 15-second observation expiry that
+  withdraws the path even if its worker is stuck. Thus binary I/O cannot delay
+  disk-only CLI opt-out and its false report. Retiring a generation clears only
+  its cached certificate observation and requires a fresh client poll before
+  restarting; a fenced renewal may already have retired the old chain files.
+  This is bounded observation, not atomic exclusion of arbitrary filesystem changes.
 - Only current setting + managed pairing/hostname + verified binary + fresh
   backend permission + usable certificate can reach sidecar start. A ready
   rendezvous additionally requires the current supervisor's ready event and
@@ -112,12 +116,18 @@ proof. Existing certificate and ingress tests remain the owner of key/chain
 validation and ordinary TLS/auth behavior; no duplicate certificate provisioning
 path is added. PERMISSIONS-026 covers the new Owner-only install command.
 
-Local focused validation: 1,017 tests passed across the managed-runtime core,
+Local focused validation: 1,019 tests passed across the managed-runtime core,
 new consumer, lifecycle, certificate, transport, ingress, rendezvous, remote
 access, CLI and invocation-authority suites. The CLI status handoff also exposed
 and fixes a missing runtime `V2Config` import in the existing direct-status
 command; its regression reads a real isolated persisted choice. These are
 hermetic Python tests, not installed native/Incus/public-issuance evidence.
+The independent review's two lifecycle regressions have dedicated reproductions:
+real CLI disk-only opt-out while the binary hash remains blocked, and discarded
+renewal retiring the old chain before binary recovery. Both fail on the first
+consumer head (delayed withdrawal and a latched startup failure respectively)
+and pass with independent config observation and fresh-generation certificate
+revalidation.
 
 Operational acceptance is **not run**. Prerequisites: merged consumer, a
 published/pinned qualified sidecar, backend allowlist/certificate fixture,

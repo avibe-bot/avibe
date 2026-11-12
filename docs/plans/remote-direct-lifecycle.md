@@ -73,15 +73,22 @@ into an unbounded retry loop.
 ## Blocking work and cancellation
 
 Startup schedules observation without waiting for configuration, backend,
-certificate or TLS work. Config remains observed at 0.5-second intervals. The
-same single retained worker also verifies the managed binary on a changed
-configuration and otherwise every five seconds; binary hashes are never read
-by loop-side gates. Each successful binary observation expires 15 seconds from
+certificate or TLS work. Config remains observed at 0.5-second intervals by
+its own retained worker. Binary verification has a **separate** retained worker
+slot, scheduled/collected by the loop on a changed configuration and otherwise
+every five seconds; binary hashes are never read by loop-side gates. A stalled
+binary check cannot delay disk-only CLI opt-out observation or its false report.
+Each successful binary observation expires 15 seconds from
 its start on the loop's monotonic clock. A stalled worker cannot extend it;
 expiry withdraws publication and cancels an awaiting start without waiting for
 filesystem work. A later fresh observation may resume the normal gates.
 Observations are generation-fenced, including off/on ABA and stop/start reuse;
 replacing or losing a previously available binary retires its generation.
+Every retired generation also drops its in-memory certificate observation and
+requires a fresh client poll before a new start. A fenced renewal worker may
+already have persisted its replacement and deleted the old chain, so reusing
+cached file paths while that poll runs could otherwise latch startup failure.
+This drops no on-disk key or certificate: the client revalidates its own state.
 This is bounded observation, not atomicity against arbitrary local filesystem
 mutation between verification and process execution.
 

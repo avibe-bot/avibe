@@ -13,6 +13,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -144,7 +145,7 @@ async def _owner(config, reports, *, cert=None, ingress_type=FakeIngress, superv
         ingress_factory=lambda app, **kw: ingress_type(calls, **kw),
         supervisor_factory=lambda executable, ingress, rendezvous: supervisor_type(calls, ingress, rendezvous),
         binary_resolver=options.pop("binary_resolver", lambda config: "/injected/test-sidecar"),
-        rendezvous=rendezvous, config_loader=lambda: config, **options,
+        rendezvous=rendezvous, config_loader=options.pop("config_loader", lambda: config), **options,
     )
     await owner.start()
     try:
@@ -350,6 +351,107 @@ async def test_late_binary_observation_cannot_cross_off_on_generation(reports, m
     finally:
         old_release.set()
         new_release.set()
+
+
+async def test_cli_disk_only_optout_remains_observable_during_stalled_binary_hash(reports, monkeypatch):
+    from vibe import cli, runtime
+
+    config = _config()
+    config.save()
+    monkeypatch.setattr(module, "CONFIG_POLL_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    # Success must come from the independent config read, not binary expiry.
+    monkeypatch.setattr(module, "BINARY_OBSERVATION_MAX_AGE_SECONDS", 30.0)
+    entered, release = threading.Event(), threading.Event()
+    checks = 0
+    def resolver(config):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            entered.set()
+            assert release.wait(4)
+        return "/test/verified-sidecar"
+    # Only service readback is stubbed; the CLI's real config transaction and
+    # the owner's real disk loader must communicate without notify_config_changed.
+    monkeypatch.setattr(remote_access, "live_direct_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: False)
+    monkeypatch.setattr(remote_access, "status", lambda cfg: {
+        "ok": True, "direct": {"enabled": cfg.remote_access.vibe_cloud.direct, "state": "disabled"},
+    })
+    try:
+        async with _owner(config, reports, binary_resolver=resolver, config_loader=V2Config.load) as (owner, calls, cert, rv):
+            await _permission(owner, config)
+            await _wait(lambda: owner.status().state == "running")
+            await _wait(entered.is_set)
+            assert await asyncio.to_thread(cli.cmd_remote_direct, SimpleNamespace(direct_command="off", json=True)) == 0
+            assert V2Config.load().remote_access.vibe_cloud.direct is False
+            await _wait(lambda: owner.status().state == "disabled", timeout=1)
+            assert owner.status().enabled is False and rv.endpoint is None
+            assert not owner.status().transport_running and "supervisor_stop" in calls
+            assert reports[-1][0].remote_access.vibe_cloud.direct is False
+            assert checks == 2 and not release.is_set()
+    finally:
+        release.set()
+
+
+async def test_binary_recovery_waits_for_certificate_after_discarded_renewal_retires_old_chain(reports, monkeypatch, tmp_path):
+    config = _config()
+    monkeypatch.setattr(module, "CONFIG_POLL_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    old_chain, new_chain = tmp_path / "old-chain.pem", tmp_path / "new-chain.pem"
+    old_chain.write_bytes(b"old test chain")
+    renewal_entered, renewal_release = threading.Event(), threading.Event()
+    fresh_entered, fresh_release = threading.Event(), threading.Event()
+    available = [True]
+    class RetiringCertificate(FakeCertificateClient):
+        def poll(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return _ready(certificate_file=str(old_chain), next_poll_at=time.time() + 0.05)
+            if len(self.calls) == 2:
+                renewal_entered.set()
+                assert renewal_release.wait(4)
+                # The real client persists a renewal and retires its previous
+                # chain before the worker returns a result to the lifecycle.
+                new_chain.write_bytes(b"renewed test chain")
+                old_chain.unlink()
+            else:
+                fresh_entered.set()
+                assert fresh_release.wait(4)
+            return _ready(certificate_file=str(new_chain))
+    prepared = []
+    class FileIngress(FakeIngress):
+        def __init__(self, calls, **kwargs):
+            super().__init__(calls, **kwargs)
+            self.certfile = kwargs["certfile"]
+        def _prepare_start(self):
+            prepared.append(self.certfile)
+            Path(self.certfile).read_bytes()  # Real missing-file failure, as in TLS preparation.
+            return super()._prepare_start()
+    try:
+        async with _owner(
+            config, reports, cert=RetiringCertificate(), ingress_type=FileIngress,
+            binary_resolver=lambda cfg: "/test/verified-sidecar" if available[0] else None,
+        ) as (owner, calls, cert, rv):
+            await _permission(owner, config)
+            await _wait(lambda: owner.status().state == "running")
+            await _wait(renewal_entered.is_set)
+            available[0] = False
+            await _wait(lambda: owner.status().state == "transport-not-installed")
+            renewal_release.set()
+            await _wait(lambda: owner._poll_task is None and not old_chain.exists())
+            available[0] = True
+            await _wait(fresh_entered.is_set)
+            await asyncio.sleep(0.05)
+            fresh_release.set()
+            await _wait(lambda: owner._poll_task is None)
+            assert owner._failed_generation is None
+            await _wait(lambda: owner.status().state == "running")
+            assert prepared == [str(old_chain), str(new_chain)]
+            assert rv.endpoint is not None and calls.count("supervisor_start") == 2
+    finally:
+        renewal_release.set()
+        fresh_release.set()
 
 
 @pytest.mark.parametrize("url", ["https://custom.test", "http://alice-app.avibe.bot", "https://alice-app.avibe.bot:8443", "https://user@alice-app.avibe.bot"])
